@@ -32,7 +32,7 @@ These variables configure LLM gateway access and optional backend credentials.
 | `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
 | `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | Inherits `OPENAI`<br>`_BASE_URL` | Only set explicitly to override the default inheritance.                                                                                                                          |
-| `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL`; DeepSeek-only defaults to `deepseek-v4-pro` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
+| `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
@@ -111,6 +111,14 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
+## Single-node Ray execution
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`off`) | Opt-in switch for routing single-node serving benchmarks and `needs_gpu` specialists through Ray actors. Set to `1` / `true` / `yes` / `on` to enable Ray-managed leases. Leave unset, or set `0` / `false` / `no` / `off`, to use the local subprocess path. Multi-node serving remains controlled by the multi-node backend. |
+
+---
+
 ## Codex (OpenAI) backend web search
 
 The following variables enable OpenAI's built-in server-side web search for the
@@ -124,6 +132,19 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 |----------|---------|-------------|
 | `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
 | `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
+
+---
+
+## Single-node Ray GPU scheduling
+
+These variables tune the single-node Ray execution path (active when
+`INFERENCE_OPTIMIZER_RAY_EXEC=1` and `--nodes=1`). They have no effect on
+multi-node runs or when the Ray backend is disabled.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serialises execution on the physical GPU(s) via `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
@@ -6,6 +6,7 @@
 from __future__ import annotations
 import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,6 +33,7 @@ from .coordinator_helpers import (
     _parse_baseline_workload_extra,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
+    _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
 )
@@ -53,6 +55,17 @@ from .coordinator import (
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+
+@dataclass
+class _PromoteOutcome:
+    """Mutable carrier threaded through the per-kind promote handlers;
+    ``early_return`` skips the shared audit/save tail (sweep / conc_sweep)."""
+
+    changed: bool = False
+    audit_decision: str | None = None
+    audit_extras: dict[str, Any] = field(default_factory=dict)
+    early_return: bool = False
 
 
 def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
@@ -407,6 +420,36 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
+        if task.kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                result_payload.setdefault(
+                    "workload",
+                    {
+                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
+                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
+                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
+                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
+                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
+                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
+                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
+                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
+                    },
+                )
+                instrument.record_action_operation(
+                    self.session_dir,
+                    action=task.kind,
+                    task_id=task.task_id,
+                    status="failed",
+                    decision="discarded",
+                    result=result_payload,
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("v4 action failure capture failed", exc_info=True)
         any_changed = False
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
@@ -1512,17 +1555,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
@@ -1733,7 +1765,7 @@ class WritebackCollaborator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+        """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
         numbers it emits are intentionally ignored here: measured competitor
@@ -1741,15 +1773,13 @@ class WritebackCollaborator:
         LLM-written numbers must never be persisted as a consumable target.
 
         Args:
-            done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints and PR ids.
+            done_payload: The completed research-scout task payload.
         """
         from ..knowledge import research_hints as _research_hints
 
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            block = {}
-        hints = block.get("hints") or []
+        hints = done_payload.get("new_findings") or []
+        if not isinstance(hints, list):
+            hints = []
         try:
             added, dropped = _research_hints.append_hints(
                 self.session_dir,
@@ -1765,10 +1795,18 @@ class WritebackCollaborator:
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
+        for hint in hints:
+            if isinstance(hint, dict) and hint.get("source"):
+                pr_ids.append(hint["source"])
+        proposals = done_payload.get("proposal_set") or []
+        if isinstance(proposals, list):
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                for key in ("pr_evidence", "source_evidence"):
+                    refs = proposal.get(key)
+                    if isinstance(refs, list):
+                        pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
@@ -1778,6 +1816,7 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
+        self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -1884,8 +1923,12 @@ class WritebackCollaborator:
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                    if bv.get("task_id"):
+                        stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                            str(bv.get("effective_extra_server_args") or "")
+                        )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -1899,6 +1942,11 @@ class WritebackCollaborator:
                 _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
+                if isinstance(bv, dict):
+                    for _src_key in ("source_snapshot", "framework_root", "base_sha"):
+                        val = bv.get(_src_key)
+                        if val:
+                            stack_entry[_src_key] = str(val)
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -1908,12 +1956,17 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
+        # Merge envs: start from previous stack top envs so source-layer KEEPs
+        # (config_changes_applied={}) do not clear prior explore/env layers.
+        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
+        _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+        _merged_envs = {**_prev_envs, **_new_envs}
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
             "extra_server_args": full_args,
-            "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+            "extra_envs": _merged_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
@@ -1925,7 +1978,9 @@ class WritebackCollaborator:
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
+                    str(bv.get("effective_extra_server_args") or "")
+                )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
@@ -1976,653 +2031,870 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
+        if task_kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                result_status = str(result.get("status") or "succeeded")
+                kept = task_kind == "framework_agent" and result_status.lower() == "kept"
+                v4_result = dict(result)
+                v4_result.setdefault(
+                    "workload",
+                    {
+                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
+                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
+                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
+                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
+                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
+                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
+                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
+                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
+                    },
+                )
+                instrument.record_action_operation(
+                    self.session_dir,
+                    action=task_kind,
+                    task_id=getattr(task, "task_id", "") if task is not None else "",
+                    status=result_status,
+                    decision="promoted" if kept else "discarded",
+                    result=v4_result,
+                    extras={
+                        "candidate_id": self._framework_candidate_key(result.get("candidate"))
+                        if task_kind == "framework_agent" and isinstance(result.get("candidate"), dict)
+                        else ""
+                    },
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("v4 action result capture failed", exc_info=True)
+        outcome = _PromoteOutcome()
+        handler_name = self._PROMOTE_HANDLERS.get(task_kind)
+        if handler_name is not None:
+            await getattr(self, handler_name)(result, task, outcome)
+        # sweep / conc_sweep already recorded + saved + returned via their handler.
+        if outcome.early_return:
+            return
+        # Audit trail: one succeeded-attempt record with branch-supplied decision/extras.
+        if outcome.audit_decision is not None and task_kind in _AUDIT_ACTIONS:
+            self.shared_state.record_action_attempt(
+                action=task_kind,
+                task_id=getattr(task, "task_id", "") if task is not None else "",
+                status="succeeded",
+                decision=outcome.audit_decision,
+                result=result,
+                extras=outcome.audit_extras,
+            )
+            outcome.changed = True
+        if outcome.changed:
+            self.shared_state.save(self.session_dir)
+
+    _PROMOTE_HANDLERS: dict[str, str] = {
+        "baseline": "_promote_baseline",
+        "replay_warm_recipe": "_promote_replay_warm_recipe",
+        "profile": "_promote_profile",
+        "roofline": "_promote_roofline",
+        "explore": "_promote_explore",
+        "integrate_patch": "_promote_integrate_patch",
+        "framework_agent": "_promote_framework_agent",
+        "sweep": "_promote_sweep",
+        "conc_sweep": "_promote_conc_sweep",
+    }
+
+    async def _promote_baseline(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
         changed = False
-        # Audit-trail bookkeeping: each branch sets audit_decision/extras; record_action_attempt runs once after.
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
-        if task_kind == "baseline":
-            tput = result.get("output_throughput")
-            warmup_anchor = result.get("warmup_round_tput")
-            if isinstance(tput, (int, float)) and tput > 0:
-                # Baseline's conclusion contract is the hot measure round; the
-                # discarded cold round is kept only as an audit field so gain math
-                # never mixes cold-before with hot-after.
-                if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(tput)
-                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
-                    self.shared_state.baseline_hot_tput = float(tput)
-                    log.info(
-                        "baseline anchor: using hot measure tput %.1f as "
-                        "baseline_tput (discarded cold warmup %.1f kept as "
-                        "baseline_cold_tput)",
-                        float(tput),
-                        float(warmup_anchor),
-                    )
-                else:
-                    self.shared_state.baseline_tput = float(tput)
-                self.shared_state.baseline_failure_streak = 0
-                self.shared_state.baseline_arg_error_streak = 0
+        tput = result.get("output_throughput")
+        warmup_anchor = result.get("warmup_round_tput")
+        if isinstance(tput, (int, float)) and tput > 0:
+            # Baseline's conclusion contract is the hot measure round; the
+            # discarded cold round is kept only as an audit field so gain math
+            # never mixes cold-before with hot-after.
+            if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
+                self.shared_state.baseline_tput = float(tput)
+                self.shared_state.baseline_cold_tput = float(warmup_anchor)
+                self.shared_state.baseline_hot_tput = float(tput)
+                log.info(
+                    "baseline anchor: using hot measure tput %.1f as "
+                    "baseline_tput (discarded cold warmup %.1f kept as "
+                    "baseline_cold_tput)",
+                    float(tput),
+                    float(warmup_anchor),
+                )
+            else:
+                self.shared_state.baseline_tput = float(tput)
+            self.shared_state.baseline_failure_streak = 0
+            self.shared_state.baseline_arg_error_streak = 0
+            changed = True
+        acc = result.get("accuracy")
+        if isinstance(acc, (int, float)):
+            self.shared_state.baseline_accuracy = float(acc)
+            changed = True
+        # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
+        materialized = result.get("materialized_config")
+        if isinstance(materialized, str) and materialized:
+            self.shared_state.baseline_config_path = materialized
+            changed = True
+            # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
+            try:
+                parsed = _parse_baseline_workload_extra(materialized)
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "baseline workload extra parsing failed for %s",
+                    materialized,
+                )
+                parsed = {}
+            if parsed:
+                self.shared_state.baseline_workload_extra = parsed
+        # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
+        runtime_sec_raw = result.get("subprocess_runtime_sec")
+        if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
+            self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
+            changed = True
+        # Promote the warm measure-round wall-clock as the anchor for the
+        # explore decision-round overtime kill (present only on the
+        # double-run baseline path; else explore uses the cold anchor).
+        warm_runtime_raw = result.get("measure_round_runtime_sec")
+        if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
+            self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
+            changed = True
+        elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
+            self.shared_state.baseline_warm_runtime_sec = 0.0
+            changed = True
+        # current_best.tput follows the same hot baseline contract so the
+        # gain numerator and denominator stay aligned.
+        anchor_tput = float(self.shared_state.baseline_tput or 0.0)
+        self.shared_state.current_best = {
+            "action": "baseline",
+            "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
+            "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+            "cold_tput": (
+                float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
+            ),
+            "ttft_mean_ms": result.get("ttft_mean_ms"),
+            "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
+            "workspace": result.get("workspace"),
+        }
+        changed = True
+        audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
+        audit_extras = {
+            "materialized_config": result.get("materialized_config"),
+            "accuracy": result.get("accuracy"),
+            "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+            # Stamp canonical params fingerprint for the self-loop denial helper.
+            "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
+        }
+        # seed the gaps[] ledger from baseline (best-effort).
+        await self._refresh_gaps(reason="baseline_done")
+        # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
+        # snapshot ceiling in case the later roofline step fails.
+        if isinstance(tput, (int, float)) and tput > 0:
+            try:
+                self.shared_state.record_baseline_roofline_ceiling()
+            except Exception as exc:  # noqa: BLE001 — best-effort backup
+                log.warning(
+                    "baseline roofline-ceiling backup failed: %r",
+                    exc,
+                )
+        # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
+        if self._should_run_prelude_bootstrap(tput):
+            # History injection (fires regardless of --no-warm-replay).
+            try:
+                self._inject_warm_recipe_history_into_ledger()
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "PRELUDE: warm-recipe history injection failed: %r",
+                    exc,
+                )
+            # Warm-recipe replay, anchored on the hot baseline_tput contract.
+            try:
+                await self._maybe_enqueue_warm_replay(
+                    baseline_tput=float(self.shared_state.baseline_tput or tput),
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                log.exception(
+                    "PRELUDE: failed to enqueue warm-replay task: %r",
+                    exc,
+                )
+            # Auto-analysis (roofline / profile); may defer.
+            await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
+                baseline_tput=float(tput),
+            )
+            # Research scout (parallel, read-only, CPU-only).
+            await self._maybe_enqueue_prelude_research_scout()
+            # Static-recon (parallel, read-only, CPU-only): seed bridge
+            # candidates as gaps[] before EXPLORE starts.
+            await self._maybe_enqueue_prelude_static_recon()
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
+
+    async def _promote_replay_warm_recipe(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
+        try:
+            self._promote_warm_replay(result, task=task)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("warm-replay promote failed")
+        # PRELUDE initial roofline was deferred while replay ran.
+        await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
+
+    async def _promote_profile(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
+        changed = False
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
+        # Defensive skipped arm: audit as skipped + drop the gate.
+        if str(result.get("status") or "") == "skipped":
+            audit_decision = "skipped"
+            audit_extras = {
+                "error_class": result.get("error_class"),
+                "error": result.get("error"),
+            }
+            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
+                self.shared_state.auto_roofline_pending_task_id = ""
                 changed = True
-            acc = result.get("accuracy")
-            if isinstance(acc, (int, float)):
-                self.shared_state.baseline_accuracy = float(acc)
-                changed = True
-            # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
-            materialized = result.get("materialized_config")
-            if isinstance(materialized, str) and materialized:
-                self.shared_state.baseline_config_path = materialized
-                changed = True
-                # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
-                try:
-                    parsed = _parse_baseline_workload_extra(materialized)
-                except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "baseline workload extra parsing failed for %s",
-                        materialized,
-                    )
-                    parsed = {}
-                if parsed:
-                    self.shared_state.baseline_workload_extra = parsed
-            # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
-            runtime_sec_raw = result.get("subprocess_runtime_sec")
-            if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
-                self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
-                changed = True
-            # Promote the warm measure-round wall-clock as the anchor for the
-            # explore decision-round overtime kill (present only on the
-            # double-run baseline path; else explore uses the cold anchor).
-            warm_runtime_raw = result.get("measure_round_runtime_sec")
-            if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
-                self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
-                changed = True
-            elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
-                self.shared_state.baseline_warm_runtime_sec = 0.0
-                changed = True
-            # current_best.tput follows the same hot baseline contract so the
-            # gain numerator and denominator stay aligned.
-            anchor_tput = float(self.shared_state.baseline_tput or 0.0)
+        else:
+            audit_decision = "promoted"
+            audit_extras = {
+                "trace_path": None,
+                "profile_args": None,
+                "output_throughput": result.get("output_throughput"),
+            }
+        # Surface the trace path so Orch passes a real path to trace_analyze.
+        trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        profile_status = str(result.get("status") or "")
+        if profile_status == "failed" or result.get("error_class") == "no_trace_files":
+            self.shared_state.last_profile_status = "failed"
+            if not trace_path:
+                self.shared_state.last_profile_trace = ""
+            changed = True
+        elif trace_path:
+            self.shared_state.last_profile_trace = str(trace_path)
+            self.shared_state.last_profile_status = "succeeded"
+            # Record the server config in effect for this trace.
+            profile_args = ""
+            if task is not None:
+                profile_args = str((task.params or {}).get("base_extra_args") or "")
+            self.shared_state.last_profile_args = profile_args
+            # New trace invalidates the stale trace_analyze cache.
+            self.shared_state.last_trace_analyze = {}
+            changed = True
+            audit_extras["trace_path"] = str(trace_path)
+            audit_extras["profile_args"] = profile_args
+        # profile result may include a tput; promote into current_best on the +1% rule.
+        tput = result.get("output_throughput")
+        cb = self.shared_state.current_best or {}
+        cb_tput = cb.get("tput") if isinstance(cb, dict) else None
+        cur_best = (
+            float(cb_tput)
+            if isinstance(cb_tput, (int, float)) and cb_tput > 0
+            else float(self.shared_state.baseline_tput or 0.0)
+        )
+        if (
+            isinstance(tput, (int, float))
+            and tput > 0
+            and cur_best > 0
+            and (tput - cur_best) / cur_best * 100.0 >= 1.0
+        ):
             self.shared_state.current_best = {
-                "action": "baseline",
-                "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
-                "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
-                "cold_tput": (
-                    float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
-                ),
+                "action": "profile",
+                "tput": float(tput),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
             }
+            if self.shared_state.baseline_tput > 0:
+                self.shared_state.cumulative_gain = (
+                    (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+                )
             changed = True
-            audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
-            audit_extras = {
-                "materialized_config": result.get("materialized_config"),
-                "accuracy": result.get("accuracy"),
-                "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
-                # Stamp canonical params fingerprint for the self-loop denial helper.
-                "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
-            }
-            # seed the gaps[] ledger from baseline (best-effort).
-            await self._refresh_gaps(reason="baseline_done")
-            # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
-            # snapshot ceiling in case the later roofline step fails.
-            if isinstance(tput, (int, float)) and tput > 0:
-                try:
-                    self.shared_state.record_baseline_roofline_ceiling()
-                except Exception as exc:  # noqa: BLE001 — best-effort backup
-                    log.warning(
-                        "baseline roofline-ceiling backup failed: %r",
-                        exc,
-                    )
-            # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
-            if self._should_run_prelude_bootstrap(tput):
-                # History injection (fires regardless of --no-warm-replay).
-                try:
-                    self._inject_warm_recipe_history_into_ledger()
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "PRELUDE: warm-recipe history injection failed: %r",
-                        exc,
-                    )
-                # Warm-recipe replay, anchored on the hot baseline_tput contract.
-                try:
-                    await self._maybe_enqueue_warm_replay(
-                        baseline_tput=float(self.shared_state.baseline_tput or tput),
-                    )
-                except Exception as exc:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "PRELUDE: failed to enqueue warm-replay task: %r",
-                        exc,
-                    )
-                # Auto-analysis (roofline / profile); may defer.
-                await self._maybe_enqueue_prelude_initial_analysis_after_baseline(
-                    baseline_tput=float(tput),
-                )
-                # Research scout (parallel, read-only, CPU-only).
-                await self._maybe_enqueue_prelude_research_scout()
-                # Static-recon (parallel, read-only, CPU-only): seed bridge
-                # candidates as gaps[] before EXPLORE starts.
-                await self._maybe_enqueue_prelude_static_recon()
-        elif task_kind == "replay_warm_recipe":
-            # Separate promote path so replay doesn't overwrite baseline_tput/current_best.
-            try:
-                self._promote_warm_replay(result, task=task)
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("warm-replay promote failed")
-            # PRELUDE initial roofline was deferred while replay ran.
-            await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
-        elif task_kind == "profile":
-            # Defensive skipped arm: audit as skipped + drop the gate.
-            if str(result.get("status") or "") == "skipped":
-                audit_decision = "skipped"
-                audit_extras = {
-                    "error_class": result.get("error_class"),
-                    "error": result.get("error"),
-                }
-                if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
-                    self.shared_state.auto_roofline_pending_task_id = ""
-                    changed = True
-            else:
-                audit_decision = "promoted"
-                audit_extras = {
-                    "trace_path": None,
-                    "profile_args": None,
-                    "output_throughput": result.get("output_throughput"),
-                }
-            # Surface the trace path so Orch passes a real path to trace_analyze.
-            trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
-            profile_status = str(result.get("status") or "")
-            if profile_status == "failed" or result.get("error_class") == "no_trace_files":
-                self.shared_state.last_profile_status = "failed"
-                if not trace_path:
-                    self.shared_state.last_profile_trace = ""
+        # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
+        if profile_status == "succeeded":
+            anchor_tput = self._current_tput_from_validated_gain()
+            if anchor_tput > 0:
+                self.shared_state.last_roofline_tput = float(anchor_tput)
                 changed = True
-            elif trace_path:
-                self.shared_state.last_profile_trace = str(trace_path)
-                self.shared_state.last_profile_status = "succeeded"
-                # Record the server config in effect for this trace.
-                profile_args = ""
-                if task is not None:
-                    profile_args = str((task.params or {}).get("base_extra_args") or "")
-                self.shared_state.last_profile_args = profile_args
-                # New trace invalidates the stale trace_analyze cache.
-                self.shared_state.last_trace_analyze = {}
-                changed = True
-                audit_extras["trace_path"] = str(trace_path)
-                audit_extras["profile_args"] = profile_args
-            # profile result may include a tput; promote into current_best on the +1% rule.
-            tput = result.get("output_throughput")
-            cb = self.shared_state.current_best or {}
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            cur_best = (
-                float(cb_tput)
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0
-                else float(self.shared_state.baseline_tput or 0.0)
-            )
-            if (
-                isinstance(tput, (int, float))
-                and tput > 0
-                and cur_best > 0
-                and (tput - cur_best) / cur_best * 100.0 >= 1.0
-            ):
-                self.shared_state.current_best = {
-                    "action": "profile",
-                    "tput": float(tput),
-                    "ttft_mean_ms": result.get("ttft_mean_ms"),
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
-                    "tpot_mean_ms": result.get("tpot_mean_ms"),
-                    "workspace": result.get("workspace"),
-                }
-                if self.shared_state.baseline_tput > 0:
-                    self.shared_state.cumulative_gain = (
-                        (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-                    )
-                changed = True
-            # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
-            if profile_status == "succeeded":
-                anchor_tput = self._current_tput_from_validated_gain()
-                if anchor_tput > 0:
-                    self.shared_state.last_roofline_tput = float(anchor_tput)
-                    changed = True
-            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
-                self.shared_state.auto_roofline_pending_task_id = ""
-                changed = True
-        elif task_kind == "roofline":
-            # The composite roofline action runs profile + trace_analyze atomically;
-            # its executor writes last_profile_* + last_trace_analyze, so here we just record the audit row.
-            status = str(result.get("status") or "")
-            if status == "skipped":
-                # Defensive arm: clean no-op, no streak/watermark touch.
-                audit_decision = "skipped"
-                audit_extras = {
-                    "error_class": result.get("error_class"),
-                    "error": result.get("error"),
-                }
-                # Still clear the pending pointer so the watermark check can re-arm.
-                if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
-                    self.shared_state.auto_roofline_pending_task_id = ""
-                    changed = True
-            elif status == "succeeded":
-                audit_decision = "promoted"
-                # Prefer the executor's last_trace_analyze snapshot over the result dict.
-                _last_ta = self.shared_state.last_trace_analyze or {}
-                audit_extras = {
-                    "snapshot_id": (
-                        _last_ta.get("roofline_snapshot_id")
-                        if _last_ta.get("roofline_snapshot_id") is not None
-                        else result.get("snapshot_id")
-                    ),
-                    "last_profile_trace": (self.shared_state.last_profile_trace or result.get("last_profile_trace")),
-                    "analysis_md_path": (_last_ta.get("analysis_md_path") or result.get("analysis_md_path")),
-                    "profile_workspace": result.get("profile_workspace"),
-                    "degraded": bool(result.get("degraded", False)),
-                }
-                # Reset the roofline failure streak on a successful snapshot.
-                if hasattr(self.shared_state, "roofline_failure_streak"):
-                    self.shared_state.roofline_failure_streak = 0
-                # Re-anchor the 10% watermark step on the projected current tput.
-                anchor_tput = self._current_tput_from_validated_gain()
-                if anchor_tput > 0:
-                    self.shared_state.last_roofline_tput = float(anchor_tput)
-                changed = True
-            else:
-                audit_decision = "discarded"
-                audit_extras = {
-                    "phase": result.get("phase"),
-                    "error_class": result.get("error_class"),
-                    "error": result.get("error"),
-                }
-                # Bump the failure streak (mirrors the audit ledger for prompt renderers).
-                if hasattr(self.shared_state, "roofline_failure_streak"):
-                    self.shared_state.roofline_failure_streak += 1
-                changed = True
-                log.warning(
-                    "Auto-roofline %s failed (reason=%s phase=%s "
-                    "error_class=%s); continuing in degraded mode "
-                    "(specialists / explore proceed without a fresh "
-                    "analysis_md). No retry, no fallback.",
-                    task.task_id if task else "?",
-                    str((task.params or {}).get("reason") or "") if task is not None else "",
-                    result.get("phase"),
-                    result.get("error_class"),
-                )
-            # Clear the pending pointer (matched by task id).
-            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
-                self.shared_state.auto_roofline_pending_task_id = ""
-                changed = True
-        elif task_kind == "explore":
-            # The executor already did per-variant KEEP/REVERT + rebench, so winners
-            # are authoritative; Coordinator is single-writer for explore_search.accepted +
-            # current_best + optimization_stack and does not re-threshold.
-            # 1. Apply the executor's ledger increment.
-            update = result.get("explore_search_update")
-            if isinstance(update, dict):
-                self.shared_state.apply_explore_search_update(update)
-                changed = True
-            # 2. Search-space expansion bookkeeping (honoured defensively when an update is present).
-            disc_update = result.get("discovered_flags_update")
-            if isinstance(disc_update, dict):
-                self.shared_state.record_discovered_flags(
-                    framework=str(disc_update.get("framework") or ""),
-                    backend_flags=disc_update.get("backend_flags"),
-                    param_flags=disc_update.get("param_flags"),
-                    source_path=str(disc_update.get("source_path") or ""),
-                )
-                err = disc_update.get("discovery_error")
-                if err:
-                    self.shared_state.discovered_flags_error = str(err)
-                changed = True
-            # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
-            winners = result.get("winners") or []
-            round_id = str(result.get("round_id") or "")
-            best_winner = result.get("best_variant")
-            best_tput = result.get("output_throughput")
-            promoted = False
-            # A post-resume revalidation task confirms the EXISTING stack/current
-            # best rather than adding a variant, so it never "promotes".
-            # Reconcile the validation watermark + clear the
-            # ``resume_pending_revalidation`` flag from the measured tput — but
-            # ONLY when the rebench actually produced a valid measurement, so a
-            # failed/empty rebench leaves the flag set and reports keep warning.
-            if task is not None and str((task.params or {}).get("source") or "") in {
-                "resume_stack_revalidate",
-                "resume_reverify_best",
-            }:
-                measured = result.get("output_throughput")
-                measured_ok = isinstance(measured, (int, float)) and measured > 0
-                # A GEAK revalidation (2b) must assert config identity + that the
-                # optimization engaged before stamping validated, else replay via
-                # the GEAK harness (2a). Native revalidations keep the
-                # unconditional watermark reconciliation below.
-                if bool((task.params or {}).get("geak_fallback")):
-                    got_hash = ""
-                    if isinstance(best_winner, dict):
-                        got_hash = str(best_winner.get("fingerprint") or "")
-                    if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
-                        got_hash = str(winners[0].get("fingerprint") or "")
-                    decision = _geak_revalidation_decision(
-                        measured=measured,
-                        baseline=self.shared_state.baseline_tput,
-                        got_hash=got_hash,
-                        expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
-                        min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
-                    )
-                    if decision == "validated":
-                        # Write the headline from the measured orchestrator-harness
-                        # rebench: lift current_best + optimization_stack + the
-                        # validated gain and clear geak_pending.
-                        ps = (
-                            self.shared_state.geak_result
-                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                            else {}
-                        )
-                        self._promote_geak_from_candidate(
-                            ps,
-                            measured_tput=float(measured),
-                            provenance="geak_orch_harness_validated",
-                        )
-                    else:
-                        # 2b inconclusive -> GEAK harness replay (2a), which
-                        # clears the pending flag on success. Best-effort.
-                        log.warning(
-                            "geak 2b revalidation inconclusive "
-                            "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
-                            measured,
-                            got_hash,
-                            (task.params or {}).get("expected_cfg_hash"),
-                        )
-                        try:
-                            # Routed via ``_coord`` so a test / caller that overrides
-                            # ``coordinator._validate_geak_via_geak_harness`` still wins
-                            # (bare-name delegation resolves it back onto this class).
-                            await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
-                        except Exception:  # noqa: BLE001 - defensive
-                            log.exception("geak 2a GEAK-harness fallback failed")
-                    changed = True
-                else:
-                    if measured_ok and self.shared_state.baseline_tput > 0:
-                        self._update_cumulative_gain_validated(measured)
-                        cb_rec = (
-                            self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-                        )
-                        recorded = cb_rec.get("tput")
-                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                        if (
-                            isinstance(recorded, (int, float))
-                            and recorded > 0
-                            and float(measured) < float(recorded) * floor / 100.0
-                        ):
-                            await self._record_observation(
-                                "coordinator",
-                                "observation",
-                                {
-                                    "kind": "current_best_drift",
-                                    "severity": "high",
-                                    "measured_tput": float(measured),
-                                    "recorded_tput": float(recorded),
-                                    "floor_pct": floor,
-                                },
-                            )
-                    if measured_ok:
-                        self.shared_state.resume_pending_revalidation = False
-                    changed = True
-            if isinstance(winners, list) and winners:
-                for winner in winners:
-                    if not isinstance(winner, dict):
-                        continue
-                    accepted = dict(winner)
-                    accepted.setdefault("accepted_at_round", round_id)
-                    accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
-                    self.shared_state.record_explore_accepted(accepted)
-                    # A specialist-provenance KEEP zeroes that domain's rounds_since_last_keep counter.
-                    prov = str(accepted.get("provenance") or "")
-                    if prov.startswith("specialist:"):
-                        try:
-                            self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
-                        except Exception:  # noqa: BLE001 — defensive
-                            log.exception(
-                                "depth: note_domain_keep failed for provenance=%r",
-                                prov,
-                            )
-                    changed = True
-                # 4. Lift the best winner into current_best / optimization_stack.
-                if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
-                    explore_gap_cid = (
-                        str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
-                    )
-                    self._lift_to_current_best(
-                        "explore",
-                        float(best_tput),
-                        best_winner,
-                        gap_canonical_id=explore_gap_cid,
-                    )
-                    promoted = True
-                    changed = True
-            try:
-                self.shared_state.note_explore_outcome(promoted=promoted)
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("depth: note_explore_outcome failed")
-            if promoted:
-                # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
-                # advance validated_stack_len so the unvalidated-stack guard clears.
-                if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                    self._update_cumulative_gain_validated(best_tput)
-                    # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
-                    await self._maybe_enqueue_watermark_roofline(
-                        reason="explore_keep_watermark",
-                    )
-            else:
-                changed = True
-            audit_decision = "promoted" if promoted else "discarded"
-            audit_extras = {
-                "round_id": round_id,
-                "winners_count": (len(winners) if isinstance(winners, list) else 0),
-                "losers_count": len(result.get("losers") or []),
-                "skipped_dup_count": len(result.get("skipped_dup") or []),
-                "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
-                "best_gain_pct_vs_base": result.get("best_gain_pct"),
-                "output_throughput": best_tput,
-                "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
-                "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
-            }
-        elif task_kind == "integrate_patch":
-            status = str(result.get("status") or "")
-            new_tput = result.get("output_throughput")
-            kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
-            if kept_flag:
-                specialist_task_id = str(result.get("specialist_task_id") or "")
-                lift = {
-                    "name": specialist_task_id or "integrate_patch_keep",
-                    "candidate_extra_server_args": "",
-                    "extra_envs": dict(result.get("config_changes_applied") or {}),
-                    "tput": float(new_tput),
-                    "workspace": result.get("workspace"),
-                    "provenance": "integrate_patch",
-                    "scope": "source_patch",
-                    # Durable source-layer handles so current_best stays relaunchable
-                    # and reproducible in the GEAK baseline.
-                    "source_snapshot": result.get("source_snapshot") or "",
-                    "framework_root": result.get("framework_root") or "",
-                    "base_sha": result.get("base_sha") or "",
-                }
-                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
-                if self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(new_tput)
-                    self.shared_state.resume_pending_revalidation = False
-                    await self._maybe_enqueue_watermark_roofline(
-                        reason="integrate_keep_watermark",
-                    )
-                changed = True
-            # Clear the pending_integrate sentinel after the task outcome is observed.
-            if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
-                pending = self.shared_state.pending_integrate
-                if not pending or str(pending.get("task_id") or "") in {
-                    "",
-                    str(getattr(task, "task_id", "") or ""),
-                }:
-                    self.shared_state.pending_integrate = {}
-                    changed = True
-            audit_decision = "promoted" if kept_flag else "discarded"
-            audit_extras = {
-                "status": status,
-                "specialist_task_id": result.get("specialist_task_id"),
-                "output_throughput": new_tput,
-                "delta_pct": result.get("delta_pct"),
-                "accuracy_pass": result.get("accuracy_pass"),
-                "patches_applied": result.get("patches_applied") or [],
-                "patches_reverted": result.get("patches_reverted") or [],
-            }
-        elif task_kind == "framework_agent":
-            # FRAMEWORK per-candidate result: append a progress row, update the batch
-            # max-gain stat, and on KEEP lift to current_best + validated gain + watermark.
-            status = str(result.get("status") or "")
-            candidate = result.get("candidate") or {}
-            cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
-            # Silent apply/bench failure: recover the candidate key from task
-            # params and coerce the status so the row is a real terminal verdict
-            # the pump can dedup on, not a blank row keyed on "".
-            if not cand_id and task is not None:
-                task_cand = (getattr(task, "params", None) or {}).get("candidate")
-                cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
-            if not status:
-                status = "no_result_failed"
-            batch_id = str(
-                result.get("batch_id")
-                or candidate.get("batch_id")
-                or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
-                or ""
-            )
-            delta_pct = result.get("delta_pct")
-            new_tput = result.get("output_throughput")
-            kept_flag = status == "kept"
-            progress_entry = {
-                "candidate_id": cand_id,
-                "pr_url": str(candidate.get("pr_url") or ""),
-                "status": status,
-                "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-                "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-                "gain_pct": float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
-                "kept": kept_flag,
-                "batch_id": batch_id,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
-            if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-                self.shared_state.framework_agent_phase_progress = []
-            self.shared_state.framework_agent_phase_progress.append(progress_entry)
-            try:
-                from ..framework.artifacts import write_decision_json
+        if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
+            self.shared_state.auto_roofline_pending_task_id = ""
+            changed = True
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
 
-                write_decision_json(
-                    self.session_dir,
-                    candidate_id=cand_id,
-                    batch_id=batch_id,
-                    status=status,
-                    kept=kept_flag,
-                    provenance="raw_diff",
-                    reason=str(result.get("reason") or ""),
-                    gain_pct=(float(delta_pct) if isinstance(delta_pct, (int, float)) else None),
-                    accuracy_pass=result.get("accuracy_pass"),
-                    extra={"workspace": str(result.get("workspace") or "")},
+    async def _promote_roofline(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a roofline result: audit + failure streak + roofline anchor (reads last_trace_analyze)."""
+        changed = False
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
+        # The composite roofline action runs profile + trace_analyze atomically;
+        # its executor writes last_profile_* + last_trace_analyze, so here we just record the audit row.
+        status = str(result.get("status") or "")
+        if status == "skipped":
+            # Defensive arm: clean no-op, no streak/watermark touch.
+            audit_decision = "skipped"
+            audit_extras = {
+                "error_class": result.get("error_class"),
+                "error": result.get("error"),
+            }
+            # Still clear the pending pointer so the watermark check can re-arm.
+            if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
+                self.shared_state.auto_roofline_pending_task_id = ""
+                changed = True
+        elif status == "succeeded":
+            audit_decision = "promoted"
+            # Prefer the executor's last_trace_analyze snapshot over the result dict.
+            _last_ta = self.shared_state.last_trace_analyze or {}
+            audit_extras = {
+                "snapshot_id": (
+                    _last_ta.get("roofline_snapshot_id")
+                    if _last_ta.get("roofline_snapshot_id") is not None
+                    else result.get("snapshot_id")
+                ),
+                "last_profile_trace": (self.shared_state.last_profile_trace or result.get("last_profile_trace")),
+                "analysis_md_path": (_last_ta.get("analysis_md_path") or result.get("analysis_md_path")),
+                "profile_workspace": result.get("profile_workspace"),
+                "degraded": bool(result.get("degraded", False)),
+            }
+            # Reset the roofline failure streak on a successful snapshot.
+            if hasattr(self.shared_state, "roofline_failure_streak"):
+                self.shared_state.roofline_failure_streak = 0
+            # Re-anchor the 10% watermark step on the projected current tput.
+            anchor_tput = self._current_tput_from_validated_gain()
+            if anchor_tput > 0:
+                self.shared_state.last_roofline_tput = float(anchor_tput)
+            changed = True
+        else:
+            audit_decision = "discarded"
+            audit_extras = {
+                "phase": result.get("phase"),
+                "error_class": result.get("error_class"),
+                "error": result.get("error"),
+            }
+            # Bump the failure streak (mirrors the audit ledger for prompt renderers).
+            if hasattr(self.shared_state, "roofline_failure_streak"):
+                self.shared_state.roofline_failure_streak += 1
+            changed = True
+            log.warning(
+                "Auto-roofline %s failed (reason=%s phase=%s "
+                "error_class=%s); continuing in degraded mode "
+                "(specialists / explore proceed without a fresh "
+                "analysis_md). No retry, no fallback.",
+                task.task_id if task else "?",
+                str((task.params or {}).get("reason") or "") if task is not None else "",
+                result.get("phase"),
+                result.get("error_class"),
+            )
+        # Clear the pending pointer (matched by task id).
+        if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
+            self.shared_state.auto_roofline_pending_task_id = ""
+            changed = True
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
+
+    async def _promote_explore(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
+        changed = False
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
+        # The executor already did per-variant KEEP/REVERT + rebench, so winners
+        # are authoritative; Coordinator is single-writer for explore_search.accepted +
+        # current_best + optimization_stack and does not re-threshold.
+        # 1. Apply the executor's ledger increment.
+        update = result.get("explore_search_update")
+        if isinstance(update, dict):
+            self.shared_state.apply_explore_search_update(update)
+            changed = True
+        # 2. Search-space expansion bookkeeping (honoured defensively when an update is present).
+        disc_update = result.get("discovered_flags_update")
+        if isinstance(disc_update, dict):
+            self.shared_state.record_discovered_flags(
+                framework=str(disc_update.get("framework") or ""),
+                backend_flags=disc_update.get("backend_flags"),
+                param_flags=disc_update.get("param_flags"),
+                source_path=str(disc_update.get("source_path") or ""),
+            )
+            err = disc_update.get("discovery_error")
+            if err:
+                self.shared_state.discovered_flags_error = str(err)
+            changed = True
+        # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
+        winners = result.get("winners") or []
+        round_id = str(result.get("round_id") or "")
+        best_winner = result.get("best_variant")
+        best_tput = result.get("output_throughput")
+        promoted = False
+        # A post-resume revalidation task confirms the EXISTING stack/current
+        # best rather than adding a variant, so it never "promotes".
+        # Reconcile the validation watermark + clear the
+        # ``resume_pending_revalidation`` flag from the measured tput — but
+        # ONLY when the rebench actually produced a valid measurement, so a
+        # failed/empty rebench leaves the flag set and reports keep warning.
+        is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
+            "resume_stack_revalidate",
+            "resume_reverify_best",
+        }
+        if is_revalidation_task:
+            measured = result.get("output_throughput")
+            measured_ok = isinstance(measured, (int, float)) and measured > 0
+            # A GEAK revalidation (2b) must assert config identity + that the
+            # optimization engaged before stamping validated, else replay via
+            # the GEAK harness (2a). Native revalidations keep the
+            # unconditional watermark reconciliation below.
+            if bool((task.params or {}).get("geak_fallback")):
+                got_hash = ""
+                if isinstance(best_winner, dict):
+                    got_hash = str(best_winner.get("fingerprint") or "")
+                if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
+                    got_hash = str(winners[0].get("fingerprint") or "")
+                cb_now = (
+                    self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                )
+                cb_tput = cb_now.get("tput")
+                decision = _geak_revalidation_decision(
+                    measured=measured,
+                    baseline=self.shared_state.baseline_tput,
+                    got_hash=got_hash,
+                    expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
+                    min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
+                    current_best=cb_tput,
+                )
+                if decision == "validated":
+                    # Write the headline from the measured orchestrator-harness
+                    # rebench: lift current_best + optimization_stack + the
+                    # validated gain and clear geak_pending.
+                    ps = (
+                        self.shared_state.geak_result
+                        if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                        else {}
+                    )
+                    self._promote_geak_from_candidate(
+                        ps,
+                        measured_tput=float(measured),
+                        provenance="geak_orch_harness_validated",
+                    )
+                elif decision == "no_promote":
+                    # Well-measured + engaged over baseline, but does not beat
+                    # current_best. This is a real result, NOT inconclusive, so
+                    # do not replay via the GEAK harness (2a); clear the pending
+                    # candidate without touching the headline / stack / gain.
+                    log.info(
+                        "geak 2b rebench did not beat current_best "
+                        "(measured=%r current_best=%r) -> no_promote",
+                        measured,
+                        cb_tput,
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_no_promote",
+                                "measured_tput": float(measured),
+                                "current_best_tput": (
+                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
+                                ),
+                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak no_promote: observation emit failed")
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
+                else:
+                    # 2b inconclusive -> GEAK harness replay (2a), which
+                    # clears the pending flag on success. Best-effort.
+                    log.warning(
+                        "geak 2b revalidation inconclusive "
+                        "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
+                        measured,
+                        got_hash,
+                        (task.params or {}).get("expected_cfg_hash"),
+                    )
+                    try:
+                        # Routed via ``_coord`` so a test / caller that overrides
+                        # ``coordinator._validate_geak_via_geak_harness`` still wins
+                        # (bare-name delegation resolves it back onto this class).
+                        await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
+                    except Exception as exc:  # noqa: BLE001 - defensive
+                        log.exception("geak 2a GEAK-harness fallback failed")
+                        try:
+                            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                            geak_result = (
+                                self.shared_state.geak_result
+                                if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                                else {}
+                            )
+                            instrument.record_geak_operation(
+                                self.session_dir,
+                                stage="final_validation_failed",
+                                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                                result={
+                                    **geak_result,
+                                    "failure_reason": "geak_harness_fallback_exception",
+                                    "error": repr(exc),
+                                },
+                                status="failed",
+                                validation_source="geak_same_harness_geak",
+                            )
+                        except Exception:  # noqa: BLE001
+                            log.debug("geak v4 fallback-exception recording failed", exc_info=True)
+                changed = True
+            else:
+                if measured_ok and self.shared_state.baseline_tput > 0:
+                    self._update_cumulative_gain_validated(measured)
+                    cb_rec = (
+                        self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                    )
+                    recorded = cb_rec.get("tput")
+                    floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                    if (
+                        isinstance(recorded, (int, float))
+                        and recorded > 0
+                        and float(measured) < float(recorded) * floor / 100.0
+                    ):
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "current_best_drift",
+                                "severity": "high",
+                                "measured_tput": float(measured),
+                                "recorded_tput": float(recorded),
+                                "floor_pct": floor,
+                            },
+                        )
+                if measured_ok:
+                    self.shared_state.resume_pending_revalidation = False
+                changed = True
+        # A revalidation task only CONFIRMS the existing stack/current_best; its
+        # winner is not a new discovery. Skip the accept/lift path so a rebench
+        # (e.g. geak_revalidate) never appends a duplicate optimization_stack
+        # entry or re-lifts current_best.
+        if isinstance(winners, list) and winners and not is_revalidation_task:
+            for winner in winners:
+                if not isinstance(winner, dict):
+                    continue
+                accepted = dict(winner)
+                accepted.setdefault("accepted_at_round", round_id)
+                accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
+                self.shared_state.record_explore_accepted(accepted)
+                # A specialist-provenance KEEP zeroes that domain's rounds_since_last_keep counter.
+                prov = str(accepted.get("provenance") or "")
+                if prov.startswith("specialist:"):
+                    try:
+                        self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
+                    except Exception:  # noqa: BLE001 — defensive
+                        log.exception(
+                            "depth: note_domain_keep failed for provenance=%r",
+                            prov,
+                        )
+                changed = True
+            # 4. Lift the best winner into current_best / optimization_stack.
+            if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
+                best_winner = dict(best_winner)
+                if task is not None:
+                    best_winner["task_id"] = str(task.task_id or "")
+                explore_gap_cid = (
+                    str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
+                )
+                self._lift_to_current_best(
+                    "explore",
+                    float(best_tput),
+                    best_winner,
+                    gap_canonical_id=explore_gap_cid,
+                )
+                promoted = True
+                changed = True
+        try:
+            self.shared_state.note_explore_outcome(promoted=promoted)
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("depth: note_explore_outcome failed")
+        if promoted:
+            # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
+            # advance validated_stack_len so the unvalidated-stack guard clears.
+            if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
+                self._update_cumulative_gain_validated(best_tput)
+                # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
+                await self._maybe_enqueue_watermark_roofline(
+                    reason="explore_keep_watermark",
+                )
+        else:
+            changed = True
+        audit_decision = "promoted" if promoted else "discarded"
+        audit_extras = {
+            "round_id": round_id,
+            "winners_count": (len(winners) if isinstance(winners, list) else 0),
+            "losers_count": len(result.get("losers") or []),
+            "skipped_dup_count": len(result.get("skipped_dup") or []),
+            "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
+            "best_gain_pct_vs_base": result.get("best_gain_pct"),
+            "output_throughput": best_tput,
+            "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
+            "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
+        }
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
+
+    async def _promote_integrate_patch(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote an integrate_patch result: on KEEP lift current_best; clear pending_integrate."""
+        changed = False
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
+        status = str(result.get("status") or "")
+        new_tput = result.get("output_throughput")
+        kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        if kept_flag:
+            specialist_task_id = str(result.get("specialist_task_id") or "")
+            lift = {
+                "name": specialist_task_id or "integrate_patch_keep",
+                "task_id": getattr(task, "task_id", "") if task is not None else "",
+                "candidate_extra_server_args": "",
+                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "tput": float(new_tput),
+                "workspace": result.get("workspace"),
+                "provenance": "integrate_patch",
+                "scope": "source_patch",
+                # Durable source-layer handles so current_best stays relaunchable
+                # and reproducible in the GEAK baseline.
+                "source_snapshot": result.get("source_snapshot") or "",
+                "framework_root": result.get("framework_root") or "",
+                "base_sha": result.get("base_sha") or "",
+            }
+            self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+            if self.shared_state.baseline_tput > 0:
+                self._update_cumulative_gain_validated(new_tput)
+                self.shared_state.resume_pending_revalidation = False
+                await self._maybe_enqueue_watermark_roofline(
+                    reason="integrate_keep_watermark",
+                )
+            changed = True
+        # Clear the pending_integrate sentinel after the task outcome is observed.
+        if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
+            pending = self.shared_state.pending_integrate
+            if not pending or str(pending.get("task_id") or "") in {
+                "",
+                str(getattr(task, "task_id", "") or ""),
+            }:
+                self.shared_state.pending_integrate = {}
+                changed = True
+        audit_decision = "promoted" if kept_flag else "discarded"
+        audit_extras = {
+            "status": status,
+            "specialist_task_id": result.get("specialist_task_id"),
+            "output_throughput": new_tput,
+            "delta_pct": result.get("delta_pct"),
+            "accuracy_pass": result.get("accuracy_pass"),
+            "patches_applied": result.get("patches_applied") or [],
+            "patches_reverted": result.get("patches_reverted") or [],
+        }
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
+
+    async def _promote_framework_agent(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a framework_agent candidate: progress row, batch max-gain stat, KEEP lift."""
+        changed = False
+        audit_decision: str | None = None
+        audit_extras: dict[str, Any] = {}
+        # FRAMEWORK per-candidate result: append a progress row, update the batch
+        # max-gain stat, and on KEEP lift to current_best + validated gain + watermark.
+        status = str(result.get("status") or "")
+        candidate = result.get("candidate") or {}
+        cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
+        # Silent apply/bench failure: recover the candidate key from task
+        # params and coerce the status so the row is a real terminal verdict
+        # the pump can dedup on, not a blank row keyed on "".
+        if not cand_id and task is not None:
+            task_cand = (getattr(task, "params", None) or {}).get("candidate")
+            cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
+        if not status:
+            status = "no_result_failed"
+        batch_id = str(
+            result.get("batch_id")
+            or candidate.get("batch_id")
+            or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
+            or ""
+        )
+        delta_pct = result.get("delta_pct")
+        new_tput = result.get("output_throughput")
+        kept_flag = status == "kept"
+        progress_entry = {
+            "candidate_id": cand_id,
+            "pr_url": str(candidate.get("pr_url") or ""),
+            "status": status,
+            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+            "gain_pct": float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
+            "kept": kept_flag,
+            "batch_id": batch_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        }
+        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
+            self.shared_state.framework_agent_phase_progress = []
+        self.shared_state.framework_agent_phase_progress.append(progress_entry)
+        try:
+            from ..framework.artifacts import write_decision_json
+
+            write_decision_json(
+                self.session_dir,
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=kept_flag,
+                provenance="raw_diff",
+                reason=str(result.get("reason") or ""),
+                gain_pct=(float(delta_pct) if isinstance(delta_pct, (int, float)) else None),
+                accuracy_pass=result.get("accuracy_pass"),
+                extra={"workspace": str(result.get("workspace") or "")},
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("FRAMEWORK: executor decision.json write failed", exc_info=True)
+        # Update batch max-gain rolling stat (for the plateau judge).
+        batches = getattr(self.shared_state, "framework_agent_batches", None) or []
+        if isinstance(batches, list) and batches:
+            for entry in reversed(batches):
+                if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
+                    prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
+                    gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
+                    if gain > prev:
+                        entry["max_gain_pct_observed_in_batch"] = gain
+                    break
+        changed = True
+        if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
+            lift = {
+                "name": f"framework:{cand_id}",
+                "variant_name": cand_id,
+                "task_id": getattr(task, "task_id", "") if task is not None else "",
+                "candidate_extra_server_args": "",
+                "extra_envs": {},
+                "workspace": result.get("workspace"),
+            }
+            self._lift_to_current_best("framework", float(new_tput), lift)
+            if self.shared_state.baseline_tput > 0:
+                self._update_cumulative_gain_validated(new_tput)
+                await self._maybe_enqueue_watermark_roofline(
+                    reason="framework_keep_watermark",
+                )
+        audit_decision = "promoted" if kept_flag else "discarded"
+        audit_extras = {
+            "candidate_id": cand_id,
+            "batch_id": batch_id,
+            "status": status,
+            "delta_pct": delta_pct,
+            "output_throughput": new_tput,
+            "kept": kept_flag,
+        }
+        outcome.changed = changed
+        outcome.audit_decision = audit_decision
+        outcome.audit_extras = audit_extras
+
+    async def _promote_sweep(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a sweep result: self-audit + record_sweep + save; discovery-only, never promotes."""
+        outcome.early_return = True
+        pareto = result.get("pareto_front") or []
+        self.shared_state.record_action_attempt(
+            action="sweep",
+            task_id=getattr(task, "task_id", "") if task is not None else "",
+            status="succeeded",
+            decision="discarded",
+            result=result,
+            extras={
+                "grid_size": result.get("grid_size"),
+                "best_overall": result.get("best_overall"),
+                "best_for_each_conc": result.get("best_for_each_conc"),
+                "pareto_front_size": (len(pareto) if isinstance(pareto, list) else None),
+            },
+        )
+        self.shared_state.record_sweep(result)
+        # Sweep is discovery-only (never promotes) and must not mutate params_no_promote_streak.
+        self.shared_state.save(self.session_dir)
+        # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in.
+        if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
+            try:
+                await self._enqueue_internal_conc_sweep_task(
+                    reason="post_sweep",
                 )
             except Exception:  # noqa: BLE001
-                log.debug("FRAMEWORK: executor decision.json write failed", exc_info=True)
-            # Update batch max-gain rolling stat (for the plateau judge).
-            batches = getattr(self.shared_state, "framework_agent_batches", None) or []
-            if isinstance(batches, list) and batches:
-                for entry in reversed(batches):
-                    if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
-                        prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                        gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-                        if gain > prev:
-                            entry["max_gain_pct_observed_in_batch"] = gain
-                        break
-            changed = True
-            if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
-                lift = {
-                    "name": f"framework:{cand_id}",
-                    "variant_name": cand_id,
-                    "candidate_extra_server_args": "",
-                    "extra_envs": {},
-                    "workspace": result.get("workspace"),
-                }
-                self._lift_to_current_best("framework", float(new_tput), lift)
-                if self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(new_tput)
-                    await self._maybe_enqueue_watermark_roofline(
-                        reason="framework_keep_watermark",
-                    )
-            audit_decision = "promoted" if kept_flag else "discarded"
-            audit_extras = {
-                "candidate_id": cand_id,
-                "batch_id": batch_id,
-                "status": status,
-                "delta_pct": delta_pct,
-                "output_throughput": new_tput,
-                "kept": kept_flag,
-            }
-        elif task_kind == "sweep":
-            pareto = result.get("pareto_front") or []
-            self.shared_state.record_action_attempt(
-                action="sweep",
-                task_id=getattr(task, "task_id", "") if task is not None else "",
-                status="succeeded",
-                decision="discarded",
-                result=result,
-                extras={
-                    "grid_size": result.get("grid_size"),
-                    "best_overall": result.get("best_overall"),
-                    "best_for_each_conc": result.get("best_for_each_conc"),
-                    "pareto_front_size": (len(pareto) if isinstance(pareto, list) else None),
-                },
-            )
-            self.shared_state.record_sweep(result)
-            # Sweep is discovery-only (never promotes) and must not mutate params_no_promote_streak.
-            self.shared_state.save(self.session_dir)
-            # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in.
-            if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
-                try:
-                    await self._enqueue_internal_conc_sweep_task(
-                        reason="post_sweep",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
-            return
-        elif task_kind == "conc_sweep":
-            self.shared_state.record_action_attempt(
-                action="conc_sweep",
-                task_id=getattr(task, "task_id", "") if task is not None else "",
-                status=str(result.get("status") or "succeeded"),
-                decision="discarded",
-                result=result,
-                extras={
-                    "was_skipped": bool(result.get("was_skipped", False)),
-                    "skip_reason": result.get("skip_reason"),
-                    "budget_exhausted": bool(result.get("budget_exhausted", False)),
-                    "total_budget_sec": result.get("total_budget_sec"),
-                    "elapsed_sec": result.get("elapsed_sec"),
-                    "best_speedup": ((result.get("summary") or {}).get("best_speedup")),
-                    "best_conc": ((result.get("summary") or {}).get("best_conc")),
-                    "successful_pairs": ((result.get("summary") or {}).get("successful_pairs")),
-                    "report_path": result.get("report_json_path"),
-                },
-            )
-            # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done.
-            self.shared_state.record_conc_sweep(result)
-            self.shared_state.save(self.session_dir)
-            return
-        # Audit trail: one succeeded-attempt record with branch-supplied decision/extras.
-        if audit_decision is not None and task_kind in _AUDIT_ACTIONS:
-            self.shared_state.record_action_attempt(
-                action=task_kind,
-                task_id=getattr(task, "task_id", "") if task is not None else "",
-                status="succeeded",
-                decision=audit_decision,
-                result=result,
-                extras=audit_extras,
-            )
-            changed = True
-        if changed:
-            self.shared_state.save(self.session_dir)
+                log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
+
+    async def _promote_conc_sweep(
+        self,
+        result: dict,
+        task: "Task | None",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Promote a conc_sweep result: self-audit + record_conc_sweep + save; discovery-only."""
+        outcome.early_return = True
+        self.shared_state.record_action_attempt(
+            action="conc_sweep",
+            task_id=getattr(task, "task_id", "") if task is not None else "",
+            status=str(result.get("status") or "succeeded"),
+            decision="discarded",
+            result=result,
+            extras={
+                "was_skipped": bool(result.get("was_skipped", False)),
+                "skip_reason": result.get("skip_reason"),
+                "budget_exhausted": bool(result.get("budget_exhausted", False)),
+                "total_budget_sec": result.get("total_budget_sec"),
+                "elapsed_sec": result.get("elapsed_sec"),
+                "best_speedup": ((result.get("summary") or {}).get("best_speedup")),
+                "best_conc": ((result.get("summary") or {}).get("best_conc")),
+                "successful_pairs": ((result.get("summary") or {}).get("successful_pairs")),
+                "report_path": result.get("report_json_path"),
+            },
+        )
+        # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done.
+        self.shared_state.record_conc_sweep(result)
+        self.shared_state.save(self.session_dir)
 
     # ------------------------------------------------------------------
     # Resume / replay (folded in from the former ResumeCollaborator).
@@ -3203,7 +3475,7 @@ class WritebackCollaborator:
         # before stamping validated, and falls back to 2a (GEAK harness) on miss.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
-        ps_overlay = str(ps.get("final_overlay") or "").strip()
+        ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
@@ -3243,6 +3515,26 @@ class WritebackCollaborator:
                     params=params_ps,
                     idempotency_key="geak-revalidate",
                 )
+                try:
+                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                    instrument.record_geak_operation(
+                        self.session_dir,
+                        stage="rebench_started",
+                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                        result={
+                            **ps,
+                            "rebench": {
+                                "task_id": task.task_id,
+                                "existing": bool(existing),
+                                "mode": "orchestrator_same_harness",
+                                "expected_cfg_hash": expected_cfg_hash,
+                            },
+                        },
+                        status="running",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug("geak v4 rebench recording failed", exc_info=True)
                 return {"task_id": task.task_id, "existing": bool(existing), "mode": "geak_2b"}
 
         rebuilt = self._materialize_stack_config_for_resume()
@@ -3309,6 +3601,19 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok":
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="geak_harness_fallback",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result={**ps, "fallback_reason": reason},
+                status="running",
+                validation_source="geak_same_harness_geak",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
         # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
@@ -3363,6 +3668,19 @@ class WritebackCollaborator:
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
                 log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
+                try:
+                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                    instrument.record_geak_operation(
+                        self.session_dir,
+                        stage="final_validation_failed",
+                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                        result={**ps, "fallback_result": res, "failure_reason": "missing_measured_throughput"},
+                        status="failed",
+                        validation_source="geak_same_harness_geak",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
             self._promote_geak_from_candidate(
                 ps,
@@ -3382,6 +3700,24 @@ class WritebackCollaborator:
             geak_sp,
             reason,
         )
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="final_validation_failed",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result={
+                    **ps,
+                    "fallback_result": res,
+                    "failure_reason": reason,
+                    "geak_speedup": geak_sp,
+                },
+                status="failed",
+                validation_source="geak_same_harness_geak",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 failed-validation recording failed", exc_info=True)
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _resume_reenter_kernel_if_needed(self) -> None:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Author-time instrumentation for ``session_breakdown.json``.
@@ -24,9 +24,12 @@ instrumented at those sites separately.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
@@ -42,6 +45,7 @@ _GEAK_BACKENDS = frozenset({"geak"})
 _FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
+_VALID_PRODUCER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _now_iso_safe() -> str:
@@ -89,11 +93,555 @@ def _rel(path: Path, session_dir: Path | str) -> str:
         return str(path)
 
 
+def _stable_id(prefix: str, *parts: Any) -> str:
+    """Build a readable, collision-resistant id from author-time values."""
+    raw_parts: list[str] = []
+    for part in parts:
+        if isinstance(part, Mapping):
+            text = json.dumps(dict(part), sort_keys=True, separators=(",", ":"), default=str)
+        else:
+            text = str(part or "")
+        if text:
+            raw_parts.append(text)
+    raw = "|".join(raw_parts) or "unknown"
+    readable = re.sub(r"[^A-Za-z0-9._:-]+", "-", raw).strip("-")[:96] or "unknown"
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"{prefix}:{readable}:{digest}"
+
+
+def _operation_status(status: Any) -> str:
+    """Normalize action status while preserving terminal failures."""
+    value = str(status or "").strip().lower()
+    if value in {"kept", "keep", "promoted", "succeeded", "success", "completed", "complete", "ok"}:
+        return "succeeded"
+    if value in {"running", "started", "pending"}:
+        return "running"
+    if value in {"skipped", "discarded", "reverted", "revert", "rejected", "no_promote"}:
+        return value
+    return "failed" if value in _FAILED_STATUSES or value else "unknown"
+
+
+def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
+    """Return the resume-stable operation id for an action event."""
+    extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
+    task_id = str(entry.get("task_id") or "").strip()
+    if task_id:
+        return _stable_id("op", action, task_id)
+    key = next(
+        (
+            extras.get(name)
+            for name in ("round_id", "round", "tick", "fingerprint", "candidate_id", "key")
+            if extras.get(name) not in (None, "")
+        ),
+        "",
+    )
+    return _stable_id("op", action, key or entry.get("ts") or entry)
+
+
+def _record_action_artifacts(
+    session_dir: Path | str,
+    *,
+    operation_id: str,
+    result: Mapping[str, Any],
+    producer: str,
+) -> list[str]:
+    """Record path references already present in an action result."""
+    artifact_ids: list[str] = []
+    scalar_keys = (
+        "workspace",
+        "output_dir",
+        "report_path",
+        "benchmark_report_path",
+        "raw_result_path",
+        "stderr_log_path",
+        "analysis_md_path",
+        "kernel_roofline_path",
+        "main_trace_path",
+        "trace_dir",
+        "report_json_path",
+        "report_csv_path",
+        "config_path",
+        "materialized_config",
+        "decision_path",
+    )
+    list_keys = ("trace_files", "patches_applied", "patches_reverted", "artifacts")
+    refs: list[tuple[str, Any]] = [(key, result.get(key)) for key in scalar_keys]
+    for key in list_keys:
+        values = result.get(key)
+        if isinstance(values, (list, tuple)):
+            refs.extend((key, value) for value in values)
+    seen: set[str] = set()
+    for index, (kind, path) in enumerate(refs):
+        if not isinstance(path, (str, Path)) or not str(path).strip():
+            continue
+        rendered = str(path)
+        if rendered in seen:
+            continue
+        seen.add(rendered)
+        artifact_id = _stable_id("artifact", operation_id, kind, rendered)
+        artifact_ids.append(artifact_id)
+        record_artifact(
+            session_dir,
+            artifact_id=artifact_id,
+            operation_id=operation_id,
+            producer_operation_id=operation_id,
+            kind=kind,
+            name=Path(rendered).name or kind,
+            path=rendered,
+            status="available",
+            producer=producer,
+            consumers=[operation_id],
+            coverage={"source": "structured_result"},
+        )
+    return artifact_ids
+
+
+def _record_action_measurements(
+    session_dir: Path | str,
+    *,
+    action: str,
+    operation_id: str,
+    result: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    producer: str,
+) -> list[str]:
+    """Record scalar and per-point measurements from a structured result."""
+    measurement_ids: list[str] = []
+    metric_fields = (
+        ("output_throughput", "throughput", str(result.get("throughput_unit") or "tok/s")),
+        ("throughput", "throughput", str(result.get("throughput_unit") or "tok/s")),
+        ("best_tput", "throughput", str(result.get("throughput_unit") or "tok/s")),
+        ("throughput_after", "throughput", str(result.get("throughput_unit") or "tok/s")),
+        ("baseline_tput", "baseline_throughput", str(result.get("throughput_unit") or "tok/s")),
+        ("achieved_tok_per_sec", "achieved_throughput", "tok/s"),
+        ("theoretical_peak_tok_per_sec", "theoretical_peak_throughput", "tok/s"),
+        ("accuracy", "accuracy", str(result.get("accuracy_unit") or "score")),
+        ("ttft_mean_ms", "ttft_mean", "ms"),
+        ("tpot_mean_ms", "tpot_mean", "ms"),
+        ("e2el_mean_ms", "e2el_mean", "ms"),
+        ("best_gain_pct", "gain", "percent"),
+        ("delta_pct", "gain", "percent"),
+        ("actual_gain_pct", "gain", "percent"),
+        ("within_roofline_pct", "roofline_utilization", "percent"),
+        ("snapshot_id", "snapshot", "id"),
+    )
+    dimensions = {
+        key: result.get(key)
+        for key in ("conc", "isl", "osl", "tp", "ep", "framework", "precision")
+        if result.get(key) is not None
+    }
+    common = {
+        "operation_id": operation_id,
+        "status": _operation_status(entry.get("status") or result.get("status")),
+        "measured_at": str(entry.get("ts") or result.get("ts") or ""),
+        "producer": producer,
+        "dimensions": dimensions,
+        "metric_basis": str(result.get("metric_basis") or result.get("accuracy_source") or "partial:not_provided"),
+        "harness": (
+            result.get("harness")
+            or result.get("bench_client")
+            or result.get("benchmark_script")
+            or result.get("materialized_config")
+            or result.get("config_path")
+            or {"status": "partial", "reason": "not_provided"}
+        ),
+        "workload": (
+            dict(result.get("workload") or {})
+            if isinstance(result.get("workload"), Mapping)
+            else {**dimensions, "lock": "partial", "status": "partial"}
+        ),
+        "samples": list(result.get("samples") or []) if isinstance(result.get("samples"), (list, tuple)) else [],
+        "aggregation": result.get("aggregation") or "result_scalar",
+    }
+    seen_names: set[str] = set()
+    for field, name, unit in metric_fields:
+        value = result.get(field)
+        if value is None or name in seen_names:
+            continue
+        seen_names.add(name)
+        measurement_id = _stable_id("measurement", operation_id, name)
+        measurement_ids.append(measurement_id)
+        record_measurement(
+            session_dir,
+            measurement_id=measurement_id,
+            kind=name,
+            name=name,
+            value=value,
+            unit=unit,
+            source={
+                "field": field,
+                "action": action,
+                "role": "baseline" if field == "baseline_tput" else "final" if name == "throughput" else "derived",
+            },
+            metric_basis=(
+                str(result.get("metric_basis") or "output")
+                if name in {"throughput", "baseline_throughput", "achieved_throughput"}
+                else common["metric_basis"]
+            ),
+            metadata={"completeness": "complete" if common["samples"] else "partial"},
+            **{key: value for key, value in common.items() if key != "metric_basis"},
+        )
+
+    point_groups: list[tuple[str, Any]] = [
+        ("sweep", result.get("all_variants")),
+        ("comparison", result.get("comparison")),
+    ]
+    for group, points in point_groups:
+        if not isinstance(points, list):
+            continue
+        for index, point in enumerate(points):
+            if not isinstance(point, Mapping):
+                continue
+            point_key = point.get("variant_name") or point.get("name") or point.get("conc") or index
+            for field, name, unit in (
+                ("output_throughput_tok_s", "throughput", "tok/s"),
+                ("output_throughput", "throughput", "tok/s"),
+                ("throughput", "throughput", "tok/s"),
+                ("speedup", "speedup", "ratio"),
+                ("ttft_mean_ms", "ttft_mean", "ms"),
+                ("tpot_mean_ms", "tpot_mean", "ms"),
+                ("e2el_mean_ms", "e2el_mean", "ms"),
+            ):
+                if point.get(field) is None:
+                    continue
+                measurement_id = _stable_id("measurement", operation_id, group, point_key, name)
+                measurement_ids.append(measurement_id)
+                record_measurement(
+                    session_dir,
+                    measurement_id=measurement_id,
+                    operation_id=operation_id,
+                    kind=name,
+                    name=name,
+                    value=point.get(field),
+                    unit=unit,
+                    status=str(point.get("status") or common["status"]),
+                    measured_at=common["measured_at"],
+                    producer=producer,
+                    dimensions={
+                        key: point.get(key)
+                        for key in ("variant_name", "conc", "isl", "osl")
+                        if point.get(key) is not None
+                    },
+                    metric_basis=str(result.get("metric_basis") or ""),
+                    harness=common["harness"],
+                    workload=common["workload"],
+                    samples=[],
+                    aggregation="point",
+                    source={"field": field, "group": group},
+                )
+    return measurement_ids
+
+
+def _record_adoption_transition(
+    session_dir: Path | str,
+    *,
+    adoption_id: str,
+    operation_id: str,
+    adopted: bool,
+    producer: str,
+    reason: str,
+    **fields: Any,
+) -> None:
+    """Upsert the current state of one canonical adoption."""
+    now = str(fields.pop("transitioned_at", "") or _now_iso_safe())
+    record_adoption(
+        session_dir,
+        adoption_id=adoption_id,
+        producer=producer,
+        operation_id=operation_id,
+        status="adopted" if adopted else "revoked",
+        decision="KEEP" if adopted else "REVERT",
+        validated=adopted,
+        reason=reason,
+        **({"adopted_at": now} if adopted else {"revoked_at": now}),
+        **fields,
+    )
+
+
+def _mirror_action_v4(
+    session_dir: Path | str,
+    *,
+    action: str,
+    entry: Mapping[str, Any],
+    result: Mapping[str, Any],
+    phase: str,
+    macro_cycle: int,
+    tick: int,
+    producer: str,
+) -> None:
+    """Mirror one settled non-kernel action into canonical v4 streams."""
+    identity_entry = dict(entry)
+    identity_extras = dict(entry.get("extras") or {}) if isinstance(entry.get("extras"), Mapping) else {}
+    if not entry.get("task_id") and not any(
+        identity_extras.get(name) not in (None, "")
+        for name in ("round_id", "round", "tick", "fingerprint", "candidate_id", "key")
+    ):
+        identity_extras["tick"] = tick
+    identity_entry["extras"] = identity_extras
+    operation_id = _action_operation_id(action, identity_entry)
+    status = _operation_status(entry.get("status") or result.get("status"))
+    decision = str(entry.get("decision") or result.get("decision") or result.get("status") or "")
+    extras = dict(entry.get("extras") or {}) if isinstance(entry.get("extras"), Mapping) else {}
+    task_id = str(entry.get("task_id") or "")
+    subject_id = _stable_id("subject", action, task_id or extras or result.get("candidate") or result)
+    subject_type = {
+        "baseline": "workload",
+        "profile": "profile",
+        "roofline": "roofline_snapshot",
+        "framework_agent": "framework_candidate",
+        "explore": "variant",
+        "sweep": "sweep",
+        "conc_sweep": "concurrency_sweep",
+    }.get(action, action)
+    subject_attributes: dict[str, Any] = {}
+    if isinstance(result.get("candidate"), Mapping):
+        subject_attributes["candidate"] = dict(result["candidate"])
+    if isinstance(result.get("best_variant"), Mapping):
+        subject_attributes["variant"] = dict(result["best_variant"])
+    elif isinstance(result.get("best_winner"), Mapping):
+        subject_attributes["variant"] = dict(result["best_winner"])
+    if action in {"profile", "roofline"}:
+        subject_attributes.update(
+            {
+                key: result.get(key)
+                for key in (
+                    "snapshot_id",
+                    "roofline_arm",
+                    "trace_health",
+                    "hot_kernels",
+                    "top_bottleneck",
+                )
+                if result.get(key) is not None
+            }
+        )
+    record_subject(
+        session_dir,
+        subject_id=subject_id,
+        subject_type=subject_type,
+        role="target",
+        name=str(
+            extras.get("candidate_id")
+            or extras.get("variant_name")
+            or extras.get("best_variant_name")
+            or action
+        ),
+        attributes=subject_attributes,
+        producer=producer,
+    )
+    measurement_ids = _record_action_measurements(
+        session_dir,
+        action=action,
+        operation_id=operation_id,
+        result=result,
+        entry=entry,
+        producer=producer,
+    )
+    artifact_ids = _record_action_artifacts(
+        session_dir,
+        operation_id=operation_id,
+        result=result,
+        producer=producer,
+    )
+    ended_at = str(entry.get("ts") or result.get("ts") or _now_iso_safe())
+    substeps: list[dict[str, Any]] = []
+    if action == "baseline":
+        substeps.append(
+            {
+                "substep_id": _stable_id("substep", operation_id, "benchmark"),
+                "kind": "benchmark",
+                "name": "baseline benchmark",
+                "status": status,
+                "ended_at": ended_at,
+                "measurements": [mid for mid in measurement_ids if "throughput" in mid],
+                "artifacts": artifact_ids,
+            }
+        )
+        eval_status = "skipped" if result.get("run_eval_disabled") else (
+            "succeeded" if result.get("accuracy") is not None else ("failed" if status == "failed" else "partial")
+        )
+        substeps.append(
+            {
+                "substep_id": _stable_id("substep", operation_id, "eval"),
+                "kind": "evaluation",
+                "name": "accuracy evaluation",
+                "status": eval_status,
+                "ended_at": ended_at,
+                "measurements": [mid for mid in measurement_ids if "accuracy" in mid],
+                "metadata": {
+                    "accuracy_source": result.get("accuracy_source"),
+                    "run_eval_disabled": result.get("run_eval_disabled"),
+                },
+            }
+        )
+    elif action == "roofline":
+        for name in ("profile", "trace_analyze"):
+            substeps.append(
+                {
+                    "substep_id": _stable_id("substep", operation_id, name),
+                    "kind": name,
+                    "name": name,
+                    "status": status if str(result.get("phase") or "") in ("", name) else "succeeded",
+                    "ended_at": ended_at,
+                    "artifacts": artifact_ids,
+                }
+            )
+    elif action == "profile":
+        substeps.append(
+            {
+                "substep_id": _stable_id("substep", operation_id, "profile"),
+                "kind": "profile",
+                "name": "profile capture",
+                "status": status,
+                "ended_at": ended_at,
+                "measurements": measurement_ids,
+                "artifacts": artifact_ids,
+                "metadata": {"trace_health": result.get("trace_health")},
+            }
+        )
+    elif action == "framework_agent":
+        for name in ("apply", "benchmark", "evaluation", "decision"):
+            substeps.append(
+                {
+                    "substep_id": _stable_id("substep", operation_id, name),
+                    "kind": name,
+                    "name": name,
+                    "status": status,
+                    "ended_at": ended_at,
+                }
+            )
+    gates: list[dict[str, Any]] = []
+    if action == "framework_agent":
+        for name, value in (
+            ("accuracy", result.get("accuracy_pass")),
+            ("throughput", result.get("throughput_pass")),
+            ("critic", result.get("critic_pass")),
+        ):
+            if value is None:
+                continue
+            gates.append(
+                {
+                    "gate_id": _stable_id("gate", operation_id, name),
+                    "kind": name,
+                    "name": name,
+                    "status": "passed" if bool(value) else "failed",
+                    "decision": "allow" if bool(value) else "deny",
+                    "evaluated_at": ended_at,
+                }
+            )
+    adoption_ids: list[str] = []
+    verdict = str(entry.get("decision") or result.get("decision") or result.get("status") or "").strip().upper()
+    adoptable_actions = {
+        "framework_agent",
+        "explore",
+        "integrate",
+        "replay_warm_recipe",
+        "warm_replay",
+        "warm_recipe",
+    }
+    keep_verdict = verdict in {"KEEP", "KEPT", "PROMOTED", "ADOPTED"}
+    revert_verdict = verdict in {"REVERT", "REVERTED", "REJECTED", "FAILED"}
+    validation_passed = bool(result.get("validated", result.get("accuracy_pass", keep_verdict)))
+    if action in adoptable_actions and ((keep_verdict and validation_passed) or revert_verdict):
+        adoption_id = _stable_id("adoption", operation_id)
+        adoption_ids.append(adoption_id)
+        _record_adoption_transition(
+            session_dir,
+            adoption_id=adoption_id,
+            operation_id=operation_id,
+            adopted=keep_verdict and validation_passed,
+            reason=str(result.get("decision_reason") or result.get("reason") or verdict),
+            transitioned_at=ended_at,
+            subject={"subject_id": subject_id, "subject_type": subject_type},
+            artifact_ids=artifact_ids,
+            measurement_ids=measurement_ids,
+            kind=action,
+            gain_pct=to_float(result.get("delta_pct") or result.get("best_gain_pct")),
+            configuration=dict(result.get("configuration") or {}),
+            producer=producer,
+        )
+    record_operation(
+        session_dir,
+        operation_id=operation_id,
+        root_operation_id=operation_id,
+        kind="composite" if action in {"baseline", "roofline", "framework_agent"} else action,
+        name=action,
+        phase=phase,
+        macro_cycle=int(macro_cycle or 0),
+        status=status,
+        source="author_time_writeback",
+        executor_class="deterministic",
+        purpose="discovery" if action in {"sweep", "conc_sweep"} else (
+            "validation" if action == "baseline" else "optimization"
+        ),
+        scope=str(extras.get("scope") or ""),
+        strategy_group=action,
+        strategy=str(extras.get("provenance") or result.get("strategy") or action),
+        producer=producer,
+        sequence=int(tick or 0),
+        ended_at=ended_at,
+        subject={"subject_id": subject_id, "subject_type": subject_type},
+        substeps=substeps,
+        gates=gates,
+        decisions=[
+            {
+                "decision_id": _stable_id("decision", operation_id),
+                "kind": action,
+                "verdict": decision,
+                "decided_at": ended_at,
+                "component": producer,
+                "evidence": extras,
+            }
+        ],
+        outputs=dict(result),
+        error=result.get("error"),
+        measurement_refs=measurement_ids,
+        artifact_refs=artifact_ids,
+        adoption_refs=adoption_ids,
+        extensions={"task_id": task_id, "tick": tick},
+        metadata={"extras": extras},
+    )
+    transition_id = _stable_id(
+        "transition",
+        operation_id,
+        f"macro_cycle:{int(macro_cycle or 0)}",
+        f"tick:{int(tick or 0)}",
+        status,
+        decision,
+        ended_at,
+    )
+    record_phase_transition(
+        session_dir,
+        transition_id=transition_id,
+        operation_id=operation_id,
+        phase=phase,
+        action=action,
+        status=status,
+        decision=decision,
+        ts=ended_at,
+        producer=producer,
+    )
+    record_trace_event(
+        session_dir,
+        trace_event_id=_stable_id("trace", operation_id, status),
+        operation_id=operation_id,
+        kind="operation_finalized",
+        phase=phase,
+        status=status,
+        decision=decision,
+        ts=ended_at,
+        producer=producer,
+    )
+
+
 def record_phase_event(
     session_dir: Path | str | None,
     *,
     action: str,
     entry: dict[str, Any],
+    result: Mapping[str, Any] | None = None,
+    phase: str = "",
+    macro_cycle: int = 0,
+    tick: int = 0,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
     """Record one ``phase_timeline`` event from a ``record_action_attempt`` entry.
@@ -130,8 +678,56 @@ def record_phase_event(
             payload,
             key=key,
         )
+        _mirror_action_v4(
+            session_dir,
+            action=action,
+            entry=entry,
+            result=dict(result or {}),
+            phase=phase or str(entry.get("phase") or ""),
+            macro_cycle=macro_cycle,
+            tick=tick,
+            producer=producer,
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_phase_event failed", exc_info=True)
+
+
+def record_action_operation(
+    session_dir: Path | str | None,
+    *,
+    action: str,
+    task_id: str,
+    status: str,
+    decision: str,
+    result: Mapping[str, Any] | None = None,
+    extras: Mapping[str, Any] | None = None,
+    phase: str = "",
+    macro_cycle: int = 0,
+    tick: int = 0,
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Mirror an action into v4 without changing legacy action ledgers."""
+    if not session_dir:
+        return
+    try:
+        _mirror_action_v4(
+            session_dir,
+            action=action,
+            entry={
+                "ts": str((result or {}).get("ts") or _now_iso_safe()),
+                "task_id": str(task_id or ""),
+                "status": str(status or ""),
+                "decision": str(decision or ""),
+                "extras": dict(extras or {}),
+            },
+            result=dict(result or {}),
+            phase=phase,
+            macro_cycle=macro_cycle,
+            tick=tick,
+            producer=producer,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_action_operation failed", exc_info=True)
 
 
 def snapshot_state_sections(
@@ -175,6 +771,81 @@ def snapshot_state_sections(
             fn(rec, state)
         except Exception:  # noqa: BLE001
             log.debug("snapshot section %s failed", name, exc_info=True)
+    try:
+        _snapshot_v4_run(rec, state)
+    except Exception:  # noqa: BLE001
+        log.debug("snapshot v4 run failed", exc_info=True)
+
+
+def _snapshot_v4_run(rec, st: Any) -> None:
+    """Write the complete currently available v4 run snapshot from memory."""
+    current_best = dict(getattr(st, "current_best", None) or {})
+    stack = list(getattr(st, "optimization_stack", None) or [])
+    model_info = dict(getattr(st, "model_info", None) or {})
+    model_arch = dict(getattr(st, "model_arch", None) or {})
+    model = {
+        **model_arch,
+        **model_info,
+        "name": str(getattr(st, "model_name", "") or ""),
+        "path": str(getattr(st, "model_path", "") or ""),
+        "class": str(getattr(st, "model_class", "") or ""),
+        "type": str(getattr(st, "model_type", "") or model_info.get("model_type") or ""),
+        "architectures": list(getattr(st, "model_architectures", None) or model_info.get("architectures") or []),
+    }
+    workload = {
+        "framework": str(getattr(st, "framework", "") or ""),
+        "model_name": str(getattr(st, "model_name", "") or ""),
+        "model_path": str(getattr(st, "model_path", "") or ""),
+        "gpu_type": str(getattr(st, "gpu_type", "") or ""),
+        "precision": str(getattr(st, "precision", "") or ""),
+        "tp": int(getattr(st, "tp", 0) or 0),
+        "ep": int(getattr(st, "ep", 0) or 0),
+        "conc": int(getattr(st, "conc", 0) or 0),
+        "isl": int(getattr(st, "isl", 0) or 0),
+        "osl": int(getattr(st, "osl", 0) or 0),
+        "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
+        "objective": {
+            "target_gain_pct": getattr(st, "target_gain_pct", None),
+            "target_tput": getattr(st, "target_tput", None),
+        },
+    }
+    stop_reason = str(getattr(st, "stop_reason", "") or "")
+    outcome_status = "running"
+    if stop_reason:
+        outcome_status = "failed" if any(
+            marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort")
+        ) else "completed"
+    rec.record_upsert_singleton(
+        "run_snapshot",
+        {
+            "run": {
+                "session_id": str(getattr(st, "session_id", "") or ""),
+                "claw_session_id": str(getattr(st, "claw_session_id", "") or ""),
+                "sandbox_user_id": str(getattr(st, "sandbox_user_id", "") or ""),
+                "started_at": str(getattr(st, "start_ts", "") or ""),
+                "phase": str(getattr(st, "phase", "") or ""),
+                "macro_cycle": int(getattr(st, "macro_cycle", 0) or 0),
+                "tick": int(getattr(st, "tick", 0) or 0),
+                "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
+                "stop_reason": stop_reason,
+            },
+            "workload": workload,
+            "model": model,
+            "versions": dict(getattr(st, "versions", None) or getattr(st, "tool_versions", None) or {}),
+            "outcome": {
+                "status": outcome_status,
+                "stop_reason": stop_reason,
+                "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
+                "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
+                "current_best": current_best,
+                "cumulative_gain_pct": to_float(getattr(st, "cumulative_gain", None)),
+                "cumulative_gain_validated_pct": to_float(
+                    getattr(st, "cumulative_gain_validated", None)
+                ),
+                "optimization_stack_size": len(stack),
+            },
+        },
+    )
 
 
 def _snapshot_session(rec, st: Any) -> None:
@@ -418,6 +1089,861 @@ def _invocation_section(backend: str) -> str | None:
     return None
 
 
+def _session_key(session_dir: Path | str) -> str:
+    """Return the stable session component used by canonical kernel ids."""
+    try:
+        return Path(session_dir).resolve().name
+    except (TypeError, ValueError, OSError):
+        return str(session_dir or "unknown")
+
+
+_KERNEL_ROUTE_CONTEXT: dict[str, dict[str, str]] = {}
+
+
+def _kernel_route_context_key(session_dir: Path | str) -> str:
+    """Return the in-process context key for one session."""
+    return _session_key(session_dir)
+
+
+def _kernel_selection_operation_id(
+    session_dir: Path | str,
+    *,
+    macro_cycle: int | None = None,
+    run_discriminator: str = "",
+) -> str:
+    """Return the current cycle/run-specific strategy-selection operation id."""
+    context_key = _kernel_route_context_key(session_dir)
+    if macro_cycle is None and not run_discriminator:
+        current = _KERNEL_ROUTE_CONTEXT.get(context_key, {}).get("selection_id")
+        if current:
+            return current
+        run_discriminator = f"runtime:{_now_iso_safe()}"
+    discriminator = (
+        f"macro_cycle:{int(macro_cycle)}"
+        if macro_cycle is not None
+        else f"run:{run_discriminator}"
+    )
+    return _stable_id("op", "kernel_optimizer_selection", context_key, discriminator)
+
+
+def _kernel_route_operation_id(
+    session_dir: Path | str,
+    strategy: str,
+    *,
+    macro_cycle: int | None = None,
+    run_discriminator: str = "",
+) -> str:
+    """Return the current cycle/run-specific competing route operation id."""
+    context_key = _kernel_route_context_key(session_dir)
+    if macro_cycle is None and not run_discriminator:
+        current = _KERNEL_ROUTE_CONTEXT.get(context_key, {}).get(f"route:{strategy}")
+        if current:
+            return current
+        run_discriminator = f"runtime:{_now_iso_safe()}"
+    discriminator = (
+        f"macro_cycle:{int(macro_cycle)}"
+        if macro_cycle is not None
+        else f"run:{run_discriminator}"
+    )
+    route_id = _stable_id(
+        "op",
+        "kernel_optimizer_run",
+        context_key,
+        discriminator,
+        strategy,
+    )
+    _KERNEL_ROUTE_CONTEXT.setdefault(context_key, {})[f"route:{strategy}"] = route_id
+    return route_id
+
+
+def _kernel_route_subject_id(
+    session_dir: Path | str,
+    strategy: str,
+    *,
+    route_operation_id: str = "",
+) -> str:
+    """Return the stable subject id for one competing kernel route."""
+    route_id = route_operation_id or _kernel_route_operation_id(session_dir, strategy)
+    return _stable_id("subject", "kernel_optimizer_route", route_id, strategy)
+
+
+def _kernel_subject_id(session_dir: Path | str, kernel_id: str) -> str:
+    """Return the stable subject id for one native kernel."""
+    return _stable_id("subject", "kernel", _session_key(session_dir), kernel_id)
+
+
+def _kernel_operation_id(session_dir: Path | str, kernel_id: str) -> str:
+    """Return the stable native per-kernel operation id."""
+    return _stable_id("op", "kernel_optimization", _session_key(session_dir), kernel_id)
+
+
+def _measurement_metadata(
+    source: str,
+    *,
+    harness: Any = None,
+    workload: Any = None,
+    samples: Any = None,
+    aggregation: Any = None,
+) -> dict[str, Any]:
+    """Build explicit measurement provenance, including partial metadata."""
+    harness_value = harness if harness not in (None, "", {}) else {"status": "partial", "reason": "not_provided"}
+    if isinstance(workload, Mapping) and workload:
+        workload_value = dict(workload)
+        workload_value.setdefault(
+            "lock",
+            "complete"
+            if any(workload_value.get(key) is not None for key in ("model", "tp", "conc", "isl", "osl"))
+            else "partial",
+        )
+        if workload_value["lock"] == "partial":
+            workload_value.setdefault("status", "partial")
+    else:
+        workload_value = {"lock": "partial", "status": "partial", "reason": "not_provided"}
+    sample_value = list(samples) if isinstance(samples, (list, tuple)) else []
+    aggregation_value = (
+        aggregation
+        if aggregation not in (None, "", {})
+        else {"method": "reported_value", "status": "partial", "sample_count": len(sample_value) or None}
+    )
+    return {
+        "source": source,
+        "harness": harness_value,
+        "workload": workload_value,
+        "samples": sample_value,
+        "aggregation": aggregation_value,
+        "metadata": {"completeness": "complete" if sample_value else "partial"},
+    }
+
+
+def record_kernel_strategy_selection(
+    session_dir: Path | str | None,
+    *,
+    selected_strategy: str,
+    actual_path: str,
+    candidates: list[str] | tuple[str, ...] = ("geak", "kernel_agent_forge"),
+    macro_cycle: int | None = None,
+    run_discriminator: str = "",
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Record the GEAK/native XOR decision and the selected route only."""
+    if not session_dir:
+        return
+    selected = str(selected_strategy or "").strip()
+    paths = ["geak", "kernel_agent_forge"]
+    for value in candidates:
+        candidate = str(value).strip()
+        if candidate and candidate not in paths:
+            paths.append(candidate)
+    if selected not in paths:
+        paths.append(selected)
+    now = _now_iso_safe()
+    discriminator = str(run_discriminator or "")
+    if macro_cycle is None and not discriminator:
+        discriminator = f"runtime:{now}"
+    selection_id = _kernel_selection_operation_id(
+        session_dir,
+        macro_cycle=macro_cycle,
+        run_discriminator=discriminator,
+    )
+    route_id = _kernel_route_operation_id(
+        session_dir,
+        selected,
+        macro_cycle=macro_cycle,
+        run_discriminator=discriminator,
+    )
+    context = _KERNEL_ROUTE_CONTEXT.setdefault(_kernel_route_context_key(session_dir), {})
+    previous_selection_id = context.get("selection_id", "")
+    previous_route_id = context.get("active_route_id", "")
+    previous_strategy = context.get("active_strategy", "")
+    version_key = f"selection_version:{selection_id}"
+    selection_version = int(context.get(version_key, "0") or 0) + 1
+    if (
+        previous_selection_id == selection_id
+        and previous_route_id
+        and previous_route_id != route_id
+        and previous_strategy != selected
+    ):
+        record_operation(
+            session_dir,
+            operation_id=previous_route_id,
+            producer=producer,
+            status="superseded",
+            ended_at=now,
+            extensions={
+                "route_competition": {
+                    "active": False,
+                    "selected": False,
+                    "superseded_by": route_id,
+                    "selection_version": selection_version,
+                }
+            },
+        )
+    context["selection_id"] = selection_id
+    context["active_route_id"] = route_id
+    context["active_strategy"] = selected
+    context[version_key] = str(selection_version)
+    context["discriminator"] = (
+        f"macro_cycle:{int(macro_cycle)}"
+        if macro_cycle is not None
+        else f"run:{discriminator}"
+    )
+    record_operation(
+        session_dir,
+        operation_id=selection_id,
+        producer=producer,
+        kind="strategy_selection",
+        name="kernel_optimizer_strategy_selection",
+        phase="KERNEL_AGENT",
+        scope="phase",
+        strategy_group="kernel_optimizer",
+        strategy=selected,
+        status="succeeded",
+        executor_class="deterministic",
+        macro_cycle=macro_cycle,
+        started_at=now,
+        ended_at=now,
+        outputs={
+            "candidates": paths,
+            "selected_strategy": selected,
+            "actual_path": str(actual_path or selected),
+            "xor": True,
+            "selection_version": selection_version,
+        },
+        decisions=[
+            {
+                "decision_id": _stable_id(
+                    "decision",
+                    selection_id,
+                    "selected",
+                    selection_version,
+                ),
+                "kind": "strategy_selection",
+                "verdict": selected,
+                "reason": "resolved_in_memory_kernel_configuration",
+                "decided_at": now,
+                "evidence": {"actual_path": str(actual_path or selected), "candidates": paths},
+            }
+        ],
+    )
+    subject_id = _kernel_route_subject_id(
+        session_dir,
+        selected,
+        route_operation_id=route_id,
+    )
+    subject = {
+        "subject_id": subject_id,
+        "subject_type": "kernel_optimizer_route",
+        "role": "selected",
+        "name": selected,
+        "attributes": {"strategy_group": "kernel_optimizer"},
+    }
+    record_subject(session_dir, subject, producer=producer, subject_id=subject_id)
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        kind="kernel_optimizer_run",
+        name=selected,
+        phase="KERNEL_AGENT",
+        scope="run",
+        strategy_group="kernel_optimizer",
+        strategy=selected,
+        status="running",
+        executor_class="llm_tool" if selected == "geak" else "deterministic",
+        parent_operation_id=selection_id,
+        root_operation_id=selection_id,
+        macro_cycle=macro_cycle,
+        subject=subject,
+        inputs={"selected_strategy": selected, "actual_path": str(actual_path or selected)},
+        extensions={
+            "route_competition": {
+                "selected": True,
+                "active": True,
+                "xor": True,
+                "selection_version": selection_version,
+            }
+        },
+    )
+
+
+def record_native_kernel_run_start(
+    session_dir: Path | str | None,
+    *,
+    payload: Mapping[str, Any] | None = None,
+    macro_cycle: int | None = None,
+    route_operation_id: str = "",
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Upsert the selected native Kernel Agent plus Forge route as running."""
+    if not session_dir:
+        return
+    current_route_id = _KERNEL_ROUTE_CONTEXT.get(
+        _kernel_route_context_key(session_dir),
+        {},
+    ).get("route:kernel_agent_forge", "")
+    route_id = route_operation_id or _kernel_route_operation_id(
+        session_dir,
+        "kernel_agent_forge",
+        macro_cycle=macro_cycle,
+        run_discriminator=""
+        if current_route_id
+        else str((payload or {}).get("run_id") or (payload or {}).get("task_id") or ""),
+    )
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        kind="kernel_optimizer_run",
+        name="kernel_agent_forge",
+        phase="KERNEL_AGENT",
+        scope="run",
+        strategy_group="kernel_optimizer",
+        strategy="kernel_agent_forge",
+        executor_class="deterministic",
+        status="running",
+        started_at=_now_iso_safe(),
+        inputs=dict(payload or {}),
+        subject={
+            "subject_id": _kernel_route_subject_id(
+                session_dir,
+                "kernel_agent_forge",
+                route_operation_id=route_id,
+            ),
+            "subject_type": "kernel_optimizer_route",
+            "role": "selected",
+            "name": "kernel_agent_forge",
+        },
+    )
+
+
+def record_native_kernel_run_result(
+    session_dir: Path | str | None,
+    *,
+    result: Mapping[str, Any],
+    macro_cycle: int | None = None,
+    route_operation_id: str = "",
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Finalize the native Kernel Agent plus Forge route from its result."""
+    if not session_dir:
+        return
+    value = dict(result or {})
+    current_route_id = _KERNEL_ROUTE_CONTEXT.get(
+        _kernel_route_context_key(session_dir),
+        {},
+    ).get("route:kernel_agent_forge", "")
+    route_id = route_operation_id or _kernel_route_operation_id(
+        session_dir,
+        "kernel_agent_forge",
+        macro_cycle=macro_cycle,
+        run_discriminator=""
+        if current_route_id
+        else str(value.get("run_id") or value.get("task_id") or ""),
+    )
+    result_status = _operation_status(value.get("status"))
+    batch_results = value.get("batch_results") if isinstance(value.get("batch_results"), list) else []
+    if batch_results:
+        terminal = [
+            _operation_status(item.get("status"))
+            for item in batch_results
+            if isinstance(item, Mapping)
+        ]
+        result_status = "succeeded" if any(item == "succeeded" for item in terminal) else result_status
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        kind="kernel_optimizer_run",
+        name="kernel_agent_forge",
+        phase="KERNEL_AGENT",
+        scope="run",
+        strategy_group="kernel_optimizer",
+        strategy="kernel_agent_forge",
+        executor_class="deterministic",
+        status=result_status,
+        ended_at=_now_iso_safe(),
+        outputs={
+            "status": value.get("status"),
+            "batch_mode": value.get("batch_mode"),
+            "batch_kernel_ids": value.get("batch_kernel_ids"),
+            "backend_order": value.get("backend_order"),
+            "result_kernel_id": value.get("kernel_id"),
+        },
+        error=value.get("error") or value.get("error_class"),
+    )
+
+
+def _geak_result_artifacts(
+    session_dir: Path | str,
+    operation_id: str,
+    result: Mapping[str, Any],
+    producer: str,
+) -> list[str]:
+    """Record GEAK artifact references already carried by the result."""
+    artifact_ids: list[str] = []
+    for field in (
+        "eval_dir",
+        "report_path",
+        "final_launch_script",
+        "bench_script",
+        "final_patch",
+        "kernel_journey_path",
+    ):
+        path = result.get(field)
+        if not path:
+            continue
+        artifact_id = _stable_id("artifact", operation_id, field, path)
+        record_artifact(
+            session_dir,
+            artifact_id=artifact_id,
+            producer=producer,
+            operation_id=operation_id,
+            producer_operation_id=operation_id,
+            kind=field,
+            path=str(path),
+            present=None,
+            coverage={"status": "reference_only"},
+        )
+        artifact_ids.append(artifact_id)
+    return artifact_ids
+
+
+def record_geak_operation(
+    session_dir: Path | str | None,
+    *,
+    stage: str,
+    result: Mapping[str, Any] | None = None,
+    status: str | None = None,
+    validated: bool = False,
+    measured_tput: Any = None,
+    validation_source: str = "",
+    macro_cycle: int | None = None,
+    route_operation_id: str = "",
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Upsert the GEAK route across runner, candidate, rebench, and final validation."""
+    if not session_dir:
+        return
+    value = dict(result or {})
+    context = _KERNEL_ROUTE_CONTEXT.get(_kernel_route_context_key(session_dir), {})
+    current_route_id = context.get("route:geak", "")
+    run_discriminator = (
+        ""
+        if current_route_id
+        else str(value.get("run_id") or value.get("task_id") or "")
+    )
+    route_id = route_operation_id or _kernel_route_operation_id(
+        session_dir,
+        "geak",
+        macro_cycle=macro_cycle,
+        run_discriminator=run_discriminator,
+    )
+    selection_id = _kernel_selection_operation_id(
+        session_dir,
+        macro_cycle=macro_cycle,
+        run_discriminator=run_discriminator,
+    )
+    now = _now_iso_safe()
+    normalized_status = _operation_status(status or value.get("status") or "running")
+    if stage in {"runner_started", "candidate", "rebench_started", "geak_harness_fallback"}:
+        normalized_status = "running"
+    if validated:
+        normalized_status = "succeeded"
+    substep = {
+        "substep_id": _stable_id("substep", route_id, stage),
+        "kind": stage,
+        "name": stage,
+        "status": "succeeded" if validated else normalized_status,
+        "ended_at": now if normalized_status != "running" or validated else "",
+        "metadata": {
+            "validation_source": validation_source or None,
+            "final_validation": bool(validated),
+        },
+    }
+    measurement_refs: list[str] = []
+    workload = value.get("workload") if isinstance(value.get("workload"), Mapping) else {}
+    harness = value.get("bench_client") or value.get("harness") or "geak_e2e"
+    samples = value.get("samples") or value.get("throughput_samples")
+    aggregation = value.get("aggregation")
+    for label, raw, source_name, headline in (
+        ("baseline", value.get("baseline_throughput_tok_s") or value.get("ref_tput"), "geak_runner", False),
+        (
+            "final",
+            measured_tput if measured_tput is not None else value.get("final_throughput_tok_s"),
+            validation_source or "geak_runner",
+            bool(validated),
+        ),
+    ):
+        numeric = to_float(raw)
+        if numeric is None:
+            continue
+        measurement_id = _stable_id("measurement", route_id, label, source_name)
+        metadata = _measurement_metadata(
+            source_name,
+            harness=validation_source if headline and validation_source else harness,
+            workload=workload,
+            samples=samples,
+            aggregation=aggregation,
+        )
+        record_measurement(
+            session_dir,
+            measurement_id=measurement_id,
+            producer=producer,
+            operation_id=route_id,
+            kind="throughput",
+            name=f"{label}_throughput",
+            value=numeric,
+            unit="tok/s",
+            status="validated" if headline else "provisional",
+            measured_at=now,
+            metric_basis="output",
+            dimensions={"role": label, "headline_eligible": headline},
+            **metadata,
+        )
+        measurement_refs.append(measurement_id)
+    artifact_refs = _geak_result_artifacts(session_dir, route_id, value, producer)
+    parity = value.get("output_parity")
+    alignment = value.get("alignment_metrics") if isinstance(value.get("alignment_metrics"), Mapping) else {}
+    final_validation = (
+        value.get("final_validation")
+        if isinstance(value.get("final_validation"), Mapping)
+        else value.get("validation")
+        if isinstance(value.get("validation"), Mapping)
+        else {}
+    )
+    internal_refs = list(value.get("internal_refs") or []) if isinstance(value.get("internal_refs"), list) else []
+    for field in ("accepted_kernels", "accepted_heads", "kernels_attempted"):
+        refs = value.get(field)
+        if not isinstance(refs, list):
+            continue
+        for index, ref in enumerate(refs):
+            ref_value = dict(ref) if isinstance(ref, Mapping) else {"value": ref}
+            ref_key = ref_value.get("kernel_id") or ref_value.get("name") or ref_value.get("value") or index
+            internal_refs.append(
+                {
+                    "relation_id": _stable_id("relation", route_id, "geak_internal", field, ref_key),
+                    "kind": field,
+                    "ref": ref_value,
+                    "provisional": not validated,
+                }
+            )
+    gates: list[dict[str, Any]] = []
+    if parity is not None:
+        parity_ok = _to_bool(parity)
+        gates.append(
+            {
+                "gate_id": _stable_id("gate", route_id, "output_parity"),
+                "kind": "correctness",
+                "name": "output_parity",
+                "status": "passed" if parity_ok is True else "failed" if parity_ok is False else "partial",
+                "decision": "allow" if parity_ok is True else "deny" if parity_ok is False else "review",
+                "evidence": {"output_parity": parity},
+            }
+        )
+    if validated or final_validation:
+        gates.append(
+            {
+                "gate_id": _stable_id("gate", route_id, "final_validation"),
+                "kind": "final_validation",
+                "name": "orchestrator_final_validation",
+                "status": "passed" if validated else "partial",
+                "decision": "allow" if validated else "review",
+                "evaluated_at": now,
+                "evidence": {
+                    "source": validation_source or None,
+                    "measured_tput": to_float(measured_tput),
+                    "details": dict(final_validation),
+                },
+            }
+        )
+    timing_fields: dict[str, Any] = {}
+    if stage == "runner_started":
+        timing_fields["started_at"] = now
+    if normalized_status != "running":
+        timing_fields["ended_at"] = now
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        kind="kernel_optimizer_run",
+        name="geak",
+        phase="KERNEL_AGENT",
+        scope="run",
+        strategy_group="kernel_optimizer",
+        strategy="geak",
+        executor_class="llm_tool",
+        status=normalized_status,
+        parent_operation_id=selection_id,
+        root_operation_id=selection_id,
+        subject={
+            "subject_id": _kernel_route_subject_id(
+                session_dir,
+                "geak",
+                route_operation_id=route_id,
+            ),
+            "subject_type": "kernel_optimizer_route",
+            "role": "selected",
+            "name": "geak",
+        },
+        substeps=[substep],
+        gates=gates,
+        outputs={
+            "status": value.get("status"),
+            "returncode": value.get("returncode"),
+            "accepted_config": value.get("accepted_config"),
+            "throughput_speedup": value.get("throughput_speedup"),
+            "final_validation_precedence": "orchestrator_final_validation",
+        },
+        measurement_refs=measurement_refs,
+        artifact_refs=artifact_refs,
+        extensions={
+            "geak": {
+                "candidate_state": "validated" if validated else "provisional",
+                "output_parity": parity,
+                "alignment": dict(alignment),
+                "final_validation": dict(final_validation),
+                "internal_refs": internal_refs,
+            }
+        },
+        error=value.get("error") or value.get("error_class"),
+        **timing_fields,
+    )
+    adoption_id = _stable_id("adoption", route_id, "final_validation")
+    if validated or stage in {"final_validation", "final_validation_failed"}:
+        _record_adoption_transition(
+            session_dir,
+            adoption_id=adoption_id,
+            producer=producer,
+            operation_id=route_id,
+            adopted=validated,
+            reason=validation_source
+            or ("orchestrator_final_validation_passed" if validated else "orchestrator_final_validation_failed"),
+            transitioned_at=now,
+            measurement_ids=measurement_refs,
+            artifact_ids=artifact_refs,
+            kind="kernel_optimizer",
+            configuration=dict(value.get("accepted_config") or {}),
+            metadata={"validation_tier": "orchestrator_final"},
+        )
+    else:
+        return
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        adoption_refs=[adoption_id],
+    )
+
+
+def _record_geak_internal_ref(
+    session_dir: Path | str,
+    *,
+    kernel_id: str,
+    stage: str,
+    payload: Mapping[str, Any],
+    producer: str,
+) -> None:
+    """Keep GEAK-internal kernels as route extensions, never native children."""
+    route_id = _kernel_route_operation_id(session_dir, "geak")
+    relation_id = _stable_id("relation", route_id, "geak_internal", kernel_id, stage)
+    record_operation(
+        session_dir,
+        operation_id=route_id,
+        producer=producer,
+        extensions={
+            "geak": {
+                "internal_refs": [
+                    {
+                        "relation_id": relation_id,
+                        "kernel_id": kernel_id,
+                        "stage": stage,
+                        "evidence": dict(payload),
+                        "provisional": True,
+                    }
+                ]
+            }
+        },
+    )
+
+
+def record_gemm_tuning_operation(
+    session_dir: Path | str | None,
+    *,
+    payload: Mapping[str, Any] | None = None,
+    result: Mapping[str, Any] | None = None,
+    macro_cycle: int | None = None,
+    attempt_discriminator: str = "",
+    producer: str = PRODUCER_KERNEL_AGENT,
+) -> None:
+    """Record the independent Kernel-phase GEMM tuning run and KEEP adoption."""
+    if not session_dir:
+        return
+    inputs = dict(payload or {})
+    value = dict(result or {})
+    task_id = str(inputs.get("task_id") or value.get("task_id") or "kernel_entry_gemm_tuning")
+    cycle = (
+        int(macro_cycle)
+        if macro_cycle is not None
+        else int(inputs.get("macro_cycle") or value.get("macro_cycle") or 0)
+    )
+    attempt_key = str(
+        attempt_discriminator
+        or inputs.get("attempt_id")
+        or inputs.get("run_id")
+        or value.get("attempt_id")
+        or value.get("run_id")
+        or task_id
+    )
+    operation_id = _stable_id(
+        "op",
+        "gemm_tuning",
+        _session_key(session_dir),
+        f"macro_cycle:{cycle}",
+        f"attempt:{attempt_key}",
+    )
+    backend = str(value.get("backend") or inputs.get("gemm_tuning_backend") or "forge").lower()
+    now = _now_iso_safe()
+    status = "running" if result is None else _operation_status(value.get("status"))
+    attempts: list[dict[str, Any]] = []
+    attempt_rows = value.get("tuners_run") if isinstance(value.get("tuners_run"), list) else []
+    for index, attempt in enumerate(attempt_rows):
+        if not isinstance(attempt, Mapping):
+            continue
+        attempts.append(
+            {
+                "attempt_id": _stable_id("attempt", operation_id, attempt.get("tuner") or index),
+                "backend": str(attempt.get("tuner") or backend),
+                "status": _operation_status(attempt.get("status")),
+                "outputs": dict(attempt),
+            }
+        )
+    if value.get("fallback_backend"):
+        attempts.append(
+            {
+                "attempt_id": _stable_id("attempt", operation_id, "fallback", value.get("fallback_backend")),
+                "backend": str(value.get("fallback_backend")),
+                "status": status,
+                "metadata": {
+                    "requested_backend": value.get("requested_backend"),
+                    "fallback_reason": value.get("fallback_reason"),
+                },
+            }
+        )
+    measurement_refs: list[str] = []
+    for name, raw, basis, unit in (
+        ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio"),
+        ("baseline_throughput", value.get("baseline_tput"), "output", "tok/s"),
+        ("final_throughput", value.get("new_tput") or value.get("final_throughput"), "output", "tok/s"),
+        ("e2e_gain_pct", value.get("e2e_gain_pct"), "output", "percent"),
+    ):
+        numeric = to_float(raw)
+        if numeric is None:
+            continue
+        measurement_id = _stable_id("measurement", operation_id, name)
+        record_measurement(
+            session_dir,
+            measurement_id=measurement_id,
+            producer=producer,
+            operation_id=operation_id,
+            kind="gemm_tuning",
+            name=name,
+            value=numeric,
+            unit=unit,
+            status="validated" if value.get("e2e_validated") else "provisional",
+            measured_at=now,
+            metric_basis=basis,
+            dimensions={"engine": backend},
+            **_measurement_metadata(
+                "gemm_tuning_result",
+                harness=value.get("harness") or value.get("benchmark_script"),
+                workload=value.get("workload"),
+                samples=value.get("samples"),
+                aggregation=value.get("aggregation"),
+            ),
+        )
+        measurement_refs.append(measurement_id)
+    artifact_refs: list[str] = []
+    artifact_values: list[tuple[str, Any]] = [
+        ("workspace", value.get("workspace")),
+        ("tuned_file", value.get("tuned_file")),
+        ("final_report_path", value.get("final_report_path")),
+        ("benchmark_script", value.get("benchmark_script")),
+    ]
+    artifacts = value.get("artifacts")
+    if isinstance(artifacts, Mapping):
+        artifact_values.extend((str(name), path) for name, path in artifacts.items())
+    for kind, path in artifact_values:
+        if not path:
+            continue
+        artifact_id = _stable_id("artifact", operation_id, kind, path)
+        record_artifact(
+            session_dir,
+            artifact_id=artifact_id,
+            producer=producer,
+            operation_id=operation_id,
+            producer_operation_id=operation_id,
+            kind=kind,
+            path=str(path),
+            coverage={"status": "reference_only"},
+        )
+        artifact_refs.append(artifact_id)
+    decision = str(value.get("decision") or "").upper()
+    timing_fields: dict[str, Any] = {"started_at": now} if result is None else {"ended_at": now}
+    record_operation(
+        session_dir,
+        operation_id=operation_id,
+        producer=producer,
+        kind="gemm_tuning",
+        name="gemm_tuning",
+        phase="KERNEL_AGENT",
+        macro_cycle=cycle,
+        scope="run",
+        strategy_group="gemm_engine",
+        strategy=backend,
+        executor_class="deterministic",
+        status=status,
+        inputs=inputs,
+        outputs={
+            "decision": decision,
+            "engine": value.get("engine") or backend,
+            "requested_backend": value.get("requested_backend"),
+            "fallback_backend": value.get("fallback_backend"),
+            "fallback_reason": value.get("fallback_reason"),
+            "recommended_env": value.get("recommended_env"),
+        },
+        attempts=attempts,
+        measurement_refs=measurement_refs,
+        artifact_refs=artifact_refs,
+        extensions={"gemm": {"e2e_validated": value.get("e2e_validated"), "result": value}},
+        error=value.get("error") or value.get("error_class"),
+        **timing_fields,
+    )
+    if result is None:
+        return
+    adoption_id = _stable_id("adoption", operation_id, "keep")
+    e2e_keep = decision == "KEEP" and value.get("e2e_validated") is True
+    if not e2e_keep and decision not in {"REVERT", "REJECTED"}:
+        return
+    _record_adoption_transition(
+        session_dir,
+        adoption_id=adoption_id,
+        producer=producer,
+        operation_id=operation_id,
+        adopted=e2e_keep,
+        reason=str(
+            value.get("decision_reason")
+            or ("gemm_e2e_keep" if e2e_keep else "gemm_e2e_revert")
+        ),
+        transitioned_at=now,
+        measurement_ids=measurement_refs,
+        artifact_ids=artifact_refs,
+        kind="gemm_tuning",
+        gain_pct=to_float(value.get("e2e_gain_pct")),
+        configuration=dict(value.get("recommended_env") or value.get("extra_envs") or {}),
+    )
+    record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
+
+
 def record_kernel_invocations(
     session_dir: Path | str | None,
     result: dict[str, Any],
@@ -448,6 +1974,22 @@ def record_kernel_invocations(
         run_id = str(result.get("run_id") or result.get("session_id") or "")
         attempts = result.get("attempts")
         attempts = attempts if isinstance(attempts, list) else []
+        backend_names = {
+            str(attempt.get("backend") or "").strip().lower()
+            for attempt in attempts
+            if isinstance(attempt, Mapping) and attempt.get("backend")
+        }
+        route_strategy = (
+            "geak_internal"
+            if backend_names == {"geak"} or (not backend_names and str(result.get("backend") or "").lower() == "geak")
+            else "kernel_agent_forge"
+        )
+        record_kernel_backend_result(
+            session_dir,
+            result,
+            route_strategy=route_strategy,
+            producer=producer,
+        )
         verification = result.get("verification") or {}
         proposal = result.get("proposal") or {}
         kernel_decision = str(proposal.get("decision") or "").upper()
@@ -775,6 +2317,7 @@ def record_kernel_discovery(
     tool_version: str | None = None,
     duration_sec: Any = None,
     error: str | None = None,
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
@@ -838,6 +2381,46 @@ def record_kernel_discovery(
             version=tool_version,
             producer=producer,
         )
+        route = str(route_strategy or "kernel_agent_forge")
+        if route == "legacy_only":
+            return
+        if route == "geak_internal":
+            for kernel in kernels:
+                kid = str(kernel.get("kernel_id") or "")
+                if kid:
+                    _record_geak_internal_ref(
+                        session_dir,
+                        kernel_id=kid,
+                        stage="discovery",
+                        payload=kernel,
+                        producer=producer,
+                    )
+        else:
+            record_native_kernel_run_start(
+                session_dir,
+                payload={"discovery_source": source, "tool": tool or source},
+                producer=producer,
+            )
+            route_id = _kernel_route_operation_id(session_dir, "kernel_agent_forge")
+            record_operation(
+                session_dir,
+                operation_id=route_id,
+                producer=producer,
+                substeps=[
+                    {
+                        "substep_id": _stable_id("substep", route_id, "discovery"),
+                        "kind": "kernel_discovery",
+                        "name": "kernel_discovery",
+                        "status": _operation_status(status),
+                        "metadata": {
+                            "source": source,
+                            "tool": tool or source,
+                            "hot_kernel_count": len(kernels),
+                            "scan": scan,
+                        },
+                    }
+                ],
+            )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_discovery failed", exc_info=True)
 
@@ -896,6 +2479,7 @@ def record_kernel_dispatch(
     skip_reason: str = "",
     orchestration_commit: str = "",
     task_group: str | None = None,
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record the dispatch decision for one kernel (stage 2 of ``kernel_journey``).
@@ -935,6 +2519,61 @@ def record_kernel_dispatch(
             payload,
             key=str(kernel_id),
         )
+        if str(route_strategy or "") == "legacy_only":
+            return
+        if str(route_strategy or "") == "geak_internal":
+            _record_geak_internal_ref(
+                session_dir,
+                kernel_id=str(kernel_id),
+                stage="dispatch",
+                payload=payload,
+                producer=producer,
+            )
+            return
+        record_native_kernel_run_start(session_dir, producer=producer)
+        subject_id = _kernel_subject_id(session_dir, str(kernel_id))
+        operation_id = _kernel_operation_id(session_dir, str(kernel_id))
+        subject = {
+            "subject_id": subject_id,
+            "subject_type": "kernel",
+            "role": "optimization_target",
+            "name": str(kernel_id),
+            "attributes": {"task_group": task_group},
+        }
+        record_subject(session_dir, subject, subject_id=subject_id, producer=producer)
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind="kernel_optimization",
+            name=str(kernel_id),
+            phase="KERNEL_AGENT",
+            scope="kernel",
+            strategy_group="kernel_backend",
+            strategy="forge",
+            executor_class="llm_tool",
+            status="running" if dispatched else "skipped",
+            started_at=_now_iso_safe(),
+            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            subject=subject,
+            inputs={
+                "backends": [str(value) for value in (backends or [])],
+                "task_group": task_group,
+                "orchestration_commit": orchestration_commit,
+            },
+            gates=[
+                {
+                    "gate_id": _stable_id("gate", operation_id, "dispatch"),
+                    "kind": "dispatch",
+                    "name": "kernel_dispatch",
+                    "status": "passed" if dispatched else "failed",
+                    "decision": "allow" if dispatched else "deny",
+                    "reason": str(skip_reason or ""),
+                    "evidence": {"backends": [str(value) for value in (backends or [])]},
+                }
+            ],
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_dispatch failed", exc_info=True)
 
@@ -943,6 +2582,7 @@ def record_kernel_backend_result(
     session_dir: Path | str | None,
     result: dict[str, Any],
     *,
+    route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record per-backend attempts for one kernel (stage 3 of ``kernel_journey``).
@@ -974,6 +2614,37 @@ def record_kernel_backend_result(
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
         kernel_micro_speedup = to_float(verification.get("micro_speedup"))
+        legacy_only = str(route_strategy or "") == "legacy_only"
+        geak_internal = str(route_strategy or "") == "geak_internal"
+        if geak_internal:
+            if kid:
+                _record_geak_internal_ref(
+                    session_dir,
+                    kernel_id=kid,
+                    stage="backend_result",
+                    payload={
+                        "run_id": run_id,
+                        "attempts": attempts,
+                        "verification": verification,
+                        "proposal": result.get("proposal"),
+                    },
+                    producer=producer,
+                )
+        elif kid and not legacy_only:
+            record_native_kernel_run_start(session_dir, producer=producer)
+            subject_id = _kernel_subject_id(session_dir, kid)
+            subject = {
+                "subject_id": subject_id,
+                "subject_type": "kernel",
+                "role": "optimization_target",
+                "name": kid,
+            }
+            record_subject(session_dir, subject, subject_id=subject_id, producer=producer)
+        operation_id = _kernel_operation_id(session_dir, kid) if kid and not geak_internal and not legacy_only else ""
+        canonical_attempts: list[dict[str, Any]] = []
+        canonical_gates: list[dict[str, Any]] = []
+        measurement_refs: list[str] = []
+        artifact_refs: list[str] = []
         recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
@@ -1010,6 +2681,84 @@ def record_kernel_backend_result(
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
             recorded_any = True
+            if operation_id:
+                canonical_attempt_id = attempt_id or _stable_id("attempt", operation_id, run_id, backend)
+                correctness_source = (
+                    att.get("correctness_source")
+                    or verification.get("correctness_source")
+                    or (att.get("backend_paths") or {}).get("test_command")
+                    or "partial:not_provided"
+                )
+                canonical_attempts.append(
+                    {
+                        "attempt_id": canonical_attempt_id,
+                        "backend": backend,
+                        "status": _operation_status(att.get("status")),
+                        "started_at": str(att.get("started_at") or att.get("created_at") or ""),
+                        "ended_at": str(att.get("ended_at") or ""),
+                        "outputs": {
+                            "decision": str(att.get("decision") or ""),
+                            "compile_passed": _to_bool(att.get("compile_passed")),
+                            "correctness_passed": _to_bool(att.get("correctness_passed")),
+                            "correctness_source": correctness_source,
+                            "verification_status": verification.get("status"),
+                        },
+                        "error": att.get("error") or att.get("error_message"),
+                    }
+                )
+                for gate_name, gate_value, gate_kind in (
+                    ("compile", _to_bool(att.get("compile_passed")), "compile"),
+                    ("correctness", _to_bool(att.get("correctness_passed")), "correctness"),
+                ):
+                    canonical_gates.append(
+                        {
+                            "gate_id": _stable_id("gate", operation_id, canonical_attempt_id, gate_name),
+                            "kind": gate_kind,
+                            "name": gate_name,
+                            "status": "passed" if gate_value is True else "failed" if gate_value is False else "partial",
+                            "decision": "allow" if gate_value is True else "deny" if gate_value is False else "review",
+                            "evidence": {"source": correctness_source, "value": gate_value},
+                        }
+                    )
+                numeric_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
+                if numeric_speedup is not None:
+                    measurement_id = _stable_id("measurement", operation_id, canonical_attempt_id, "micro_speedup")
+                    record_measurement(
+                        session_dir,
+                        measurement_id=measurement_id,
+                        producer=producer,
+                        operation_id=operation_id,
+                        subject=subject,
+                        kind="kernel_benchmark",
+                        name="micro_speedup",
+                        value=numeric_speedup,
+                        unit="ratio",
+                        status="provisional",
+                        metric_basis="kernel_time_ratio",
+                        dimensions={"backend": backend, "attempt_id": canonical_attempt_id},
+                        **_measurement_metadata(
+                            "kernel_agent_result",
+                            harness=att.get("harness") or att.get("benchmark_file"),
+                            workload=att.get("workload"),
+                            samples=att.get("samples"),
+                            aggregation=att.get("aggregation"),
+                        ),
+                    )
+                    measurement_refs.append(measurement_id)
+                if optimized:
+                    artifact_id = _stable_id("artifact", operation_id, canonical_attempt_id, optimized)
+                    record_artifact(
+                        session_dir,
+                        artifact_id=artifact_id,
+                        producer=producer,
+                        operation_id=operation_id,
+                        producer_operation_id=operation_id,
+                        subject=subject,
+                        kind="optimized_kernel",
+                        path=str(optimized),
+                        coverage={"status": "reference_only"},
+                    )
+                    artifact_refs.append(artifact_id)
             # The backend's authoritative version lands in the top-level ``versions`` map.
             if backend:
                 record_tool_version(
@@ -1019,6 +2768,62 @@ def record_kernel_backend_result(
                     version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
                     producer=producer,
                 )
+
+        if operation_id:
+            proposal = result.get("proposal") if isinstance(result.get("proposal"), Mapping) else {}
+            decision = str(proposal.get("decision") or "").upper()
+            operation_status = _operation_status(result.get("status"))
+            if decision in {"KEEP", "REVERT", "PARTIAL", "NEEDS_REVIEW"}:
+                operation_status = "succeeded" if decision == "KEEP" else decision.lower()
+            canonical_gates.append(
+                {
+                    "gate_id": _stable_id("gate", operation_id, "verification"),
+                    "kind": "verification",
+                    "name": "kernel_verification",
+                    "status": str(verification.get("status") or ("passed" if decision == "KEEP" else "partial")),
+                    "decision": "allow" if decision == "KEEP" else "review",
+                    "evidence": {
+                        "compile_passed": _to_bool(verification.get("compile_passed")),
+                        "correctness_passed": _to_bool(verification.get("correctness_passed")),
+                        "correctness_source": verification.get("correctness_source") or "partial:not_provided",
+                        "best_attempt_id": best_attempt_id,
+                        "best_backend": verification.get("best_backend"),
+                    },
+                }
+            )
+            record_operation(
+                session_dir,
+                operation_id=operation_id,
+                producer=producer,
+                kind="kernel_optimization",
+                name=kid,
+                phase="KERNEL_AGENT",
+                scope="kernel",
+                strategy_group="kernel_backend",
+                strategy=str(verification.get("best_backend") or result.get("backend") or "forge"),
+                executor_class="llm_tool",
+                status=operation_status,
+                ended_at=_now_iso_safe() if operation_status != "running" else "",
+                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                subject=subject,
+                attempts=canonical_attempts,
+                gates=canonical_gates,
+                decisions=[
+                    {
+                        "decision_id": _stable_id("decision", operation_id, "proposal"),
+                        "kind": "kernel_proposal",
+                        "verdict": decision or "unknown",
+                        "reason": "; ".join(str(value) for value in (proposal.get("reasons") or [])),
+                        "evidence": dict(proposal),
+                    }
+                ],
+                outputs={"verification": dict(verification), "proposal": dict(proposal)},
+                measurement_refs=measurement_refs,
+                artifact_refs=artifact_refs,
+                extensions={"forge": {"correctness_source": verification.get("correctness_source")}},
+                error=result.get("error") or result.get("error_class"),
+            )
 
         if recorded_any or not kid:
             return
@@ -1058,6 +2863,33 @@ def record_kernel_backend_result(
             payload,
             key=f"{kid}-predispatch",
         )
+        if operation_id:
+            record_operation(
+                session_dir,
+                operation_id=operation_id,
+                producer=producer,
+                kind="kernel_optimization",
+                name=kid,
+                phase="KERNEL_AGENT",
+                scope="kernel",
+                strategy_group="kernel_backend",
+                strategy=backend,
+                executor_class="llm_tool",
+                status="failed",
+                ended_at=_now_iso_safe(),
+                parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+                attempts=[
+                    {
+                        "attempt_id": _stable_id("attempt", operation_id, "predispatch"),
+                        "backend": backend,
+                        "status": "failed",
+                        "error": payload.get("error"),
+                        "metadata": {"pre_dispatch_failure": True},
+                    }
+                ],
+                error=payload.get("error") or payload.get("error_class"),
+            )
         if backend != "unknown":
             record_tool_version(
                 session_dir,
@@ -1081,6 +2913,9 @@ def record_kernel_e2e(
     patch_path: str | None = None,
     target_file: str | None = None,
     extra_server_args: str = "",
+    result: Mapping[str, Any] | None = None,
+    route_strategy: str = "kernel_agent_forge",
+    validation_tier: str = "",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record the end-to-end integrate outcome for one kernel (stage 4).
@@ -1117,10 +2952,158 @@ def record_kernel_e2e(
             "extra_server_args": str(extra_server_args or ""),
             "ts": _now_iso_safe(),
         }
+        if validation_tier:
+            payload["validation_tier"] = validation_tier
         _recorder(session_dir, producer).record_item(
             "kernel_e2e",
             payload,
             key=str(kernel_id),
+        )
+        evidence = dict(result or {})
+        if str(route_strategy or "") == "legacy_only":
+            return
+        if str(route_strategy or "") == "geak_internal":
+            _record_geak_internal_ref(
+                session_dir,
+                kernel_id=str(kernel_id),
+                stage="e2e",
+                payload={**payload, "result": evidence},
+                producer=producer,
+            )
+            return
+        operation_id = _kernel_operation_id(session_dir, str(kernel_id))
+        subject = {
+            "subject_id": _kernel_subject_id(session_dir, str(kernel_id)),
+            "subject_type": "kernel",
+            "role": "optimization_target",
+            "name": str(kernel_id),
+        }
+        decision_value = str(decision or "").upper()
+        measurement_refs: list[str] = []
+        for name, raw, role in (
+            ("baseline_throughput", evidence.get("base_tput"), "baseline"),
+            ("final_throughput", evidence.get("new_tput"), "final"),
+            ("e2e_gain_pct", e2e_gain_pct, "delta"),
+        ):
+            numeric = to_float(raw)
+            if numeric is None:
+                continue
+            measurement_id = _stable_id("measurement", operation_id, "integrate", name)
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                subject=subject,
+                kind="e2e",
+                name=name,
+                value=numeric,
+                unit="percent" if role == "delta" else "tok/s",
+                status="validated" if validated is True else "provisional",
+                metric_basis="output",
+                dimensions={"role": role, "baseline_source": "integrate_input", "final_source": "integrate_rebaseline"},
+                **_measurement_metadata(
+                    "integrate_handler",
+                    harness=evidence.get("harness") or "orchestrator_baseline",
+                    workload=evidence.get("workload"),
+                    samples=evidence.get("samples"),
+                    aggregation=evidence.get("aggregation"),
+                ),
+            )
+            measurement_refs.append(measurement_id)
+        parity = evidence.get("parity") or evidence.get("output_parity") or evidence.get("accuracy_pass")
+        paired_ab = evidence.get("paired_ab") if isinstance(evidence.get("paired_ab"), Mapping) else {}
+        decision_reason = str(evidence.get("decision_reason") or "")
+        final_validated = bool(validated) and decision_value in {"KEEP", "ADOPTED"}
+        gate = {
+            "gate_id": _stable_id("gate", operation_id, "integrate_e2e"),
+            "kind": "e2e",
+            "name": "integrate_e2e",
+            "status": "passed" if final_validated else "failed" if decision_value in {"REVERT", "REJECTED"} else "partial",
+            "decision": "allow" if final_validated else "deny" if decision_value in {"REVERT", "REJECTED"} else "review",
+            "reason": decision_reason,
+            "evidence": {
+                "paired_ab": dict(paired_ab),
+                "parity": parity,
+                "validated": validated,
+                "validation_tier": validation_tier or evidence.get("validation_tier"),
+                "decision_reason": decision_reason,
+                "rebuild_check": evidence.get("rebuild_check"),
+                "source_import_confirmed": evidence.get("source_import_confirmed"),
+            },
+        }
+        artifact_refs: list[str] = []
+        for kind, path in (("patch", patch_path), ("target_file", target_file), ("report", evidence.get("report_path"))):
+            if not path:
+                continue
+            artifact_id = _stable_id("artifact", operation_id, kind, path)
+            record_artifact(
+                session_dir,
+                artifact_id=artifact_id,
+                producer=producer,
+                operation_id=operation_id,
+                producer_operation_id=operation_id,
+                subject=subject,
+                kind=kind,
+                path=str(path),
+                coverage={"status": "reference_only"},
+            )
+            artifact_refs.append(artifact_id)
+        adoption_refs: list[str] = []
+        if final_validated or decision_value in {"REVERT", "REJECTED"}:
+            adoption_id = _stable_id("adoption", operation_id, "integrate")
+            _record_adoption_transition(
+                session_dir,
+                adoption_id=adoption_id,
+                producer=producer,
+                operation_id=operation_id,
+                adopted=final_validated,
+                reason=decision_reason
+                or ("integrate_e2e_passed" if final_validated else "integrate_e2e_failed"),
+                subject=subject,
+                artifact_ids=artifact_refs,
+                measurement_ids=measurement_refs,
+                kind="kernel_optimization",
+                gain_pct=to_float(e2e_gain_pct),
+                configuration={
+                    "patch_path": patch_path,
+                    "target_file": target_file,
+                    "extra_server_args": str(extra_server_args or ""),
+                },
+                metadata={"validation_tier": validation_tier or "integrate_e2e"},
+            )
+            adoption_refs.append(adoption_id)
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind="kernel_optimization",
+            name=str(kernel_id),
+            phase="KERNEL_AGENT",
+            scope="kernel",
+            executor_class="llm_tool",
+            status="succeeded" if final_validated else "reverted" if decision_value in {"REVERT", "REJECTED"} else "needs_review",
+            ended_at=_now_iso_safe(),
+            parent_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            root_operation_id=_kernel_route_operation_id(session_dir, "kernel_agent_forge"),
+            subject=subject,
+            gates=[gate],
+            outputs={
+                "integrated": bool(integrated),
+                "decision": decision_value,
+                "validated": validated,
+                "validation_tier": validation_tier or evidence.get("validation_tier"),
+            },
+            measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
+            adoption_refs=adoption_refs,
+            extensions={
+                "integrate": {
+                    "paired_ab": dict(paired_ab),
+                    "parity": parity,
+                    "decision_reason": decision_reason,
+                }
+            },
         )
     except Exception:  # noqa: BLE001
         log.debug("record_kernel_e2e failed", exc_info=True)
@@ -1150,6 +3133,95 @@ def record_specialist_round(
             "specialist_runs",
             dict(entry),
             key=key,
+        )
+        round_id = str(entry.get("round_id") or key or entry.get("task_id") or "unknown")
+        operation_id = _stable_id("op", "specialist", round_id)
+        round_subject_id = _stable_id("subject", "specialist-round", round_id)
+        domains = list(entry.get("domains") or [])
+        if entry.get("domain"):
+            domains.append(str(entry.get("domain")))
+        domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
+        domains = list(dict.fromkeys(domain for domain in domains if domain))
+        record_subject(
+            session_dir,
+            subject_id=round_subject_id,
+            subject_type="specialist_round",
+            role="proposal_source",
+            name=round_id,
+            attributes={
+                "domains": domains,
+                "proposals_total": entry.get("proposals_total"),
+            },
+            producer=producer,
+        )
+        domain_subjects: list[dict[str, Any]] = []
+        for domain in domains:
+            domain_id = _stable_id("subject", "specialist-domain", round_id, domain)
+            record_subject(
+                session_dir,
+                subject_id=domain_id,
+                subject_type="specialist_domain",
+                role="proposal_domain",
+                name=str(domain),
+                attributes={"round_id": round_id},
+                producer=producer,
+            )
+            domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
+        proposal_subjects: list[dict[str, Any]] = []
+        proposals = entry.get("proposal_set")
+        if isinstance(proposals, list):
+            for index, proposal in enumerate(proposals):
+                if not isinstance(proposal, Mapping):
+                    continue
+                proposal_key = (
+                    proposal.get("proposal_id")
+                    or proposal.get("fingerprint")
+                    or proposal.get("name")
+                    or index
+                )
+                proposal_id = _stable_id("subject", "specialist-proposal", round_id, proposal_key)
+                record_subject(
+                    session_dir,
+                    subject_id=proposal_id,
+                    subject_type="variant",
+                    role="proposal",
+                    name=str(proposal.get("name") or proposal_key),
+                    attributes=dict(proposal),
+                    producer=producer,
+                )
+                proposal_subjects.append(
+                    {"subject_id": proposal_id, "subject_type": "variant", "role": "proposal"}
+                )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            root_operation_id=operation_id,
+            kind="specialist",
+            name=f"specialist round {round_id}",
+            phase="EXPLORE",
+            status="succeeded" if entry.get("completed_at") else "partial",
+            source="specialist_recorder_hook",
+            executor_class="llm_agent",
+            purpose="proposal",
+            scope=str(entry.get("scope") or ""),
+            strategy_group="specialist",
+            strategy="multi_domain",
+            producer=producer,
+            ended_at=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            subject={"subject_id": round_subject_id, "subject_type": "specialist_round"},
+            subjects=domain_subjects + proposal_subjects,
+            outputs=dict(entry),
+            adoption_refs=[],
+            extensions={"downstream_relation": "proposal_only"},
+        )
+        record_trace_event(
+            session_dir,
+            trace_event_id=_stable_id("trace", operation_id, "completed"),
+            operation_id=operation_id,
+            kind="specialist_proposals_recorded",
+            status="succeeded" if entry.get("completed_at") else "partial",
+            ts=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            producer=producer,
         )
     except Exception:  # noqa: BLE001
         log.debug("record_specialist_round failed", exc_info=True)
@@ -1207,6 +3279,7 @@ def record_critic_iteration(
             "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
             "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
+            "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
         if isinstance(kb_assess, dict) and kb_assess:
             payload["kb_assess"] = kb_assess
@@ -1217,6 +3290,98 @@ def record_critic_iteration(
             payload,
             key=str(iter_n),
         )
+        operation_id = _stable_id("op", "critic", iter_n)
+        artifact_refs: list[str] = []
+        for name in ("request_path", "judge_bundle_path", "emit_path", "review_path"):
+            path = payload.get(name)
+            if not path:
+                continue
+            artifact_id = _stable_id("artifact", operation_id, name, path)
+            artifact_refs.append(artifact_id)
+            record_artifact(
+                session_dir,
+                artifact_id=artifact_id,
+                operation_id=operation_id,
+                producer_operation_id=operation_id,
+                kind=name,
+                path=str(path),
+                present=True,
+                status="available",
+                producer=producer,
+            )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            root_operation_id=operation_id,
+            kind="critic",
+            name=str(payload.get("topic") or "critic review"),
+            status="succeeded",
+            source="critic_recorder_hook",
+            executor_class="llm_agent",
+            purpose="review",
+            producer=producer,
+            ended_at=str(payload.get("ts") or ""),
+            decisions=[
+                {
+                    "decision_id": _stable_id("decision", operation_id),
+                    "kind": "critic",
+                    "verdict": str(payload.get("verdict") or ""),
+                    "reason": str(payload.get("summary") or ""),
+                    "decided_at": str(payload.get("ts") or ""),
+                    "component": producer,
+                }
+            ],
+            artifact_refs=artifact_refs,
+            outputs=payload,
+        )
+        record_trace_event(
+            session_dir,
+            trace_event_id=_stable_id("trace", operation_id, "reviewed"),
+            operation_id=operation_id,
+            kind="critic_reviewed",
+            verdict=str(payload.get("verdict") or ""),
+            ts=str(payload.get("ts") or ""),
+            producer=producer,
+        )
+        for index, write in enumerate(payload.get("kb_writes") or []):
+            if not isinstance(write, Mapping):
+                continue
+            write_key = (
+                write.get("write_id")
+                or write.get("point_id")
+                or write.get("edge_id")
+                or write.get("kind")
+                or index
+            )
+            write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
+            result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}
+            write_status = _operation_status(result_payload.get("status") or write.get("status") or "succeeded")
+            record_operation(
+                session_dir,
+                operation_id=write_operation_id,
+                root_operation_id=operation_id,
+                parent_operation_id=operation_id,
+                kind="kb_write",
+                name=str(write.get("kind") or write_key),
+                status=write_status,
+                source="critic_commit_review",
+                executor_class="deterministic",
+                purpose="knowledge_write",
+                producer=producer,
+                ended_at=str(payload.get("ts") or ""),
+                inputs=dict(write),
+                outputs=dict(result_payload),
+            )
+            record_trace_event(
+                session_dir,
+                trace_event_id=_stable_id("trace", write_operation_id, write_status),
+                operation_id=write_operation_id,
+                parent_operation_id=operation_id,
+                kind="kb_write_finalized",
+                status=write_status,
+                ts=str(payload.get("ts") or ""),
+                producer=producer,
+            )
     except Exception:  # noqa: BLE001
         log.debug("record_critic_iteration failed", exc_info=True)
 
@@ -1259,6 +3424,32 @@ def record_robustness_signal(
             payload,
             key=wd.name,
         )
+        operation_id = _stable_id("op", "robustness", wd.name)
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            root_operation_id=operation_id,
+            kind="robustness",
+            name=str(payload.get("signal") or "robustness signal"),
+            status="succeeded" if payload.get("action") else "partial",
+            source="robustness_recorder_hook",
+            executor_class="llm_agent",
+            purpose="recovery",
+            producer=producer,
+            ended_at=str(payload.get("ts") or ""),
+            outputs=payload,
+            extensions={"metadata_completeness": "partial" if not payload.get("signal") else "available"},
+        )
+        record_trace_event(
+            session_dir,
+            trace_event_id=_stable_id("trace", operation_id, "handled"),
+            operation_id=operation_id,
+            kind="robustness_signal_handled",
+            signal=payload.get("signal"),
+            action=payload.get("action"),
+            ts=str(payload.get("ts") or ""),
+            producer=producer,
+        )
     except Exception:  # noqa: BLE001
         log.debug("record_robustness_signal failed", exc_info=True)
 
@@ -1284,23 +3475,312 @@ def record_singleton_section(
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
+        if section.startswith("kb_") or section in {"warm_replay", "kb_provenance"}:
+            operation_id = _stable_id(
+                "op",
+                section,
+                payload.get("task_id") or payload.get("id") or payload.get("ts") or payload,
+            )
+            record_operation(
+                session_dir,
+                operation_id=operation_id,
+                root_operation_id=operation_id,
+                kind=section,
+                name=section,
+                status=_operation_status(payload.get("status") or "succeeded"),
+                source="recorder_hook",
+                executor_class="deterministic",
+                purpose="knowledge",
+                producer=producer,
+                ended_at=str(payload.get("ts") or ""),
+                outputs=payload,
+            )
+            record_trace_event(
+                session_dir,
+                trace_event_id=_stable_id("trace", operation_id, "recorded"),
+                operation_id=operation_id,
+                kind=f"{section}_recorded",
+                status=_operation_status(payload.get("status") or "succeeded"),
+                ts=str(payload.get("ts") or ""),
+                producer=producer,
+            )
     except Exception:  # noqa: BLE001
         log.debug("record_singleton_section %s failed", section, exc_info=True)
+
+
+def _v4_payload(
+    payload: Mapping[str, Any] | None,
+    fields: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Combine a mapping payload with keyword fields for a v4 helper."""
+    value = dict(payload) if isinstance(payload, Mapping) else {}
+    value.update(fields)
+    return value
+
+
+def _valid_v4_call(
+    session_dir: Path | str | None,
+    producer: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Return whether a v4 helper call has usable routing metadata."""
+    return bool(session_dir and payload and _VALID_PRODUCER.fullmatch(str(producer or "")))
+
+
+def _record_v4_entity(
+    session_dir: Path | str | None,
+    *,
+    section: str,
+    payload: Mapping[str, Any] | None,
+    fields: Mapping[str, Any],
+    id_field: str,
+    entity_id: str | None,
+    producer: str,
+) -> None:
+    """Best-effort writer for one stable v4 entity."""
+    value = _v4_payload(payload, fields)
+    stable_id = str(entity_id or value.get(id_field) or "").strip()
+    if stable_id:
+        value[id_field] = stable_id
+    if not _valid_v4_call(session_dir, producer, value) or not stable_id:
+        return
+    try:
+        _recorder(session_dir, producer).record_upsert_item(
+            section,
+            value,
+            key=stable_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("record_%s failed", section, exc_info=True)
+
+
+def _record_v4_event(
+    session_dir: Path | str | None,
+    *,
+    section: str,
+    payload: Mapping[str, Any] | None,
+    fields: Mapping[str, Any],
+    key_fields: tuple[str, ...],
+    producer: str,
+) -> None:
+    """Best-effort writer for a v4 event with an optional stable key."""
+    value = _v4_payload(payload, fields)
+    if not _valid_v4_call(session_dir, producer, value):
+        return
+    key = next((str(value.get(name) or "").strip() for name in key_fields if value.get(name)), "")
+    try:
+        recorder = _recorder(session_dir, producer)
+        if key:
+            recorder.record_upsert_item(section, value, key=key)
+        else:
+            recorder.record_item(section, value)
+    except Exception:  # noqa: BLE001
+        log.debug("record_%s failed", section, exc_info=True)
+
+
+def record_run_snapshot(
+    session_dir: Path | str | None,
+    snapshot: Mapping[str, Any] | None = None,
+    *,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Record a partial v4 run snapshot using author-time facts only."""
+    value = _v4_payload(snapshot, fields)
+    if not _valid_v4_call(session_dir, producer, value):
+        return
+    try:
+        _recorder(session_dir, producer).record_upsert_singleton("run_snapshot", value)
+    except Exception:  # noqa: BLE001
+        log.debug("record_run_snapshot failed", exc_info=True)
+
+
+def record_phase_transition(
+    session_dir: Path | str | None,
+    transition: Mapping[str, Any] | None = None,
+    *,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Record one v4 phase transition."""
+    value = _v4_payload(transition, fields)
+    if not value.get("transition_id") and not value.get("event_id"):
+        value["transition_id"] = _stable_id(
+            "transition",
+            value.get("operation_id") or "",
+            f"macro_cycle:{value.get('macro_cycle')}",
+            f"tick:{value.get('tick')}",
+            f"event:{value.get('event_sequence')}",
+            value.get("from_phase") or "",
+            value.get("phase") or value.get("to_phase") or "",
+            value.get("ts") or _now_iso_safe(),
+        )
+    _record_v4_event(
+        session_dir,
+        section="phase_transitions",
+        payload=value,
+        fields={},
+        key_fields=("transition_id", "event_id"),
+        producer=producer,
+    )
+
+
+def record_subject(
+    session_dir: Path | str | None,
+    subject: Mapping[str, Any] | None = None,
+    *,
+    subject_id: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Upsert one v4 subject by stable ``subject_id``."""
+    _record_v4_entity(
+        session_dir,
+        section="subjects",
+        payload=subject,
+        fields=fields,
+        id_field="subject_id",
+        entity_id=subject_id,
+        producer=producer,
+    )
+
+
+def record_operation(
+    session_dir: Path | str | None,
+    operation: Mapping[str, Any] | None = None,
+    *,
+    operation_id: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Upsert one v4 operation by stable ``operation_id``."""
+    _record_v4_entity(
+        session_dir,
+        section="operations",
+        payload=operation,
+        fields=fields,
+        id_field="operation_id",
+        entity_id=operation_id,
+        producer=producer,
+    )
+
+
+def record_measurement(
+    session_dir: Path | str | None,
+    measurement: Mapping[str, Any] | None = None,
+    *,
+    measurement_id: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Upsert one v4 measurement by stable ``measurement_id``."""
+    _record_v4_entity(
+        session_dir,
+        section="measurements",
+        payload=measurement,
+        fields=fields,
+        id_field="measurement_id",
+        entity_id=measurement_id,
+        producer=producer,
+    )
+
+
+def record_adoption(
+    session_dir: Path | str | None,
+    adoption: Mapping[str, Any] | None = None,
+    *,
+    adoption_id: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Upsert one v4 adoption by stable ``adoption_id``."""
+    value = _v4_payload(adoption, fields)
+    status = str(value.get("status") or "").lower()
+    decision = str(value.get("decision") or "").upper()
+    if status == "adopted" or (decision == "KEEP" and value.get("validated") is True):
+        value["status"] = "adopted"
+        value["decision"] = "KEEP"
+        value["validated"] = True
+    elif status in {"revoked", "reverted"} or decision == "REVERT":
+        value["status"] = "revoked"
+        value["decision"] = "REVERT"
+        value["validated"] = False
+    _record_v4_entity(
+        session_dir,
+        section="adoptions",
+        payload=value,
+        fields={},
+        id_field="adoption_id",
+        entity_id=adoption_id,
+        producer=producer,
+    )
+
+
+def record_artifact(
+    session_dir: Path | str | None,
+    artifact: Mapping[str, Any] | None = None,
+    *,
+    artifact_id: str | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Upsert one v4 artifact reference by stable ``artifact_id``."""
+    _record_v4_entity(
+        session_dir,
+        section="artifacts",
+        payload=artifact,
+        fields=fields,
+        id_field="artifact_id",
+        entity_id=artifact_id,
+        producer=producer,
+    )
+
+
+def record_trace_event(
+    session_dir: Path | str | None,
+    event: Mapping[str, Any] | None = None,
+    *,
+    producer: str = PRODUCER_COORDINATOR,
+    **fields: Any,
+) -> None:
+    """Record one v4 trace event, idempotent when an event id is supplied."""
+    _record_v4_event(
+        session_dir,
+        section="trace_events",
+        payload=event,
+        fields=fields,
+        key_fields=("trace_event_id", "event_id", "span_id"),
+        producer=producer,
+    )
 
 
 __all__ = [
     "PRODUCER_COORDINATOR",
     "PRODUCER_KERNEL_AGENT",
     "record_critic_iteration",
+    "record_action_operation",
+    "record_adoption",
+    "record_artifact",
     "record_kernel_backend_result",
     "record_kernel_discovery",
     "record_kernel_dispatch",
     "record_kernel_e2e",
     "record_kernel_invocations",
+    "record_kernel_strategy_selection",
+    "record_native_kernel_run_start",
+    "record_native_kernel_run_result",
+    "record_geak_operation",
+    "record_gemm_tuning_operation",
     "record_phase_event",
+    "record_phase_transition",
+    "record_measurement",
+    "record_operation",
     "record_robustness_signal",
     "record_singleton_section",
     "record_specialist_round",
+    "record_subject",
     "record_tool_version",
+    "record_trace_event",
+    "record_run_snapshot",
     "snapshot_state_sections",
 ]

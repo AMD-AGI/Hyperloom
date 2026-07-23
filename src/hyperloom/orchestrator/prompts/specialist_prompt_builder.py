@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Specialist sub-agent prompt assembler.
@@ -625,7 +625,7 @@ def _focus_research_scout_specialist(
         "You are the **research scout** — a read-only collector of",
         "*already-proven* priors. You do NOT benchmark, apply patches, or",
         "decide KEEP/REVERT. Your single deliverable is a prioritised list",
-        "of research hints, each with an explicit source.",
+        "of source-backed findings and executable variants.",
         "",
         *proven_lines,
         "**Three research sources (cover all that are reachable)**",
@@ -650,14 +650,14 @@ def _focus_research_scout_specialist(
         "numbers as a structured target: measured competitor baselines are",
         "sourced from InferenceX, never authored by this scout.",
         "",
-        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
-        "``research`` block:",
-        "- ``hints``: list of ``{what, expected_impact, accuracy_risk,",
-        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
-        "  / MLPerf row / reference script path); a hint without a source",
-        "  is dropped.",
-        "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
-        "  ids you actually inspected (feeds exploration-depth tracking).",
+        "**Output protocol** — use only the top-level ``specialist_done`` fields:",
+        "- ``proposal_set``: executable variants using the standard explore",
+        "  schema. Put inspected PRs and references in ``pr_evidence`` or",
+        "  ``source_evidence`` on each proposal.",
+        "- ``new_findings``: list of ``{what, expected_impact, accuracy_risk,",
+        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog /",
+        "  MLPerf row / reference script path).",
+        "- ``residual_questions``: unanswered questions for the next scout round.",
         "",
         "**Iron rule** — read-only. Never write a patch, never launch a",
         "benchmark, never recommend a phase transition. Turn proven priors",
@@ -1803,7 +1803,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the read-only framework source roots and per-domain focus
+    Lists the installed source roots and per-domain focus
     directories, or a ``(none)`` placeholder when neither is supplied.
 
     Args:
@@ -1817,7 +1817,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     if inp.framework_source_roots:
-        rows.append("Framework source roots (read-only):")
+        rows.append("Installed source roots (read-only):")
         for p in inp.framework_source_roots:
             rows.append(f"- {p}")
     if inp.source_hint_directories:
@@ -1979,9 +1979,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
         "  AND no ``patches_written``/``artifacts_written``; in that case",
         "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
-        "- ``new_findings`` is your free-form summary of anything you",
-        "  learned this round — Coordinator funnels it into the KB",
-        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
+        "- ``new_findings`` is a list of learned items. Research scouts must",
+        "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
+        "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",

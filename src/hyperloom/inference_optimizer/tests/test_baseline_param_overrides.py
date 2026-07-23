@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Baseline parameter override tests."""
@@ -779,6 +779,26 @@ def test_reference_base_extra_args_override_wins(tmp_path):
     assert args.count("--attention-backend") == 1
     assert "ROCM_FLASH" in args
     assert "TRITON_ATTN" not in args
+
+
+def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path):
+    """A single-value flag in both reference and extra args collapses to last-wins."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model="/path/models/X")
+    out = tmp_path / "out"
+    out.mkdir()
+    materialized = materialize_config_with_envs(
+        base,
+        out,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+        reference_server_args="--gpu-memory-utilization 0.95",
+        extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97",
+    )
+    args = _fw_args(materialized)
+    assert args.count("--gpu-memory-utilization") == 1
+    assert "0.97" in args and "0.95" not in args
+    assert "--kv-cache-dtype fp8" in args
 
 
 def test_reference_envs_do_not_clobber_existing(tmp_path):

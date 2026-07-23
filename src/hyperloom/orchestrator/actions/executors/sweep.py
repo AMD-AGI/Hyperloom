@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Real ``sweep`` ActionRunner — full ISL/OSL/CONC Pareto sweep.
@@ -48,7 +48,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
-    sweep_run_eval_enabled,
 )
 
 
@@ -129,10 +128,9 @@ def _build_grid(
                 "OSL": str(osl),
                 "NUM_PROMPTS": str(num_prompts),
             }
-            # Accuracy eval is concurrency-invariant, so skip it per sweep point
-            # by default. Opt back in via INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1.
-            if not sweep_run_eval_enabled():
-                variant_envs["RUN_EVAL"] = "false"
+            # Accuracy eval is concurrency-invariant, so it is always skipped per
+            # sweep point (the accuracy gate still runs on explore / baseline).
+            variant_envs["RUN_EVAL"] = "false"
             out.append(
                 GridVariant(
                     name=name,

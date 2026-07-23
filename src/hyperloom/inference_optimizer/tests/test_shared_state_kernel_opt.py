@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for SharedState.record_kernel_opt invariants + the multi-KEEP integrate queue helpers."""
@@ -642,6 +642,15 @@ def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
     assert "rejected" not in entry
     assert state.rejected_kernel_patches == []
     assert "k001" not in state.rejected_kernel_ids
+
+
+def test_integrate_attempt_is_stamped_with_macro_cycle(state: SharedState):
+    state.macro_cycle = 2
+    entry = state.record_kernel_integrate_result(
+        _integrate_result("k001", decision="KEEP", gain_pct=1.0),
+    )
+    assert entry is not None
+    assert entry["attempts"][-1]["cycle"] == 2
 
 
 def test_integrate_fault_rejected_after_budget_exhausted(state: SharedState):

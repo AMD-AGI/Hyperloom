@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """FrameworkAgentExecutor coverage tests."""
@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from .conftest import init_git_repo
+from .conftest import init_git_repo, patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors.framework_agent import (
     FrameworkAgentExecutor,
@@ -50,6 +50,11 @@ index 0000000..1111111 100644
 -OLD
 +NEW
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _make_candidate(

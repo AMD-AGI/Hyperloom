@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for the additive ``kernel_journey`` breakdown section.
@@ -142,6 +142,42 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
     assert k002["outcome"] == "skipped"
     assert k002["dispatch"]["skip_reason"] == "non_reusable_kernel"
     assert k002["backend_attempts"] == []
+
+
+def test_kernel_journey_keep_requires_final_validation(tmp_path: Path) -> None:
+    instrument.record_kernel_dispatch(
+        tmp_path,
+        kernel_id="k-provisional",
+        dispatched=True,
+        backends=["geak"],
+    )
+    instrument.record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k-provisional",
+            "run_id": "r1",
+            "attempts": [
+                {
+                    "attempt_id": "a1",
+                    "backend": "geak",
+                    "status": "succeeded",
+                    "decision": "KEEP",
+                }
+            ],
+        },
+        route_strategy="geak_internal",
+    )
+    instrument.record_kernel_e2e(
+        tmp_path,
+        kernel_id="k-provisional",
+        integrated=True,
+        validated=False,
+        decision="KEEP",
+        route_strategy="geak_internal",
+    )
+
+    entry = assemble_parts(tmp_path)["kernel_journey"]["kernels"][0]
+    assert entry["outcome"] != "adopted"
 
 
 def test_kernel_backend_result_keeps_retries_across_runs(tmp_path: Path) -> None:

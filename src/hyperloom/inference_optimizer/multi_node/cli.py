@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI managing one session-scoped RayJob.
@@ -36,7 +36,11 @@ from ..session.paths import mn_profile_trace_root
 from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
-from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from ._internal.server_args_safety import (
+    ServerArgsRejected,
+    prepare_shell_safe_extra_args,
+    validate_server_args,
+)
 from .state_paths import resolve_state_file
 from ._internal.external_state import load_multi_node_state
 
@@ -709,27 +713,6 @@ def _read_bundled_pod_python_script(
     return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
 
 
-def _prepare_shell_safe_extra_args(raw: str, *, context: str) -> str:
-    """Validate and quote server args before embedding them in a shell command.
-
-    Args:
-        raw: Shell-style framework server arguments.
-        context: Error context included in rejection messages.
-
-    Returns:
-        str: Every parsed argv token individually shell-quoted.
-
-    Raises:
-        ServerArgsRejected: If a denied flag or malformed quoting is present.
-    """
-    validate_server_args(raw, context=context)
-    try:
-        tokens = shlex.split(raw or "")
-    except ValueError as exc:
-        raise ServerArgsRejected(f"unparseable server args ({context}): {exc}") from exc
-    return " ".join(shlex.quote(token) for token in tokens)
-
-
 def _build_restart_entrypoint(
     args: argparse.Namespace,
     pid_file: str,
@@ -752,8 +735,12 @@ def _build_restart_entrypoint(
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
 
+    # extra_args is spliced after ``--`` into a shell entrypoint and word-split
+    # by launch_server.sh into argv. Denylist path/model flags, then re-quote
+    # each token so a value like ``--foo 1; touch x`` cannot inject a second
+    # shell command (metacharacters stay inside a single quoted token).
     try:
-        safe_extra_args = _prepare_shell_safe_extra_args(
+        safe_extra_args = prepare_shell_safe_extra_args(
             args.extra_args or "",
             context="restart-server --extra-args",
         )
@@ -1122,9 +1109,11 @@ def _build_multinode_launch_entrypoint(
     """
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
-    extra_args = args.extra_args or ""
     try:
-        validate_server_args(extra_args, context="rayjob restart-server --extra-args")
+        extra_args = prepare_shell_safe_extra_args(
+            args.extra_args or "",
+            context="rayjob restart-server --extra-args",
+        )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
     # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive

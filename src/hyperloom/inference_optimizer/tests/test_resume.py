@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator resume tests.
@@ -338,7 +338,6 @@ class TestN23ResumePerSession:
 
         monkeypatch.setenv(_paths.ENV_USER_DATA_PATH, str(tmp_path))
         monkeypatch.delenv(_paths.ENV_CURRENT_SESSION_DIR, raising=False)
-        monkeypatch.delenv(_paths.ENV_SESSION_LAYOUT, raising=False)
 
     def test_resume_picks_latest_subdir_after_two_launches(self, tmp_path):
         from hyperloom.inference_optimizer.session import paths as _paths

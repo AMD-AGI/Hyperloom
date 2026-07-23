@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """EXPLORE phase handler: macro-cycle strategy, specialist fan-out/retry, gap
 tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations
+from hashlib import sha1
 import logging as _logging
 import os
 import time
@@ -190,6 +191,68 @@ class ExplorePhase(PhaseHandler):
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
         return "\n".join(lines)
 
+    def _cycle_directive_fallback(self) -> str:
+        """Render a deterministic cycle focus from ``_plan_cycle_focus``.
+
+        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
+        """
+        try:
+            planned = self._plan_cycle_focus()
+        except Exception:  # noqa: BLE001 — fallback must never raise
+            return ""
+        focus = str(planned.get("focus") or "").strip()
+        if not focus:
+            return ""
+        parts = [f"focus={focus}"]
+        rationale = str(planned.get("rationale") or "").strip()
+        if rationale:
+            parts.append(rationale)
+        bottleneck = str(planned.get("bottleneck_at_start") or "").strip()
+        if bottleneck:
+            parts.append(f"bottleneck={bottleneck}")
+        saturated = planned.get("saturated_at_start") or []
+        if saturated:
+            parts.append(f"deprioritize saturated={list(saturated)}")
+        return "; ".join(parts)
+
+    def _reseed_orch_prompt_for_cycle(self) -> bool:
+        """Rebuild the orchestration system prompt for the new macro-cycle.
+
+        Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
+        records the directive in the ``cycle_directive_history`` ring. Skips a
+        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        """
+        if getattr(self, "_orch_prompt_is_user_supplied", False):
+            return False
+        rebuild = getattr(self, "_rebuild_orch_prompt", None)
+        if rebuild is None:
+            return False
+        state = self.shared_state
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
+        source = "llm"
+        if not directive:
+            directive = self._cycle_directive_fallback()
+            source = "deterministic"
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        overrides = getattr(self, "system_prompt_overrides", None)
+        if not isinstance(overrides, dict):
+            return False
+        overrides["orchestration"] = new_prompt
+        history = list(getattr(state, "cycle_directive_history", []) or [])
+        history.append(
+            {
+                "cycle": cycle,
+                "directive": directive,
+                "source": source,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        state.cycle_directive_history = history[-10:]
+        return True
+
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
@@ -223,20 +286,11 @@ class ExplorePhase(PhaseHandler):
             state.gain_at_cycle_start = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
         except (TypeError, ValueError):
             state.gain_at_cycle_start = 0.0
-        # Reset per-cycle counters (fresh plateau/dispatch budget for the cycle).
+        # Reset per-cycle counters.
         try:
-            state.reset_specialist_dispatched()
-            state.reset_explore_plateau_proxy()
+            state.reset_per_cycle_plateau_state()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK for the new cycle; preserved batches/progress rows
-        # keep already-tested PRs skipped.
-        state.framework_agent_phase_done = False
-        state.framework_agent_discover_failures = 0
-        # Reset the config-exploration guard so each macro-cycle re-runs the lane.
-        state.framework_config_lane_state = ""
-        state.framework_config_lane_round = 0
-        state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
         # consecutive-no-keep plateau gate ignores the prior cycle's trailing
         # no-KEEP streak.
@@ -262,10 +316,6 @@ class ExplorePhase(PhaseHandler):
                 )
         except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
             log.exception("Coordinator: framework_agent cycle_boundary marker append failed")
-        # Clear the per-cycle SWEEP completion markers so the next cycle's SWEEP
-        # runs a fresh sweep instead of exiting on a stale status.
-        state.last_sweep = {}
-        state.last_conc_sweep = {}
         try:
             self._record_cycle_strategy_for_current_cycle()
         except Exception:  # noqa: BLE001 — focus is advisory only
@@ -306,7 +356,8 @@ class ExplorePhase(PhaseHandler):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory and reset.
+        # 1) Compact the cycle's conversation into durable memory, re-focus the
+        # orchestration prompt for the new cycle, then reset.
         try:
             compacted = await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
@@ -314,6 +365,10 @@ class ExplorePhase(PhaseHandler):
                 force=True,
             )
             summary["memory_compacted"] = bool(compacted)
+            try:
+                summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
+            except Exception:  # noqa: BLE001 — reseed is best-effort
+                log.exception("cycle soft-restart: orchestration prompt reseed failed")
             # Reset unconditionally so a no-op checkpoint still reseeds next turn.
             self._reset_orchestration_conversation()
             summary["conversation_reset"] = True
@@ -513,12 +568,14 @@ class ExplorePhase(PhaseHandler):
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        for idx, hint in enumerate(hints):
+        for hint in hints:
             what = str(hint.get("what") or "").strip()
-            if not what:
+            source = str(hint.get("source") or "").strip()
+            if not what or not source:
                 continue
             tags = hint.get("domain_tags") or []
-            cid = f"gap.research_hint.{idx}"
+            key = f"{what.lower()}::{source.lower()}"
+            cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
             try:
                 self.shared_state.upsert_gap(
                     {

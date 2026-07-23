@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """FRAMEWORK_AGENT phase handler: candidate discovery/ranking/audit, authoring
@@ -582,6 +582,7 @@ class FrameworkPhase(PhaseHandler):
                 "confidence": float((audit or {}).get("confidence") or 0.0),
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
         try:
@@ -630,6 +631,7 @@ class FrameworkPhase(PhaseHandler):
                     applicability=str((audit or {}).get("applicability") or "").strip(),
                     provenance="phase_audit",
                     changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                    session_dir=self.session_dir,
                 )
             except Exception:  # noqa: BLE001 — KB writeback is best-effort
                 log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)
@@ -2076,8 +2078,7 @@ class FrameworkPhase(PhaseHandler):
         """Dispatch a local-exploration specialist when the arm is enabled.
 
         Used as the discovery-exhaustion fallback: rather than marking the phase
-        done, author a patch from the live source. No-op (returns ``False``)
-        when the arm is disabled so callers fall back to the historical exit.
+        done, author a patch from the live source. No-op when the arm is disabled.
 
         Args:
             reason: Short provenance tag recorded on the dispatch log line.
@@ -2132,17 +2133,14 @@ class FrameworkPhase(PhaseHandler):
             f"- framework: {framework or '(session framework)'}",
             "",
             "How to work:",
-            "- Read the live framework source (your framework_source_roots) and the",
+            "- Read installed package source (your framework_source_roots) and the",
             "  latest profiling breakdown to locate the serving hot path",
             "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
             "- You MAY use WebSearch / WebFetch to compare the live tree against the",
             "  LATEST upstream code (e.g. the framework's main branch) and port a",
             "  newer optimisation when the local checkout is behind.",
-            "- You MAY read /opt/rocm and the HIP source for understanding, and you",
-            "  MAY edit framework Python and aiter source (aiter JIT-recompiles via",
-            "  ninja/hipcc, so edits take effect on the next launch). Do NOT edit",
-            "  compiled /opt/rocm libraries that need a full rebuild to take effect —",
-            "  leave those to the kernel agent.",
+            "- You MAY inspect and patch installed package source. State expected",
+            "  reload, JIT, or rebuild behavior in the deliverable.",
             "",
             "Deliverable — EITHER is valid (pick what actually moves throughput):",
             "- a unified-diff source patch in your worktree (``patches_written``), OR",
@@ -2418,9 +2416,12 @@ class FrameworkPhase(PhaseHandler):
     def _framework_agent_ranker_client(self) -> Any:
         """Return an OpenAI-compatible async client for ranking, or ``None``.
 
-        Reuses the ProposalScorer's client when present (same gateway/auth);
-        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
-        ``OPENAI_BASE_URL``. Cached on first successful build.
+        Reuses the ProposalScorer's client when present (same gateway/auth),
+        then the orchestration backend's own client (so the LLM ranker is on by
+        default whenever orchestration has LLM credentials); otherwise builds
+        one from the orchestration backend's configured key/URL env (falling
+        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        Cached on first successful build.
         """
         import os
 
@@ -2437,14 +2438,35 @@ class FrameworkPhase(PhaseHandler):
                     return client
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
+        # Reuse the orchestration backend's own OpenAI-compatible client when it
+        # exposes one (e.g. CodexBackend): same gateway + auth as the running
+        # session, so the ranker is default-on without extra configuration.
+        backend = self.backends.get("orchestration")
+        backend_client = getattr(backend, "_client", None)
+        if backend_client is not None and hasattr(backend_client, "chat"):
+            self._coord._fa_ranker_client = backend_client
+            return backend_client
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError:
             return None
-        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Resolve credentials from the orchestration backend's configured env
+        # names first (so a split-gateway orchestration key is reused), then the
+        # shared gateway defaults.
+        api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
+        base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
+        api_key = (
+            os.environ.get(api_key_env)
+            or os.environ.get("SAFE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
         if not api_key:
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        base_url = (
+            os.environ.get(base_url_env)
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
+        )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()
@@ -3104,6 +3126,7 @@ class FrameworkPhase(PhaseHandler):
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             "candidate_count": len(norm),
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
@@ -3473,6 +3496,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
             "provenance": str(provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
         # onto the row too, without clobbering the canonical fields above, so
@@ -3811,6 +3835,7 @@ class FrameworkPhase(PhaseHandler):
             "kept": status == "kept",
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
@@ -3958,6 +3983,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": 0.0,
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         self.shared_state.framework_agent_phase_progress.append(progress_entry)
         try:

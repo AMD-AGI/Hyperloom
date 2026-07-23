@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
@@ -11,7 +11,7 @@ Fields::
     model_class         str   — categorical key supplied via --model-class
     model_arch          dict  — advisory architecture profile (hybrid
                                 structured + free-text notes) loaded from
-                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                the launcher's ``<session_dir>/model_arch.json``;
                                 prompt-context only, no deterministic gating
     model_architectures list  — config.json ``architectures``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
@@ -514,7 +514,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
 
-    # Roofline-v2 trace-analyze cache; ``last_trace_analyze`` canonical 11-field dict from record_trace_analyze; ``roofline_snapshot_id`` mirrors nested value for hot-path access.
+    # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
     # Append-only compact roofline snapshots for report.py (first baseline kept for before/after); capped at MAX_ROOFLINE_SNAPSHOTS.
@@ -642,7 +642,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
     kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
-    # Cross-round params/backends/sweep aggregation (cap 10); _promote_to_shared_state detects a consistent sub-1%-per-shot winner across rounds.
+    # Cross-round params/backends/sweep aggregation (cap 10); legacy rows folded into the unified winners_history on resume.
     params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
@@ -650,8 +650,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
-    specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
     # Per-kb_anchor coverage counters: EXPLORE rounds since a specialist was
     # dispatched / since a KEEP landed. Both ++ once per EXPLORE round, reset on
     # dispatch / KEEP.
@@ -791,6 +789,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Bounded rollback ring (cap 10) of prior good ``orchestration_memory``
     # records; recovers a later degenerate compaction from a prior snapshot.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Bounded ring (cap 10) of per-macro-cycle directives injected into the
+    # orchestration system prompt; entries: {cycle, directive, source, ts}.
+    cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
@@ -1147,6 +1149,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
+                    tp=int(self.tp or 0) or None,
+                    max_model_len=int(self.max_model_len or 0) or None,
+                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,
@@ -1894,10 +1899,29 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
+            capture_result = dict(result)
+            capture_result.setdefault(
+                "workload",
+                {
+                    "framework": str(getattr(self, "framework", "") or ""),
+                    "model_name": str(getattr(self, "model_name", "") or ""),
+                    "gpu_type": str(getattr(self, "gpu_type", "") or ""),
+                    "precision": str(getattr(self, "precision", "") or ""),
+                    "tp": int(getattr(self, "tp", 0) or 0),
+                    "ep": int(getattr(self, "ep", 0) or 0),
+                    "conc": int(getattr(self, "conc", 0) or 0),
+                    "isl": int(getattr(self, "isl", 0) or 0),
+                    "osl": int(getattr(self, "osl", 0) or 0),
+                },
+            )
             instrument.record_phase_event(
                 getattr(self, "_session_dir", None),
                 action=action,
                 entry=entry,
+                result=capture_result,
+                phase=str(getattr(self, "phase", "") or ""),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                tick=int(getattr(self, "tick", 0) or 0),
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("record_phase_event capture failed", exc_info=True)
@@ -2127,7 +2151,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         payload: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Write the canonical 11-field ``last_trace_analyze`` dict (single writer); ``roofline_snapshot_id`` increments monotonically.
+        """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` is previous + 1, resetting when the cache was cleared.
 
         Args:
             payload (dict[str, Any]): The trace_analyze task payload (supplies
@@ -2148,73 +2172,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             artifacts = result.get("artifact_paths") or {}
             if isinstance(artifacts, dict):
                 kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        kernel_roofline: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        rocprof_by_kernel_id: dict[str, Any] = {}
-        if kernel_roofline_path:
-            try:
-                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
-                for row in roofline_payload.get("kernels") or []:
-                    if not isinstance(row, dict) or not row.get("kernel_id"):
-                        continue
-                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
-            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
-                rocprof_by_kernel_id = {}
-        for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            arithmetic_intensity = entry.get("arithmetic_intensity")
-            if arithmetic_intensity is None:
-                arithmetic_intensity = entry.get("flops_per_byte")
-            efficiency_percent = entry.get("efficiency_percent")
-            if efficiency_percent is None:
-                efficiency_percent = entry.get("efficiency_pct")
-            rocprof_roofline = entry.get("rocprof_roofline")
-            if rocprof_roofline is None and kid is not None:
-                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
-            summary_entry = {
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                # TraceLens kernel_category bucket ("" when absent).
-                "kernel_category": entry.get("kernel_category") or "",
-                "gpu_pct": entry.get("gpu_pct"),
-                "bottleneck": entry.get("bottleneck"),
-                "bound_type": entry.get("bound_type"),
-                "arithmetic_intensity": arithmetic_intensity,
-                "flops_per_byte": entry.get("flops_per_byte"),
-                "efficiency_percent": efficiency_percent,
-                "compute_utilization_pct": entry.get("compute_utilization_pct"),
-                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
-                "suggestion": entry.get("suggestion") or "",
-                "roofline_name": entry.get("roofline_name"),
-                "rocprof_roofline": rocprof_roofline,
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-            }
-            summary.append(summary_entry)
-            if any(
-                summary_entry.get(key) not in (None, "", [])
-                for key in (
-                    "bound_type",
-                    "arithmetic_intensity",
-                    "flops_per_byte",
-                    "efficiency_percent",
-                    "compute_utilization_pct",
-                    "bandwidth_utilization_pct",
-                    "suggestion",
-                    "roofline_name",
-                    "rocprof_roofline",
-                )
-            ):
-                kernel_roofline.append(dict(summary_entry))
-            if reusable and kid:
-                reusable_ids.append(str(kid))
+        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
         skipped = result.get("skipped_kernels") or []
@@ -2288,6 +2246,103 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # Top-level mirror so PolicyGate/Coordinator skip the nested-dict lookup.
         self.roofline_snapshot_id = snapshot_id
 
+        self._append_roofline_snapshot_history(
+            payload=payload,
+            snapshot_id=snapshot_id,
+            ts_iso=ts_iso,
+            analysis_md_path=analysis_md_path,
+            trace_input=trace_input,
+            kernel_roofline_path=kernel_roofline_path,
+        )
+
+    def _build_hot_kernel_summaries(
+        self,
+        result: dict[str, Any],
+        kernel_roofline_path: str,
+    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
+        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot
+        kernels, merging the optional per-kernel rocprof roofline sidecar."""
+        hot = result.get("hot_kernels") or []
+        summary: list[dict[str, Any]] = []
+        kernel_roofline: list[dict[str, Any]] = []
+        reusable_ids: list[str] = []
+        rocprof_by_kernel_id: dict[str, Any] = {}
+        if kernel_roofline_path:
+            try:
+                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
+                for row in roofline_payload.get("kernels") or []:
+                    if not isinstance(row, dict) or not row.get("kernel_id"):
+                        continue
+                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
+            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
+                rocprof_by_kernel_id = {}
+        for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kernel_id")
+            reusable = bool(entry.get("reusable_native_kernel"))
+            arithmetic_intensity = entry.get("arithmetic_intensity")
+            if arithmetic_intensity is None:
+                arithmetic_intensity = entry.get("flops_per_byte")
+            efficiency_percent = entry.get("efficiency_percent")
+            if efficiency_percent is None:
+                efficiency_percent = entry.get("efficiency_pct")
+            rocprof_roofline = entry.get("rocprof_roofline")
+            if rocprof_roofline is None and kid is not None:
+                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
+            summary_entry = {
+                "kernel_id": kid,
+                "name": entry.get("name"),
+                # TraceLens kernel_category bucket ("" when absent).
+                "kernel_category": entry.get("kernel_category") or "",
+                "gpu_pct": entry.get("gpu_pct"),
+                "bottleneck": entry.get("bottleneck"),
+                "bound_type": entry.get("bound_type"),
+                "arithmetic_intensity": arithmetic_intensity,
+                "flops_per_byte": entry.get("flops_per_byte"),
+                "efficiency_percent": efficiency_percent,
+                "compute_utilization_pct": entry.get("compute_utilization_pct"),
+                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+                "suggestion": entry.get("suggestion") or "",
+                "roofline_name": entry.get("roofline_name"),
+                "rocprof_roofline": rocprof_roofline,
+                "source_file": entry.get("source_file"),
+                "reusable_native_kernel": reusable,
+                "recommended_backends": entry.get("recommended_backends") or [],
+                "recommended_actions": entry.get("recommended_actions") or [],
+            }
+            summary.append(summary_entry)
+            if any(
+                summary_entry.get(key) not in (None, "", [])
+                for key in (
+                    "bound_type",
+                    "arithmetic_intensity",
+                    "flops_per_byte",
+                    "efficiency_percent",
+                    "compute_utilization_pct",
+                    "bandwidth_utilization_pct",
+                    "suggestion",
+                    "roofline_name",
+                    "rocprof_roofline",
+                )
+            ):
+                kernel_roofline.append(dict(summary_entry))
+            if reusable and kid:
+                reusable_ids.append(str(kid))
+        return summary, kernel_roofline, reusable_ids
+
+    def _append_roofline_snapshot_history(
+        self,
+        *,
+        payload: dict[str, Any],
+        snapshot_id: int,
+        ts_iso: str,
+        analysis_md_path: str,
+        trace_input: str,
+        kernel_roofline_path: str,
+    ) -> None:
+        """Append a compact roofline snapshot for report-side comparison;
+        best-effort, failures never block the canonical write above."""
         # Append compact history for report-side Roofline Comparison; best-effort.
         try:
             from ..kernel.roofline_snapshot import (

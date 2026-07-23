@@ -20,7 +20,7 @@ flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-develope
 """
 
 # Keep in sync with pyproject.toml [project].version.
-version_number = "0.8.0"
+version_number = "0.9.0"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
@@ -49,7 +49,7 @@ all_article_info_author = ""
 # for PDF output on Read the Docs
 project = "Hyperloom"
 author = "Advanced Micro Devices, Inc."
-copyright = "2025 Advanced Micro Devices, Inc."
+copyright = "2026 Advanced Micro Devices, Inc."
 version = version_number
 release = version_number
 

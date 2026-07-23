@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Framework source-root resolution for PolicyGate and flag discovery.
@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import site
 import sys
+import sysconfig
 from pathlib import Path
 
 _DEFAULT_SGLANG_SERVER_ARGS = Path("/sgl-workspace/sglang/python/sglang/srt/server_args.py")
@@ -245,12 +247,53 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
-def resolve_source_file_allowlist() -> tuple[str, ...]:
-    """Return PolicyGate ``source_file`` allowlist roots.
+def _discover_installed_package_roots() -> tuple[str, ...]:
+    """Return active site/dist-packages roots available to specialists."""
+    candidates: list[Path] = []
+    try:
+        candidates.extend(Path(p) for p in site.getsitepackages())
+    except (AttributeError, OSError):
+        pass
+    try:
+        user_site = site.getusersitepackages()
+        if user_site:
+            candidates.append(Path(user_site))
+    except (AttributeError, OSError):
+        pass
+    for key in ("purelib", "platlib"):
+        value = sysconfig.get_path(key)
+        if value:
+            candidates.append(Path(value))
+    candidates.extend(
+        Path(p)
+        for p in sys.path
+        if p and Path(p).name in {"site-packages", "dist-packages"}
+    )
+    for env_name in ("VIRTUAL_ENV", "VLLM_VENV_ROOT"):
+        root = Path(os.environ.get(env_name, "").strip())
+        lib = root / "lib"
+        if lib.is_dir():
+            candidates.extend(lib.glob("python*/site-packages"))
+            candidates.extend(lib.glob("python*/dist-packages"))
 
-    Merges the static defaults, runtime-discovered roots, and any roots
-    from ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`` (default ∪
-    discovered ∪ env).
+    found: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        root = _normalize_root(str(candidate))
+        if root and root not in seen:
+            seen.add(root)
+            found.append(root)
+    return tuple(found)
+
+
+def resolve_source_file_allowlist() -> tuple[str, ...]:
+    """Return trusted source roots available to specialists and integration.
+
+    Includes editable framework trees and every active site/dist-packages root.
+    File-level editability is decided during reviewed integration rather than by
+    restricting specialist discovery to named framework packages.
 
     Returns:
         tuple[str, ...]: The merged, de-duplicated allowlist roots.
@@ -259,6 +302,7 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
     env_roots = tuple(_normalize_root(p) for p in env.split(":") if p.strip()) if env else ()
     return _merge_roots(
         _DEFAULT_SOURCE_ROOTS,
+        _discover_installed_package_roots(),
         _discover_installed_framework_roots(),
         env_roots,
         resolve_rocm_hip_source_roots(),

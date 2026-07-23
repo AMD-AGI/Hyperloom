@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Kernel-decision write-owner functions.
@@ -245,6 +245,7 @@ def record_kernel_integrate_result(
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
+        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
     }
     attempts.append(attempt)
     best_gain = max(
@@ -299,6 +300,8 @@ def record_kernel_integrate_result(
                 patch_path=patch_path,
                 target_file=target_file,
                 extra_server_args=extra_args,
+                result=result,
+                validation_tier="integrate_e2e" if _dec == "KEEP" else "",
             )
     except Exception:  # noqa: BLE001
         pass
@@ -617,6 +620,16 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     attempts = list(state.gemm_tuning_attempts or [])
     attempts.append(entry)
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            getattr(state, "_session_dir", None),
+            payload={"task_id": str(entry.get("task_id") or "kernel_entry_gemm_tuning")},
+            result=entry,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _kernel_ids_in_optimization_stack(state) -> set[str]:

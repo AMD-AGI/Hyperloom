@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared helper for the ``explore`` executor's grid runs.
@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import is_python_package_root, scrub_child_process_env
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
@@ -769,6 +769,17 @@ def _kill_stale_servers() -> None:
     time.sleep(8 if killed_atom else 2)
 
 
+def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
+    """Prepend Magpie's import root to PYTHONPATH, skipping package-root dirs.
+
+    A ``site-packages`` MAGPIE_PATH is already importable; prepending it would
+    shadow an isolated vLLM venv's torch. A checkout root is kept.
+    """
+    if not magpie_dir or is_python_package_root(magpie_dir):
+        return current_pythonpath
+    return f"{magpie_dir}:{current_pythonpath}" if current_pythonpath else magpie_dir
+
+
 def _run_magpie(
     *,
     magpie_python: str,
@@ -823,7 +834,7 @@ def _run_magpie(
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
-        env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
+        env["PYTHONPATH"] = _prepend_magpie_pythonpath(magpie_dir, env.get("PYTHONPATH", ""))
 
     # Multi-node: tell Magpie to skip its local-server launch and point
     # benchmark_serving at the head pod's ClusterIP.
@@ -911,6 +922,49 @@ def _num_gpus_for_config(config_path: Path) -> float:
         return float(int(envs.get("TP", 1) or 1))
     except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
         return 1.0
+
+
+def _resolve_mn_effective_server_args(
+    cfg_path: Path,
+    base_yaml_path: Path,
+    variant: Any,
+    *,
+    base_extra_args: str,
+    base_args_mode: str,
+) -> str:
+    """Resolve the multi-node server args for a variant restart; prefer the
+    materialized variant YAML, falling back to a recompose from the base YAML."""
+    try:
+        with cfg_path.open(encoding="utf-8") as _f:
+            _variant_cfg = yaml.safe_load(_f) or {}
+        _variant_bench = _variant_cfg.get("benchmark") or {}
+        _variant_envs = _variant_bench.get("envs") or {}
+        _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
+        return str(_variant_envs.get(_variant_framework_env) or "")
+    except Exception:  # noqa: BLE001 - restart path still reports validation errors
+        log.debug(
+            "grid_runner: failed to read materialized variant args from %s",
+            cfg_path,
+            exc_info=True,
+        )
+        try:
+            with base_yaml_path.open(encoding="utf-8") as _f:
+                _base_cfg = yaml.safe_load(_f) or {}
+            _base_bench = _base_cfg.get("benchmark") or {}
+            _base_envs = _base_bench.get("envs") or {}
+            _base_framework_env = server_args_env_name(_base_bench.get("framework"))
+            _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
+        except Exception:  # noqa: BLE001 - best-effort parity fallback
+            _fallback_inherited_args = ""
+        return _shell_safe_dedupe(
+            compose_server_args(
+                inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
+                base_extra_args=base_extra_args,
+                variant_extra_args=variant.extra_server_args,
+                remove_args=getattr(variant, "remove_args", []),
+                args_mode=getattr(variant, "args_mode", "append"),
+            )
+        )
 
 
 async def run_grid(
@@ -1078,37 +1132,13 @@ async def run_grid(
                 break
             continue
 
-        try:
-            with cfg_path.open(encoding="utf-8") as _f:
-                _variant_cfg = yaml.safe_load(_f) or {}
-            _variant_bench = _variant_cfg.get("benchmark") or {}
-            _variant_envs = _variant_bench.get("envs") or {}
-            _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
-            _mn_effective_args = str(_variant_envs.get(_variant_framework_env) or "")
-        except Exception:  # noqa: BLE001 - restart path still reports validation errors
-            log.debug(
-                "grid_runner: failed to read materialized variant args from %s",
-                cfg_path,
-                exc_info=True,
-            )
-            try:
-                with base_yaml_path.open(encoding="utf-8") as _f:
-                    _base_cfg = yaml.safe_load(_f) or {}
-                _base_bench = _base_cfg.get("benchmark") or {}
-                _base_envs = _base_bench.get("envs") or {}
-                _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-                _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-            except Exception:  # noqa: BLE001 - best-effort parity fallback
-                _fallback_inherited_args = ""
-            _mn_effective_args = _shell_safe_dedupe(
-                compose_server_args(
-                    inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
-                    base_extra_args=base_extra_args,
-                    variant_extra_args=variant.extra_server_args,
-                    remove_args=getattr(variant, "remove_args", []),
-                    args_mode=getattr(variant, "args_mode", "append"),
-                )
-            )
+        _mn_effective_args = _resolve_mn_effective_server_args(
+            cfg_path,
+            base_yaml_path,
+            variant,
+            base_extra_args=base_extra_args,
+            base_args_mode=base_args_mode,
+        )
 
         if auto_warmup_requested:
             try:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Branch coverage for integrate_patch helper functions: framework-root
@@ -23,15 +23,61 @@ def test_now_iso():
     assert "T" in ip._now_iso()
 
 
-def test_resolve_framework_root_explicit_dir(tmp_path):
+def test_resolve_framework_root_explicit_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path)])
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
-def test_resolve_framework_root_explicit_missing_then_git(tmp_path, monkeypatch):
+def test_resolve_framework_root_explicit_outside_allowlist_rejected(tmp_path, monkeypatch):
+    """An explicit override outside the source allowlist must not be honoured."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(allowed)])
+    assert ip._resolve_framework_root(str(outside)) is None
+
+
+def test_resolve_framework_root_explicit_nested_under_allowlist(tmp_path, monkeypatch):
+    """A subdirectory of an allowlisted root may be selected explicitly."""
+    fw = tmp_path / "fw"
+    nested = fw / "pkg"
+    nested.mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root(str(nested)) == nested
+
+
+def test_resolve_framework_root_accepts_non_git_installed_package(tmp_path, monkeypatch):
+    packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    package = packages / "unrelated_package"
+    package.mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(packages)])
+    assert ip._resolve_framework_root(str(package)) == package
+
+
+def test_resolve_framework_root_slash_override_rejected(tmp_path, monkeypatch):
+    """An explicit ``/`` override must never be returned as the framework root."""
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root("/") is None
+
+
+def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path, monkeypatch):
+    """Broken symlinks for explicit overrides are rejected without raising."""
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    broken = tmp_path / "broken-link"
+    broken.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root(str(broken)) is None
+
+
+def test_resolve_framework_root_explicit_missing_rejected(tmp_path, monkeypatch):
     gitroot = tmp_path / "fw"
     (gitroot / ".git").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(gitroot)])
-    assert ip._resolve_framework_root("/no/such/dir") == gitroot
+    assert ip._resolve_framework_root("/no/such/dir") is None
 
 
 def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
@@ -403,3 +449,46 @@ def test_revert_patches_checkout_fails(tmp_path, monkeypatch):
     applied = [tmp_path / "a.patch"]
     reverted = ex._revert_patches(tmp_path, applied)
     assert reverted == []
+
+
+class _Verdict:
+    def __init__(self, verdict: str):
+        self._v = verdict
+
+    def get_specialist_patch_verdict(self, tid: str) -> str:
+        return self._v
+
+
+def test_enforce_critic_gate_noop_when_no_shared_state():
+    assert ip._enforce_critic_gate(None, "spec") is None
+
+
+def test_enforce_critic_gate_passes_on_permissive_verdict():
+    assert ip._enforce_critic_gate(_Verdict("approve"), "spec") is None
+    assert ip._enforce_critic_gate(_Verdict("advise"), "spec") is None
+
+
+def test_enforce_critic_gate_rejects_on_non_permissive_verdict():
+    out = ip._enforce_critic_gate(_Verdict("reject"), "spec-1")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert out["specialist_task_id"] == "spec-1"
+    assert out["patches_applied"] == []
+    assert "reject" in out["reason"]
+
+
+def test_enforce_critic_gate_rejects_when_no_verdict_on_record():
+    out = ip._enforce_critic_gate(_Verdict(""), "spec-2")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert "no Critic verdict on record" in out["reason"]
+
+
+def test_enforce_critic_gate_handles_state_without_verdict_method():
+    class _NoMethod:
+        pass
+
+    # AttributeError on get_specialist_patch_verdict is treated as "no verdict".
+    out = ip._enforce_critic_gate(_NoMethod(), "spec-4")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"

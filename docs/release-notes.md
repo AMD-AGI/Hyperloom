@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 0.8.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
+    "description": "Hyperloom release notes: headline capabilities for version 0.9.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is `0.8.0` (`pyproject.toml`). For the
+The current packaged version is `0.9.0` (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
@@ -21,12 +21,14 @@ per-release versions:
 
 ### 0.9.0 highlights
 
-- **Ray-managed single-node execution**: Every GPU/serving unit (baseline,
+- **Opt-in Ray-managed single-node execution**: When
+  `INFERENCE_OPTIMIZER_RAY_EXEC=1` is set, GPU/serving units (baseline,
   profile/roofline, explore, sweep, conc_sweep, and `needs_gpu` specialists)
-  now runs on a Ray-managed GPU lease, with Ray owning GPU queueing, device
+  run on a Ray-managed GPU lease, with Ray owning GPU queueing, device
   isolation, and a whole-machine serving mutex. The path fails fast on an
   infeasible cluster, times out stuck specialist scheduling, detects dead
-  actors, and keeps the raylet stable across per-round server reboots.
+  actors, and adds safeguards around Ray actor failure and server lifecycle
+  cleanup. When unset, single-node serving uses the local subprocess path.
   Multi-node is unchanged (gated off).
 
 - **Accuracy-gate & eval-result integrity**: lm-eval output is wired to a
@@ -36,8 +38,8 @@ per-release versions:
   mirror; and session-breakdown attribution no longer fabricates credit from a
   seeded stack.
 
-- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic +
-  DeepSeek directly (provider-only paths), with env-driven, consistent gateway
+- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic
+  directly (provider-only paths), with env-driven, consistent gateway
   auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
   the Critic can run over the native provider endpoint.
 

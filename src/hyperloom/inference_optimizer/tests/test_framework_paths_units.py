@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``orchestrator.framework_paths`` path-resolution helpers and the PolicyGate roots allowlist."""
+"""Unit tests for framework source-scope path-resolution helpers."""
 
 from __future__ import annotations
 
@@ -55,19 +55,23 @@ class TestNormalizeRoot:
 class TestResolveSourceFileAllowlist:
     def test_default_when_env_empty(self, monkeypatch):
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         # The enablement ROCm/HIP roots are always merged (default-on capability).
         assert fp.resolve_source_file_allowlist() == (fp._DEFAULT_SOURCE_ROOTS + fp._ROCM_HIP_SOURCE_ROOTS)
 
     def test_merges_discovered_roots(self, monkeypatch):
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ("/venv/site-packages/",))
         monkeypatch.setattr(
             fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
         )
         roots = fp.resolve_source_file_allowlist()
         assert fp._DEFAULT_SOURCE_ROOTS[0] in roots
+        assert "/venv/site-packages/" in roots
         assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
 
     def test_appends_extra_roots_unique_in_order(self, monkeypatch):
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         monkeypatch.setenv(
             "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
             "/opt/custom/sglang:/sgl-workspace/aiter:/opt/other/vllm",
@@ -78,6 +82,17 @@ class TestResolveSourceFileAllowlist:
         assert "/opt/custom/sglang/" in out
         assert "/opt/other/vllm/" in out
         assert out.count("/sgl-workspace/aiter/") == 1
+
+    def test_discovers_active_site_packages_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "lib" / "python3.12" / "site-packages"
+        root.mkdir(parents=True)
+        monkeypatch.setattr(fp.site, "getsitepackages", lambda: [str(root)])
+        monkeypatch.setattr(fp.site, "getusersitepackages", lambda: "")
+        monkeypatch.setattr(fp.sysconfig, "get_path", lambda _key: None)
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
+        assert f"{root}/" in fp.resolve_source_file_allowlist()
 
 
 class TestFindSpecOrigin:
@@ -145,6 +160,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             ),
         )
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         # Isolate from the always-on enablement ROCm/HIP root (may exist on disk).
         monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
@@ -193,6 +209,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()

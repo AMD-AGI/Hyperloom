@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator-event-driven signals.
@@ -27,6 +27,9 @@ class EventConfig:
 
     policy_denied_threshold: int = 3
     delegated_failure_threshold: int = 2
+    # Sustained-failure count at/above which repeated_failure escalates to HIGH
+    # so the action ladder emits prune_branch (first hits stay advisory MEDIUM).
+    delegated_failure_prune_threshold: int = 4
     # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
     # B4 ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
@@ -163,10 +166,13 @@ def _delegated_failure_symptoms(
     for family, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
+        severity = (
+            SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
+        )
         out.append(
             Symptom(
                 name="repeated_failure",
-                severity=SymptomSeverity.MEDIUM,
+                severity=severity,
                 summary=(f"action family {family!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
                 evidence={
                     "family": family,
@@ -314,8 +320,7 @@ def _recover_unsuccessful_symptoms(
                 "state": state,
                 "error_class": error_class,
                 "force_gpu_cleanup": latest.get("force_gpu_cleanup"),
-                "gpureset_attempted": latest.get("gpureset_attempted"),
-                "post_free_mb_per_gpu": latest.get("post_free_mb_per_gpu"),
+                "mid_free_mb_per_gpu": latest.get("mid_free_mb_per_gpu"),
             },
             subject={},  # session-wide
             source="coordinator_events",
@@ -343,7 +348,7 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
     if str(payload.get("family") or "").strip() == "recover":
         return True
     # Executor signature — recover-only fields.
-    if "force_gpu_cleanup" in payload and "gpureset_attempted" in payload:
+    if "force_gpu_cleanup" in payload and "mid_free_mb_per_gpu" in payload:
         return True
     return False
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
@@ -11,7 +11,7 @@ Fields::
     model_class         str   — categorical key supplied via --model-class
     model_arch          dict  — advisory architecture profile (hybrid
                                 structured + free-text notes) loaded from
-                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                the launcher's ``<session_dir>/model_arch.json``;
                                 prompt-context only, no deterministic gating
     model_architectures list  — config.json ``architectures``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
@@ -63,19 +63,21 @@ class _ExploreStateMixin:
         """
         if not isinstance(entry, dict) or not entry:
             return
+        entry = dict(entry)
+        entry.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
-            self.specialist_rounds.append(dict(entry))
+            self.specialist_rounds.append(entry)
         else:
             existing = self.specialist_rounds
             matched = False
             for i, prev in enumerate(existing):
                 if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
-                    existing[i] = dict(entry)
+                    existing[i] = entry
                     matched = True
                     break
             if not matched:
-                existing.append(dict(entry))
+                existing.append(entry)
         self._trim_specialist_rounds()
         # Author-time breakdown capture: one specialist_runs item per round.
         try:
@@ -93,30 +95,6 @@ class _ExploreStateMixin:
         cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
         if len(self.specialist_rounds) > cap:
             self.specialist_rounds = self.specialist_rounds[-cap:]
-
-    def bump_specialist_domain_empty_streak(
-        self,
-        domain: str,
-        *,
-        empty: bool,
-    ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value.
-
-        Args:
-            domain (str): The specialist domain; blank normalizes to
-                ``"unknown"``.
-            empty (bool): ``True`` to increment the streak, ``False`` to reset
-                it to zero.
-
-        Returns:
-            int: The post-update streak value for the domain.
-        """
-        d = str(domain or "").strip() or "unknown"
-        if empty:
-            self.specialist_domain_empty_streak[d] = int(self.specialist_domain_empty_streak.get(d, 0) or 0) + 1
-        else:
-            self.specialist_domain_empty_streak[d] = 0
-        return self.specialist_domain_empty_streak[d]
 
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
@@ -450,6 +428,22 @@ class _ExploreStateMixin:
         """Reset the explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
+    def reset_per_cycle_plateau_state(self) -> None:
+        """Reset transient plateau and dispatch state for a macro-cycle."""
+        self.params_no_promote_streak = 0
+        self.explore_specialist_dispatched_count = 0
+        self.framework_agent_phase_done = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_empty_discoveries = 0
+        self.framework_config_lane_state = ""
+        self.framework_config_lane_round = 0
+        self.framework_config_pending_grid = []
+        self.specialist_domain_empty_streak = {}
+        self.rounds_since_last_specialist = {}
+        self.rounds_since_last_keep = {}
+        self.last_sweep = {}
+        self.last_conc_sweep = {}
+
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
 
@@ -546,9 +540,29 @@ class _ExploreStateMixin:
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         wh = list(prior.get("winners_history") or [])
+        known = {
+            (
+                str(row.get("round_id") or ""),
+                str(row.get("fingerprint") or row.get("variant_name") or ""),
+                str(row.get("ts") or ""),
+            )
+            for row in wh
+            if isinstance(row, dict)
+        }
         for entry in update.get("winners_history") or []:
-            if isinstance(entry, dict):
-                wh.append(dict(entry))
+            if not isinstance(entry, dict):
+                continue
+            row = dict(entry)
+            key = (
+                str(row.get("round_id") or ""),
+                str(row.get("fingerprint") or row.get("variant_name") or ""),
+                str(row.get("ts") or ""),
+            )
+            if key in known:
+                continue
+            row.setdefault("cycle", cur_cycle)
+            known.add(key)
+            wh.append(row)
         merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP :]
         sa: set[tuple[str, ...]] = set()
         for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):

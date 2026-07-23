@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """PolicyGate — single chokepoint: every parsed Intent passes through ``validate_intent`` before side-effects."""
@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from ..framework.paths import resolve_source_file_allowlist
 from ..bus.gpu_pool import (
@@ -30,8 +30,8 @@ from ..phases.machine_state import (
     PHASE_NAMES,
     PHASE_SWEEP,
     is_action_allowed_in_phase,
-    is_action_llm_proposable_in_phase_with_interleave,
-    llm_proposable_actions_for_with_interleave,
+    is_action_llm_proposable_in_phase,
+    llm_proposable_actions_for,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -146,9 +146,9 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# Sweep actions; named constants so the ``*_phase_singleton`` rules have a single source of truth.
+# Full workload sweep action; named constant so the
+# ``sweep_phase_singleton`` rule has a single source of truth.
 SWEEP_ACTION_NAME: str = "sweep"
-CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -478,10 +478,8 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` may match :func:`resolve_source_file_allowlist` (framework trees
-# outside session_dir, resolved at check time). `framework_source_root` is the
-# optional git-apply root override; gating it here blocks an LLM-authored override
-# escaping to an arbitrary dir under strict_paths.
+# `source_file` and `framework_source_root` may point at trusted installed source
+# scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
@@ -596,7 +594,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "lifecycle",
         # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
         "specialist_rounds",
-        "specialist_domain_empty_streak",
         # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
@@ -751,6 +748,49 @@ class PolicyGate:
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
         self._validate_payload_paths(role, intent.type, payload)
 
+    def validate_dispatched_task(
+        self,
+        action_name: str,
+        params: dict[str, Any] | None,
+    ) -> None:
+        """Re-validate a persisted queued task before executor dispatch.
+
+        Defense-in-depth for forged ``coordinator.db`` rows: replays path
+        containment and delegate action gates that normally run at intent
+        ingress. Coordinator-managed internal actions receive path checks
+        only (they are never LLM-delegated). Phase compatibility is
+        intentionally skipped so legitimately queued work is not rejected
+        after a phase transition.
+
+        Args:
+            action_name: The task ``kind`` / delegate action name.
+            params: Task params deserialized from the DB row.
+
+        Raises:
+            PolicyDenied: When the task would have been rejected had it
+                arrived via ``IntentRouter`` delegate validation.
+        """
+        kind = str(action_name or "").strip()
+        if not kind:
+            raise PolicyDenied("dispatched task missing kind", rule="payload")
+        params_dict = dict(params or {}) if isinstance(params, dict) else {}
+        payload = {"action_name": kind, "params": params_dict}
+        role = self.role_registry.get("orchestration")
+        if role is None:
+            raise PolicyDenied("unknown agent 'orchestration'", rule="role")
+        self._validate_payload_paths(role, IntentType.DELEGATE, payload)
+        # Coordinator-managed internal actions (roofline / profile /
+        # replay_warm_recipe / framework_agent / conc_sweep) are dispatched by
+        # the Coordinator itself, never LLM-delegated, so they receive path
+        # checks only. In particular the SWEEP-entry auto-enqueued conc_sweep
+        # must NOT be re-validated against the delegate-body sweep-family
+        # singleton guard here — that guard keys on auto_conc_sweep_task_id,
+        # which is the auto-enqueued task's own id, so it would deny the sole
+        # conc_sweep against itself and surface as a spurious conc_sweep_failed.
+        if kind in COORDINATOR_INTERNAL_ACTIONS:
+            return
+        self._validate_delegate_body(role, payload, check_phase=False)
+
     def _closing_phase_denial(
         self,
         source: str,
@@ -817,7 +857,7 @@ class PolicyGate:
         analysis/internal-only gate, the kernel_agent-owned-action guard, and
         the per-action specialised paths (``specialist`` / ``dynamic_action``
         / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
-        the FP8-only, gain-driven and explore-minimum kernel_opt gates, the
+        the GEMM-tuning ownership, gain-driven and explore-minimum kernel_opt gates, the
         ActionRegistry unknown-action lookup, per-action source and
         required-payload guards, the phase-compatibility check, and the
         external-tool collision guards (R4 / R5).
@@ -833,6 +873,26 @@ class PolicyGate:
         Raises:
             PolicyDenied: if any delegate rule fails; the ``rule``
                 attribute identifies which guard fired.
+        """
+        self._validate_delegate_body(role, payload, check_phase=True)
+
+    def _validate_delegate_body(
+        self,
+        role: "AgentRole",
+        payload: dict[str, Any],
+        *,
+        check_phase: bool,
+    ) -> None:
+        """Shared delegate validation for intents and dispatched task rows.
+
+        Args:
+            role: The resolved role of the emitting agent.
+            payload: Delegate payload with ``action_name`` and optional
+                ``params``.
+            check_phase: When True, enforce the phase-compatibility gate
+                (intent ingress). Dispatch-time replay passes False so
+                legitimately queued tasks are not rejected after a phase
+                transition.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -853,7 +913,8 @@ class PolicyGate:
         # R2 ``specialist`` bypasses ActionRegistry; its contract is enforced by ``_validate_specialist_dispatch``.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
-            self._validate_phase_action(role, action_name, intent_kind="delegate")
+            if check_phase:
+                self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
@@ -861,10 +922,7 @@ class PolicyGate:
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
-        if action_name == CONC_SWEEP_ACTION_NAME:
-            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
-        self._validate_fp8_only_action(action_name, intent_kind="delegate")
+        self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
@@ -900,7 +958,8 @@ class PolicyGate:
                     ),
                 )
         # R1 phase_incompatible; after structural checks so cheaper denials win.
-        self._validate_phase_action(role, action_name, intent_kind="delegate")
+        if check_phase:
+            self._validate_phase_action(role, action_name, intent_kind="delegate")
         # R4 / R5 — block a delegate whose action_name invokes an external tool.
         self._validate_no_kb_write_collision(
             action_name,
@@ -919,7 +978,7 @@ class PolicyGate:
         ActionRegistry lookup here is soft — unknown names are only
         rejected when a registry is wired and the action is neither
         registered nor kernel_agent-owned. Mirrors the delegate channel's
-        explore-grid, sweep-singleton, FP8-only, gain-driven /
+        explore-grid, sweep-singleton, GEMM-tuning ownership, gain-driven /
         explore-minimum kernel_opt, phase, and external-tool collision
         gates so an LLM cannot sidestep them by proposing instead of
         delegating.
@@ -956,14 +1015,10 @@ class PolicyGate:
                 rule="unknown_action",
             )
         # sweep_phase_singleton (defense in depth on the propose_action channel).
+        # conc_sweep is Coordinator-internal (never LLM-proposed); _validate_phase_action
+        # below rejects any LLM conc_sweep as Coordinator-managed (phase_incompatible).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(
-                payload,
-                intent_kind="propose_action",
-            )
-        # conc_sweep_phase_singleton on propose_action.
-        if action_name == CONC_SWEEP_ACTION_NAME:
-            self._validate_conc_sweep_singleton(
                 payload,
                 intent_kind="propose_action",
             )
@@ -979,7 +1034,7 @@ class PolicyGate:
                     "escalate via its action-ladder instead"
                 ),
             )
-        self._validate_fp8_only_action(action_name, intent_kind="propose_action")
+        self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # R4 / R5 — defense in depth on propose_action.
@@ -1055,7 +1110,7 @@ class PolicyGate:
         :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
         allowed-target set, and that ``kind`` is present. For
         orchestration→kernel requests the ``kind`` is treated as the action
-        name, so the internal-only, phase, FP8-only and external-tool
+        name, so the internal-only, phase, GEMM-tuning ownership and external-tool
         collision guards are applied to it as defense in depth.
 
         Args:
@@ -1096,7 +1151,7 @@ class PolicyGate:
             target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
         ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, gated_kind, intent_kind="request")
-        self._validate_fp8_only_action(kind, intent_kind="request")
+        self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
         self._validate_tool_whitelist_collision(
@@ -1229,11 +1284,12 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework "
-                    "are driven by the Coordinator (PRELUDE bootstrap, +10% "
-                    "watermark refresh, warm-recipe replay, FRAMEWORK "
-                    "pump) and never appear in any phase's LLM-proposable "
-                    "set. Propose ``specialist`` or ``explore`` instead."
+                    "roofline / profile / replay_warm_recipe / framework / "
+                    "conc_sweep are driven by the Coordinator (PRELUDE "
+                    "bootstrap, +10% watermark refresh, warm-recipe replay, "
+                    "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "
+                    "in any phase's LLM-proposable set. Propose ``specialist`` "
+                    "or ``explore`` instead (or ``sweep`` for a full workload grid)."
                 ),
             )
         state = self.shared_state
@@ -1243,21 +1299,20 @@ class PolicyGate:
         if not phase or phase not in PHASE_NAMES:
             return
         explore_enabled = bool(getattr(state, "explore_enabled", True))
-        # --no-explore disables EXPLORE for the whole run, so the interleave
-        # channel must not let KERNEL re-introduce an ``explore`` grid. Always
-        # fail-closed (independent of ``strict_phase``): it is an operator decision.
+        # --no-explore disables EXPLORE for the whole run, so KERNEL must not
+        # re-introduce an ``explore`` grid. Always fail-closed (independent of
+        # ``strict_phase``): it is an operator decision.
         if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
-                f"(--no-explore); KERNEL may not borrow the interleave "
-                f"channel to run an explore grid",
+                f"(--no-explore); KERNEL may not run an explore grid",
                 rule="explore_disabled",
                 hint=(
-                    "--no-explore skips the EXPLORE phase entirely. The "
-                    "phase-interleave grey channel cannot reintroduce "
-                    "`explore` into KERNEL. Use kernel_agent-owned actions "
-                    "(kernel_opt / integrate / ...), or `specialist` / "
-                    "`integrate_patch` if you need patch research/integration."
+                    "--no-explore skips the EXPLORE phase entirely, so "
+                    "`explore` cannot be reintroduced into KERNEL. Use "
+                    "kernel_agent-owned actions (kernel_opt / integrate / ...), "
+                    "or `specialist` / `integrate_patch` if you need patch "
+                    "research/integration."
                 ),
             )
         # Robustness-delegate-only actions (e.g. ``recover``) are absent from the LLM-proposable set but still delegatable by robustness; accept if phase-allowed.
@@ -1267,20 +1322,9 @@ class PolicyGate:
             and is_action_allowed_in_phase(action_name, phase)
         ):
             return
-        if is_action_llm_proposable_in_phase_with_interleave(
-            action_name,
-            phase,
-            explore_enabled=explore_enabled,
-        ):
+        if is_action_llm_proposable_in_phase(action_name, phase):
             return
-        allowed = tuple(
-            sorted(
-                llm_proposable_actions_for_with_interleave(
-                    phase,
-                    explore_enabled=explore_enabled,
-                )
-            )
-        )
+        allowed = llm_proposable_actions_for(phase)
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
@@ -1308,18 +1352,19 @@ class PolicyGate:
             hint=hint,
         )
 
-    # FP8-only actions
-    def _validate_fp8_only_action(
+    # GEMM tuning ownership
+    def _validate_gemm_tuning_action(
         self,
         action_name: str,
         *,
         intent_kind: str,
     ) -> None:
-        """Reject GEMM tuning for non-FP8 sessions when using GEAK backend.
+        """Do not pre-filter GEMM tuning applicability in Hyperloom.
 
-        When GEMM_TUNING_BACKEND=forge (or KERNEL_OPT_BACKEND_ORDER starts
-        with forge), the FP8 gate is lifted since forge-gemm-tune supports
-        bf16/fp4/vLLM natively and handles eligibility internally.
+        Current GEAK owns its optimization loop and decides internally whether
+        GEMM tuning applies to the workload.  Hyperloom keeps this hook as a
+        named policy boundary but deliberately does not reject by precision,
+        framework, or GEMM type.
 
         Args:
             action_name (str): the action name being checked.
@@ -1327,32 +1372,9 @@ class PolicyGate:
                 error hint.
 
         Raises:
-            PolicyDenied: when a GEAK-only GEMM tuning action is requested but
-                the session precision is not ``fp8``.
+            PolicyDenied: This hook does not currently raise.
         """
-        if not action_name or action_name not in _GEMM_TUNING_ACTIONS:
-            return
-        # Dynamically check if forge backend lifts the FP8 gate.
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
-
-        if _resolve_gemm_tuning_backend({}) == "forge":
-            return  # forge handles eligibility internally; no FP8 gate.
-        state = self.shared_state
-        if state is None:
-            return
-        precision = str(getattr(state, "precision", "") or "").strip().lower()
-        if precision == "fp8":
-            return
-        raise PolicyDenied(
-            f"action {action_name!r} is FP8-only but session precision={precision or '(unset)'!r}",
-            rule="fp8_only_action",
-            hint=(
-                f"intent_kind={intent_kind!r}: GEAK GEMM tuning only applies "
-                "to FP8 block-scale workloads. Set PRECISION=fp8 / "
-                "--precision fp8, or use GEMM_TUNING_BACKEND=forge for "
-                "broader precision support."
-            ),
-        )
+        return
 
     # R4 — kb_write_unauthorized
     def _validate_no_kb_write_collision(
@@ -1438,11 +1460,18 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Deny agent workload sweeps once SWEEP auto-dispatched conc_sweep.
+        """Deny an LLM workload ``sweep`` once SWEEP auto-dispatched ``conc_sweep``.
 
-        The automatic phase path now runs ``conc_sweep`` directly, so a later
-        LLM-proposed full ``sweep`` would only burn extra GPU time. Escape:
+        The automatic phase path runs the Coordinator-internal ``conc_sweep``
+        directly on SWEEP entry (recorded as ``auto_conc_sweep_task_id`` in the
+        latest ``phase_history`` evidence), so a later LLM-proposed full
+        ``sweep`` would only burn extra GPU time. Escape:
         ``params.bypass_sweep_singleton=True``.
+
+        ``conc_sweep`` itself has no singleton guard — it is a
+        Coordinator-internal action (see ``COORDINATOR_INTERNAL_ACTIONS``) that
+        is never LLM-proposed, so an LLM ``conc_sweep`` is rejected earlier by
+        ``_validate_phase_action`` as Coordinator-managed.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1455,99 +1484,8 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 conc_sweep task and no bypass flag is set.
         """
-        self._validate_sweep_family_singleton(
-            payload,
-            bypass_key="bypass_sweep_singleton",
-            evidence_key="auto_conc_sweep_task_id",
-            rule="sweep_phase_singleton",
-            message_fn=lambda auto_id: (
-                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
-                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
-                f"sweep is no longer part of the automatic closeout path."
-            ),
-            hint=(
-                "The Coordinator's SWEEP-entry hook already dispatches "
-                "conc_sweep directly; no full workload sweep proposal is "
-                "needed. Wait for SWEEP→CLOSE. "
-                "If you genuinely need a second grid for debug, "
-                f"set params.bypass_sweep_singleton=True on the "
-                f"{intent_kind} payload (the override is recorded "
-                f"on the audit trail)."
-            ),
-        )
-
-    # ``conc_sweep_phase_singleton``
-    def _validate_conc_sweep_singleton(
-        self,
-        payload: dict[str, Any],
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Enforce one conc_sweep per SWEEP phase; re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
-
-        Args:
-            payload (dict[str, Any]): the intent payload;
-                ``params.bypass_conc_sweep_singleton`` opts out of the singleton
-                guard.
-            intent_kind (str): the channel the action arrived on, used in the
-                error hint.
-
-        Raises:
-            PolicyDenied: when the SWEEP phase already carries an auto-enqueued
-                conc_sweep task and no bypass flag is set.
-        """
-        self._validate_sweep_family_singleton(
-            payload,
-            bypass_key="bypass_conc_sweep_singleton",
-            evidence_key="auto_conc_sweep_task_id",
-            rule="conc_sweep_phase_singleton",
-            message_fn=lambda auto_id: (
-                f"conc_sweep: SWEEP phase already has an auto-enqueued "
-                f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
-                f"duplicate runs reproduce the same baseline + current_best "
-                f"comparison and add no new data while burning 30-150 min "
-                f"of GPU time."
-            ),
-            hint=(
-                "Coordinator's SWEEP-entry hook already dispatched "
-                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
-                "second run for debug, set "
-                f"params.bypass_conc_sweep_singleton=True on the "
-                f"{intent_kind} payload (recorded on the audit trail)."
-            ),
-        )
-
-    def _validate_sweep_family_singleton(
-        self,
-        payload: dict[str, Any],
-        *,
-        bypass_key: str,
-        evidence_key: str,
-        rule: str,
-        message_fn: Callable[[str], str],
-        hint: str,
-    ) -> None:
-        """Shared SWEEP-phase singleton guard for the sweep / conc_sweep family.
-
-        Walks the latest ``phase_history`` entry and denies when the SWEEP phase
-        already carries an auto-enqueued task under *evidence_key* (unless the
-        per-family *bypass_key* is set on ``params``).
-
-        Args:
-            payload: The intent payload (``params.<bypass_key>`` opts out).
-            bypass_key: ``params`` flag that bypasses this guard.
-            evidence_key: ``phase_history[-1].evidence`` key holding the
-                auto-enqueued task id.
-            rule: PolicyDenied rule id raised on conflict.
-            message_fn: Builds the deny message from the resolved auto-task id.
-            hint: PolicyDenied remediation hint.
-
-        Raises:
-            PolicyDenied: when the SWEEP phase already carries the auto-enqueued
-                task and no bypass flag is set.
-        """
         params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get(bypass_key):
+        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
             return
         ss = getattr(self, "shared_state", None)
         if ss is None:
@@ -1563,16 +1501,32 @@ class PolicyGate:
         evidence = latest.get("evidence")
         if not isinstance(evidence, dict):
             return
-        auto_id = str(evidence.get(evidence_key) or "").strip()
+        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
         if not auto_id:
             return
-        raise PolicyDenied(message_fn(auto_id), rule=rule, hint=hint)
+        raise PolicyDenied(
+            (
+                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
+                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
+                f"sweep is no longer part of the automatic closeout path."
+            ),
+            rule="sweep_phase_singleton",
+            hint=(
+                "The Coordinator's SWEEP-entry hook already dispatches "
+                "conc_sweep directly; no full workload sweep proposal is "
+                "needed. Wait for SWEEP→CLOSE. "
+                "If you genuinely need a second grid for debug, "
+                f"set params.bypass_sweep_singleton=True on the "
+                f"{intent_kind} payload (the override is recorded "
+                f"on the audit trail)."
+            ),
+        )
 
     def _validate_integrate_patch_critic_gate(
         self,
         payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless operator sets ``HYPERLOOM_BYPASS_CRITIC=1``).
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict).
 
         Args:
             payload (dict[str, Any]): the integrate_patch intent payload
@@ -1581,8 +1535,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: when ``params`` is malformed, ``specialist_task_id``
                 is missing, no Critic verdict is on record, or the verdict is
-                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS` (and the
-                operator has not set ``HYPERLOOM_BYPASS_CRITIC=1``).
+                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1602,19 +1555,6 @@ class PolicyGate:
                     "the patches you want to apply."
                 ),
             )
-        # Bypass must come from the out-of-band operator env the LLM cannot
-        # author; an in-band params.bypass_critic is ignored (self-approval).
-        bypass = os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1"
-        if bypass:
-            return
-        if params.get("bypass_critic"):
-            # In-band bypass is ignored; log the attempted override.
-            log.warning(
-                "integrate_patch: in-band params.bypass_critic ignored; Critic gate "
-                "enforced for specialist_task_id=%r (operator override is "
-                "HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-                sid,
-            )
         ss = getattr(self, "shared_state", None)
         verdict = ""
         if ss is not None:
@@ -1631,9 +1571,7 @@ class PolicyGate:
                     "Wait for the Critic to emit a "
                     "review_verdict{target_proposal_msg_id=<patch "
                     "proposal>, verdict=approve|reject|...} for this "
-                    "specialist. An operator may override out-of-band with "
-                    "HYPERLOOM_BYPASS_CRITIC=1 (in-band bypass_critic is "
-                    "ignored). The Critic verdict "
+                    "specialist. The Critic verdict "
                     "is recorded on SharedState.specialist_patch_verdicts."
                 ),
             )
@@ -1646,11 +1584,8 @@ class PolicyGate:
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "Either ask the Critic to re-review (next "
-                    "review_verdict overwrites this one), drop the "
-                    "patch (specialist_done.patches_written=[]), or "
-                    "have an operator set HYPERLOOM_BYPASS_CRITIC=1 "
-                    "out-of-band to force integration with an explicit "
-                    "operator audit trail (in-band bypass_critic is ignored)."
+                    "review_verdict overwrites this one), or drop the "
+                    "patch (specialist_done.patches_written=[])."
                 ),
             )
 
@@ -1856,7 +1791,9 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0:
+        if ceiling <= 0 and not (
+            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
+        ):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",
@@ -2279,15 +2216,14 @@ class PolicyGate:
         return v == sd or v.is_relative_to(sd)
 
     def _path_in_source_allowlist(self, value: str) -> bool:
-        """Return whether a path falls under a framework source allowlist.
+        """Return whether a path falls under a trusted installed source scope.
 
         Args:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` resolves to or under any root returned by
-                :func:`resolve_source_file_allowlist` (the aiter / sglang /
-                vllm source trees); False otherwise.
+            bool: True when ``value`` resolves to or under a configured editable
+            source root, active site/dist-packages root, or ROCm source root.
         """
         return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
 
@@ -2358,11 +2294,14 @@ class PolicyGate:
                     return
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is not under session_dir or any of "
+                    f"{key!r}={node!r} is not under session_dir or a trusted "
+                    f"installed source scope from "
                     f"{list(resolve_source_file_allowlist())!r}",
-                    rule="source_file_not_allowlisted",
+                    rule="source_file_outside_trusted_scope",
                     hint=(
-                        "kernel-opt may only target framework source trees under aiter/sglang/vllm; reject the request"
+                        "source_file and framework_source_root must resolve under "
+                        "an active site/dist-packages, configured framework root, "
+                        "or session directory"
                     ),
                 )
             if key not in PATH_LIKE_FIELDS:

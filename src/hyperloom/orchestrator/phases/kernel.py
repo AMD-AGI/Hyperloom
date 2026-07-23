@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
@@ -87,7 +87,29 @@ class KernelPhase(PhaseHandler):
                 from_phase or "<unknown>",
             )
             return
-        if self._geak_enabled():
+        geak_enabled = self._geak_enabled()
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            selected = "geak" if geak_enabled else "kernel_agent_forge"
+            instrument.record_kernel_strategy_selection(
+                self.session_dir,
+                selected_strategy=selected,
+                actual_path=selected,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
+            if not geak_enabled:
+                instrument.record_native_kernel_run_start(
+                    self.session_dir,
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    payload={
+                        "kernel_optimizer": str(getattr(self.shared_state, "kernel_optimizer", "") or ""),
+                        "from_phase": from_phase,
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            log.debug("kernel v4 strategy selection recording failed", exc_info=True)
+        if geak_enabled:
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
             # seeded with the EXPLORE best config, then hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
@@ -119,6 +141,7 @@ class KernelPhase(PhaseHandler):
                     {
                         "task_id": "kernel_entry_gemm_tuning",
                         "reason": "kernel_entry_auto",
+                        "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     },
                     session_dir=self.session_dir,
                 )
@@ -183,6 +206,7 @@ class KernelPhase(PhaseHandler):
         payload = {
             "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
             "reason": "fp8_no_improvement_bf16_fallback",
+            "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
             "precision": "bf16",
             "tuner": "sglang_dense_bf16",
         }
@@ -379,6 +403,18 @@ class KernelPhase(PhaseHandler):
         signals SWEEP via the ``skip_to_sweep`` escalate hint.
         """
         state = self.shared_state
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="runner_started",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result={"from_phase": from_phase},
+                status="running",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 start recording failed", exc_info=True)
         cb = state.current_best or {}
         accepted_flags = str(cb.get("extra_server_args") or "")
         extra_envs = cb.get("extra_envs") or {}
@@ -438,6 +474,7 @@ class KernelPhase(PhaseHandler):
             # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
             # numbers are cross-harness comparable.
             "bench_client": "auto",
+            "e2e_metric": "output",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
             "gpu_ids": (
@@ -483,6 +520,25 @@ class KernelPhase(PhaseHandler):
             # the caller enqueues the main-flow rebench that writes the headline.
             self._record_geak_candidate(result)
             self._record_geak_kernel_journey(result)
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                instrument.record_geak_operation(
+                    self.session_dir,
+                    stage="runner_result",
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    result={**result, "recovered_from": recovered_from},
+                    status=str(result.get("status") or "unknown"),
+                )
+                instrument.record_geak_operation(
+                    self.session_dir,
+                    stage="candidate",
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    result=result,
+                    status="running",
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("geak recovered v4 result recording failed", exc_info=True)
             evidence = {
                 "status": result.get("status"),
                 "throughput_speedup": result.get("throughput_speedup"),
@@ -507,6 +563,18 @@ class KernelPhase(PhaseHandler):
             the ``skip_to_sweep`` hint so the coordinator never deadlocks.
             """
             state.geak_result = result
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                instrument.record_geak_operation(
+                    self.session_dir,
+                    stage="failed",
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    result=result,
+                    status=str(result.get("status") or "failed"),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("geak v4 failure recording failed", exc_info=True)
             self._record_phase_entry_evidence(
                 geak={
                     "status": result.get("status"),
@@ -584,12 +652,14 @@ class KernelPhase(PhaseHandler):
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
         def _run() -> subprocess.CompletedProcess:
+            runner_env = dict(os.environ)
+            runner_env["E2E_METRIC"] = "output"
             p = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=dict(os.environ),
+                env=runner_env,
                 start_new_session=True,
             )
 
@@ -675,6 +745,18 @@ class KernelPhase(PhaseHandler):
         # Carry the actual exit code so the breakdown can audit a nonzero rc.
         result.setdefault("returncode", proc.returncode)
         state.geak_result = result
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="runner_result",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result=result,
+                status=str(result.get("status") or "unknown"),
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 runner-result recording failed", exc_info=True)
 
         # Invariant guard: a GEAK run whose baseline ref failed to reproduce
         # ``orchestrator_best_tput_same_config`` optimized against a phantom
@@ -703,6 +785,18 @@ class KernelPhase(PhaseHandler):
         # headline is written later from the measured rebench.
         self._record_geak_candidate(result)
         self._record_geak_kernel_journey(result)
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="candidate",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result=result,
+                status="running",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 candidate recording failed", exc_info=True)
         # Enqueue the same-harness config-identity rebench — the ONLY path that
         # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
@@ -864,6 +958,21 @@ class KernelPhase(PhaseHandler):
             return
         if measured <= 0:
             return
+        # KEEP guard (aligns GEAK with forge / integrate_patch): a measured
+        # rebench that does not beat the current best must NOT overwrite the
+        # headline / stack / gain. Backstops every promote entry point (2a, 2b,
+        # crash-recovery) so a low-but-valid measurement can never lower best.
+        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_tput = cb_now.get("tput")
+        if isinstance(cb_tput, (int, float)) and cb_tput > 0 and measured <= float(cb_tput):
+            log.info(
+                "geak promote skipped: measured %.3f did not beat current_best %.3f",
+                measured,
+                float(cb_tput),
+            )
+            self.shared_state.geak_pending = {}
+            self.shared_state.resume_pending_revalidation = False
+            return
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
 
         cb = dict(self.shared_state.current_best or {})
@@ -931,6 +1040,21 @@ class KernelPhase(PhaseHandler):
         self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="final_validation",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result=result,
+                status="succeeded",
+                validated=True,
+                measured_tput=measured,
+                validation_source=provenance,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 final validation recording failed", exc_info=True)
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
@@ -975,6 +1099,7 @@ class KernelPhase(PhaseHandler):
                     hot_kernels=list(run.get("hot_kernels") or []),
                     scan=run.get("scan") if isinstance(run.get("scan"), dict) else None,
                     tool="geak",
+                    route_strategy="legacy_only",
                 )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey discovery replay failed", exc_info=True)
@@ -994,10 +1119,15 @@ class KernelPhase(PhaseHandler):
                     skip_reason=str(disp.get("skip_reason") or ""),
                     orchestration_commit=commit,
                     task_group=disp.get("task_group"),
+                    route_strategy="legacy_only",
                 )
                 br = k.get("backend_result")
                 if isinstance(br, dict):
-                    instrument.record_kernel_backend_result(sdir, br)
+                    instrument.record_kernel_backend_result(
+                        sdir,
+                        br,
+                        route_strategy="legacy_only",
+                    )
                 e2e = k.get("e2e")
                 if isinstance(e2e, dict):
                     instrument.record_kernel_e2e(
@@ -1010,6 +1140,8 @@ class KernelPhase(PhaseHandler):
                         patch_path=e2e.get("patch_path"),
                         target_file=e2e.get("target_file"),
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
+                        result=e2e,
+                        route_strategy="legacy_only",
                     )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
@@ -1112,6 +1244,20 @@ class KernelPhase(PhaseHandler):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
             self._promote_gemm_tuning_keep(result)
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_gemm_tuning_operation(
+                self.session_dir,
+                payload={
+                    "task_id": str(result.get("task_id") or "kernel_entry_gemm_tuning"),
+                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                },
+                result=result,
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("gemm v4 finalized-result recording failed", exc_info=True)
         self.shared_state.save(self.session_dir)
 
     def _journal_gemm_tuning_keep(

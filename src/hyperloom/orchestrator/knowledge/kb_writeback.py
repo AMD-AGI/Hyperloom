@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """KB writeback adapters for specialist outcomes.
@@ -13,6 +13,7 @@ mirrors the file into gbrain.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -175,6 +176,7 @@ async def write_framework_record(
     changed_files: list[str] | None = None,
     source_framework: str = "",
     target_framework: str = "",
+    session_dir: Path | str | None = None,
 ) -> Path:
     """Append a framework-PR outcome record to ``lessons.jsonl``.
 
@@ -216,7 +218,70 @@ async def write_framework_record(
         source_framework=source_framework,
         target_framework=target_framework,
     )
-    return await asyncio.to_thread(_append_record_sync, record)
+    path = await asyncio.to_thread(_append_record_sync, record)
+    if session_dir:
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            identity = "|".join((pr_sha, pr_url, gap_canonical_id, outcome))
+            operation_key = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:16]
+            operation_id = f"op:framework-kb:{operation_key}"
+            artifact_id = f"artifact:framework-kb:{operation_key}"
+            measurement_id = f"measurement:framework-kb:{operation_key}:gain"
+            instrument.record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                operation_id=operation_id,
+                kind="gain",
+                name="throughput_delta",
+                value=float(tps_delta_pct or 0.0),
+                unit="percent",
+                status="succeeded",
+                producer="framework-kb",
+                metric_basis="framework_candidate",
+                source={"field": "tps_delta_pct"},
+            )
+            instrument.record_artifact(
+                session_dir,
+                artifact_id=artifact_id,
+                operation_id=operation_id,
+                producer_operation_id=operation_id,
+                kind="kb_record",
+                path=str(path),
+                present=True,
+                status="available",
+                producer="framework-kb",
+            )
+            instrument.record_operation(
+                session_dir,
+                operation_id=operation_id,
+                root_operation_id=operation_id,
+                kind="kb_write",
+                name="framework optimization lesson",
+                status="succeeded",
+                source="framework_kb_writeback",
+                executor_class="deterministic",
+                purpose="knowledge_write",
+                strategy_group="framework",
+                strategy=str(provenance or "framework"),
+                producer="framework-kb",
+                inputs=record,
+                outputs={"path": str(path), "outcome": outcome},
+                measurement_refs=[measurement_id],
+                artifact_refs=[artifact_id],
+            )
+            instrument.record_trace_event(
+                session_dir,
+                trace_event_id=f"trace:{operation_id}:finalized",
+                operation_id=operation_id,
+                kind="kb_write_finalized",
+                status="succeeded",
+                outcome=outcome,
+                producer="framework-kb",
+            )
+        except Exception:  # noqa: BLE001 -- KB persistence must not depend on telemetry
+            pass
+    return path
 
 
 __all__ = [

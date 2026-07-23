@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator + MockBackend + SubAgentRunner tests."""
@@ -1457,7 +1457,9 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         reason = await c.run(max_ticks=5)
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
-        assert c.shared_state.crash_count == 1
+        # Two advance_phase calls per run (pre-reactor hint consume + main) each
+        # record a coordinator exception when the tick body raises.
+        assert c.shared_state.crash_count == 2
         assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
         persisted = SharedState.load_or_init(session_dir)
@@ -1554,7 +1556,14 @@ async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_di
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.dispatcher._pump_dispatcher_once()
         assert not any("dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage() for r in caplog.records)
-        # dispatch unchanged: the task still fails on the missing runner.
-        assert await c.tasks.by_state("failed")
+        # Plan B replays PolicyGate before running: kernel-owned kinds are
+        # cancelled at dispatch (not failed on a missing runner).
+        cancelled = await c.tasks.by_state("cancelled")
+        assert len(cancelled) == 1
+        assert cancelled[0].kind == "kernel_opt"
+        evidence = (cancelled[0].history or [{}])[-1].get("evidence") or {}
+        assert evidence.get("reason") == "policy_denied"
+        assert evidence.get("rule") == "kernel_owned_by_kernel_agent"
+        assert not await c.tasks.by_state("failed")
     finally:
         await c.stop()

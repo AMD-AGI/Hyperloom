@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for signal rules + classifier."""
@@ -180,6 +180,28 @@ def test_repeated_failure_groups_by_family():
     sym = next(s for s in out if s.name == "repeated_failure")
     assert sym.evidence["family"] == "kernel_opt"
     assert sym.evidence["count"] == 2
+    # Two failures is above the alert threshold but below the prune threshold.
+    assert sym.severity is SymptomSeverity.MEDIUM
+
+
+def test_repeated_failure_escalates_to_high_at_prune_threshold():
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {"state": "failed", "kind": "kernel_opt", "task_id": f"t{i}"},
+        }
+        for i in range(4)
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(
+        _ctx(),
+        data,
+        config=EventConfig(delegated_failure_threshold=2, delegated_failure_prune_threshold=4),
+    )
+    sym = next(s for s in out if s.name == "repeated_failure")
+    assert sym.evidence["count"] == 4
+    assert sym.severity is SymptomSeverity.HIGH
 
 
 def test_recover_unsuccessful_fires_on_needs_review_with_gpu_unhealthy_error():
@@ -191,10 +213,9 @@ def test_recover_unsuccessful_fires_on_needs_review_with_gpu_unhealthy_error():
                 "task_id": "tsk-9",
                 "kind": "recover",
                 "state": "needs_review",
-                "error_class": "gpu_unhealthy_after_gpureset",
+                "error_class": "gpu_unhealthy_after_soft_cleanup",
                 "force_gpu_cleanup": True,
-                "gpureset_attempted": True,
-                "post_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
+                "mid_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
             },
         },
     ]
@@ -203,9 +224,9 @@ def test_recover_unsuccessful_fires_on_needs_review_with_gpu_unhealthy_error():
     sym = next((s for s in out if s.name == "recover_unsuccessful"), None)
     assert sym is not None
     assert sym.severity is SymptomSeverity.HIGH
-    assert sym.evidence["error_class"] == "gpu_unhealthy_after_gpureset"
+    assert sym.evidence["error_class"] == "gpu_unhealthy_after_soft_cleanup"
     assert sym.evidence["task_id"] == "tsk-9"
-    assert sym.evidence["post_free_mb_per_gpu"][0]["free_mb"] == 12.0
+    assert sym.evidence["mid_free_mb_per_gpu"][0]["free_mb"] == 12.0
 
 
 def test_recover_unsuccessful_silent_when_recover_succeeded():
@@ -218,7 +239,6 @@ def test_recover_unsuccessful_silent_when_recover_succeeded():
                 "kind": "recover",
                 "state": "succeeded",
                 "force_gpu_cleanup": True,
-                "gpureset_attempted": False,
             },
         },
     ]
@@ -237,7 +257,6 @@ def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
                 "kind": "recover",
                 "state": "succeeded",
                 "force_gpu_cleanup": True,
-                "gpureset_attempted": False,
             },
         },
         {
@@ -249,7 +268,6 @@ def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
                 "state": "needs_review",
                 "error_class": "gpu_unhealthy_after_soft_cleanup",
                 "force_gpu_cleanup": True,
-                "gpureset_attempted": False,
             },
         },
     ]
@@ -358,7 +376,7 @@ def test_idempotency_replay_silent_when_no_key():
 
 
 def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
-    # kind tag elided; recognised as recover via the force_gpu_cleanup + gpureset_attempted signature.
+    # kind tag elided; recognised as recover via the force_gpu_cleanup + mid_free_mb_per_gpu signature.
     coord_events = [
         {
             "topic": "delegated_result",
@@ -368,7 +386,7 @@ def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
                 "state": "needs_review",
                 "error_class": "gpu_unhealthy_after_soft_cleanup",
                 "force_gpu_cleanup": True,
-                "gpureset_attempted": False,
+                "mid_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
             },
         },
     ]

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared workload-env materialization (single source of truth).
@@ -86,24 +86,6 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 # Truthy-false spellings that disable the accuracy gate.
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
-# Truthy spellings that (re)enable a normally-off toggle.
-_RUN_EVAL_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
-
-
-def sweep_run_eval_enabled() -> bool:
-    """Whether ``sweep`` / ``conc_sweep`` variants should run the accuracy eval.
-
-    The GSM8K accuracy eval is invariant to concurrency / workload shape, so it
-    is OFF by default for sweeps (the accuracy gate still runs on every
-    ``explore`` / ``baseline`` benchmark). Opt back in with
-    ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1`` (truthy).
-
-    Returns:
-        ``True`` only when ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL`` is set to a
-        truthy value; ``False`` otherwise (the default).
-    """
-    return str(os.environ.get("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", "")).strip().lower() in _RUN_EVAL_TRUE_VALUES
 
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
@@ -262,6 +244,72 @@ def default_baseline_config() -> Path:
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
     rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
     return asset_root() / rel
+
+
+def _finalize_framework_server_args(
+    envs: dict[str, Any],
+    bench: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    isl_val: int,
+    osl_val: int,
+) -> None:
+    """Apply the final framework server-arg guard pipeline in place
+    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed."""
+    framework_env = server_args_env_name(bench.get("framework"))
+    resolved_server_args = str(envs.get(framework_env, "")).strip()
+    resolved_server_args = inject_sglang_context_length(
+        resolved_server_args,
+        bench.get("framework"),
+        bench.get("model"),
+        isl_val,
+        osl_val,
+        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
+    )
+    resolved_server_args = inject_sglang_watchdog_timeout(
+        resolved_server_args,
+        bench.get("framework"),
+    )
+    # 3. Dual-chunk attention backend: Qwen 1M models need
+    #    dual_chunk_flash_attn; inject it unless --attention-backend is pinned.
+    resolved_server_args = inject_sglang_attention_backend(
+        resolved_server_args,
+        bench.get("framework"),
+        bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    # 4. MoE runner backend: aiter's CK fused-MoE JIT build is broken in some
+    #    images; inject the triton MoE runner unless --moe-runner-backend is
+    #    pinned.
+    resolved_server_args = inject_sglang_moe_runner_backend(
+        resolved_server_args,
+        bench.get("framework"),
+        bench.get("model"),
+        gpu_type=gpu_type or bench.get("runner_type"),
+    )
+    resolved_server_args = inject_vllm_expert_parallel(
+        resolved_server_args,
+        bench.get("framework"),
+        os.environ.get("EP", "").strip() or envs.get("EP"),
+    )
+    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
+    #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
+    #    sglang.
+    resolved_server_args = dedup_vllm_server_args(
+        resolved_server_args,
+        bench.get("framework"),
+    )
+    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
+    #    compact each JSON blob to be space-free so it survives as one shell
+    #    word. No-op for sglang and for arg strings with no JSON.
+    resolved_server_args = compact_json_server_args(
+        resolved_server_args,
+        bench.get("framework"),
+    )
+    resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
+    if resolved_server_args:
+        envs[framework_env] = resolved_server_args
 
 
 def materialize_config_with_envs(
@@ -443,8 +491,9 @@ def materialize_config_with_envs(
     osl_val = int(envs.get("OSL") or 1024)
     conc_val = int(envs.get("CONC") or 64)
 
-    # Steady-state window for profiling configs (detected by PROFILE env or
-    # ``profiler.torch_profiler.enabled``). The captured-step count is capped at
+    # Steady-state window for profiling configs (detected by YAML
+    # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
+    # The captured-step count is capped at
     # a serialization-safe budget; the profile OSL is resolved (and lowered if
     # needed) so the steady-state floor fits that cap:
     #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP (default 128)
@@ -729,6 +778,12 @@ def materialize_config_with_envs(
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
+    # Final dedup after reference/server_args merges: collapse repeated
+    # vLLM/atom single-value flags to last-wins so recipe/variant values
+    # override earlier ones (no-op for sglang).
+    _final_args = str(envs.get(framework_env, "")).strip()
+    if _final_args:
+        envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
     # re-inject the image-quality reference here (the single scriptable choke
@@ -865,60 +920,7 @@ def materialize_config_with_envs(
     # 2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
     #    first-request aiter JIT compile survives (the 300s default fires
     #    SIGQUIT mid-warmup on a cold aiter cache).
-    framework_env = server_args_env_name(bench.get("framework"))
-    resolved_server_args = str(envs.get(framework_env, "")).strip()
-    resolved_server_args = inject_sglang_context_length(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        isl_val,
-        osl_val,
-        max_model_len=envs.get("MAX_MODEL_LEN") or os.environ.get("MAX_MODEL_LEN"),
-    )
-    resolved_server_args = inject_sglang_watchdog_timeout(
-        resolved_server_args,
-        bench.get("framework"),
-    )
-    # 3. Dual-chunk attention backend: Qwen 1M models need
-    #    dual_chunk_flash_attn; inject it unless --attention-backend is pinned.
-    resolved_server_args = inject_sglang_attention_backend(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
-    )
-    # 4. MoE runner backend: aiter's CK fused-MoE JIT build is broken in some
-    #    images; inject the triton MoE runner unless --moe-runner-backend is
-    #    pinned.
-    resolved_server_args = inject_sglang_moe_runner_backend(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
-    )
-    resolved_server_args = inject_vllm_expert_parallel(
-        resolved_server_args,
-        bench.get("framework"),
-        os.environ.get("EP", "").strip() or envs.get("EP"),
-    )
-    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
-    #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
-    #    sglang.
-    resolved_server_args = dedup_vllm_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
-    # 6. JSON-valued flags (--speculative-config / --compilation-config /
-    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
-    #    compact each JSON blob to be space-free so it survives as one shell
-    #    word. No-op for sglang and for arg strings with no JSON.
-    resolved_server_args = compact_json_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
-    resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
-    if resolved_server_args:
-        envs[framework_env] = resolved_server_args
+    _finalize_framework_server_args(envs, bench, gpu_type=gpu_type, isl_val=isl_val, osl_val=osl_val)
     # ── Client trust-remote-code (model-agnostic) ─────────────────────────
     # The MI300X bench scripts always launch the SERVER with
     # --trust-remote-code, so a custom-tokenizer model's CLIENT must load the

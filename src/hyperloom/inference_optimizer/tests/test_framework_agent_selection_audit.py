@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing,
@@ -213,10 +213,11 @@ async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
     coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
+    coord.shared_state.macro_cycle = 2
     cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
     await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
     prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "already_present" for p in prog)
+    assert any(p.get("status") == "already_present" and p.get("cycle") == 2 for p in prog)
     assert seen  # KB writeback fired for already_present
 
 
@@ -299,6 +300,25 @@ def test_ranker_client_from_scorer(coord: Coordinator) -> None:
     assert coord._framework_agent_ranker_client() is fake_client
     # Now cached.
     assert coord._framework_agent_ranker_client() is fake_client
+
+
+def test_ranker_client_reuses_orchestration_backend_client(coord: Coordinator) -> None:
+    """When orchestration exposes an OpenAI-compatible client, the ranker reuses
+    it (default-on without extra credentials)."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+
+    class _FakeChat:
+        pass
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    fake = _FakeClient()
+    coord.backends["orchestration"]._client = fake  # type: ignore[attr-defined]
+    assert coord._framework_agent_ranker_client() is fake
+    # Cached after first resolution.
+    assert coord._framework_agent_ranker_client() is fake
 
 
 def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:

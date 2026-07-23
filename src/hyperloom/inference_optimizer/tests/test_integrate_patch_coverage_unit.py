@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Supplementary coverage for IntegratePatchExecutor decision + KB paths."""
@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from .conftest import patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
@@ -37,6 +39,11 @@ index 0000000..1111111 100644
 -    return 1
 +    return 2
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -134,9 +141,9 @@ async def test_rejected_by_critic(tmp_path):
 
 @pytest.mark.asyncio
 async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
-    # SWSPLAT-42420: a queued/resume-dispatched task is NOT re-validated by
-    # PolicyGate. With a live SharedState but no recorded verdict (a forged
-    # coordinator.db row), integrate_patch must refuse to apply the patch.
+    # Dispatch replays PolicyGate before queued→running (see test_dispatched_task_policy).
+    # This case still covers the executor-layer critic gate: with SharedState present
+    # but no recorded verdict, integrate_patch must refuse to apply the patch.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -157,6 +164,35 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     )
     assert res["status"] == "rejected_by_critic"
     # patch not applied: the source file is untouched.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_slash_framework_root_override_rejected(tmp_path):
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": "/",
+                "apply_only": True,
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "framework_source_root_rejected"
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -199,32 +235,6 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     assert res["status"] == "rejected_by_critic"
     assert called["setup"] is False, "setup_commands ran before the Critic gate"
     assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_forged_task_bypass_env_allows_without_verdict(tmp_path, monkeypatch):
-    # The out-of-band operator override still forces through with no verdict.
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
-
-    class _SS:
-        def get_specialist_patch_verdict(self, tid):
-            return ""
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True},
-            extra={"shared_state": _SS()},
-        )
-    )
-    # With bypass set, the verdict gate does not reject; apply_only short-circuits the bench.
-    assert res["status"] != "rejected_by_critic"
 
 
 @pytest.mark.asyncio
@@ -889,3 +899,45 @@ async def test_bench_patch_config_not_found(tmp_path):
             config_changes_applied={},
             specialist_task_id="abc",
         )
+
+
+@pytest.mark.asyncio
+async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch):
+    # An artifact-install failure with a dirty tree must restore the auto-stash;
+    # otherwise the untracked user file stays trapped in the git stash.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    # Dirty the tree with an untracked file so integrate_patch auto-stashes (-u).
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    # Force a non-empty artifact set and a failing install so the code hits the
+    # artifact_install_failed return branch.
+    def _fake_resolve(*args, **kwargs):
+        return [object()], []
+
+    def _fake_apply(self, specs, *, backup_root):
+        return [], [{"artifact": "tuned.json", "error": "disk full"}]
+
+    monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
+    monkeypatch.setattr(IntegratePatchExecutor, "_apply_artifacts", _fake_apply)
+    monkeypatch.setattr(IntegratePatchExecutor, "_revert_artifacts", lambda self, applied: None)
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+        )
+    )
+
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "artifact_install_failed"
+    # The user's untracked file must be back in the working tree, not stranded
+    # in the stash. This is the regression the fix guards against.
+    assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n"

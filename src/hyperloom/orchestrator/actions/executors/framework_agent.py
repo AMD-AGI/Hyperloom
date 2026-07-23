@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Apply one discovered framework PR candidate and KEEP or REVERT by benchmark."""
@@ -495,18 +495,26 @@ class FrameworkAgentExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        framework_root = _resolve_framework_root(
-            params.get("framework_source_root") or None,
-        )
+        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
+        framework_root = _resolve_framework_root(explicit_framework_root)
         if framework_root is None:
-            return {
-                "status": "apply_failed",
-                "error_class": "no_framework_agent_root",
-                "error": (
+            if explicit_framework_root:
+                _error_class = "framework_source_root_rejected"
+                _error = (
+                    f"framework_source_root {explicit_framework_root!r} is not "
+                    "under the configured source allowlist"
+                )
+            else:
+                _error_class = "no_framework_agent_root"
+                _error = (
                     "no framework_source_root resolved; cannot apply "
                     "candidate PR. Configure $INFERENCEX_PATH or pass "
                     "params.framework_source_root."
-                ),
+                )
+            return {
+                "status": "apply_failed",
+                "error_class": _error_class,
+                "error": _error,
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [],
@@ -1038,6 +1046,7 @@ class FrameworkAgentExecutor:
                 applicability=str(candidate.get("applicability") or "").strip(),
                 provenance="framework_agent",
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                session_dir=self.session_dir,
             )
             log.info(
                 "framework: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",

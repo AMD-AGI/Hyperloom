@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Breakdown recorder: author-time capture of ``session_breakdown.json`` data.
@@ -27,17 +27,31 @@ from __future__ import annotations
 from . import instrument
 from .assembler import assemble_parts, has_parts, parts_dir
 from .instrument import (
+    record_action_operation,
+    record_adoption,
+    record_artifact,
     record_critic_iteration,
     record_kernel_backend_result,
     record_kernel_discovery,
     record_kernel_dispatch,
     record_kernel_e2e,
     record_kernel_invocations,
+    record_kernel_strategy_selection,
+    record_native_kernel_run_start,
+    record_native_kernel_run_result,
+    record_geak_operation,
+    record_gemm_tuning_operation,
+    record_measurement,
+    record_operation,
     record_phase_event,
+    record_phase_transition,
     record_robustness_signal,
+    record_run_snapshot,
     record_singleton_section,
     record_specialist_round,
+    record_subject,
     record_tool_version,
+    record_trace_event,
     snapshot_state_sections,
 )
 from .recorder import (
@@ -59,17 +73,31 @@ __all__ = [
     "has_parts",
     "instrument",
     "parts_dir",
+    "record_action_operation",
+    "record_adoption",
+    "record_artifact",
     "record_critic_iteration",
     "record_kernel_backend_result",
     "record_kernel_discovery",
     "record_kernel_dispatch",
     "record_kernel_e2e",
     "record_kernel_invocations",
+    "record_kernel_strategy_selection",
+    "record_native_kernel_run_start",
+    "record_native_kernel_run_result",
+    "record_geak_operation",
+    "record_gemm_tuning_operation",
+    "record_measurement",
+    "record_operation",
     "record_phase_event",
+    "record_phase_transition",
     "record_robustness_signal",
+    "record_run_snapshot",
     "record_singleton_section",
     "record_specialist_round",
+    "record_subject",
     "record_tool_version",
+    "record_trace_event",
     "snapshot_state_sections",
     "section_shape",
 ]

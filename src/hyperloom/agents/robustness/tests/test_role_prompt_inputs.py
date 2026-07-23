@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for prompt -> ReactorContext parser."""
@@ -252,6 +252,7 @@ def test_tick_and_stop_reason_parse_into_snapshot():
             """\
             session_id=s
             tick=42  target_gap_pct=12.50
+            macro_cycle=3
             stop_reason=(none)
             crash_count=0
             """
@@ -260,6 +261,7 @@ def test_tick_and_stop_reason_parse_into_snapshot():
     )
     ctx = from_coordinator_prompt(prompt)
     assert ctx.shared_state.tick == 42
+    assert ctx.shared_state.macro_cycle == 3
     assert ctx.shared_state.stop_reason == ""
 
 

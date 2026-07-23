@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """End-to-end validation of the single-server-per-arm concurrency sweep.
@@ -231,9 +231,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Fresh test session dir; default = <session-dir>_conc_flowtest_<ts>.",
     )
     args = ap.parse_args(argv)
-
-    # Force the single-server-per-arm path (the behaviour under test).
-    os.environ["INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER"] = "1"
 
     source = args.session_dir.expanduser().resolve()
     out_dir = args.out_dir or source.parent / f"{source.name}_conc_flowtest_{int(time.time())}"

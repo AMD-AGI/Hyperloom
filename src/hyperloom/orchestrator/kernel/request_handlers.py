@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator-side handlers for Kernel-agent REQUEST kinds.
@@ -1489,18 +1489,19 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
-    """Resolve GEMM tuning backend: forge or geak.
+def _forge_explicitly_enabled() -> bool:
+    """Return true only for the single supported forge opt-in switch.
 
-    Precedence:
-    1. payload['gemm_tuning_backend']
-    2. GEMM_TUNING_BACKEND env var
-    3. Default: 'forge'
+    KernelForge is private infrastructure, so forge must never be selected by
+    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
+    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
     """
-    raw = str(payload.get("gemm_tuning_backend") or os.environ.get("GEMM_TUNING_BACKEND") or "").strip().lower()
-    if raw in ("forge", "geak"):
-        return raw
-    return "forge"
+    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+
+
+def _resolve_gemm_tuning_backend(payload: dict) -> str:
+    """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
+    return "forge" if _forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -1563,6 +1564,23 @@ def _forge_gemm_tune_available() -> bool:
         return False
 
 
+def _resolve_aiter_root_for_forge() -> str:
+    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
+    if explicit:
+        return explicit
+    try:
+        spec = importlib.util.find_spec("aiter_meta")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = getattr(spec, "submodule_search_locations", None) or []
+    for location in locations:
+        root = Path(location)
+        if (root / "csrc").is_dir():
+            return str(root)
+    return ""
+
+
 def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """Resolve the actual runtime precision and quant_type for forge tuning.
 
@@ -1579,6 +1597,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
+        if precision == "fp8" and quant_type.lower() == "auto":
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1616,6 +1637,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if not precision:
         precision = "bf16"
     quant_type = str(payload.get("quant_type") or "auto").strip()
+    if precision == "fp8" and quant_type.lower() == "auto":
+        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path)
     return precision, quant_type
 
 
@@ -2016,6 +2040,487 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+_VLLM_BLOCK_FP8_TRACE_OPS = (
+    "w8a8_triton_block_scaled_mm",
+    "rocm_aiter_gemm_a8w8_blockscale",
+    "rocm_aiter_triton_gemm_a8w8_blockscale",
+)
+
+
+def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
+    """Return whether vLLM runs the block-scaled FP8 linear kernel path."""
+    return precision == "fp8" and quant_type.strip().lower() in {
+        "blockscale",
+        "block_scale",
+        "a8w8_blockscale",
+        "fp8_blockscale",
+    }
+
+
+def _forge_framework_for_vllm(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    tunableop_input: str,
+) -> str:
+    """Route block-FP8 vLLM to Forge's AITER dense tuner family."""
+    if framework == "vllm" and not tunableop_input and _is_vllm_block_fp8(precision, quant_type):
+        return "vllm-aiter"
+    return framework
+
+
+def _vllm_block_fp8_profile_capture_required(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
+    if (
+        framework != "vllm"
+        or not _is_vllm_block_fp8(precision, quant_type)
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    return not is_multi_node()
+
+
+def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
+    """Extract one (M, N, K) tuple from a profiled block-FP8 linear event."""
+    if not isinstance(event, dict):
+        return None
+    name = str(event.get("name") or "").lower()
+    if not any(marker in name for marker in _VLLM_BLOCK_FP8_TRACE_OPS):
+        return None
+    args = event.get("args")
+    if not isinstance(args, dict):
+        return None
+    dims = args.get("Input Dims") or args.get("Input dims") or args.get("input_shapes")
+    if not isinstance(dims, list) or len(dims) < 2:
+        return None
+    a_dims, b_dims = dims[0], dims[1]
+    if not isinstance(a_dims, list) or not isinstance(b_dims, list) or len(a_dims) < 2 or len(b_dims) < 2:
+        return None
+    try:
+        m = int(a_dims[-2])
+        k = int(a_dims[-1])
+        if int(b_dims[-1]) == k:
+            n = int(b_dims[-2])
+        elif int(b_dims[-2]) == k:
+            n = int(b_dims[-1])
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return (m, n, k) if min(m, n, k) > 0 else None
+
+
+def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+    """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
+    import gzip
+
+    shapes: set[tuple[int, int, int]] = set()
+    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    for path in trace_paths:
+        try:
+            if path.name.endswith(".gz"):
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as stream:
+                    data = json.load(stream)
+            else:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            continue
+        events = data.get("traceEvents") if isinstance(data, dict) else None
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            shape = _trace_event_block_fp8_shape(event)
+            if shape is not None:
+                shapes.add(shape)
+    if not shapes:
+        return "", 0
+    out = capture_dir / "forge_shapes.json"
+    payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
+    try:
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return "", 0
+    return str(out), len(payload)
+
+
+def _vllm_dense_shape_capture_required(
+    *,
+    framework: str,
+    model_path: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether Forge needs an automatic TunableOp recording pass."""
+    if (
+        framework != "vllm"
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        return False
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path)
+    if not summary or bool(summary.get("is_moe")):
+        return False
+    try:
+        hidden_size = int(summary.get("hidden_size") or 0)
+        intermediate_size = int(summary.get("intermediate_size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return hidden_size > 0 and intermediate_size > 0
+
+
+def _pick_shape_capture_port() -> int:
+    """Pick a free local port distinct from the production serving port."""
+    import socket
+
+    for _ in range(5):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port != 8888:
+            return port
+    return 18888
+
+
+def _resolve_shape_capture_port(value: Any) -> int:
+    """Resolve an isolated capture port and reject the production port."""
+    if value in (None, ""):
+        return _pick_shape_capture_port()
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid shape_capture_port: {value!r}") from exc
+    if port <= 0 or port > 65535 or port == 8888:
+        raise ValueError(f"shape_capture_port must be 1..65535 and not 8888: {port}")
+    return port
+
+
+def _is_tunableop_untuned_row(line: str) -> bool:
+    """Recognize a native PyTorch TunableOp offline-input row."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+        return False
+    fields = [field.strip() for field in stripped.split(",")]
+    if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
+        return False
+    dimensions = [int(value) for value in re.findall(r"\d+", fields[1])]
+    return sum(value > 0 for value in dimensions) >= 3
+
+
+def _merge_tunableop_untuned_files(base_path: Path) -> int:
+    """Merge per-device TunableOp recordings into one deterministic input."""
+    rows: list[str] = []
+    seen: set[str] = set()
+    pattern = f"{base_path.stem}*{base_path.suffix}"
+    for path in sorted(base_path.parent.glob(pattern)):
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            row = line.strip()
+            if _is_tunableop_untuned_row(row) and row not in seen:
+                seen.add(row)
+                rows.append(row)
+    if not rows:
+        return 0
+
+    tmp_path = base_path.with_suffix(f"{base_path.suffix}.tmp")
+    try:
+        tmp_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        os.replace(tmp_path, base_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 0
+    return len(rows)
+
+
+async def _capture_vllm_tunableop_shapes(
+    *,
+    state: Any,
+    session_dir: Path,
+    payload: dict,
+    workspace: Path,
+) -> HandlerResult:
+    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
+    from ..actions.executors.baseline import BaselineExecutor
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    untuned_base = capture_dir / "tunableop_untuned.csv"
+    results_base = capture_dir / "tunableop_results.csv"
+    profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
+
+    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
+    if not config_path or not Path(config_path).is_file():
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    if profile_mode:
+        try:
+            import yaml
+
+            capture_config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            benchmark_config = capture_config.setdefault("benchmark", {})
+            profiler_config = benchmark_config.setdefault("profiler", {})
+            torch_profiler_config = profiler_config.setdefault("torch_profiler", {})
+            torch_profiler_config["enabled"] = True
+            profile_config_path = capture_dir / "block_fp8_profile_config.yaml"
+            profile_config_path.write_text(
+                yaml.safe_dump(capture_config, sort_keys=False),
+                encoding="utf-8",
+            )
+            config_path = str(profile_config_path)
+        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_failed",
+                "error": f"vLLM block-FP8 profile config failed: {exc}",
+                "shape_capture_workspace": str(capture_dir),
+            }
+
+    current_best = getattr(state, "current_best", None)
+    current_best = current_best if isinstance(current_best, dict) else {}
+    inherited_envs = dict(current_best.get("extra_envs") or {})
+    inherited_envs.update(dict(payload.get("extra_envs") or {}))
+    capture_envs = {
+        str(key): str(value)
+        for key, value in inherited_envs.items()
+        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+    }
+    try:
+        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": str(exc),
+            "shape_capture_workspace": str(capture_dir),
+        }
+    capture_envs.update(
+        {
+            "PORT": str(capture_port),
+            "RUN_EVAL": "false",
+            "HL_TUNABLEOP_MODE": "",
+            "HL_TUNABLEOP_FILE": "",
+            "HL_TUNABLEOP_VERBOSE": "",
+            "PYTORCH_TUNABLEOP_ENABLED": "1",
+            "PYTORCH_TUNABLEOP_TUNING": "0",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
+            "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
+        }
+    )
+    if profile_mode:
+        capture_envs.update(
+            {
+                "VLLM_ROCM_USE_AITER": "1",
+                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            }
+        )
+    for env_name, state_name in (
+        ("TP", "tp"),
+        ("CONC", "conc"),
+        ("ISL", "isl"),
+        ("OSL", "osl"),
+        ("MAX_MODEL_LEN", "max_model_len"),
+    ):
+        value = payload.get(state_name)
+        if value in (None, ""):
+            value = capture_envs.get(env_name)
+        if value in (None, ""):
+            value = getattr(state, state_name, 0)
+        try:
+            resolved = int(value or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+        if resolved > 0:
+            capture_envs[env_name] = str(resolved)
+
+    try:
+        timeout_sec = int(
+            payload.get("shape_capture_timeout_sec")
+            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
+            or 1800
+        )
+    except (TypeError, ValueError):
+        timeout_sec = 1800
+    timeout_sec = max(60, timeout_sec)
+
+    task_id = f"{str(payload.get('task_id') or workspace.name)}-shape-capture"
+    extra_server_args = (
+        str(payload.get("extra_server_args") or "")
+        if "extra_server_args" in payload
+        else str(current_best.get("extra_server_args") or "")
+    )
+    if profile_mode:
+        if "profiler-config.delay_iterations" not in extra_server_args:
+            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
+        if "torch_profiler_record_shapes" not in extra_server_args:
+            extra_server_args = (
+                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
+            ).strip()
+    inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
+    if isinstance(inherited_unset, str):
+        capture_unset_envs = [inherited_unset]
+    else:
+        capture_unset_envs = [str(key) for key in inherited_unset]
+    capture_unset_envs.extend(
+        [
+            "HL_TUNABLEOP_MODE",
+            "HL_TUNABLEOP_FILE",
+            "HL_TUNABLEOP_VERBOSE",
+            "PYTORCH_TUNABLEOP_ENABLED",
+            "PYTORCH_TUNABLEOP_TUNING",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+            "PYTORCH_TUNABLEOP_FILENAME",
+        ]
+    )
+    inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
+    if isinstance(inherited_remove, str):
+        capture_remove_args = [inherited_remove]
+    else:
+        capture_remove_args = [str(arg) for arg in inherited_remove]
+    capture_remove_args.append("--port")
+    task = Task(
+        task_id=task_id,
+        kind="gemm_shape_capture",
+        state="running",
+        params={
+            "config_path": config_path,
+            "output_dir": str(capture_dir),
+            "timeout_sec": timeout_sec,
+            "framework": "vllm",
+            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+            "extra_server_args": extra_server_args,
+            "extra_envs": capture_envs,
+            "remove_args": capture_remove_args,
+            "unset_envs": capture_unset_envs,
+            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+            "disable_run_eval": True,
+            "baseline_double_run": False,
+        },
+        idempotency_key=f"{task_id}-run",
+    )
+    ctx = RunnerContext(task=task, lease=None)
+    import copy
+
+    capture_state = copy.copy(state)
+    capture_state.baseline_eager_fallback = False
+    ctx.extra = {
+        "shared_state": capture_state,
+        "session_dir": session_dir,
+        "workspace": capture_dir,
+    }
+
+    try:
+        benchmark_result = await BaselineExecutor(
+            session_dir=session_dir,
+            shared_state=capture_state,
+        )(ctx)
+    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture raised {exc!r}",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    if not isinstance(benchmark_result, dict):
+        benchmark_result = {}
+    if profile_mode:
+        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        if benchmark_result.get("status") == "succeeded" and shape_count > 0:
+            return {
+                "status": "ok",
+                "shapes_json": shapes_json,
+                "shape_capture_workspace": str(capture_dir),
+                "shape_count": shape_count,
+                "capture_mode": "block_fp8_profile",
+            }
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM block-FP8 profile capture produced no structured GEMM shapes{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": shape_count,
+            "capture_mode": "block_fp8_profile",
+        }
+
+    row_count = _merge_tunableop_untuned_files(untuned_base)
+    if benchmark_result.get("status") != "succeeded" or row_count == 0:
+        try:
+            untuned_base.unlink(missing_ok=True)
+        except OSError:
+            pass
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture produced no complete workload recording{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": row_count,
+        }
+
+    return {
+        "status": "ok",
+        "tunableop_input": str(untuned_base),
+        "shape_capture_workspace": str(capture_dir),
+        "shape_count": row_count,
+    }
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -2083,11 +2588,61 @@ async def _run_forge_gemm_tuning(
     if not untuned_csv and not shapes_json:
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
+    tunableop_input = str(payload.get("tunableop_input") or "").strip()
+    forge_framework = _forge_framework_for_vllm(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        tunableop_input=tunableop_input,
+    )
+    shape_capture: HandlerResult | None = None
+    block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    )
+    tunableop_capture = _vllm_dense_shape_capture_required(
+        framework=framework,
+        model_path=model_path,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    ) and not block_fp8_profile_capture
+    if block_fp8_profile_capture or tunableop_capture:
+        capture_payload = dict(payload)
+        if block_fp8_profile_capture:
+            capture_payload["_shape_capture_mode"] = "block_fp8_profile"
+        shape_capture = await _capture_vllm_tunableop_shapes(
+            state=state,
+            session_dir=session_dir,
+            payload=capture_payload,
+            workspace=workspace,
+        )
+        if shape_capture.get("status") != "ok":
+            shape_capture.setdefault("backend", "forge")
+            shape_capture.setdefault("engine", "forge")
+            shape_capture.setdefault("workspace", str(workspace))
+            shape_capture.setdefault("precision", precision)
+            shape_capture.setdefault("framework", framework)
+            shape_capture.setdefault("model_path", model_path)
+            return shape_capture
+        tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
+        captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
+        if captured_shapes:
+            shapes_json = captured_shapes
+            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
+            # profile capture is workload-matched and must supersede any stale
+            # specialist CSV resolved before the capture pass.
+            untuned_csv = ""
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
         "model_path": model_path,
-        "framework": framework,
+        "framework": forge_framework,
         "precision": precision,
         "quant_type": quant_type,
         "gpu_type": gpu_type,
@@ -2102,7 +2657,7 @@ async def _run_forge_gemm_tuning(
         "tokens": tokens,
         "untuned_csv": untuned_csv,
         "shapes_json": shapes_json,
-        "tunableop_input": str(payload.get("tunableop_input") or ""),
+        "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
@@ -2116,6 +2671,9 @@ async def _run_forge_gemm_tuning(
         "--input-json",
         str(input_json),
     ]
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
 
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
@@ -2137,7 +2695,20 @@ async def _run_forge_gemm_tuning(
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
+    result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
+    if shape_capture is not None:
+        result.setdefault(
+            "shape_capture",
+            {
+                "status": "ok",
+                "workspace": shape_capture.get("shape_capture_workspace"),
+                "tunableop_input": tunableop_input,
+                "shapes_json": shapes_json,
+                "shape_count": shape_capture.get("shape_count"),
+                "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+            },
+        )
 
     # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
     # result.json and derive a top-level skip_reason.
@@ -2182,29 +2753,16 @@ async def _run_geak_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Legacy GEAK FP8 block-scale GEMM tuning (sglang-only)."""
+    """Legacy GEAK GEMM tuning wrapper.
+
+    Hyperloom does not decide precision/framework applicability here; it passes
+    the workload metadata through and lets GEAK decide.
+    """
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     precision = _normalize_precision(payload.get("precision") or state.precision)
-    if precision != "fp8":
-        return {
-            "status": "skipped",
-            "decision": "REVERT",
-            "error_class": "fp8_only_action",
-            "error": f"GEAK GEMM tuning only applies to FP8 workloads (precision={precision or '(unset)'})",
-            "precision": precision,
-        }
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    if framework != "sglang":
-        return {
-            "status": "skipped",
-            "decision": "REVERT",
-            "error_class": "unsupported_framework",
-            "error": f"GEAK GEMM tuning first version supports SGLang only (framework={framework or '(unset)'})",
-            "framework": framework,
-            "precision": precision,
-        }
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
@@ -2256,20 +2814,34 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
+        "env": {"E2E_METRIC": "output"},
     }
     if geak_config:
         input_payload["config"] = geak_config
     elif not payload.get("dry_run"):
-        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
-        result.setdefault("requested_backend", "geak")
-        result.setdefault("fallback_backend", "forge")
-        result.setdefault("fallback_reason", "legacy_geak_config_missing")
-        return result
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "backend": "geak",
+            "engine": "geak",
+            "error_class": "legacy_geak_config_missing",
+            "error": (
+                "GEAK GEMM tuning requires GEAK_CONFIG. "
+                "Forge fallback is disabled unless KERNEL_OPT_BACKEND_ORDER=forge."
+            ),
+            "workspace": str(workspace),
+            "precision": precision,
+            "framework": framework,
+            "model_path": model_path,
+            "benchmark_script": benchmark_script,
+        }
     if payload.get("dry_run"):
         input_payload["dry_run"] = True
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
     cmd = [
+        "env",
+        "E2E_METRIC=output",
         "python3",
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",
@@ -2302,12 +2874,11 @@ async def run_gemm_tuning_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEMM tuning via forge-gemm-tune (deterministic) or GEAK (legacy).
+    """Run GEMM tuning via GEAK, or forge only when explicitly enabled.
 
     Backend selection:
-    1. payload['gemm_tuning_backend']
-    2. GEMM_TUNING_BACKEND env var
-    3. Default: 'forge'
+    1. Exact ``KERNEL_OPT_BACKEND_ORDER=forge`` -> forge.
+    2. Everything else -> GEAK.
 
     Args:
         payload: The GEMM-tuning request payload.
@@ -2318,12 +2889,33 @@ async def run_gemm_tuning_handler(
     """
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 start recording failed", exc_info=True)
 
     if backend == "forge":
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
     else:
         result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    result.setdefault("task_id", payload.get("task_id"))
+    result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+            result=result,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 result recording failed", exc_info=True)
     return result
 
 
@@ -2595,95 +3187,25 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
 
-async def trace_analyze_handler(
+def _build_trace_analyze_cmd(
     payload: dict,
     *,
     session_dir: Path,
-) -> HandlerResult:
-    """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
-
-    Args:
-        payload (dict): Request payload (see ``Required payload`` /
-            ``Optional payload`` below for the recognized keys).
-        session_dir (Path): Session root used for resolving inputs and writing
-            the analysis outputs.
-
-    Required payload:
-        trace_input: path to a torch_trace dir or single .trace.json.gz file.
-
-    Returns ``{status, hot_kernels, trace_report_path (analysis.md), cli_log_path, details}``.
-    """
-    trace_input = payload.get("trace_input") or payload.get("trace_dir")
-    if not trace_input:
-        return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    root_err = _kernel_agent_root_error()
-    if root_err:
-        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
-    # Backfill workload context from SharedState when Orchestration omits it.
-    from ..state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    framework = (payload.get("framework") or state.framework or "").strip()
-    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
-    model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
-    analysis_mode = (payload.get("analysis_mode") or "").strip()
-    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
-        analysis_mode = "inference"
-
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # and ``deterministic`` (no-LLM TraceLens) are explicit routes via payload
-    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    explicit_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
-    # Reject an unknown route: warn and fall back to the default ``agent`` route.
-    route_health_warnings: list[dict[str, Any]] = []
-    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        log.warning(
-            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route",
-            explicit_route,
-            sorted(_VALID_ANALYSIS_ROUTES),
-        )
-        route_health_warnings.append(
-            {
-                "code": "invalid_analysis_route",
-                "severity": "warning",
-                "message": (
-                    f"unknown analysis_route {explicit_route!r} (expected one of "
-                    f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
-                ),
-                "requested_route": explicit_route,
-            }
-        )
-        explicit_route = ""
-    analysis_route = explicit_route or "agent"
-    is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
-    tracelens_root: Path | None = None
-    if not is_bypass:
-        tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing or incomplete (no .git).
-        if not (tracelens_root / ".git").exists():
-            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-        tl_err = _tracelens_root_error(tracelens_root)
-        if tl_err:
-            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
-
-    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
-    workspace_path = payload.get("workspace_path") or str(session_dir)
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
-
-    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
-    # raw trace and drop the --split-* hints.
-    from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-    scriptable = is_scriptable(framework)
-
-    # Load materialized baseline workload metadata once.
-    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
-    workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
-
+    state: Any,
+    workspace_path: str,
+    trace_input: Any,
+    tracelens_root: "Path | None",
+    is_bypass: bool,
+    scriptable: bool,
+    workload: dict,
+    model_name: str,
+    framework: str,
+    target_platform: str,
+    analysis_mode: str,
+    analysis_route: str,
+) -> "tuple[list[str], str]":
+    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
+    ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
@@ -2765,6 +3287,115 @@ async def trace_analyze_handler(
         cmd += ["--roofline-output-name", roofline_output_name]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
+    return cmd, steady_state_mode
+
+
+async def trace_analyze_handler(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
+
+    Args:
+        payload (dict): Request payload (see ``Required payload`` /
+            ``Optional payload`` below for the recognized keys).
+        session_dir (Path): Session root used for resolving inputs and writing
+            the analysis outputs.
+
+    Required payload:
+        trace_input: path to a torch_trace dir or single .trace.json.gz file.
+
+    Returns the tool's result dict with ``status``, surfaced artifact paths, and
+    ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
+    """
+    trace_input = payload.get("trace_input") or payload.get("trace_dir")
+    if not trace_input:
+        return {"status": "failed", "error": "missing 'trace_input' in payload"}
+    root_err = _kernel_agent_root_error()
+    if root_err:
+        return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
+    # Backfill workload context from SharedState when Orchestration omits it.
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    framework = (payload.get("framework") or state.framework or "").strip()
+    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
+    model_name = (payload.get("model_name") or state.model_name or state.model_path or "").strip()
+    analysis_mode = (payload.get("analysis_mode") or "").strip()
+    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
+        analysis_mode = "inference"
+
+    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
+    # and ``deterministic`` (no-LLM TraceLens) are explicit routes via payload
+    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
+    explicit_route = (
+        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
+    )
+    # Reject an unknown route: warn and fall back to the default ``agent`` route.
+    route_health_warnings: list[dict[str, Any]] = []
+    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        log.warning(
+            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route",
+            explicit_route,
+            sorted(_VALID_ANALYSIS_ROUTES),
+        )
+        route_health_warnings.append(
+            {
+                "code": "invalid_analysis_route",
+                "severity": "warning",
+                "message": (
+                    f"unknown analysis_route {explicit_route!r} (expected one of "
+                    f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+                ),
+                "requested_route": explicit_route,
+            }
+        )
+        explicit_route = ""
+    analysis_route = explicit_route or "agent"
+    is_bypass = analysis_route == "bypass"
+    # Resolve TraceLens root independently of inherited env, self-healing a
+    # vanished checkout before validation. Skipped on bypass.
+    tracelens_root: Path | None = None
+    if not is_bypass:
+        tracelens_root = _resolve_tracelens_root()
+        # Self-heal when the checkout is missing or incomplete (no .git).
+        if not (tracelens_root / ".git").exists():
+            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+        tl_err = _tracelens_root_error(tracelens_root)
+        if tl_err:
+            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+
+    # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
+
+    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
+    # raw trace and drop the --split-* hints.
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    scriptable = is_scriptable(framework)
+
+    # Load materialized baseline workload metadata once.
+    metadata = _load_materialized_workload_metadata(state.baseline_config_path)
+    workload = metadata.get("runtime_args", {}).get("workload", {}) if isinstance(metadata, dict) else {}
+
+    cmd, steady_state_mode = _build_trace_analyze_cmd(
+        payload,
+        session_dir=session_dir,
+        state=state,
+        workspace_path=workspace_path,
+        trace_input=trace_input,
+        tracelens_root=tracelens_root,
+        is_bypass=is_bypass,
+        scriptable=scriptable,
+        workload=workload,
+        model_name=model_name,
+        framework=framework,
+        target_platform=target_platform,
+        analysis_mode=analysis_mode,
+        analysis_route=analysis_route,
+    )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
     _disc_started = time.monotonic()
@@ -3038,31 +3669,16 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
 
 
 def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
-    """Return the raw, lowercased kernel backend order from payload/env.
+    """Return the effective kernel backend order.
 
-    This is the single source of truth for kernel-backend selection and is
-    shared by both the per-kernel ladder (:func:`_backend_order`) and the
-    phase-level GEAK e2e check (:func:`geak_selected`).  Unknown tokens
-    are kept here on purpose; callers filter to the set they understand.
-
-    Precedence (highest to lowest): ``payload['backend_order']`` ->
-    ``KERNEL_OPT_BACKEND_ORDER`` env -> ``KERNEL_OPT_BACKENDS`` env.  When none
-    is set, the phase-level GEAK delegate is the default.
-
-    Args:
-        payload: Optional request payload that may carry ``backend_order``.
-
-    Returns:
-        list[str]: The ordered, lowercased backend tokens (may be empty).
+    Forge is deliberately not request-selectable.  The only supported forge
+    opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
+    missing value, legacy alias, or payload override stays on the GEAK
+    whole-phase backend.
     """
-    raw = (
-        (payload or {}).get("backend_order")
-        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-        or os.environ.get("KERNEL_OPT_BACKENDS")
-    )
-    if not raw:
-        return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
-    return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+    if _forge_explicitly_enabled():
+        return ["forge"]
+    return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
 
 def geak_selected(payload: dict | None = None) -> bool:
@@ -3110,52 +3726,14 @@ def _kernel_ladder_budget_sec(payload: dict) -> int:
 
 
 def _backend_order(payload: dict) -> list[str]:
-    """Resolve the ordered list of optimization backends to try.
+    """Resolve the per-kernel backend ladder.
 
-    Precedence (highest to lowest):
-
-    1. ``payload['backend_order']`` – explicit per-request override.
-    2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
-    3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
-       ``KERNEL_OPT_BACKEND_ORDER``.
-    4. Empty, because the no-env default is the phase-level ``geak`` delegate.
-
-    All backend names are normalized to lowercase before filtering, so
-    values like ``"GEAK"`` or ``"Forge"`` are treated the same as their
-    lowercase equivalents.  Unknown backends are silently dropped.
-
-    Args:
-        payload (dict): Request payload that may carry ``backend_order``.
-
-    Returns:
-        list[str]: The filtered, ordered backend names (subset of
-            ``{"forge"}``).
-
-    Raises:
-        ValueError: When the requested order contains only removed out-of-band
-            backends (``claude``/``codex``/``cursor``), instead of silently
-            substituting forge.
+    The per-kernel ladder is disabled unless forge is explicitly opted in via
+    ``KERNEL_OPT_BACKEND_ORDER=forge``.  GEAK owns the default whole KERNEL
+    phase, so request payloads and legacy aliases cannot select forge.
     """
     order = _raw_kernel_backend_order(payload)
-    # `forge` is the only per-kernel backend; bare ``geak`` is a phase-level delegate.
-    allowed = {"forge"}
-    filtered = [backend for backend in order if backend in allowed]
-    if filtered:
-        return filtered
-    # The out-of-band backends (claude/codex/cursor) have been removed. Fail
-    # loudly instead of silently substituting forge, so a caller that explicitly
-    # requested a removed backend gets an actionable error rather than an
-    # unexpected forge run (which would then depend on the private KernelForge).
-    removed_oob = {"claude", "codex", "cursor"}
-    requested_removed = sorted({backend for backend in order if backend in removed_oob})
-    if requested_removed:
-        raise ValueError(
-            "kernel backend(s) no longer available: "
-            + ", ".join(requested_removed)
-            + ". Set KERNEL_OPT_BACKEND_ORDER to 'forge' (per-kernel) or "
-            "'geak' (whole-phase)."
-        )
-    return []
+    return ["forge"] if order == ["forge"] else []
 
 
 def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
@@ -3807,8 +4385,8 @@ async def _run_optimization_batch(
     # per-repo lock, so keep the batch serial whenever forge is in the ladder.
     if "forge" in _backend_order(payload):
         max_parallel = 1
-    # parallel_backends is off by default (single forge backend); only an
-    # explicit override enables it.
+    # parallel_backends is off by default; it only matters when explicit
+    # per-kernel forge mode is enabled.
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
     # When forced on, halve the GPU budget so pre-Ray backend setup fits.
     if parallel_backends:
@@ -3889,6 +4467,12 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_result(session_dir, result=out)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 batch-result recording failed", exc_info=True)
     return out
 
 
@@ -4022,6 +4606,29 @@ async def _run_optimization_single(
         await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_start(
+            session_dir,
+            payload={
+                "kernel_id": str(kernel_id),
+                "backend": backends_arg,
+                "source_file": payload.get("source_file"),
+            },
+        )
+        instrument.record_kernel_dispatch(
+            session_dir,
+            kernel_id=str(kernel_id),
+            dispatched=True,
+            backends=[value for value in backends_arg.split(",") if value],
+            task_group=(payload.get("candidate") or {}).get("task_group")
+            if isinstance(payload.get("candidate"), dict)
+            else None,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 start recording failed", exc_info=True)
+
+    try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
@@ -4057,6 +4664,17 @@ async def _run_optimization_single(
     # Full-trace: record each forge attempt's key-step timeline as a forge_steps
     # audit. Best-effort; no-op without a step marker.
     _trace_kernel_attempt_steps(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_backend_result(
+            session_dir,
+            result,
+            route_strategy="kernel_agent_forge",
+        )
+        instrument.record_native_kernel_run_result(session_dir, result=result)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 result recording failed", exc_info=True)
     return result
 
 
@@ -4718,6 +5336,24 @@ async def integrate_handler(
         result["paired_ab"] = paired_ab
         if paired_ab.get("confirmed") is False:
             result["decision_reason"] = "paired_ab_disconfirmed"
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_e2e(
+            session_dir,
+            kernel_id=str(kernel_id or ""),
+            integrated=decision == "KEEP",
+            e2e_gain_pct=gain_pct,
+            validated=True if decision == "KEEP" else False,
+            decision=decision,
+            patch_path=str(patch_path or "") or None,
+            target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
+            extra_server_args=extra_args,
+            result=result,
+            validation_tier="integrate_e2e",
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("kernel integrate v4 result recording failed", exc_info=True)
     return result
 
 

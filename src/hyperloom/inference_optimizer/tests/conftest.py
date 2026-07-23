@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Pytest hooks and shared helpers for the inference_optimizer tests package."""
@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
@@ -133,3 +132,25 @@ def git_commit_all(path: Path, message: str) -> None:
         capture_output=True,
         env=env,
     )
+
+
+def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:
+    """Register common tmp_path framework repos for integrate_patch allowlist tests."""
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.framework import paths as fp
+
+    real = fp.resolve_source_file_allowlist
+
+    def _merged() -> tuple[str, ...]:
+        extras: list[str] = []
+        for name in ("fw", "repo", "framework"):
+            cand = tmp_path / name
+            if cand.is_dir():
+                extras.append(str(cand.resolve()))
+        merged = list(real())
+        for extra in extras:
+            if extra not in merged:
+                merged.append(extra)
+        return tuple(merged)
+
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", _merged)

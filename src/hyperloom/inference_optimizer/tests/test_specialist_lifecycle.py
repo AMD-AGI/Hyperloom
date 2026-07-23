@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Specialist_done bookkeeping tests.
@@ -38,7 +38,6 @@ class _StubSharedState:
 
     def __init__(self):
         self.specialist_rounds: list[dict[str, Any]] = []
-        self.specialist_domain_empty_streak: dict[str, int] = {}
         self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0
 
@@ -51,19 +50,6 @@ class _StubSharedState:
                     self.specialist_rounds[i] = dict(entry)
                     return
         self.specialist_rounds.append(dict(entry))
-
-    def bump_specialist_domain_empty_streak(
-        self,
-        domain: str,
-        *,
-        empty: bool,
-    ) -> int:
-        d = domain or "unknown"
-        if empty:
-            self.specialist_domain_empty_streak[d] = self.specialist_domain_empty_streak.get(d, 0) + 1
-        else:
-            self.specialist_domain_empty_streak[d] = 0
-        return self.specialist_domain_empty_streak[d]
 
     def update_last_specialist(self, snapshot: dict[str, Any]) -> None:
         self.last_specialist = dict(snapshot)
@@ -160,7 +146,6 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert row["empty"] is False
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"
-    assert state.specialist_domain_empty_streak.get("serving_specialist", 0) == 0
     assert state.last_specialist["task_id"] == "task-1"
     assert state.last_specialist["empty"] is False
     assert state.last_specialist["proposals_total"] == 1
@@ -173,8 +158,8 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
 
 
 @pytest.mark.asyncio
-async def test_record_specialist_result_empty_proposal_set_bumps_streak(coord):
-    """Empty proposal_set: ledger row stays (empty=True), streak +1."""
+async def test_record_specialist_result_empty_proposal_set(coord):
+    """Empty proposal_set: ledger row stays (empty=True)."""
     task = _StubTask(task_id="task-empty-1", params={})
     coord.tasks.register(task)
 
@@ -188,54 +173,7 @@ async def test_record_specialist_result_empty_proposal_set_bumps_streak(coord):
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
     assert state.specialist_rounds[0]["empty"] is True
-    assert state.specialist_domain_empty_streak.get("kernel_switch_specialist") == 1
     assert state.last_specialist["empty"] is True
-
-
-@pytest.mark.asyncio
-async def test_record_specialist_result_streak_accumulates_then_resets(coord):
-    """Empty × 3 then non-empty: streak goes 1 → 2 → 3 → 0."""
-    state: _StubSharedState = coord.shared_state
-    for n in range(1, 4):
-        task = _StubTask(task_id=f"task-{n}", params={})
-        coord.tasks.register(task)
-        await coord._record_specialist_result(
-            task=task,
-            done_payload=_done_payload(empty=True, domain="comm_specialist"),
-            source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-{n}",
-        )
-        assert state.specialist_domain_empty_streak["comm_specialist"] == n
-
-    task4 = _StubTask(task_id="task-4", params={})
-    coord.tasks.register(task4)
-    await coord._record_specialist_result(
-        task=task4,
-        done_payload=_done_payload(empty=False, domain="comm_specialist"),
-        source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-4",
-    )
-    assert state.specialist_domain_empty_streak["comm_specialist"] == 0
-
-
-@pytest.mark.asyncio
-async def test_record_specialist_result_per_domain_streak_independent(coord):
-    """Two different domains keep independent streak counters."""
-    state: _StubSharedState = coord.shared_state
-
-    for tid, dom in [
-        ("t-fw-1", "serving_specialist"),
-        ("t-kn-1", "kernel_switch_specialist"),
-        ("t-fw-2", "serving_specialist"),
-    ]:
-        t = _StubTask(task_id=tid, params={})
-        coord.tasks.register(t)
-        await coord._record_specialist_result(
-            task=t,
-            done_payload=_done_payload(empty=True, domain=dom),
-            source=f"{SPECIALIST_FROM_AGENT_PREFIX}{tid}",
-        )
-
-    assert state.specialist_domain_empty_streak["serving_specialist"] == 2
-    assert state.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 @pytest.mark.asyncio
@@ -298,7 +236,6 @@ async def test_handle_specialist_done_unknown_task_logs_and_skips(coord, caplog)
     )
     state: _StubSharedState = coord.shared_state
     assert state.specialist_rounds == []
-    assert state.specialist_domain_empty_streak == {}
 
 
 @pytest.mark.asyncio
@@ -515,7 +452,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
     assert row["empty"] is False
-    assert coord.shared_state.specialist_domain_empty_streak.get("serving_specialist", -1) == 0
     assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()

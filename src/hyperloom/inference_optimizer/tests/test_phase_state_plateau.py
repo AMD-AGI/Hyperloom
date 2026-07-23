@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """plateau pure functions + escalate hints + stop_reason ENUM."""
@@ -28,7 +28,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_plateau_kernel,
     exit_normal_explore,
     exit_normal_kernel,
-    is_pause_specialist_hint,
     is_valid_escalate_hint,
     is_valid_stop_reason,
     kernel_work_pending,
@@ -48,20 +47,10 @@ def test_escalate_hint_vocab_closed():
     )
 
 
-def test_is_valid_escalate_hint_accepts_vocab_and_pause_specialist():
+def test_is_valid_escalate_hint_accepts_vocab():
     assert is_valid_escalate_hint("skip_to_kernel")
-    assert is_valid_escalate_hint("pause_specialist_serving_specialist")
-    assert is_valid_escalate_hint("pause_specialist_anything")
     assert not is_valid_escalate_hint("garbage")
     assert not is_valid_escalate_hint("")
-    # The bare prefix is invalid — must have a suffix.
-    assert not is_valid_escalate_hint("pause_specialist_")
-
-
-def test_is_pause_specialist_hint_requires_suffix():
-    assert is_pause_specialist_hint("pause_specialist_x")
-    assert not is_pause_specialist_hint("pause_specialist_")
-    assert not is_pause_specialist_hint("skip_to_kernel")
 
 
 def test_plateau_explore_empty_state_returns_false():
@@ -118,6 +107,20 @@ def test_plateau_explore_short_empty_streak_blocks_trigger():
             {"proposals_total": 0, "proposals_kept": 0},
             # newest round produced something → streak resets to 0.
             {"proposals_total": 5, "proposals_kept": 2},
+        ],
+    )
+    triggered, ev = compute_plateau_explore(state)
+    assert triggered is False
+    assert ev["empty_streak"] == 0
+
+
+def test_plateau_explore_ignores_prior_macro_cycle_rows():
+    state = SimpleNamespace(
+        macro_cycle=1,
+        explore_search={"winners_history": [{"gain_pct": 0.0, "cycle": 0}]},
+        specialist_rounds=[
+            {"proposals_total": 0, "proposals_kept": 0, "cycle": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
     )
     triggered, ev = compute_plateau_explore(state)
@@ -186,6 +189,24 @@ def test_plateau_kernel_low_gain_triggers():
     assert ev["recent_keep_gain_pct"] == 0.1
 
 
+def test_plateau_kernel_ignores_prior_macro_cycle_attempts():
+    state = SimpleNamespace(
+        macro_cycle=1,
+        kernel_integrate_attempts={
+            "k1": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:00:00", "cycle": 0},
+                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00", "cycle": 0},
+                    {"decision": "REVERT", "ts": "2026-05-19T18:02:00", "cycle": 0},
+                ]
+            }
+        },
+    )
+    triggered, ev = compute_plateau_kernel(state)
+    assert triggered is False
+    assert ev["reason"] == "no_kernel_attempts_yet"
+
+
 def test_plateau_kernel_high_gain_blocks_revert_streak():
     """When the REVERT streak is below threshold and gain is large, plateau doesn't fire."""
     state = SimpleNamespace(
@@ -233,6 +254,37 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
     triggered, ev = compute_plateau_kernel(state)
     assert triggered is False
     assert ev.get("reason") == "no_kernel_attempts_yet"
+
+
+def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
+    state = SharedState(session_id="t")
+    state.params_no_promote_streak = 4
+    state.explore_specialist_dispatched_count = 3
+    state.framework_agent_phase_done = True
+    state.framework_agent_discover_failures = 2
+    state.framework_agent_empty_discoveries = 2
+    state.specialist_domain_empty_streak = {"serving_specialist": 3}
+    state.rounds_since_last_specialist = {"serving_specialist": 4}
+    state.rounds_since_last_keep = {"serving_specialist": 5}
+    state.last_sweep = {"status": "succeeded"}
+    state.last_conc_sweep = {"status": "succeeded"}
+    state.explore_search = {"tested": {"stable": {"cycle": 0}}}
+    state.kernel_integrate_attempts = {"stable": {"attempts": [{"cycle": 0}]}}
+
+    state.reset_per_cycle_plateau_state()
+
+    assert state.params_no_promote_streak == 0
+    assert state.explore_specialist_dispatched_count == 0
+    assert state.framework_agent_phase_done is False
+    assert state.framework_agent_discover_failures == 0
+    assert state.framework_agent_empty_discoveries == 0
+    assert state.specialist_domain_empty_streak == {}
+    assert state.rounds_since_last_specialist == {}
+    assert state.rounds_since_last_keep == {}
+    assert state.last_sweep == {}
+    assert state.last_conc_sweep == {}
+    assert state.explore_search["tested"]["stable"]["cycle"] == 0
+    assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
 
 def test_exit_normal_explore_exits_on_plateau():
@@ -411,6 +463,20 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
     assert kernel_work_pending(state) is True
     assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.kernel_optimizer = "geak"
+    state.geak_result = {"status": "no_gain"}
+    state.untried_hot_reusable_kernels = lambda: ["k017"]
+
+    assert kernel_work_pending(state) is False
+    out = compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "kernel_no_more_leverage"
 
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """``record_trace_analyze`` caches TraceLens analysis.md (full text, monotonic snapshot id, point-in-time gain capture, silent read failures)."""

@@ -1,11 +1,11 @@
 ---
-name: hyperloom-qwen3-30b-a3b-instruct-2507-24h
-description: Run a long-horizon Hyperloom Qwen3-30B-A3B-Instruct-2507 optimization session. Use when the user wants long-horizon budget accounting (fixed per-cycle budget window) for a roughly 24-hour demo.
+name: hyperloom-qwen3-14b-fp8-12h
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
 ---
 
-# Hyperloom Qwen3-30B-A3B-Instruct-2507 Long-Horizon Run
+# Hyperloom Qwen3-14B-FP8 12h Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a long-horizon Qwen3-30B-A3B-Instruct-2507 demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
 
 ## Run Mode
 
@@ -39,12 +39,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
@@ -62,18 +63,9 @@ After that, run all remaining commands for this demo inside the same container w
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 ```
 
-## Long-Horizon Budget Mode
-
-Current Hyperloom can open cyclic macro-cycles for all time budgets while budget and leverage remain. `--max-hours 24` still selects long-horizon budget accounting, which uses the fixed per-cycle budget window. Long-horizon budget mode requires one of:
-
-1. `--max-hours >= 24`
-2. an unbounded run (`max_minutes == 0`)
-
-Shorter bounded runs can also reloop, but they keep charge-back phase budgeting against the remaining session time instead of the fixed per-cycle window.
-
 ## Environment
 
-- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-30B-A3B-Instruct-2507 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
+- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-14B-FP8 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
 Required optimize CLI flags:
@@ -84,7 +76,10 @@ Required optimize CLI flags:
 - `--osl 1024`
 - `--precision bf16`
 - `--target-gain 30`
-- `--max-hours 24`
+- `--max-hours 12`
+- `--max-minutes-framework-pct 0.01`
+- `--max-minutes-explore-pct 0.42`
+- `--max-minutes-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
@@ -94,14 +89,14 @@ Use this decision flow:
 
 - If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
 - If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
-- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B-Instruct-2507` and download `Qwen/Qwen3-30B-A3B-Instruct-2507` there when `config.json` is not already present.
+- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8` and download `Qwen/Qwen3-14B-FP8` there when `config.json` is not already present.
 
 Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
 export REPO_ROOT="$(pwd -P)"
-export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B-Instruct-2507}"
+export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -112,7 +107,7 @@ if (target / "config.json").is_file():
     print(f"Using existing model at {target.resolve()}")
 else:
     snapshot_download(
-        repo_id="Qwen/Qwen3-30B-A3B-Instruct-2507",
+        repo_id="Qwen/Qwen3-14B-FP8",
         local_dir=str(target),
         local_dir_use_symlinks=False,
     )

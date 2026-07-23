@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for ``multi_node/scripts`` launch and kill helpers.
@@ -1792,8 +1792,88 @@ def test_kill_single_entrypoint_quotes_pid_file(monkeypatch):
 
     assert shlex.quote(pid_file) in ep
     assert f"kill_server.sh {pid_file}" not in ep
+def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
+    """A shell-metacharacter extra_args must not inject a second command into
+    the restart entrypoint; the `;` stays inside a quoted argv token."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="m",
+        tp=8,
+        no_wait_health=False,
+        extra_args="--foo 1; touch /tmp/pwned",
+    )
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    # The raw injection form (a bare `; touch`) must NOT appear as shell syntax.
+    assert "1; touch /tmp/pwned" not in ep
+    # The metacharacter is confined to a single quoted token.
+    assert "'1;'" in ep
 
 
+def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
+    """Legitimate multi-token extra_args survive unchanged (no functional
+    regression from the shell-safe re-quoting)."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="m",
+        tp=8,
+        no_wait_health=False,
+        extra_args="--mem-fraction-static 0.85 --enable-torch-compile",
+    )
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    assert "-- --mem-fraction-static 0.85 --enable-torch-compile" in ep
+
+
+def test_multinode_launch_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
+    """Multi-node RayJob restart must shell-safe --extra-args like single-node."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="m",
+        tp=8,
+        no_wait_health=False,
+        extra_args="--foo 1; touch /tmp/pwned",
+        ep=1,
+        pd_mode="colocated",
+    )
+    ep = mn_cli._build_multinode_launch_entrypoint(ns, nnodes=2, pid_dir="/tmp/pids", log_dir="/tmp/logs")
+    assert "1; touch /tmp/pwned" not in ep
+    assert "'1;'" in ep
+
+
+def test_infera_build_node_launch_args_neutralizes_malicious_extra_args():
+    from hyperloom.inference_optimizer.multi_node._internal import infera_support
+
+    la = infera_support.build_node_launch_args(
+        framework="sglang",
+        model="/m",
+        tp=8,
+        nnodes=1,
+        extra_args="--foo 1; touch /tmp/pwned",
+    )
+    assert "1; touch /tmp/pwned" not in la
+    assert "'1;'" in la
+
+
+def test_infera_build_node_launch_args_rejects_denied_extra_args():
+    from hyperloom.inference_optimizer.multi_node._internal import infera_support
+    from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import ServerArgsRejected
+
+    with pytest.raises(ServerArgsRejected, match="denied server flags"):
+        infera_support.build_node_launch_args(
+            framework="sglang",
+            model="/m",
+            tp=8,
+            nnodes=1,
+            extra_args="--model-path /evil",
+        )
 def test_multinode_op_args_shlex_quotes_malicious_value():
     """The Infera SSH op_args builder path (bench) must also shlex-quote."""
     import shlex

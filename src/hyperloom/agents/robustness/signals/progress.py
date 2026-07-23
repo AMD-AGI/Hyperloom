@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Progress-stagnation detectors (B2 / B3).
@@ -80,6 +80,10 @@ class ProgressDetector:
             self._last_tick: int = int(loaded.get("last_tick", -1))
         except (TypeError, ValueError):
             self._last_tick = -1
+        try:
+            self._macro_cycle: int = int(loaded.get("macro_cycle", 0))
+        except (TypeError, ValueError):
+            self._macro_cycle = 0
 
     def _persist(self) -> None:
         """Write the gain history and last tick to the state view, if any."""
@@ -89,6 +93,7 @@ class ProgressDetector:
             {
                 "gain_history": list(self._gain_history),
                 "last_tick": self._last_tick,
+                "macro_cycle": self._macro_cycle,
             }
         )
 
@@ -116,6 +121,9 @@ class ProgressDetector:
         snap = ctx.shared_state
         if snap.closing_phase or snap.stop_reason:
             return []
+        if snap.macro_cycle != self._macro_cycle:
+            self._macro_cycle = snap.macro_cycle
+            self._gain_history = []
         # Append at most one history slot per Coordinator tick.
         if snap.tick > self._last_tick:
             self._gain_history.append(float(snap.cumulative_gain_validated or 0.0))

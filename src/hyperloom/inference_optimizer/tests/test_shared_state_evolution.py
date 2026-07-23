@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SharedState evolution and migration tests (Inv-10.1/10.2/10.3)."""
@@ -303,7 +303,6 @@ def test_core_state_fields_contains_v08_new_additions():
         "warm_start_pitfalls",
         "warm_start_lessons",
         "specialist_rounds",
-        "specialist_domain_empty_streak",
         "research_lane_capacity",
         "stop_reason",
         "optimization_stack",

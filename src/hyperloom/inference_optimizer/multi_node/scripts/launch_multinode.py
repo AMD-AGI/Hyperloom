@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Multi-node sglang / vllm server launcher, run INSIDE the RayJob head pod.
@@ -1057,13 +1057,7 @@ def main() -> int:
         dtp = 0
         ib_dev = ""
 
-    # shlex.split (not str.split) so quoted values stay one token and tokenization
-    # matches launch_infera_node + the launcher's own quoting; a malformed quote
-    # falls back to whitespace split rather than aborting the launch.
-    try:
-        extra_args = shlex.split(args.extra_args) if args.extra_args else []
-    except ValueError:
-        extra_args = args.extra_args.split() if args.extra_args else []
+    extra_args = shlex.split(args.extra_args) if args.extra_args else []
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")

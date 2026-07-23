@@ -104,11 +104,8 @@ claude = [
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 hyperloom = "hyperloom.inference_optimizer.setup:main"
-# tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
-# (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
-# keep resolving after promotion into the single ``hyperloom`` distribution.
-# The orchestrator's ``framework/client.py._resolve_fa_binary()`` looks up
-# ``fa`` on PATH first (``shutil.which("fa")``), which these provide.
+# Console scripts for interactive / manual use; the orchestrator invokes
+# ``python -m hyperloom.agents.framework.runtime.cli`` directly instead.
 framework-agent = "hyperloom.agents.framework.runtime.cli:main"
 fa = "hyperloom.agents.framework.runtime.cli:main"
 # tree-reform.MD P2.5: robustness-agent's own ``[project.scripts]`` entry,
@@ -145,12 +142,9 @@ where = ["src"]
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
