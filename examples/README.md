@@ -13,6 +13,14 @@ both the install target and the agent workspace. Prepare a dedicated clean
 directory first, then open that directory in Cursor, Claude Code, or Codex before
 running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker unless you are already inside a working framework
+> environment.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
