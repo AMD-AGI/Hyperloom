@@ -35,7 +35,7 @@ curl -fL -O \
   https://github.com/AMD-AGI/Hyperloom/releases/latest/download/hyperloom_inference_optimizer-py3-none-any.whl
 
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-py3-none-any.whl \
+  ./hyperloom_inference_optimizer*-py3-none-any.whl \
   --target .
 ```
 
