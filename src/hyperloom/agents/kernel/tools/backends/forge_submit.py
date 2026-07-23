@@ -1284,7 +1284,7 @@ def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
     ``[{"shape": "(16384,2048) bf16"}, ...]``. Both forms are parsed here.
     """
     out: list[list[int]] = []
-    for e in candidate.get("input_shapes") or []:
+    for e in candidate.get("input_shapes") or candidate.get("shapes") or []:
         s = e.get("shape") if isinstance(e, dict) else e
         if isinstance(s, (list, tuple)) and s and all(isinstance(x, int) for x in s):
             out.append([int(x) for x in s])
@@ -1310,6 +1310,12 @@ def _gemm_dims(shapes: list[list[int]]) -> dict:
         for b in twod:
             if a is not b and a[1] == b[0]:
                 return {"M": a[0], "K": a[1], "N": b[1]}
+    # Linear/GEMM weight layout is commonly W[N,K], so X[M,K] @ W.T has
+    # equal trailing dimensions rather than A[1] == B[0].
+    for a in twod:
+        for b in twod:
+            if a is not b and a[1] == b[1]:
+                return {"M": a[0], "K": a[1], "N": b[0]}
     if twod:
         return {"M": twod[0][0], "K": twod[0][1]}
     return {}
@@ -1363,20 +1369,66 @@ def _shapes_from_candidate(candidate: dict) -> dict:
 
     With a single shape, minimal == primary and the sweep degenerates (Y3).
     """
-    op = (str(candidate.get("operation") or "") + " " + str(candidate.get("name") or "")).lower()
-    dims = _tensor_dim_lists(candidate)
-    if "moe" in op:
-        primary = _moe_dims(dims)
-    elif any(t in op for t in ("gemm", "matmul", "_mm", "linear")):
-        primary = _gemm_dims(dims)
-    else:
-        primary = {}
-    # Honor an explicit pre-named dim dict if one was supplied.
-    if not primary:
-        shapes = candidate.get("input_shapes") or []
-        if shapes and isinstance(shapes[0], dict) and any(k in shapes[0] for k in ("M", "N", "K", "E", "TOPK")):
-            primary = {k: v for k, v in shapes[0].items() if k in ("M", "N", "K", "E", "TOPK")}
-    return {"primary": primary, "minimal": primary, "validation": [primary] if primary else []}
+    def _named_dims(row: dict) -> dict:
+        op = (
+            str(row.get("operation") or "")
+            + " "
+            + str(row.get("name") or "")
+        ).lower()
+        dims = _tensor_dim_lists(row)
+        if "moe" in op:
+            named = _moe_dims(dims)
+        elif any(t in op for t in ("gemm", "matmul", "_mm", "linear")):
+            named = _gemm_dims(dims)
+        else:
+            named = {}
+        if not named:
+            shapes = row.get("input_shapes") or []
+            if (
+                shapes
+                and isinstance(shapes[0], dict)
+                and any(k in shapes[0] for k in ("M", "N", "K", "E", "TOPK"))
+            ):
+                named = {
+                    k: v
+                    for k, v in shapes[0].items()
+                    if k in ("M", "N", "K", "E", "TOPK")
+                }
+        return named
+
+    primary = _named_dims(candidate)
+    validation: list[dict] = []
+    group = candidate.get("task_group")
+    if isinstance(group, dict):
+        rows = [
+            row
+            for row in (group.get("rows") or [])
+            if isinstance(row, dict)
+        ]
+        primary_id = str(group.get("primary_kernel_id") or "")
+        primary_row = next(
+            (
+                row
+                for row in rows
+                if str(row.get("kernel_id") or "") == primary_id
+            ),
+            None,
+        )
+        if primary_row is not None:
+            primary = _named_dims(primary_row) or primary
+        for row in rows:
+            named = _named_dims(row)
+            if named and named not in validation:
+                validation.append(named)
+    if primary:
+        validation = [primary] + [
+            case for case in validation if case != primary
+        ]
+    return {
+        "primary": primary,
+        "minimal": primary,
+        "validation": validation,
+    }
 
 
 def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None, improved: bool) -> Path:

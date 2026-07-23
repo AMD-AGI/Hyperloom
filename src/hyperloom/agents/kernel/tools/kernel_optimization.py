@@ -139,6 +139,22 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
     return candidates
 
 
+def load_candidate_input(path: str, kernel_id: str) -> dict[str, Any] | None:
+    """Load a serialized dispatch candidate, including task-group context."""
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate_id = str(payload.get("kernel_id") or "")
+    if candidate_id and candidate_id != str(kernel_id):
+        return None
+    return payload
+
+
 def _normalize_kernel_id(value: str) -> str:
     """Normalize a kernel id for tolerant comparison.
 
@@ -3189,6 +3205,11 @@ def main() -> int:
         ),
     )
     parser.add_argument("--candidates-path", default="")
+    parser.add_argument(
+        "--candidate-json",
+        default="",
+        help="Serialized dispatch candidate; preserves task-group context.",
+    )
     parser.add_argument("--backends", default="")
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
@@ -3243,7 +3264,9 @@ def main() -> int:
         )
         candidates_path = Path(args.candidates_path) if args.candidates_path else resolve_candidates_path(run_dir)
         all_candidates = load_candidates(candidates_path)
-        candidate = find_candidate(all_candidates, args.kernel_id)
+        candidate = load_candidate_input(args.candidate_json, args.kernel_id)
+        if candidate is None:
+            candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
             # kernel_id matches no candidate; skip cleanly instead of crashing.
             known = [str(c.get("kernel_id") or "") for c in all_candidates]

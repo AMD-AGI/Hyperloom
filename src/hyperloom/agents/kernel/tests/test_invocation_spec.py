@@ -303,3 +303,93 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     option_index = cmd.index("--invocation-spec-file")
     assert cmd[option_index + 1] == str(spec_path.resolve())
     assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
+
+
+def test_serialized_candidate_preserves_task_group(tmp_path):
+    path = tmp_path / "candidate_tg001.json"
+    candidate = _candidate(tmp_path)
+    candidate["task_group"] = {
+        "task_group_id": "tg001",
+        "primary_kernel_id": "k002",
+        "kernel_ids": ["k001", "k002"],
+        "rows": [
+            {
+                "kernel_id": "k001",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,5120) fp8"},
+                    {"shape": "(5120,5120) fp8"},
+                ],
+            },
+            {
+                "kernel_id": "k002",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,17408) fp8"},
+                    {"shape": "(5120,17408) fp8"},
+                ],
+            },
+        ],
+    }
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    loaded = kernel_optimization.load_candidate_input(str(path), "k002")
+    spec = invocation_spec.build_invocation_spec(loaded)
+
+    assert loaded["task_group"]["task_group_id"] == "tg001"
+    assert spec["workload"]["task_group"]["kernel_ids"] == ["k001", "k002"]
+    assert len(spec["workload"]["task_group"]["cases"]) == 2
+    assert kernel_optimization.load_candidate_input(str(path), "k999") is None
+
+
+def test_forge_shapes_include_every_grouped_gemm_case(tmp_path):
+    candidate = _candidate(tmp_path)
+    candidate["task_group"] = {
+        "task_group_id": "tg001",
+        "primary_kernel_id": "k002",
+        "kernel_ids": ["k001", "k002", "k003", "k004"],
+        "rows": [
+            {
+                "kernel_id": "k001",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,5120) fp8"},
+                    {"shape": "(5120,5120) fp8"},
+                ],
+            },
+            {
+                "kernel_id": "k002",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,17408) fp8"},
+                    {"shape": "(5120,17408) fp8"},
+                ],
+            },
+            {
+                "kernel_id": "k003",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,5120) fp8"},
+                    {"shape": "(7168,5120) fp8"},
+                ],
+            },
+            {
+                "kernel_id": "k004",
+                "name": "scaled_gemm",
+                "input_shapes": [
+                    {"shape": "(64,5120) fp8"},
+                    {"shape": "(34816,5120) fp8"},
+                ],
+            },
+        ],
+    }
+
+    shapes = forge_submit._shapes_from_candidate(candidate)
+
+    assert shapes["primary"] == {"M": 64, "N": 5120, "K": 17408}
+    assert shapes["validation"] == [
+        {"M": 64, "N": 5120, "K": 17408},
+        {"M": 64, "N": 5120, "K": 5120},
+        {"M": 64, "N": 7168, "K": 5120},
+        {"M": 64, "N": 34816, "K": 5120},
+    ]

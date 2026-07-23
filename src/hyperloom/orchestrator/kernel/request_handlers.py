@@ -3600,6 +3600,14 @@ async def run_optimization_handler(
                 single_payload.get("kernel_id"),
                 candidates,
             )
+            # Preserve the selected candidate itself: it may carry a task_group
+            # that does not exist on the raw hot-kernel row reloaded by the
+            # kernel_optimization subprocess.
+            single_payload["candidate"] = candidates[0]
+            single_payload.setdefault(
+                "source_file",
+                candidates[0].get("source_file"),
+            )
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
             canon = _resolve_candidate_id(
@@ -4339,6 +4347,17 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
+    task_group = candidate.get("task_group")
+    if isinstance(task_group, dict):
+        best["task_group_id"] = str(task_group.get("task_group_id") or "")
+        best["task_group_kernel_ids"] = [
+            str(item)
+            for item in (task_group.get("kernel_ids") or [])
+            if str(item)
+        ]
+        best["task_group_primary_kernel_id"] = str(
+            task_group.get("primary_kernel_id") or kernel_id
+        )
     # Preserve source_file so the streaming callback can group by file.
     if not best.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
@@ -4537,6 +4556,38 @@ async def _run_optimization_single(
         "--workspace-path",
         workspace_path,
     ]
+    candidate_payload = payload.get("candidate")
+    if isinstance(candidate_payload, dict):
+        task_group = candidate_payload.get("task_group")
+        group_id = (
+            str(task_group.get("task_group_id") or "")
+            if isinstance(task_group, dict)
+            else ""
+        )
+        identity = group_id or str(candidate_payload.get("kernel_id") or kernel_id)
+        safe_identity = re.sub(r"[^A-Za-z0-9._-]+", "_", identity).strip("._-") or "candidate"
+        candidate_json_path = (
+            Path(workspace_path)
+            / "kernel-agent"
+            / "runs"
+            / str(payload.get("session_id") or session_dir.name)
+            / "inputs"
+            / f"candidate_{safe_identity}.json"
+        )
+        try:
+            candidate_json_path.parent.mkdir(parents=True, exist_ok=True)
+            candidate_json_path.write_text(
+                json.dumps(candidate_payload, indent=2, sort_keys=True, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            cmd += ["--candidate-json", str(candidate_json_path)]
+        except OSError as exc:
+            log.warning(
+                "could not persist grouped candidate input %s: %s",
+                candidate_json_path,
+                exc,
+            )
     backends_arg = _backends_cli_arg(payload.get("backends"))
     if backends_arg:
         cmd += ["--backends", backends_arg]

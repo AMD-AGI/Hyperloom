@@ -624,6 +624,57 @@ def _deployment_context(candidate: dict[str, Any], *, repo_root: str = "") -> di
     return context
 
 
+def _task_group_contract(
+    candidate: dict[str, Any],
+    *,
+    repo_root: str = "",
+) -> dict[str, Any]:
+    """Compact a TraceLens task group into actionable workload cases."""
+    group = candidate.get("task_group")
+    if not isinstance(group, dict):
+        return {}
+    cases: list[dict[str, Any]] = []
+    for row in group.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        arguments = _argument_records(
+            row.get("input_shapes") or row.get("shapes") or [],
+            row.get("input_dtypes") or row.get("dtypes") or [],
+            root="args",
+        )
+        case: dict[str, Any] = {
+            "kernel_id": str(row.get("kernel_id") or ""),
+            "name": str(row.get("name") or ""),
+            "source_file": _absolute_path(
+                row.get("source_file"),
+                base_dir=repo_root,
+            ),
+            "call_count": row.get("call_count"),
+            "gpu_pct": row.get("gpu_pct"),
+            "arguments": arguments,
+            "outputs": _argument_records(
+                row.get("output_shapes") or [],
+                row.get("output_dtypes") or [],
+                root="outputs",
+            ),
+        }
+        compact_case = _compact_json(case)
+        if isinstance(compact_case, dict):
+            cases.append(compact_case)
+    return {
+        "task_group_id": str(group.get("task_group_id") or ""),
+        "primary_kernel_id": str(group.get("primary_kernel_id") or ""),
+        "kernel_ids": [
+            str(item)
+            for item in (group.get("kernel_ids") or [])
+            if str(item)
+        ],
+        "aggregate_gpu_pct": group.get("aggregate_gpu_pct"),
+        "aggregate_call_count": group.get("aggregate_call_count"),
+        "cases": cases,
+    }
+
+
 def invocation_spec_filename(candidate: dict[str, Any]) -> str:
     """Return a path-safe, operator-identifying invocation-spec filename."""
     identity = str(candidate.get("name") or candidate.get("operation") or "unknown_operator").strip()
@@ -721,6 +772,7 @@ def build_invocation_spec(
     ]
     runtime_args = candidate.get("runtime_args") if isinstance(candidate.get("runtime_args"), dict) else {}
     runtime_flags = candidate.get("runtime_flags") if isinstance(candidate.get("runtime_flags"), dict) else {}
+    task_group_contract = _task_group_contract(candidate, repo_root=repo_root)
     execution: dict[str, Any] = {}
     execution_fields = {
         "framework": candidate.get("framework") or candidate.get("backend"),
@@ -778,7 +830,7 @@ def build_invocation_spec(
         },
         "workload": {
             "call_count": candidate.get("call_count"),
-            "task_group": _safe_mapping(candidate.get("task_group"), base_dir=repo_root),
+            "task_group": task_group_contract,
         },
         "execution": execution,
         "deployment": deployment,
