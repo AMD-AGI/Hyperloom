@@ -870,26 +870,22 @@ PY
 }
 
 download_rocm_profiler_hotfix_libs() {
-  local tmp_dir archive
+  local tmp_dir archive url
   tmp_dir="$(mktemp -d)"
-  command -v gh >/dev/null 2>&1 || {
+  command -v curl >/dev/null 2>&1 || {
     rm -rf "$tmp_dir"
-    warn "gh CLI not found; cannot download ROCm profiler hotfix asset"
+    warn "curl not found; cannot download ROCm profiler hotfix asset"
     return 1
   }
-  gh auth status >/dev/null 2>&1 || {
+  # Public release asset; no auth needed on an open-source repo.
+  url="https://github.com/${HYPERLOOM_WHEEL_REPO}/releases/download/${HYPERLOOM_WHEEL_TAG}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}" >&2
+  if ! curl -fSL -o "$archive" "$url" >&2; then
     rm -rf "$tmp_dir"
-    warn "gh is not authenticated; cannot download ROCm profiler hotfix asset"
-    return 1
-  }
-  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}" >&2
-  if ! gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
-    -p "$ROCM_PROFILER_HOTFIX_ASSET" -D "$tmp_dir" >&2; then
-    rm -rf "$tmp_dir"
-    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
+    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
     return 1
   fi
-  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
   if ! tar -xzf "$archive" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
     warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
