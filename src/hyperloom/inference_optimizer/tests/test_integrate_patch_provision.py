@@ -81,6 +81,19 @@ def _executor(tmp_path):
     return ip.IntegratePatchExecutor(session_dir=tmp_path / "session")
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_disk_preflight(monkeypatch):
+    """Stop the real disk_preflight from leaking the runner's free-space into
+    these tests. The provision stage runs disk_preflight before consulting the
+    adapter; on a space-constrained CI runner (< 20 GB free on /tmp) it would
+    raise DiskPreflightError and short-circuit provision-logic tests that never
+    intend to exercise it. Tests that DO exercise it re-patch disk_preflight
+    themselves (that patch wins over this autouse no-op)."""
+    import hyperloom.agents.framework.isolation as iso
+
+    monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)
+
+
 # ---------------------------------------------------------------------------
 # provision stage: no candidate / skip paths
 # ---------------------------------------------------------------------------
