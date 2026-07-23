@@ -27,9 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Refresh the optimization-loop documentation under
   `docs/conceptual/optimization-loop.md` and add
   `src/hyperloom/inference_optimizer/README.md` as a package-level entry point.
-- README now links to the structured docs via a "Learn More" index and lists
-  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, and `SECURITY.md` in the
-  repo tree.
+- README now links to the structured docs from its "Get Started" and
+  "Documentation" sections.
 - **fix(orchestrator)**: drop pre-M4 `select_kernels` request alias and the
   legacy `SharedState.last_select_kernels` / `record_select_kernels` mirror.
   Only the canonical `trace_analyze` kind / `last_trace_analyze` cache
@@ -41,11 +40,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `state.json` carrying `last_select_kernels` silently drops the slot
   via `_legacy_drop_fields`.
 
-## [0.8.0]
-Current packaged version (`pyproject.toml`). Changes since `v0.3` are tracked
-under **[Unreleased]** above pending a tagged release; the version number was
-advanced to `0.8.0` to match the runtime. See
+## [v1.0.0a1] - 2026-07-22
+Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) for the user-facing summary.
+
+## [0.8.0]
+Earlier packaged version. See [release notes](docs/release-notes.md) for the
+user-facing summary.
 
 ## [v0.3] - 2026-05-14
 ### Added
@@ -62,7 +63,8 @@ advanced to `0.8.0` to match the runtime. See
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v0.3...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a1...HEAD
+[v1.0.0a1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a1
 [0.8.0]: https://github.com/AMD-AGI/Hyperloom/blob/main/docs/release-notes.md
 [v0.3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.3
 [v0.2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.2
