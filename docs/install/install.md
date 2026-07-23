@@ -84,9 +84,6 @@ It asks for these values with a fixed option order:
    - `docker`
    - `baremetal`
 
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-to enable setup to run directly in the current container environment.
-
 ## Setup scenarios
 
 Hyperloom supports two local setup scenarios. Pick the one that matches where your 
