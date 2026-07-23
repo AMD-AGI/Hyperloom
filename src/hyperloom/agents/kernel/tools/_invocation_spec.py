@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from _io_utils import atomic_write_json
+from _task_group_contract import CASE_SELECTOR_KEY, task_group_shape_cases
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SHAPE_RE = re.compile(r"\(([^()]*)\)\s*([A-Za-z0-9_:.\-]+)?")
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _SOURCE_LOCATOR_RE = re.compile(
@@ -633,29 +634,47 @@ def _task_group_contract(
     group = candidate.get("task_group")
     if not isinstance(group, dict):
         return {}
+    rows_by_kernel_id = {
+        str(row.get("kernel_id") or ""): row
+        for row in (group.get("rows") or [])
+        if isinstance(row, dict)
+    }
     cases: list[dict[str, Any]] = []
-    for row in group.get("rows") or []:
-        if not isinstance(row, dict):
-            continue
+    for normalized in task_group_shape_cases(candidate):
+        kernel_ids = [
+            str(kernel_id)
+            for kernel_id in (normalized.get("kernel_ids") or [])
+            if str(kernel_id)
+        ]
+        source_row = next(
+            (rows_by_kernel_id[kernel_id] for kernel_id in kernel_ids if kernel_id in rows_by_kernel_id),
+            {},
+        )
         arguments = _argument_records(
-            row.get("input_shapes") or row.get("shapes") or [],
-            row.get("input_dtypes") or row.get("dtypes") or [],
+            normalized.get("input_shapes") or [],
+            normalized.get("input_dtypes") or [],
             root="args",
         )
         case: dict[str, Any] = {
-            "kernel_id": str(row.get("kernel_id") or ""),
-            "name": str(row.get("name") or ""),
+            "case_id": str(normalized.get("case_id") or ""),
+            "selector": dict(normalized.get("selector") or {}),
+            "kernel_ids": kernel_ids,
+            "operation": str(normalized.get("operation") or ""),
             "source_file": _absolute_path(
-                row.get("source_file"),
+                source_row.get("source_file"),
                 base_dir=repo_root,
             ),
-            "call_count": row.get("call_count"),
-            "gpu_pct": row.get("gpu_pct"),
+            "call_count": normalized.get("call_count"),
+            "gpu_pct": source_row.get("gpu_pct"),
             "arguments": arguments,
             "outputs": _argument_records(
-                row.get("output_shapes") or [],
-                row.get("output_dtypes") or [],
+                normalized.get("output_shapes") or [],
+                normalized.get("output_dtypes") or [],
                 root="outputs",
+            ),
+            "raw_arg_spec": _safe_mapping(
+                normalized.get("raw_arg_spec"),
+                base_dir=repo_root,
             ),
         }
         compact_case = _compact_json(case)
@@ -663,6 +682,7 @@ def _task_group_contract(
             cases.append(compact_case)
     return {
         "task_group_id": str(group.get("task_group_id") or ""),
+        "task_group_key": str(group.get("task_group_key") or ""),
         "primary_kernel_id": str(group.get("primary_kernel_id") or ""),
         "kernel_ids": [
             str(item)
@@ -672,6 +692,23 @@ def _task_group_contract(
         "aggregate_gpu_pct": group.get("aggregate_gpu_pct"),
         "aggregate_call_count": group.get("aggregate_call_count"),
         "cases": cases,
+    }
+
+
+def _driver_contract(task_group: dict[str, Any]) -> dict[str, Any]:
+    """Describe the shape-selection behavior required from a Forge driver."""
+    cases = task_group.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return {}
+    return {
+        "shape_argument": "--shape",
+        "case_selector_key": CASE_SELECTOR_KEY,
+        "requires_all_cases": len(cases) > 1,
+        "case_selectors": [
+            dict(case.get("selector") or {})
+            for case in cases
+            if isinstance(case, dict) and isinstance(case.get("selector"), dict)
+        ],
     }
 
 
@@ -827,6 +864,7 @@ def build_invocation_spec(
                 test_command,
                 base_dir=repo_root,
             ),
+            "driver_contract": _driver_contract(task_group_contract),
         },
         "workload": {
             "call_count": candidate.get("call_count"),
@@ -845,8 +883,11 @@ def build_invocation_spec(
         },
     }
     raw_arg_spec = candidate.get("raw_arg_spec")
-    if not inputs and isinstance(raw_arg_spec, dict) and raw_arg_spec:
-        spec["invocation"]["raw_arg_spec"] = raw_arg_spec
+    if isinstance(raw_arg_spec, dict) and raw_arg_spec:
+        spec["invocation"]["raw_arg_spec"] = _safe_mapping(
+            raw_arg_spec,
+            base_dir=repo_root,
+        )
     compacted = _compact_json(spec)
     return compacted if isinstance(compacted, dict) else {}
 

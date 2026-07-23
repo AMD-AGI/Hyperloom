@@ -10,6 +10,7 @@ Emits optimized source plus an optimization_report.md artifact for integration.
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import os
 import re
@@ -20,6 +21,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+_TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
+_TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
+if _TOOLS_DIR_INSERTED:
+    sys.path.insert(0, _TOOLS_DIR)
+from _task_group_contract import (  # noqa: E402
+    forge_shapes_from_candidate,
+    task_group_shape_cases,
+)
+
+if _TOOLS_DIR_INSERTED:
+    sys.path.remove(_TOOLS_DIR)
 
 log = logging.getLogger(__name__)
 
@@ -1276,159 +1289,56 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
     return None
 
 
-def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
-    """Extract per-tensor integer dim lists from candidate['input_shapes'].
-
-    TraceLens emits input_shapes either as integer lists
-    ``[{"call_num": N, "shape": [d0, d1, ...]}, ...]`` OR as dtype-tagged strings
-    ``[{"shape": "(16384,2048) bf16"}, ...]``. Both forms are parsed here.
-    """
-    out: list[list[int]] = []
-    for e in candidate.get("input_shapes") or candidate.get("shapes") or []:
-        s = e.get("shape") if isinstance(e, dict) else e
-        if isinstance(s, (list, tuple)) and s and all(isinstance(x, int) for x in s):
-            out.append([int(x) for x in s])
-        elif isinstance(s, str):
-            # One entry may hold a single shape or many joined by "<br>" /
-            # newlines; findall over every "(...)" group handles both.
-            for grp in re.findall(r"\(([\d,\s]*)\)", s):
-                dims = [int(x) for x in grp.split(",") if x.strip().isdigit()]
-                if dims:
-                    out.append(dims)
-    return out
-
-
-def _gemm_dims(shapes: list[list[int]]) -> dict:
-    """Derive {M,N,K} from matmul operands A[M,K] @ B[K,N] (best-effort).
-
-    Picks the first pair of 2D tensors whose inner dims agree (A[1]==B[0]); falls
-    back to M/K from a single 2D tensor. Dims that cannot be derived are omitted
-    so the driver keeps its own default for them.
-    """
-    twod = [s for s in shapes if len(s) == 2]
-    for a in twod:
-        for b in twod:
-            if a is not b and a[1] == b[0]:
-                return {"M": a[0], "K": a[1], "N": b[1]}
-    # Linear/GEMM weight layout is commonly W[N,K], so X[M,K] @ W.T has
-    # equal trailing dimensions rather than A[1] == B[0].
-    for a in twod:
-        for b in twod:
-            if a is not b and a[1] == b[1]:
-                return {"M": a[0], "K": a[1], "N": b[0]}
-    if twod:
-        return {"M": twod[0][0], "K": twod[0][1]}
-    return {}
-
-
-def _moe_dims(shapes: list[list[int]]) -> dict:
-    """Derive {M,N,K,E,TOPK} from fused_moe tensor shapes (best-effort).
-
-    Recognizes hidden_states [M,K] (2D, widest feature dim), expert weights
-    [E,*,K] (3D), and topk ids/weights [M,t] (2D, small second dim). w2 is
-    [E,K,N] (dim1==K) -> N=dim2; else w1 [E,2N,K] (dim2==K) -> N=dim1//2.
-    Only confidently derived dims are returned; the rest fall back to defaults.
-    """
-    twod = [s for s in shapes if len(s) == 2]
-    threed = [s for s in shapes if len(s) == 3]
-    d: dict = {}
-    hidden = max(twod, key=lambda s: s[1]) if twod else None
-    if hidden is not None:
-        d["M"], d["K"] = hidden[0], hidden[1]
-        for s in twod:  # topk ids/weights: [M, topk] with a small second dim
-            if s is not hidden and s[0] == hidden[0] and 0 < s[1] <= 64:
-                d["TOPK"] = s[1]
-                break
-    if threed:
-        d["E"] = threed[0][0]
-        k = d.get("K")
-        n = None
-        if k is not None:
-            for s in threed:  # w2 [E,K,N]
-                if s[1] == k:
-                    n = s[2]
-                    break
-            if n is None:
-                for s in threed:  # w1 [E,2N,K]
-                    if s[2] == k:
-                        n = s[1] // 2
-                        break
-        if n is not None:
-            d["N"] = n
-    return d
-
-
 def _shapes_from_candidate(candidate: dict) -> dict:
-    """Build a Forge shapes dict (primary/minimal/validation) for the driver.
+    """Build primary-first Forge selectors for every distinct workload case."""
+    return forge_shapes_from_candidate(candidate)
 
-    Forge formats ``--shape K=V,...`` from shapes['primary'] and passes it to the
-    auto-generated driver, so the keys must match what the driver parses
-    (M/N/K for gemm; M/N/K/E/TOPK for moe). We derive those named dims from the
-    candidate's per-tensor input_shapes; when a dim is not derivable the key is
-    omitted and the driver keeps its built-in default (safe degradation).
 
-    With a single shape, minimal == primary and the sweep degenerates (Y3).
-    """
-    def _named_dims(row: dict) -> dict:
-        op = (
-            str(row.get("operation") or "")
-            + " "
-            + str(row.get("name") or "")
-        ).lower()
-        dims = _tensor_dim_lists(row)
-        if "moe" in op:
-            named = _moe_dims(dims)
-        elif any(t in op for t in ("gemm", "matmul", "_mm", "linear")):
-            named = _gemm_dims(dims)
-        else:
-            named = {}
-        if not named:
-            shapes = row.get("input_shapes") or []
-            if (
-                shapes
-                and isinstance(shapes[0], dict)
-                and any(k in shapes[0] for k in ("M", "N", "K", "E", "TOPK"))
-            ):
-                named = {
-                    k: v
-                    for k, v in shapes[0].items()
-                    if k in ("M", "N", "K", "E", "TOPK")
-                }
-        return named
+def _invocation_spec_covers_cases(
+    invocation_spec_file: str,
+    grouped_cases: list[dict],
+) -> bool:
+    """Validate that the persisted task-preparer contract contains every case."""
+    if not invocation_spec_file:
+        return False
+    try:
+        payload = json.loads(Path(invocation_spec_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    try:
+        schema_version = int(payload.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if schema_version < 2:
+        return False
 
-    primary = _named_dims(candidate)
-    validation: list[dict] = []
-    group = candidate.get("task_group")
-    if isinstance(group, dict):
-        rows = [
-            row
-            for row in (group.get("rows") or [])
-            if isinstance(row, dict)
-        ]
-        primary_id = str(group.get("primary_kernel_id") or "")
-        primary_row = next(
-            (
-                row
-                for row in rows
-                if str(row.get("kernel_id") or "") == primary_id
-            ),
-            None,
-        )
-        if primary_row is not None:
-            primary = _named_dims(primary_row) or primary
-        for row in rows:
-            named = _named_dims(row)
-            if named and named not in validation:
-                validation.append(named)
-    if primary:
-        validation = [primary] + [
-            case for case in validation if case != primary
-        ]
-    return {
-        "primary": primary,
-        "minimal": primary,
-        "validation": validation,
-    }
+    expected_selectors = [
+        dict(case.get("selector") or {})
+        for case in grouped_cases
+        if isinstance(case.get("selector"), dict)
+    ]
+    task_group = ((payload.get("workload") or {}).get("task_group") or {})
+    spec_cases = task_group.get("cases") if isinstance(task_group, dict) else None
+    actual_selectors = [
+        dict(case.get("selector") or {})
+        for case in (spec_cases or [])
+        if isinstance(case, dict) and isinstance(case.get("selector"), dict)
+    ]
+    driver_contract = ((payload.get("tests") or {}).get("driver_contract") or {})
+    contract_selectors = (
+        driver_contract.get("case_selectors")
+        if isinstance(driver_contract, dict)
+        else None
+    )
+    return (
+        len(expected_selectors) == len(grouped_cases)
+        and len(expected_selectors) > 1
+        and actual_selectors == expected_selectors
+        and contract_selectors == expected_selectors
+        and driver_contract.get("requires_all_cases") is True
+    )
 
 
 def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None, improved: bool) -> Path:
@@ -2047,13 +1957,34 @@ def submit(
         # subprocess, so kernel_agents need not be importable in this process).
         _ensure_forge_on_path()
 
+        shapes = _shapes_from_candidate(candidate)
+        grouped_cases = task_group_shape_cases(candidate)
+        requires_multi_case_driver = len(grouped_cases) > 1
+
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
         # If neither path can produce a usable file, still invoke forge-loop with
         # a missing driver path. Its task-preparer owns the final driver-authoring
         # fallback and will either create a conforming driver or fail explicitly.
         driver_from_adapter = False
-        if test_command:
+        if requires_multi_case_driver:
+            if not _invocation_spec_covers_cases(
+                invocation_spec_file,
+                grouped_cases,
+            ):
+                return _normalized(
+                    1,
+                    "",
+                    "forge: grouped multi-shape invocation spec is missing or incomplete",
+                    time.time() - started,
+                )
+            driver = str(output_dir / "forge_task_driver.py")
+            log.info(
+                "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
+                len(grouped_cases),
+                driver,
+            )
+        elif test_command:
             try:
                 driver = _build_driver_adapter(test_command, workspace, output_dir)
                 driver_from_adapter = True
@@ -2121,7 +2052,6 @@ def submit(
             )
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
-        shapes = _shapes_from_candidate(candidate)
         forge_log = output_dir / "forge_loop.log"
         experiments_dir = output_dir / "forge_experiments"
         experiments_dir.mkdir(parents=True, exist_ok=True)

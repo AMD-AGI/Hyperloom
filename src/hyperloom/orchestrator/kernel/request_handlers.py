@@ -1196,6 +1196,13 @@ def _fill_integrate_defaults_from_state(
         if cb_args:
             resolved["extra_server_args"] = cb_args
 
+    kernel_id = str(resolved.get("kernel_id") or "")
+    if kernel_id and not resolved.get("task_group_key"):
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        task_group_key = str(attempt.get("task_group_key") or "")
+        if task_group_key:
+            resolved["task_group_key"] = task_group_key
+
     return resolved
 
 
@@ -3629,7 +3636,15 @@ async def run_optimization_handler(
                     ),
                 }
         single_payload["_single_kernel"] = True
-        return await _run_optimization_single(single_payload, session_dir=session_dir)
+        result = await _run_optimization_single(
+            single_payload,
+            session_dir=session_dir,
+        )
+        return _stamp_task_group_result(
+            result,
+            candidates[0] if candidates else None,
+            fallback_kernel_id=str(single_payload.get("kernel_id") or ""),
+        )
     return await _run_optimization_batch(
         payload,
         candidates,
@@ -4042,7 +4057,26 @@ def _batch_kernel_candidates(
                 session_dir,
             )
 
-    def _is_live(kid: str, current_source: str = "") -> bool:
+    def _entry_allows_dispatch(
+        entry: dict[str, Any],
+        current_source: str,
+    ) -> bool:
+        """Apply retry and terminal-state rules to one persisted task ledger."""
+        if str(entry.get("last_decision") or "").upper() in {"KEEP", "REVERT"}:
+            return False
+        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
+        if current_source:
+            per_source = entry.get("attempts_per_source")
+            if isinstance(per_source, dict):
+                src_attempts = int(per_source.get(current_source, 0))
+                return src_attempts < attempt_cap
+        return int(entry.get("attempts", 0)) < attempt_cap
+
+    def _is_live(
+        kid: str,
+        current_source: str = "",
+        current_task_group_key: str = "",
+    ) -> bool:
         """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (per-source counting).
 
         Args:
@@ -4052,18 +4086,29 @@ def _batch_kernel_candidates(
         Returns:
             ``True`` when the kernel is batch-eligible, else ``False``.
         """
-        if kid in rejected_kernel_ids:
-            return False
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
-        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
-        if current_source:
-            per_source = entry.get("attempts_per_source")
-            if isinstance(per_source, dict):
-                src_attempts = int(per_source.get(current_source, 0))
-                return src_attempts < attempt_cap
-        if int(entry.get("attempts", 0)) >= attempt_cap:
+        recorded_group_key = str(entry.get("task_group_key") or "")
+        if (
+            current_task_group_key
+            and recorded_group_key
+            and recorded_group_key != current_task_group_key
+        ):
+            return True
+        recorded_source = str(entry.get("last_source_file") or "")
+        same_source = (
+            not current_source
+            or not recorded_source
+            or recorded_source == current_source
+        )
+        if (
+            kid in rejected_kernel_ids
+            and same_source
+            and not (current_task_group_key and not recorded_group_key)
+        ):
+            return False
+        if not _entry_allows_dispatch(entry, current_source):
             return False
         return True
 
@@ -4086,33 +4131,101 @@ def _batch_kernel_candidates(
             continue
         # Mark all members so the legacy loop never re-picks them.
         grouped_kernel_ids.update(member_ids)
-        # Only reusable_native members survive; fall back to the next live one
-        # when the primary is rejected, else skip the group.
+        group_id = str(group.get("task_group_id") or "")
+        group_key = str(group.get("task_group_key") or "")
         primary = str(group.get("primary_kernel_id") or "")
-        primary_cand = kernel_by_id.get(primary)
-        primary_live = (
-            primary_cand is not None
-            and primary_cand.get("reusable_native_kernel") is True
-            and bool(primary_cand.get("source_file"))
-            and _is_live(primary, str(primary_cand.get("source_file") or ""))
+        if any(member_id in in_flight for member_id in member_ids):
+            for member_id in member_ids:
+                skipped.setdefault(member_id, "group_in_flight")
+            continue
+
+        # Once the merged task has a ledger entry, retry or retire that task as
+        # one unit. Never rotate to an untouched sibling shape.
+        recorded_ledger = next(
+            (
+                (ledger_id, entry)
+                for ledger_id, entry in attempts_by_kid.items()
+                if isinstance(entry, dict)
+                and (
+                    (
+                        group_key
+                        and str(entry.get("task_group_key") or "") == group_key
+                    )
+                    or (
+                        not group_key
+                        and ledger_id in member_ids
+                        and group_id
+                        and str(entry.get("task_group_id") or "") == group_id
+                    )
+                )
+            ),
+            None,
         )
-        if not primary_live:
-            primary_cand = next(
+        if recorded_ledger is not None:
+            _recorded_member_id, recorded_entry = recorded_ledger
+            recorded_candidate = kernel_by_id.get(primary) or next(
                 (
-                    kernel_by_id[m]
-                    for m in member_ids
-                    if m in kernel_by_id
-                    and kernel_by_id[m].get("reusable_native_kernel") is True
-                    and kernel_by_id[m].get("source_file")
-                    and _is_live(m, str(kernel_by_id[m].get("source_file") or ""))
+                    kernel_by_id[member_id]
+                    for member_id in member_ids
+                    if member_id in kernel_by_id
+                    and kernel_by_id[member_id].get("reusable_native_kernel")
+                    is True
+                    and kernel_by_id[member_id].get("source_file")
                 ),
                 None,
             )
-            if primary_cand is None:
-                # Every reusable member exhausted -> nothing to dispatch.
-                for m in member_ids:
-                    skipped.setdefault(m, "group_exhausted")
+            recorded_live = (
+                recorded_candidate is not None
+                and recorded_candidate.get("reusable_native_kernel") is True
+                and bool(recorded_candidate.get("source_file"))
+                and _entry_allows_dispatch(
+                    recorded_entry,
+                    str(recorded_candidate.get("source_file") or ""),
+                )
+            )
+            if not recorded_live:
+                for member_id in member_ids:
+                    skipped.setdefault(member_id, "group_task_complete")
                 continue
+            primary_cand = recorded_candidate
+        else:
+            primary_cand = None
+
+        # Only reusable_native members survive; fall back to the next live one
+        # when the primary is rejected, else skip the group.
+        if primary_cand is None:
+            primary_cand = kernel_by_id.get(primary)
+            primary_live = (
+                primary_cand is not None
+                and primary_cand.get("reusable_native_kernel") is True
+                and bool(primary_cand.get("source_file"))
+                and _is_live(
+                    primary,
+                    str(primary_cand.get("source_file") or ""),
+                    group_key,
+                )
+            )
+            if not primary_live:
+                primary_cand = next(
+                    (
+                        kernel_by_id[m]
+                        for m in member_ids
+                        if m in kernel_by_id
+                        and kernel_by_id[m].get("reusable_native_kernel") is True
+                        and kernel_by_id[m].get("source_file")
+                        and _is_live(
+                            m,
+                            str(kernel_by_id[m].get("source_file") or ""),
+                            group_key,
+                        )
+                    ),
+                    None,
+                )
+                if primary_cand is None:
+                    # Every reusable member exhausted -> nothing to dispatch.
+                    for m in member_ids:
+                        skipped.setdefault(m, "group_exhausted")
+                    continue
         if not primary_cand.get("source_file"):
             continue
         try:
@@ -4304,6 +4417,44 @@ async def _run_backend_ladder(
     return best, attempts
 
 
+def _stamp_task_group_result(
+    result: HandlerResult,
+    candidate: dict[str, Any] | None,
+    *,
+    fallback_kernel_id: str = "",
+) -> HandlerResult:
+    """Attach task-group identity to every single or batched result path."""
+    if not isinstance(result, dict) or not isinstance(candidate, dict):
+        return result
+    task_group = candidate.get("task_group")
+    if not isinstance(task_group, dict):
+        return result
+
+    stamped = dict(result)
+    stamped.setdefault("task_group_id", str(task_group.get("task_group_id") or ""))
+    stamped.setdefault("task_group_key", str(task_group.get("task_group_key") or ""))
+    stamped.setdefault(
+        "task_group_kernel_ids",
+        [str(item) for item in (task_group.get("kernel_ids") or []) if str(item)],
+    )
+    stamped.setdefault(
+        "task_group_primary_kernel_id",
+        str(task_group.get("primary_kernel_id") or candidate.get("kernel_id") or fallback_kernel_id),
+    )
+    shape_cases = task_group.get("shape_cases")
+    if isinstance(shape_cases, list):
+        stamped.setdefault("task_group_shape_case_count", len(shape_cases))
+        stamped.setdefault(
+            "task_group_shape_case_ids",
+            [
+                str(case.get("case_id") or "")
+                for case in shape_cases
+                if isinstance(case, dict) and str(case.get("case_id") or "")
+            ],
+        )
+    return stamped
+
+
 async def _run_kernel_backend_sequence(
     base_payload: dict,
     candidate: dict[str, Any],
@@ -4347,17 +4498,11 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
-    task_group = candidate.get("task_group")
-    if isinstance(task_group, dict):
-        best["task_group_id"] = str(task_group.get("task_group_id") or "")
-        best["task_group_kernel_ids"] = [
-            str(item)
-            for item in (task_group.get("kernel_ids") or [])
-            if str(item)
-        ]
-        best["task_group_primary_kernel_id"] = str(
-            task_group.get("primary_kernel_id") or kernel_id
-        )
+    best = _stamp_task_group_result(
+        best,
+        candidate,
+        fallback_kernel_id=kernel_id,
+    )
     # Preserve source_file so the streaming callback can group by file.
     if not best.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
@@ -4448,6 +4593,11 @@ async def _run_optimization_batch(
         # KEEPs on one file (defensive; the sequence already preserves it).
         if isinstance(result, dict) and not result.get("source_file") and cand_src:
             result["source_file"] = cand_src
+        result = _stamp_task_group_result(
+            result,
+            candidate,
+            fallback_kernel_id=cand_kid,
+        )
         if record_partial is not None:
             try:
                 record_partial(result)
@@ -4669,6 +4819,11 @@ async def _run_optimization_single(
             and not result.get("attempts")
         ):
             result["backend"] = dispatched_backend
+        result = _stamp_task_group_result(
+            result,
+            candidate_payload if isinstance(candidate_payload, dict) else None,
+            fallback_kernel_id=str(kernel_id),
+        )
     # Full-trace: mine each forge attempt's stdout for token usage and append an
     # ``llm_calls.jsonl`` row. Best-effort; no-op without a usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
@@ -5323,6 +5478,7 @@ async def integrate_handler(
         "apply_result": apply_result,
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
+        "task_group_key": str(payload.get("task_group_key") or ""),
     }
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"

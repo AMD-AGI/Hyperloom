@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ def _submit_with_stubbed_loop(
     *,
     test_command: str = "",
     autogen_driver: str | None = None,
+    candidate: dict | None = None,
+    invocation_spec_file: str = "",
 ) -> tuple[dict, dict]:
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -65,9 +68,10 @@ def _submit_with_stubbed_loop(
         output_dir=output_dir,
         test_command=test_command,
         source_type="triton",
-        candidate={"operation": "unsupported_op"},
+        candidate=candidate or {"operation": "unsupported_op"},
         timeout_s=60,
         kernel_repo=str(workspace),
+        invocation_spec_file=invocation_spec_file,
     )
     return result, captured
 
@@ -106,3 +110,87 @@ def test_compile_only_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_p
     assert result["returncode"] == 0
     assert result["skipped"] is False
     assert captured["driver"] == str(driver)
+
+
+def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_path):
+    invocation_spec = tmp_path / "invocation_spec.json"
+    candidate = {
+        "kernel_id": "k002",
+        "name": "scaled_gemm",
+        "operation": "scaled_gemm",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k002",
+            "kernel_ids": ["k001", "k002"],
+            "rows": [
+                {
+                    "kernel_id": "k001",
+                    "name": "scaled_gemm",
+                    "input_shapes": [
+                        {"shape": "(64,5120) fp8"},
+                        {"shape": "(5120,5120) fp8"},
+                    ],
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "scaled_gemm",
+                    "input_shapes": [
+                        {"shape": "(64,17408) fp8"},
+                        {"shape": "(5120,17408) fp8"},
+                    ],
+                },
+            ],
+        },
+    }
+    selectors = [
+        {"CASE_ID": "case_001", "M": 64, "N": 5120, "K": 17408},
+        {"CASE_ID": "case_002", "M": 64, "N": 5120, "K": 5120},
+    ]
+    invocation_spec.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "workload": {
+                    "task_group": {
+                        "cases": [
+                            {"case_id": f"case_{index:03d}", "selector": selector}
+                            for index, selector in enumerate(selectors, start=1)
+                        ]
+                    }
+                },
+                "tests": {
+                    "driver_contract": {
+                        "requires_all_cases": True,
+                        "case_selectors": selectors,
+                    }
+                },
+            }
+        )
+    )
+
+    result, captured = _submit_with_stubbed_loop(
+        monkeypatch,
+        tmp_path,
+        test_command="python existing_harness.py --correctness",
+        candidate=candidate,
+        invocation_spec_file=str(invocation_spec),
+    )
+
+    assert result["returncode"] == 0
+    assert captured["driver"].endswith("forge_task_driver.py")
+    assert not Path(captured["driver"]).exists()
+    assert captured["shapes"]["validation"] == selectors
+
+
+def test_grouped_multi_shape_task_rejects_incomplete_invocation_spec(tmp_path):
+    invocation_spec = tmp_path / "invocation_spec.json"
+    invocation_spec.write_text('{"schema_version": 2}\n')
+    cases = [
+        {"selector": {"CASE_ID": "case_001"}},
+        {"selector": {"CASE_ID": "case_002"}},
+    ]
+
+    assert not forge_submit._invocation_spec_covers_cases(
+        str(invocation_spec),
+        cases,
+    )

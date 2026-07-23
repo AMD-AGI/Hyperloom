@@ -11,6 +11,10 @@ from types import SimpleNamespace
 _TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(_TOOLS_DIR))
 import _invocation_spec as invocation_spec  # noqa: E402
+from _task_group_contract import (  # noqa: E402
+    native_operation_key,
+    task_group_shape_cases,
+)
 import kernel_optimization  # noqa: E402
 
 _BACKENDS_DIR = _TOOLS_DIR / "backends"
@@ -217,6 +221,20 @@ def test_missing_optional_context_is_fail_soft(tmp_path):
     assert "sequence" not in spec["deployment"]
 
 
+def test_preserves_raw_argument_order_alongside_tensor_projection(tmp_path):
+    candidate = _candidate(tmp_path)
+    candidate["raw_arg_spec"] = {
+        "input_dims": "((64, 17408), (5120, 17408), (), ())",
+        "input_type": "(c10::Float8_e4m3fnuz, c10::Float8_e4m3fnuz, int, bool)",
+        "concrete_inputs": "(None, None, 128, True)",
+    }
+
+    spec = invocation_spec.build_invocation_spec(candidate)
+
+    assert spec["invocation"]["arguments"]
+    assert spec["invocation"]["raw_arg_spec"] == candidate["raw_arg_spec"]
+
+
 def test_forge_invoke_persists_and_passes_operator_spec(tmp_path, monkeypatch):
     source = tmp_path / "kernel.py"
     source.write_text("def kernel(x):\n    return x\n", encoding="utf-8")
@@ -339,6 +357,15 @@ def test_serialized_candidate_preserves_task_group(tmp_path):
     assert loaded["task_group"]["task_group_id"] == "tg001"
     assert spec["workload"]["task_group"]["kernel_ids"] == ["k001", "k002"]
     assert len(spec["workload"]["task_group"]["cases"]) == 2
+    assert spec["tests"]["driver_contract"] == {
+        "shape_argument": "--shape",
+        "case_selector_key": "CASE_ID",
+        "requires_all_cases": True,
+        "case_selectors": [
+            {"CASE_ID": "case_001", "M": 64, "N": 5120, "K": 17408},
+            {"CASE_ID": "case_002", "M": 64, "N": 5120, "K": 5120},
+        ],
+    }
     assert kernel_optimization.load_candidate_input(str(path), "k999") is None
 
 
@@ -386,10 +413,126 @@ def test_forge_shapes_include_every_grouped_gemm_case(tmp_path):
 
     shapes = forge_submit._shapes_from_candidate(candidate)
 
-    assert shapes["primary"] == {"M": 64, "N": 5120, "K": 17408}
+    assert shapes["primary"] == {
+        "CASE_ID": "case_001",
+        "M": 64,
+        "N": 5120,
+        "K": 17408,
+    }
     assert shapes["validation"] == [
-        {"M": 64, "N": 5120, "K": 17408},
-        {"M": 64, "N": 5120, "K": 5120},
-        {"M": 64, "N": 7168, "K": 5120},
-        {"M": 64, "N": 34816, "K": 5120},
+        {"CASE_ID": "case_001", "M": 64, "N": 5120, "K": 17408},
+        {"CASE_ID": "case_002", "M": 64, "N": 5120, "K": 5120},
+        {"CASE_ID": "case_003", "M": 64, "N": 7168, "K": 5120},
+        {"CASE_ID": "case_004", "M": 64, "N": 34816, "K": 5120},
     ]
+
+
+def test_forge_shapes_keep_all_generic_operator_cases():
+    candidate = {
+        "kernel_id": "k001",
+        "name": "rms_norm",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": ["k001", "k002"],
+            "rows": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rms_norm",
+                    "input_shapes": [{"shape": "(64,5120) bf16"}],
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "rms_norm",
+                    "input_shapes": [{"shape": "(8,5120) bf16"}],
+                },
+            ],
+        },
+    }
+
+    shapes = forge_submit._shapes_from_candidate(candidate)
+
+    assert shapes["validation"] == [
+        {"CASE_ID": "case_001"},
+        {"CASE_ID": "case_002"},
+    ]
+
+
+def test_forge_shapes_deduplicate_identical_observations():
+    candidate = {
+        "kernel_id": "k001",
+        "name": "rms_norm",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": ["k001", "k002"],
+            "rows": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rms_norm",
+                    "call_count": 10,
+                    "input_shapes": [{"call_num": 10, "shape": "(64,5120) bf16"}],
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "rms_norm",
+                    "call_count": 20,
+                    "input_shapes": [{"call_num": 20, "shape": "(64,5120) bf16"}],
+                },
+            ],
+        },
+    }
+
+    cases = task_group_shape_cases(candidate)
+
+    assert len(cases) == 1
+    assert cases[0]["kernel_ids"] == ["k001", "k002"]
+    assert cases[0]["call_count"] == 30
+
+
+def test_group_cases_expand_csv_invocation_boundaries():
+    candidate = {
+        "kernel_id": "k001",
+        "name": "fused_moe",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": ["k001"],
+            "rows": [
+                {
+                    "kernel_id": "k001",
+                    "name": "fused_moe",
+                    "invocation_cases": [
+                        {
+                            "operation": "fused_moe_gate",
+                            "input_shapes": [{"shape": "(64,2048) bf16"}],
+                            "raw_arg_spec": {"concrete_inputs": "(1,)"},
+                        },
+                        {
+                            "operation": "fused_moe_down",
+                            "input_shapes": [{"shape": "(512,768) bf16"}],
+                            "raw_arg_spec": {"concrete_inputs": "(2,)"},
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+
+    cases = task_group_shape_cases(candidate)
+
+    assert len(cases) == 2
+    assert [case["operation"] for case in cases] == [
+        "fused_moe_gate",
+        "fused_moe_down",
+    ]
+    assert [case["selector"]["CASE_ID"] for case in cases] == [
+        "case_001",
+        "case_002",
+    ]
+
+
+def test_native_operation_key_normalizes_graph_wrapped_mangled_symbols():
+    assert native_operation_key(
+        "hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd"
+    ) == "aiter::add_rmsnorm_quant_kernel"
