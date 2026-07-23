@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SWEEP phase auto-dispatch tests.
@@ -1264,3 +1264,88 @@ def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
     assert excinfo.value.rule == "sweep_phase_singleton"
+
+
+# 7. conc_sweep is Coordinator-internal — dispatch re-validation must not
+# collide the sole auto-enqueued conc_sweep with its own singleton evidence.
+def test_conc_sweep_is_coordinator_internal_action():
+    """conc_sweep belongs to the Coordinator-internal class and is never LLM-proposable."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_INTERNAL_ACTIONS,
+    )
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    assert "conc_sweep" in COORDINATOR_INTERNAL_ACTIONS
+    # It is phase-allowed in SWEEP but stripped from the LLM-proposable set.
+    assert phase_state.is_action_allowed_in_phase("conc_sweep", "SWEEP")
+    assert not phase_state.is_action_llm_proposable_in_phase("conc_sweep", "SWEEP")
+
+
+def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
+    """Regression: the SWEEP-entry auto-enqueued conc_sweep must pass dispatch re-validation.
+
+    Before the fix, ``validate_dispatched_task`` fell through to the
+    delegate-body sweep-family singleton guard, which keys on
+    ``auto_conc_sweep_task_id`` — the auto-enqueued task's OWN id — and denied
+    the sole conc_sweep against itself, surfacing as a spurious
+    ``conc_sweep_failed`` that closed the session at 0% gain. Now conc_sweep is
+    a Coordinator-internal action, so it receives path checks only and is not
+    re-validated against the singleton guard.
+    """
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="conc-sweep-self-id")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    # Must NOT raise, even though SWEEP evidence already carries the auto id.
+    gate.validate_dispatched_task(
+        "conc_sweep",
+        {"source": "coordinator_internal", "concs": [64, 32], "total_budget_sec": 9000},
+    )
+
+
+def test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed():
+    """An LLM-proposed conc_sweep is rejected as Coordinator-managed even with no singleton evidence.
+
+    Using a SWEEP row WITHOUT the auto conc_sweep id keeps the singleton guard
+    inert, so the denial must come from the ``phase_incompatible`` /
+    Coordinator-managed gate — proving conc_sweep is genuinely internal, not
+    merely singleton-blocked.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import (
+        Intent,
+        IntentType,
+    )
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    intent = Intent(
+        type=IntentType.PROPOSE_ACTION,
+        payload={"action_name": "conc_sweep"},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"
+
+
+def test_validate_intent_denies_llm_conc_sweep_delegate_as_coordinator_managed():
+    """An LLM-delegated conc_sweep is rejected through the internal-action gate."""
+    from hyperloom.inference_optimizer.protocol.intent import (
+        Intent,
+        IntentType,
+    )
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "conc_sweep"},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"

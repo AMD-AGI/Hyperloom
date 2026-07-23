@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SharedState + Coordinator integration tests."""
@@ -332,3 +332,20 @@ def test_save_no_current_setting_when_no_best(tmp_path):
     s = SharedState(session_id="t", model_name="m", model_path="/x/m")
     s.save(sd)
     assert not (sd / "current_setting.sh").exists()
+
+
+def test_save_current_setting_includes_workload_identity(tmp_path, monkeypatch):
+    """current_setting.sh emits TP, MAX_MODEL_LEN, GPU_TYPE when set."""
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState(session_id="t", model_name="m", model_path="/x/m")
+    s.tp = 8
+    s.max_model_len = 65536
+    s.gpu_type = "mi300x"
+    s.current_best = {"extra_server_args": "--mem-fraction-static 0.8", "extra_envs": {}}
+    s.save(sd)
+    text = (sd / "current_setting.sh").read_text(encoding="utf-8")
+    assert "export TP=8" in text
+    assert "export MAX_MODEL_LEN=65536" in text
+    assert "export GPU_TYPE=mi300x" in text

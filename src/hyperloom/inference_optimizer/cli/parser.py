@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
@@ -524,7 +524,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Resume an existing session. Without --resume-from, "
         "auto-picks the latest per-session subdir under "
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
-        "falls back to $USER_DATA_PATH (legacy flat layout). "
+        "falls back to $USER_DATA_PATH. "
         "USER_DATA_PATH MUST stay at workspace level "
         "(/shared/hyperloom-sessions, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
@@ -570,7 +570,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "model-path family keywords, replacing the deleted ``classify`` "
             "action's lightweight state-write role. For richer *advisory* "
             "model context (attention variant, KV/token, experts, MTP, ...) "
-            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "the SKILL launcher writes <session_dir>/model_arch.json, which "
             "is injected into prompts but drives no gating."
         ),
     )
@@ -1228,26 +1228,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action.",
     )
-    # Retired flags: hard-fail at argparse with a migration hint, not a silent alias.
-    _retired_hint = (
-        "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
-        "instead. The PRELUDE-initial analysis task is unconditional and "
-        "the composite/direct-profile bifurcation has been removed."
-    )
-    for _retired in (
-        "--use-roofline-composite",
-        "--no-use-roofline-composite",
-        "--deny-direct-profile",
-        "--no-deny-direct-profile",
-        "--force-roofline-after-baseline",
-        "--no-force-roofline-after-baseline",
-    ):
-        opt.add_argument(
-            _retired,
-            action=_RetiredFlag,
-            hint=_retired_hint,
-        )
-
     # Per-variant explore overtime kill ratio (mirrored to
     # SharedState.explore_overtime_kill_ratio). 0 disables.
     opt.add_argument(
@@ -1426,7 +1406,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.20.",
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
@@ -1434,7 +1414,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1442,7 +1422,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.28.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

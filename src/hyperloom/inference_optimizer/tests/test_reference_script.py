@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for reference-script parsing, rendering, and discovery."""
@@ -140,6 +140,24 @@ def test_render_round_trip(tmp_path):
     r2 = parse_reference_script(rt_src, framework="vllm")
     assert r2.server_args == r.server_args
     assert r2.envs == r.envs
+
+
+def test_render_carries_validated_rocm_envs():
+    # Regression: validated KEEP envs must survive into current_setting.sh.
+    text = render_reference_script(
+        framework="vllm",
+        server_args="--kv-cache-dtype fp8",
+        envs={
+            "VLLM_ROCM_USE_AITER_MHA": "1",
+            "HIP_FORCE_DEV_KERNARG": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT6",
+            "NCCL_MIN_NCHANNELS": "112",
+        },
+    )
+    assert "export VLLM_ROCM_USE_AITER_MHA=1" in text
+    assert "export HIP_FORCE_DEV_KERNARG=1" in text
+    assert "export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT6" in text
+    assert "export NCCL_MIN_NCHANNELS=112" in text
 
 
 def _mk_tree(tmp_path: Path, names: list[str]) -> Path:

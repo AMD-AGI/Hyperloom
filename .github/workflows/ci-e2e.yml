@@ -1,0 +1,219 @@
+name: CI E2E (single-GPU smoke run)
+
+# Every PR targeting `main` or `v1.0-dev` dispatches ONE single-GPU inference-optimizer
+# run built from the PR's branch, monitors it, and reports green (Succeeded) / red
+# (Failed or timeout). Opt OUT by adding the `skip-e2e-test` label. Runs on a
+# self-hosted runner that can reach the run API.
+#
+# Re-run WITHOUT a new commit (e.g. after a transient cluster fault):
+#   * add the `retest` label to the PR (auto-removed so it can be re-applied), or
+#   * comment `/retest` (or `/retest-failed`) on the PR.
+# NOTE: the comment path uses `issue_comment`, which GitHub always loads from the
+# DEFAULT branch's workflow file. It only works once this workflow lives on the
+# default branch. The `retest` label path works from the PR branch immediately.
+
+on:
+  pull_request:
+    branches: [main, v1.0-dev]   # PRs whose BASE branch is main or v1.0-dev
+    # opened/synchronize/reopened = run on create + new commits + reopen.
+    # labeled/unlabeled = re-evaluate for `skip-e2e-test` / `retest`.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Branch to run (defaults to the caller ref)"
+        required: false
+
+# A newer commit / retest on the same PR cancels the in-flight run; the cleanup step
+# below cancels the workload so no GPU is leaked.
+concurrency:
+  group: ci-e2e-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+# The workflow token writes the live commit status, the sticky PR report comment, and
+# removes the consumed `retest` label.
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Cheap gate that decides whether to run and resolves the PR metadata for every
+  # supported trigger (pull_request / issue_comment `/retest` / workflow_dispatch).
+  # The job-level `if` keeps unrelated comments and labels from allocating a runner.
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/retest')) ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action != 'labeled'   || github.event.label.name == 'retest') &&
+       (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
+    runs-on: Hyperloom-e2e-ci
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      head_ref: ${{ steps.decide.outputs.head_ref }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      head_repo: ${{ steps.decide.outputs.head_repo }}
+    steps:
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Decide + resolve PR metadata
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER_EVT: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          run=false; pr_number=""; head_ref=""; head_sha=""; head_repo=""
+          emit() {
+            {
+              echo "run=$run"
+              echo "pr_number=$pr_number"
+              echo "head_ref=$head_ref"
+              echo "head_sha=$head_sha"
+              echo "head_repo=$head_repo"
+            } >> "$GITHUB_OUTPUT"
+          }
+          case "$EVENT" in
+            workflow_dispatch)
+              run=true
+              head_ref="${DISPATCH_HEAD_REF:-$REF_NAME}"
+              ;;
+            pull_request)
+              if echo "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
+                echo "skip-e2e-test present; skipping"; emit; exit 0
+              fi
+              if [ "$ACTION" = "labeled" ] && [ "$LABEL" != "retest" ]; then
+                echo "labeled '$LABEL' (not retest); skipping"; emit; exit 0
+              fi
+              if [ "$ACTION" = "unlabeled" ] && [ "$LABEL" != "skip-e2e-test" ]; then
+                echo "unlabeled '$LABEL' (not skip-e2e-test); skipping"; emit; exit 0
+              fi
+              run=true
+              pr_number="$PR_NUMBER_EVT"; head_ref="$PR_HEAD_REF"
+              head_sha="$PR_HEAD_SHA"; head_repo="$PR_HEAD_REPO"
+              ;;
+            issue_comment)
+              if [ "$IS_PR_COMMENT" != "true" ]; then
+                echo "not a PR comment; skipping"; emit; exit 0
+              fi
+              body="$(printf '%s' "$COMMENT_BODY" | tr -d '\r')"
+              if ! printf '%s' "$body" | grep -qiE '(^|[[:space:]])/retest(-failed)?([[:space:]]|$)'; then
+                echo "no /retest command; skipping"; emit; exit 0
+              fi
+              pr_number="$ISSUE_NUMBER"
+              pr_json="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$API_URL/repos/$REPO/pulls/$pr_number")"
+              head_ref="$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')"
+              head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')"
+              head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
+              run=true
+              ;;
+          esac
+          echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo"
+          emit
+
+  e2e:
+    needs: resolve
+    if: needs.resolve.outputs.run == 'true'
+    # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
+    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
+    runs-on: Hyperloom-e2e-ci
+    # Covers a full MAX_HOURS run + setup/baseline overhead.
+    timeout-minutes: 240
+    steps:
+      - name: Consume retest label
+        if: github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'retest'
+        run: |
+          curl -sS -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ needs.resolve.outputs.pr_number }}/labels/retest" \
+            -o /dev/null -w 'remove-label HTTP=%{http_code}\n' || true
+
+      - name: Checkout (workflow scripts only)
+        uses: actions/checkout@v7
+
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Dispatch + monitor single-GPU smoke run
+        id: run
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          MODEL: ${{ secrets.CI_E2E_MODEL }}
+          MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
+          MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}
+          GPUS: ${{ secrets.CI_E2E_GPUS }}
+          TP: ${{ secrets.CI_E2E_TP }}
+          MAX_HOURS: ${{ secrets.CI_E2E_MAX_HOURS }}
+          # Account identity the run dispatches under.
+          CI_E2E_USER_NAME: ${{ secrets.CI_E2E_USER_NAME }}
+          # Per-PR checkout base dir.
+          CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
+          # The API endpoint may use a private CA; skip TLS verify unless a CA bundle is
+          # provided. Set the CI_E2E_INSECURE secret to 0 once the runner trusts the CA.
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '1' }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
+          # Tokenized clone URLs so the run can clone this PR branch. github.token is
+          # ephemeral (expires with the run) and can read same-repo PRs.
+          HEAD_REPO_URL: ${{ needs.resolve.outputs.head_repo && format('https://x-access-token:{0}@github.com/{1}.git', github.token, needs.resolve.outputs.head_repo) || '' }}
+          BASE_REPO_URL: ${{ format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.repository) }}
+          # Live commit status on the PR, refreshed every STATUS_INTERVAL_S.
+          GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_STATUS_REPO: ${{ github.repository }}
+          GH_STATUS_SHA: ${{ needs.resolve.outputs.head_sha }}
+          GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_INTERVAL_S: "300"
+          # Poll long enough to cover the run budget.
+          POLL_INTERVAL_S: "60"
+          POLL_MAX: "220"
+        run: |
+          chmod +x .github/scripts/ci-e2e-dispatch.sh
+          .github/scripts/ci-e2e-dispatch.sh
+
+      # If the job is cancelled (manual stop, or a newer commit / retest via concurrency
+      # cancel-in-progress), GitHub still runs this step — cancel the workload so the
+      # GPU run doesn't leak. Reliable even when the main step is hard-killed.
+      - name: Cancel workload on job cancel
+        if: cancelled()
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+        run: |
+          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
+          if [ -z "$uid" ]; then echo "no session uid recorded; nothing to cancel"; exit 0; fi
+          if [ -z "${E2E_API_BASE:-}" ]; then echo "no API base; cannot cancel"; exit 0; fi
+          echo "cancelling workload $uid"
+          curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
+            -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
+            "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
+
+# --- docs: quick reference -------------------------------------------------
+# Triggers:  PR (base main/v1.0-dev) · `retest` label · `/retest` comment · manual dispatch
+# Opt out:   add the `skip-e2e-test` label (PRs that don't touch runtime code).

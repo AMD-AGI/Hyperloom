@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared helper for the ``explore`` executor's grid runs.
@@ -27,6 +27,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     _ENV_KEY_RE,
+    is_python_package_root,
     scrub_child_process_env,
 )
 
@@ -825,6 +826,17 @@ def _kill_stale_servers() -> None:
     time.sleep(8 if killed_atom else 2)
 
 
+def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
+    """Prepend Magpie's import root to PYTHONPATH, skipping package-root dirs.
+
+    A ``site-packages`` MAGPIE_PATH is already importable; prepending it would
+    shadow an isolated vLLM venv's torch. A checkout root is kept.
+    """
+    if not magpie_dir or is_python_package_root(magpie_dir):
+        return current_pythonpath
+    return f"{magpie_dir}:{current_pythonpath}" if current_pythonpath else magpie_dir
+
+
 def _run_magpie(
     *,
     magpie_python: str,
@@ -879,7 +891,7 @@ def _run_magpie(
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
-        env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
+        env["PYTHONPATH"] = _prepend_magpie_pythonpath(magpie_dir, env.get("PYTHONPATH", ""))
 
     # Multi-node: tell Magpie to skip its local-server launch and point
     # benchmark_serving at the head pod's ClusterIP.

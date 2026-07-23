@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for :class:`RecoverExecutor`.
 
-Stubs the three side effects (rocm-smi probes, pgrep/kill, optional gpureset)
-and asserts the result-dict shape plus the on-disk ``result.json`` audit trail.
+Stubs the two side effects (rocm-smi probes, pgrep/kill) and asserts the
+result-dict shape plus the on-disk ``result.json`` audit trail.
 """
 
 from __future__ import annotations
@@ -22,8 +22,6 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.recover import (
     RecoverExecutor,
-    _env_gate_allows_gpureset,
-    _session_gpu_ids,
     recover_executor,
 )
 from hyperloom.orchestrator.state.task_registry import Task
@@ -83,7 +81,6 @@ async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
     """Healthy GPUs + no stale owners -> state=succeeded, no kills."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", _healthy_probe)
@@ -101,10 +98,7 @@ async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
 
     assert out["state"] == "succeeded"
     assert out["killed_pids"] == []
-    assert out["gpureset_attempted"] is False
     assert out["force_gpu_cleanup"] is True
-    assert out["allow_reset_env"] is False
-    assert out["mid_free_mb_per_gpu"] == out["post_free_mb_per_gpu"]
     assert (workspace / "result.json").exists()
 
 
@@ -176,7 +170,6 @@ async def test_kills_stale_owners_and_recovers(tmp_path, monkeypatch):
     assert {pid for pid, _ in sent_signals} == {4242, 4243}
     assert all(sig == signal.SIGTERM for _, sig in sent_signals)
     assert [e["signal"] for e in out["killed_pids"]] == ["TERM", "TERM"]
-    assert out["gpureset_attempted"] is False
 
     persisted = json.loads((workspace / "result.json").read_text())
     assert persisted["state"] == "succeeded"
@@ -215,141 +208,21 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
     assert out["killed_pids"][0]["signal"] == "KILL"
 
 
-# gpureset env-gate
+# Soft-cleanup failure path: leaked VRAM after kills -> needs_review.
 @pytest.mark.asyncio
-async def test_env_gate_blocks_gpureset_when_disabled(tmp_path, monkeypatch):
+async def test_soft_cleanup_leaves_vram_leaked_needs_review(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
     exe = RecoverExecutor()
 
     monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
     monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
-    called: dict[str, bool] = {}
-
-    def _spy():
-        called["gpureset"] = True
-        return {"returncode": 0}
-
-    monkeypatch.setattr(exe, "_try_rocm_smi_gpureset", _spy)
 
     out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
     assert out["state"] == "needs_review"
     assert out["error_class"] == "gpu_unhealthy_after_soft_cleanup"
-    assert out["gpureset_attempted"] is False
-    assert out["allow_reset_env"] is False
-    assert "gpureset" not in called
-
-
-@pytest.mark.asyncio
-async def test_env_gate_allows_gpureset_and_recovers(tmp_path, monkeypatch):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    exe = RecoverExecutor()
-
-    probes = iter(
-        [
-            _leaked_probe(),
-            _leaked_probe(),
-            _healthy_probe(),
-        ]
-    )
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: next(probes))
-    monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
-
-    seen_ids: list[list[int]] = []
-
-    def _fake_gpureset(gpu_ids):
-        seen_ids.append(gpu_ids)
-        return {"returncode": 0, "stdout": "GPU reset OK", "stderr": ""}
-
-    monkeypatch.setattr(exe, "_try_rocm_smi_gpureset", _fake_gpureset)
-
-    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
-    assert out["state"] == "succeeded"
-    assert out["gpureset_attempted"] is True
-    assert out["allow_reset_env"] is True
-    assert out["gpureset_result"]["returncode"] == 0
-    # Scoped to ROCR_VISIBLE_DEVICES, never --gpu=all.
-    assert seen_ids == [[0, 1, 2, 3]]
-    assert out["gpureset_target_gpus"] == [0, 1, 2, 3]
-
-
-@pytest.mark.asyncio
-async def test_gpureset_returncode_nonzero_persists_failure(tmp_path, monkeypatch):
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
-    monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
-    monkeypatch.setattr(
-        exe,
-        "_try_rocm_smi_gpureset",
-        lambda gpu_ids: {
-            "returncode": 1,
-            "stdout": "",
-            "stderr": "ERROR: requires root",
-        },
-    )
-
-    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
-    assert out["state"] == "needs_review"
-    assert out["error_class"] == "gpu_unhealthy_after_gpureset"
-    assert out["gpureset_attempted"] is True
-    assert out["gpureset_result"]["returncode"] == 1
     persisted = json.loads((workspace / "result.json").read_text())
-    assert persisted["error_class"] == "gpu_unhealthy_after_gpureset"
-
-
-@pytest.mark.asyncio
-async def test_gpureset_skipped_when_mid_probe_healthy(tmp_path, monkeypatch):
-    """If soft cleanup cleared VRAM, gpureset must not run even with the env gate open."""
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
-    exe = RecoverExecutor()
-
-    probes = iter([_leaked_probe(), _healthy_probe(), _healthy_probe()])
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", lambda: next(probes))
-    monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
-
-    monkeypatch.setattr(
-        exe,
-        "_try_rocm_smi_gpureset",
-        lambda gpu_ids: pytest.fail("gpureset should not run when mid-probe healthy"),
-    )
-
-    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
-    assert out["state"] == "succeeded"
-    assert out["gpureset_attempted"] is False
-
-
-@pytest.mark.asyncio
-async def test_gpureset_skipped_when_no_rocr_scope(tmp_path, monkeypatch):
-    """Env gate on + leaked VRAM but ROCR_VISIBLE_DEVICES unset -> skip the hard
-    reset (refuse implicit full-node ``--gpu=all``) and record why."""
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
-    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-    exe = RecoverExecutor()
-    monkeypatch.setattr(exe, "_probe_gpu_free_mb", _leaked_probe)
-    monkeypatch.setattr(exe, "_discover_stale_pids", lambda: [])
-    monkeypatch.setattr(
-        exe,
-        "_try_rocm_smi_gpureset",
-        lambda gpu_ids: pytest.fail("must not reset without a session GPU scope"),
-    )
-
-    out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
-    assert out["state"] == "needs_review"
-    assert out["gpureset_attempted"] is False
-    assert out["gpureset_skipped_reason"] == "no_session_gpu_scope"
-    assert out["error_class"] == "gpu_unhealthy_after_soft_cleanup"
+    assert persisted["error_class"] == "gpu_unhealthy_after_soft_cleanup"
 
 
 def test_parse_rocm_smi_vram_csv_basic():
@@ -416,13 +289,9 @@ async def test_result_json_has_expected_keys(tmp_path, monkeypatch):
         "state",
         "reason",
         "force_gpu_cleanup",
-        "allow_reset_env",
         "killed_pids",
         "pre_free_mb_per_gpu",
         "mid_free_mb_per_gpu",
-        "post_free_mb_per_gpu",
-        "gpureset_attempted",
-        "gpureset_result",
     }
     assert expected_keys.issubset(persisted.keys())
 
@@ -435,53 +304,6 @@ def test_module_callable_exists():
 
     assert isinstance(_instance, _Cls)
     assert recover_executor is _instance
-
-
-# gpureset subprocess error paths (real ``_try_rocm_smi_gpureset``).
-def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
-    exe = RecoverExecutor()
-    monkeypatch.setattr(recmod.shutil, "which", lambda b: None)
-    out = exe._try_rocm_smi_gpureset([0, 1])
-    assert out == {"error": "rocm-smi not on PATH"}
-
-
-def test_try_rocm_smi_gpureset_handles_timeout(monkeypatch):
-    exe = RecoverExecutor()
-    monkeypatch.setattr(
-        recmod.shutil,
-        "which",
-        lambda b: "/usr/bin/rocm-smi" if b == "rocm-smi" else None,
-    )
-
-    def _raise(*_a, **_kw):
-        raise subprocess.TimeoutExpired(cmd=["rocm-smi"], timeout=30.0)
-
-    monkeypatch.setattr(recmod.subprocess, "run", _raise)
-    out = exe._try_rocm_smi_gpureset([0, 1])
-    assert out["error"] == "timeout"
-    assert out["timeout_s"] == RecoverExecutor.GPURESET_TIMEOUT_S
-
-
-def test_try_rocm_smi_gpureset_returns_stdout_stderr(monkeypatch):
-    exe = RecoverExecutor()
-    monkeypatch.setattr(
-        recmod.shutil,
-        "which",
-        lambda b: "/usr/bin/rocm-smi" if b == "rocm-smi" else None,
-    )
-
-    class _Result:
-        returncode = 1
-        stdout = "tried gpureset"
-        stderr = "permission denied"
-
-    monkeypatch.setattr(recmod.subprocess, "run", lambda *a, **kw: _Result())
-    out = exe._try_rocm_smi_gpureset([0, 1])
-    assert out == {
-        "returncode": 1,
-        "stdout": "tried gpureset",
-        "stderr": "permission denied",
-    }
 
 
 # ===========================================================================
@@ -511,36 +333,6 @@ class _ProcResult:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-class TestEnvGate:
-    def test_default_off(self, monkeypatch):
-        # Hard GPU reset must not arm by default.
-        monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
-        assert _env_gate_allows_gpureset() is False
-
-    def test_explicit_zero_disables(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "0")
-        assert _env_gate_allows_gpureset() is False
-
-    def test_explicit_one_enables(self, monkeypatch):
-        monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
-        assert _env_gate_allows_gpureset() is True
-
-
-class TestSessionGpuIds:
-    def test_unset_returns_none(self, monkeypatch):
-        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
-        assert _session_gpu_ids() is None
-
-    def test_subset_parsed_as_physical_ids(self, monkeypatch):
-        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
-        assert _session_gpu_ids() == [4, 5, 6, 7]
-
-    def test_non_integer_token_returns_none(self, monkeypatch):
-        # A UUID token can't be mapped to a --gpu= index -> skip reset.
-        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-abc123")
-        assert _session_gpu_ids() is None
 
 
 class TestParseRocmSmiVramCsv:
@@ -748,68 +540,6 @@ class TestDiscoverStalePids:
         assert [o["pid"] for o in out] == [12000]
 
 
-class TestTryRocmSmiGpureset:
-    def test_no_rocm_smi(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: None,
-        )
-        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
-        assert out == {"error": "rocm-smi not on PATH"}
-
-    def test_success_truncates_outputs(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: "/usr/bin/rocm-smi",
-        )
-        big_stdout = "ok\n" * 1500
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.subprocess.run",
-            lambda *a, **k: _ProcResult(returncode=0, stdout=big_stdout, stderr=""),
-        )
-        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
-        assert out["returncode"] == 0
-        assert len(out["stdout"]) <= 2000
-
-    def test_timeout_reports_error(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: "/usr/bin/rocm-smi",
-        )
-
-        def boom(*a, **k):
-            raise subprocess.TimeoutExpired(
-                cmd=a,
-                timeout=k["timeout"],
-                stderr=b"timeout-stderr",
-            )
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.subprocess.run",
-            boom,
-        )
-        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
-        assert out["returncode"] is None
-        assert out["error"] == "timeout"
-        assert out["timeout_s"] == RecoverExecutor.GPURESET_TIMEOUT_S
-
-    def test_launch_failure_returns_error_dict(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: "/usr/bin/rocm-smi",
-        )
-
-        def boom(*a, **k):
-            raise FileNotFoundError("missing rocm-smi binary")
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.subprocess.run",
-            boom,
-        )
-        out = RecoverExecutor()._try_rocm_smi_gpureset([0])
-        assert "launch_failed" in out["error"]
-
-
 class TestWorkspaceHelpers:
     def test_workspace_dir_returns_none_when_missing(self):
         assert RecoverExecutor()._workspace_dir(SimpleNamespace(extra=None)) is None
@@ -861,18 +591,6 @@ class TestWriteResultJsonOSError:
         # Directory was created before the failing write.
         assert target.is_dir()
         monkeypatch.setattr(Path, "write_text", real_write_text)
-
-
-class TestSessionGpuIdsEmptyTokens:
-    def test_empty_and_whitespace_tokens_are_skipped(self, monkeypatch):
-        """Blank tokens between commas are skipped."""
-        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,,  ,1, 2 ")
-        assert _session_gpu_ids() == [0, 1, 2]
-
-    def test_only_empty_tokens_returns_none(self, monkeypatch):
-        """A value of only separators yields no ids -> None."""
-        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", " , , ")
-        assert _session_gpu_ids() is None
 
 
 class TestIsMultiNodeSandbox:
@@ -931,9 +649,6 @@ class TestMultiNodeShortCircuit:
         assert out["killed_pids"] == []
         assert out["pre_free_mb_per_gpu"] == []
         assert out["mid_free_mb_per_gpu"] == []
-        assert out["post_free_mb_per_gpu"] == []
-        assert out["gpureset_attempted"] is False
-        assert out["gpureset_result"] == {}
         assert out["reason"] == "gpu_memory_leaked"
         assert out["force_gpu_cleanup"] is True
         assert out["workspace"] == str(workspace)

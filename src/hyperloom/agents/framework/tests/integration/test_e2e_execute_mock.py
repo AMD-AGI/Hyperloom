@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Integration test: ``fa explore --execute`` against fake Primus + echo build/bench; asserts deterministic winner gate and KB auto-append when ``kb_domain`` is set."""

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SWEEP phase handler: auto-enqueue of the concurrency-sweep task."""
@@ -160,7 +160,8 @@ class SweepPhase(PhaseHandler):
                 params["concs"],
                 params["total_budget_sec"],
             )
-        # Stamp evidence so PolicyGate's conc_sweep_phase_singleton denies later LLM conc_sweep.
+        # Stamp evidence so PolicyGate's sweep_phase_singleton denies a later
+        # LLM full-workload ``sweep`` (conc_sweep already ran on SWEEP entry).
         self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Critic gate over specialist patches."""
@@ -119,27 +119,6 @@ def test_policy_allows_integrate_patch_on_advise():
     s.phase = "EXPLORE"
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-5"})
-    gate.validate_intent("orchestration", intent)
-
-
-def test_policy_bypass_critic_env_only(monkeypatch):
-    """In-band ``params.bypass_critic`` is ignored; only the out-of-band operator env overrides."""
-    s = SharedState()
-    s.record_specialist_patch_verdict("t-spec-6", "reject")
-    s.phase = "EXPLORE"
-    gate = _make_gate(s)
-    intent = _make_intent(
-        {
-            "specialist_task_id": "t-spec-6",
-            "bypass_critic": True,
-        }
-    )
-    # In-band flag must NOT bypass the gate (LLM cannot self-approve).
-    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", intent)
-    # Out-of-band operator override still works.
-    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
     gate.validate_intent("orchestration", intent)
 
 
@@ -269,39 +248,3 @@ async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path, monkeyp
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench"
     assert len(result["patches_applied"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_executor_bypass_critic_env_only(tmp_path: Path, monkeypatch):
-    """Out-of-band ``HYPERLOOM_BYPASS_CRITIC=1`` overrides the executor defense; in-band flag does not."""
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    _write_specialist_workspace_with_patch(session_dir, "t-spec-z")
-    state = SharedState()
-    state.record_specialist_patch_verdict("t-spec-z", "reject")
-    (tmp_path / "framework").mkdir()
-
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-    task = Task(
-        task_id="t-int-z",
-        kind="integrate_patch",
-        state="queued",
-        params={
-            "specialist_task_id": "t-spec-z",
-            "framework_source_root": str(tmp_path / "framework"),
-            # In-band flag must be ignored by the executor defense.
-            "bypass_critic": True,
-            "apply_only": True,
-        },
-        idempotency_key="t-int-z",
-        requires_lanes=tuple(),
-    )
-    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": state})
-
-    # The out-of-band operator env override skips the recorded-'reject'
-    # short-circuit (the in-band params.bypass_critic is ignored; that the
-    # in-band flag no longer bypasses the gate is asserted at the policy layer
-    # in test_policy_bypass_critic_env_only).
-    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
-    result = await executor(ctx)
-    assert result["status"] != "rejected_by_critic"

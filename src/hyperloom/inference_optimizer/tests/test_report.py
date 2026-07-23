@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coverage for report.py pure formatting + file-reader helpers."""
@@ -213,6 +213,52 @@ def test_highlight_topics():
     # fallback branch
     other = rp._highlight({"a": 1, "b": "two", "c": [1, 2]}, "weird_topic", "ag")
     assert "a" in other["summary"]
+
+
+# ---- _count_server_boot_failures ----
+def test_count_server_boot_failures_missing(tmp_path):
+    assert rp._count_server_boot_failures(tmp_path) == 0
+    assert rp._count_server_boot_failures(None) == 0
+
+
+def test_count_server_boot_failures_counts_warmup_failed(tmp_path):
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "optimization_journal.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"reason": "warmup_failed"},
+                    {"reason": "gain_below_threshold"},
+                    {"reason": "warmup_failed"},
+                    {"outcome": "KEEP"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert rp._count_server_boot_failures(tmp_path) == 2
+
+
+# ---- stop_reason fallback during closing_phase ----
+def test_build_summary_stop_reason_falls_back_to_time_exhausted_in_closing():
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState()
+    state.stop_reason = ""
+    state.closing_phase = True
+    summary = rp._build_summary_dict(state, {}, [])
+    assert summary["stop_reason"] == "time_exhausted"
+    assert summary["stop_reason_explanation"]
+
+
+def test_build_summary_keeps_explicit_stop_reason_over_closing_fallback():
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState()
+    state.stop_reason = "target_reached"
+    state.closing_phase = True
+    summary = rp._build_summary_dict(state, {}, [])
+    assert summary["stop_reason"] == "target_reached"
 
 
 # ---- _explain_stop_reason ----

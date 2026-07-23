@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Session_dir layout regression tests (per-model/ts default)."""
@@ -20,6 +20,7 @@ from hyperloom.inference_optimizer.session.manifest import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.policy import gate as policy_gate
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
@@ -50,7 +51,7 @@ def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
-    # No model_name -> flat layout, session_dir == workspace_root.
+    # No model_name -> session_dir == workspace_root.
     assert sd == tmp_path
     for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir(), f"missing per-session skeleton subdir: {sub}"
@@ -108,14 +109,6 @@ def test_make_session_dir_accepts_path_object(tmp_path, monkeypatch):
         model_name=Path("/path/models/DeepSeek-R1-0528"),
     )
     assert sd.parent.name == "DeepSeek-R1-0528"
-
-
-def test_make_session_dir_flat_layout_via_env(tmp_path, monkeypatch):
-    """Env override forces legacy flat layout even when model_name is set."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    monkeypatch.setenv(paths.ENV_SESSION_LAYOUT, "flat")
-    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
-    assert sd == tmp_path
 
 
 def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):
@@ -535,7 +528,7 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     assert exc.value.rule == "path_outside_session_dir"
 
 
-def test_policy_source_file_allowlist_passes(tmp_path):
+def test_policy_source_file_trusted_scope_passes(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.RESPONSE,
@@ -552,7 +545,25 @@ def test_policy_source_file_allowlist_passes(tmp_path):
     gate.validate_intent("kernel_agent", intent)
 
 
-def test_policy_source_file_outside_allowlist_denied(tmp_path):
+def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
+    packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    source = packages / "unrelated_package" / "native" / "kernel.cu"
+    source.parent.mkdir(parents=True)
+    source.write_text("// source")
+    monkeypatch.setattr(policy_gate, "resolve_source_file_allowlist", lambda: (f"{packages}/",))
+    gate = _gate(tmp_path)
+    intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={
+            "in_reply_to": "m-1",
+            "kind": "trace_analyze_done",
+            "result": {"hot_kernels": [{"kernel_id": "k1", "source_file": str(source)}]},
+        },
+    )
+    gate.validate_intent("kernel_agent", intent)
+
+
+def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.RESPONSE,
@@ -568,11 +579,11 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("kernel_agent", intent)
-    assert exc.value.rule == "source_file_not_allowlisted"
+    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
-def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
-    # A framework_source_root override escaping the source allowlist must be
+def test_policy_framework_source_root_outside_trusted_scope_denied(tmp_path):
+    # A framework_source_root override escaping trusted source scopes must be
     # rejected under strict_paths.
     gate = _gate(tmp_path)
     intent = Intent(
@@ -588,7 +599,7 @@ def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "source_file_not_allowlisted"
+    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
 def test_policy_strict_off_skips_path_check(tmp_path):

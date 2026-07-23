@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Pure-function tests for FRAMEWORK_AGENT phase routing and exit conditions."""
@@ -195,6 +195,53 @@ def test_compute_plateau_framework_agent_returns_signal():
     assert ev["lookback"] == 3
 
 
+def test_framework_batch_plateau_ignores_prior_macro_cycle():
+    batches = [
+        {
+            "batch_id": f"b{i}",
+            "cycle": 0,
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": f"c{i}"}],
+        }
+        for i in range(3)
+    ]
+    progress = [
+        {"batch_id": f"b{i}", "candidate_id": f"c{i}", "status": "reverted", "cycle": 0}
+        for i in range(3)
+    ]
+    state = _State(framework_agent_batches=batches, framework_agent_phase_progress=progress)
+    state.macro_cycle = 1
+    triggered, evidence = phase_state.compute_plateau_framework_agent(state)
+    assert triggered is False
+    assert evidence["batch_max_gains"] == []
+
+
+def test_framework_batch_plateau_counts_current_cycle_audit_skips():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    batches = [
+        {
+            "batch_id": f"b{i}",
+            "cycle": 1,
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": f"c{i}"}],
+        }
+        for i in range(n)
+    ]
+    progress = [
+        {
+            "batch_id": f"b{i}",
+            "candidate_id": f"c{i}",
+            "status": "not_applicable",
+            "cycle": 1,
+        }
+        for i in range(n)
+    ]
+    state = _State(framework_agent_batches=batches, framework_agent_phase_progress=progress)
+    state.macro_cycle = 1
+    triggered, _ = phase_state.compute_plateau_framework_agent(state)
+    assert triggered is True
+
+
 def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
     """Regression: force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [
@@ -249,6 +296,31 @@ def test_exit_normal_framework_agent_no_plateau_below_threshold():
     ]
     state = _State(framework_agent_phase_progress=progress)
     assert phase_state.exit_normal_framework_agent(state) is None
+
+
+def test_local_explore_author_empty_uses_official_plateau_threshold():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    progress = [
+        {"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False}
+        for i in range(n - 1)
+    ]
+    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
+    progress.append({"candidate_id": f"local_explore:{n - 1}", "status": "author_empty", "kept": False})
+    out = phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress))
+    assert out is not None
+    assert out[0] == "framework_agent_plateau"
+    assert out[1]["consecutive_no_keep"] == n
+
+
+def test_cycle_boundary_resets_local_explore_plateau_streak():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    progress = [
+        {"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False}
+        for i in range(n)
+    ]
+    progress.append({"candidate_id": "", "status": "cycle_boundary", "kept": False})
+    progress.append({"candidate_id": "local_explore:new", "status": "author_empty", "kept": False})
+    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
 
 
 def test_exit_normal_framework_agent_keep_resets_no_keep_streak():

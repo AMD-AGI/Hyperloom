@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
@@ -33,6 +33,7 @@ from .coordinator_helpers import (
     _parse_baseline_workload_extra,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
+    _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
 )
@@ -1524,17 +1525,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
@@ -1745,7 +1735,7 @@ class WritebackCollaborator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+        """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
         numbers it emits are intentionally ignored here: measured competitor
@@ -1753,15 +1743,13 @@ class WritebackCollaborator:
         LLM-written numbers must never be persisted as a consumable target.
 
         Args:
-            done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints and PR ids.
+            done_payload: The completed research-scout task payload.
         """
         from ..knowledge import research_hints as _research_hints
 
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            block = {}
-        hints = block.get("hints") or []
+        hints = done_payload.get("new_findings") or []
+        if not isinstance(hints, list):
+            hints = []
         try:
             added, dropped = _research_hints.append_hints(
                 self.session_dir,
@@ -1777,10 +1765,18 @@ class WritebackCollaborator:
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
+        for hint in hints:
+            if isinstance(hint, dict) and hint.get("source"):
+                pr_ids.append(hint["source"])
+        proposals = done_payload.get("proposal_set") or []
+        if isinstance(proposals, list):
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                for key in ("pr_evidence", "source_evidence"):
+                    refs = proposal.get(key)
+                    if isinstance(refs, list):
+                        pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
@@ -1790,6 +1786,7 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
+        self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -1897,7 +1894,9 @@ class WritebackCollaborator:
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                            str(bv.get("effective_extra_server_args") or "")
+                        )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -1911,6 +1910,11 @@ class WritebackCollaborator:
                 _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
+                if isinstance(bv, dict):
+                    for _src_key in ("source_snapshot", "framework_root", "base_sha"):
+                        val = bv.get(_src_key)
+                        if val:
+                            stack_entry[_src_key] = str(val)
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -1920,12 +1924,17 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
+        # Merge envs: start from previous stack top envs so source-layer KEEPs
+        # (config_changes_applied={}) do not clear prior explore/env layers.
+        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
+        _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+        _merged_envs = {**_prev_envs, **_new_envs}
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
             "extra_server_args": full_args,
-            "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+            "extra_envs": _merged_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
@@ -1937,7 +1946,9 @@ class WritebackCollaborator:
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
+                    str(bv.get("effective_extra_server_args") or "")
+                )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
@@ -2379,10 +2390,11 @@ class WritebackCollaborator:
         # ``resume_pending_revalidation`` flag from the measured tput — but
         # ONLY when the rebench actually produced a valid measurement, so a
         # failed/empty rebench leaves the flag set and reports keep warning.
-        if task is not None and str((task.params or {}).get("source") or "") in {
+        is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
             "resume_stack_revalidate",
             "resume_reverify_best",
-        }:
+        }
+        if is_revalidation_task:
             measured = result.get("output_throughput")
             measured_ok = isinstance(measured, (int, float)) and measured > 0
             # A GEAK revalidation (2b) must assert config identity + that the
@@ -2395,12 +2407,17 @@ class WritebackCollaborator:
                     got_hash = str(best_winner.get("fingerprint") or "")
                 if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
                     got_hash = str(winners[0].get("fingerprint") or "")
+                cb_now = (
+                    self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                )
+                cb_tput = cb_now.get("tput")
                 decision = _geak_revalidation_decision(
                     measured=measured,
                     baseline=self.shared_state.baseline_tput,
                     got_hash=got_hash,
                     expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
+                    current_best=cb_tput,
                 )
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
@@ -2416,6 +2433,34 @@ class WritebackCollaborator:
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
                     )
+                elif decision == "no_promote":
+                    # Well-measured + engaged over baseline, but does not beat
+                    # current_best. This is a real result, NOT inconclusive, so
+                    # do not replay via the GEAK harness (2a); clear the pending
+                    # candidate without touching the headline / stack / gain.
+                    log.info(
+                        "geak 2b rebench did not beat current_best "
+                        "(measured=%r current_best=%r) -> no_promote",
+                        measured,
+                        cb_tput,
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_no_promote",
+                                "measured_tput": float(measured),
+                                "current_best_tput": (
+                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
+                                ),
+                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak no_promote: observation emit failed")
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
                 else:
                     # 2b inconclusive -> GEAK harness replay (2a), which
                     # clears the pending flag on success. Best-effort.
@@ -2461,7 +2506,11 @@ class WritebackCollaborator:
                 if measured_ok:
                     self.shared_state.resume_pending_revalidation = False
                 changed = True
-        if isinstance(winners, list) and winners:
+        # A revalidation task only CONFIRMS the existing stack/current_best; its
+        # winner is not a new discovery. Skip the accept/lift path so a rebench
+        # (e.g. geak_revalidate) never appends a duplicate optimization_stack
+        # entry or re-lifts current_best.
+        if isinstance(winners, list) and winners and not is_revalidation_task:
             for winner in winners:
                 if not isinstance(winner, dict):
                     continue
@@ -2626,6 +2675,7 @@ class WritebackCollaborator:
             "kept": kept_flag,
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
@@ -3419,7 +3469,7 @@ class WritebackCollaborator:
         # before stamping validated, and falls back to 2a (GEAK harness) on miss.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
-        ps_overlay = str(ps.get("final_overlay") or "").strip()
+        ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for the advisory specialist-proposal scorer (ProposalScorer)."""
@@ -298,7 +298,6 @@ class _StubTask:
 class _StubSharedState:
     def __init__(self):
         self.specialist_rounds: list[dict[str, Any]] = []
-        self.specialist_domain_empty_streak: dict[str, int] = {}
         self.last_specialist: dict[str, Any] = {}
         self.saved: int = 0
 
@@ -310,11 +309,6 @@ class _StubSharedState:
                     self.specialist_rounds[i] = dict(entry)
                     return
         self.specialist_rounds.append(dict(entry))
-
-    def bump_specialist_domain_empty_streak(self, domain, *, empty) -> int:
-        d = domain or "unknown"
-        self.specialist_domain_empty_streak[d] = 0 if not empty else self.specialist_domain_empty_streak.get(d, 0) + 1
-        return self.specialist_domain_empty_streak[d]
 
     def update_last_specialist(self, snapshot) -> None:
         self.last_specialist = dict(snapshot)

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Research scout: tag/domain wiring, hint artifacts, and state bookkeeping for the read-only PRELUDE collector."""
@@ -124,6 +124,21 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     state = SharedState(session_id="research-scout-readonly")
+    state.register_seen_pr_ids(["https://pr/seen"])
+    state.specialist_rounds = [
+        {
+            "domain": "research_scout_specialist",
+            "residual_questions": ["Does this vLLM version support the backend?"],
+        }
+    ]
+    state.explore_search = {
+        "accepted": [
+            {
+                "name": "kept-variant",
+                "source_evidence": ["https://pr/kept"],
+            }
+        ]
+    }
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
@@ -159,3 +174,23 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     assert "Edit" not in task.allowed_tools
     assert "MultiEdit" not in task.allowed_tools
     assert task.side_effects == ["writes_results"]
+    assert task.params["seen_pr_ids"] == ["https://pr/seen"]
+    assert "Does this vLLM version support the backend?" in task.params["notes"]
+    assert {"name": "kept-variant", "source": "https://pr/kept"} in task.params["already_proven"]
+
+    research_hints.append_hints(
+        tmp_path,
+        [{"what": "enable aiter", "source": "https://example.test/aiter"}],
+    )
+    coord._seed_gaps_from_research_hints()
+    first_id = next(
+        row["canonical_id"]
+        for row in coord.shared_state.gaps
+        if row.get("symptom") == "enable aiter"
+    )
+    research_hints.append_hints(
+        tmp_path,
+        [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],
+    )
+    coord._seed_gaps_from_research_hints()
+    assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)

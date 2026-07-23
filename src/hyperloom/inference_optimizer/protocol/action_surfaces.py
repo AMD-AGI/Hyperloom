@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared action-surface constants.
@@ -36,9 +36,19 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
+        "conc_sweep",
         "roofline",
         "profile",
         "replay_warm_recipe",
+        # conc_sweep is the SWEEP-entry auto-enqueued CONC-ladder benchmark. It
+        # is dispatched by the Coordinator (SweepPhase._on_enter_sweep) with
+        # source="coordinator_internal" and is never LLM-proposed, so it belongs
+        # in the Coordinator-internal class alongside roofline/profile. Omitting
+        # it made the sole auto-enqueued conc_sweep fall through to the
+        # delegate-body sweep-family singleton guard at dispatch re-validation
+        # and collide with its OWN recorded auto_conc_sweep_task_id evidence,
+        # surfacing as a spurious conc_sweep_failed that closed the session.
+        "conc_sweep",
     }
 )
 

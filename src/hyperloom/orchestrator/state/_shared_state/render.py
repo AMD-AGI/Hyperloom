@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
@@ -11,7 +11,7 @@ Fields::
     model_class         str   — categorical key supplied via --model-class
     model_arch          dict  — advisory architecture profile (hybrid
                                 structured + free-text notes) loaded from
-                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                the launcher's ``<session_dir>/model_arch.json``;
                                 prompt-context only, no deterministic gating
     model_architectures list  — config.json ``architectures``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
@@ -186,7 +186,7 @@ class _RenderMixin:
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
             _phase_budget_total_seconds,
-            llm_proposable_actions_for_with_interleave,
+            llm_proposable_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_elapsed_seconds,
@@ -209,14 +209,7 @@ class _RenderMixin:
             budget_line = (
                 f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
-        proposable = tuple(
-            sorted(
-                llm_proposable_actions_for_with_interleave(
-                    phase,
-                    explore_enabled=bool(getattr(self, "explore_enabled", True)),
-                )
-            )
-        )
+        proposable = llm_proposable_actions_for(phase)
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",
@@ -557,6 +550,7 @@ class _RenderMixin:
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
+            f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
             f"closing_started_unix={self.closing_started_unix or 0.0}  "

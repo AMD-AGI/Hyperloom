@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for hyperloom.agents.framework.cross_framework (cross-framework audit).
@@ -214,23 +214,6 @@ def test_audit_no_mapped_file(kb_root: Path, tmp_path: Path) -> None:
     )
     assert res["semantic_status"] == "not_present"
     assert res["metrics"]["mapped_files"] == 0
-
-
-def test_audit_use_llm_ignored_note(kb_root: Path, tmp_path: Path) -> None:
-    _seed_map(kb_root, [_MAP_ROW])
-    target = tmp_path / "vllm_src"
-    _mk_target_module(target, "vllm/core/block/prefix_caching_block.py")
-    res = cf.run_cross_framework_audit(
-        {
-            "framework": "sglang",
-            "target_framework": "vllm",
-            "candidate": {"candidate_id": "c1"},
-            "diff_text": _SGLANG_DIFF,
-            "target_framework_source_roots": [str(target)],
-            "use_llm": True,
-        }
-    )
-    assert any("llm" in str(r).lower() for r in res["risks"])
 
 
 # --- run_phase_audit dispatch ----------------------------------------------

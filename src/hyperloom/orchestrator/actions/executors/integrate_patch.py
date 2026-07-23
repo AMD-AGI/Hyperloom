@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
@@ -254,15 +254,15 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param (must lie under
-    :func:`resolve_source_file_allowlist`) → first allowlist root whose tree
+    Precedence: explicit param (must lie under a trusted installed source
+    scope) → first source root whose tree
     actually contains the patch targets (target-aware: a ``vllm/...`` patch must
     apply under the vllm root, not the first allowlist entry which is ``aiter``)
     → first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
-            allowlist. Overrides outside the allowlist are rejected.
+        source scope. Overrides outside the trusted scope are rejected.
         patch_paths: Patch target paths used to pick the allowlist root whose
             tree actually contains them.
 
@@ -292,7 +292,7 @@ def _resolve_framework_root(
             if _is_within(p, root):
                 return p
         log.warning(
-            "integrate_patch: framework_source_root override %r rejected (not under allowlist)",
+            "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
             explicit,
         )
         return None
@@ -1176,20 +1176,13 @@ def _stamp_framework_kb_provenance(
 
 def _enforce_critic_gate(
     shared_state: Any,
-    params: dict[str, Any],
     specialist_task_id: str,
 ) -> "dict[str, Any] | None":
     """Enforce a permissive Critic verdict before any side effect; returns a
-    ``rejected_by_critic`` dict on failure, else ``None`` (no-op if bypassed)."""
-    if shared_state is None or os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1":
+    ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState
+    is available or the verdict is permissive."""
+    if shared_state is None:
         return None
-    if params.get("bypass_critic"):
-        log.warning(
-            "integrate_patch executor: in-band bypass_critic ignored; "
-            "enforcing Critic verdict for specialist_task_id=%r (operator "
-            "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-            specialist_task_id,
-        )
     try:
         from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
     except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
@@ -1210,8 +1203,7 @@ def _enforce_critic_gate(
             "reason": (
                 f"integrate_patch requires a permissive Critic verdict "
                 f"(approve/advise) for specialist task "
-                f"{specialist_task_id!r}; {_detail}. Refusing to run. "
-                f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
+                f"{specialist_task_id!r}; {_detail}. Refusing to run."
             ),
         }
     return None
@@ -1367,7 +1359,26 @@ class IntegratePatchExecutor:
                     "the patches to integrate)"
                 ),
             }
-
+        # Rebind execution-time base from live current_best so a task queued
+        # before an Explore KEEP always measures against the real stack top.
+        # (``shared_state`` and the accuracy_baseline fill are already resolved above.)
+        if shared_state is not None:
+            cb = getattr(shared_state, "current_best", None)
+            if isinstance(cb, dict):
+                cb_tput = cb.get("tput")
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                    params["base_tput"] = float(cb_tput)
+                cb_args = str(cb.get("extra_server_args") or "").strip()
+                if cb_args:
+                    params["base_extra_args"] = cb_args
+                cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
+                if cb_envs:
+                    params["base_extra_envs"] = cb_envs
+                for _ctrl in ("remove_args", "unset_envs", "args_mode"):
+                    cb_ctrl = cb.get(_ctrl)
+                    if cb_ctrl and not params.get(f"base_{_ctrl}"):
+                        params[f"base_{_ctrl}"] = cb_ctrl
+        # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
             return {
@@ -1386,10 +1397,8 @@ class IntegratePatchExecutor:
         # CORE_STATE_FIELD an LLM/forged row cannot write, and a legitimate
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
-        # task is unaffected. No-op when SharedState is absent. Override is
-        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
-        # params.bypass_critic is ignored so an LLM cannot self-approve.
-        critic_reject = _enforce_critic_gate(shared_state, params, specialist_task_id)
+        # task is unaffected. No-op when SharedState is absent.
+        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
         if critic_reject is not None:
             return critic_reject
 
@@ -1736,7 +1745,7 @@ class IntegratePatchExecutor:
                 _error_class = "framework_source_root_rejected"
                 _error = (
                     f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured source allowlist"
+                    "under the configured trusted source scope"
                 )
             else:
                 _error_class = "no_framework_agent_root"
@@ -2862,11 +2871,14 @@ class IntegratePatchExecutor:
 
         # Split config_changes into server args (--flags) and env vars so that
         # --prefixed flags reach EXTRA_{FW}_ARGS instead of being silently dropped.
+        # Env vars are layered on top of the live base_extra_envs (current_best).
         _cc_args, _cc_envs = split_config_changes(config_changes_applied)
+        _variant_envs = dict(params.get("base_extra_envs") or {})
+        _variant_envs.update(_cc_envs)
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=merge_server_args(str(params.get("base_extra_args") or "").strip(), _cc_args),
-            extra_envs=_cc_envs,
+            extra_envs=_variant_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
@@ -3057,10 +3069,11 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.rebench.yaml",
         )
         _cc_args_rb, _cc_envs_rb = split_config_changes(config_changes_applied)
+        _variant_envs_rb = {**dict(params.get("base_extra_envs") or {}), **_cc_envs_rb}
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
             extra_server_args=merge_server_args(base_extra_args, _cc_args_rb),
-            extra_envs=_cc_envs_rb,
+            extra_envs=_variant_envs_rb,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),

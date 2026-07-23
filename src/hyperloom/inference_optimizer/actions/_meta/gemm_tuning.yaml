@@ -21,19 +21,15 @@ side_effects:
   - workspace_write
   - server_restart
   - writes_config
-preferred_backend: forge
+preferred_backend: claude
 preferred_model: null
 max_turns: 25
 lease_ttl_sec: 5400
 description: >
-  GEMM dispatch tuning via forge-gemm-tune or legacy GEAK. Forge supports
-  bf16/fp8/fp4 MoE+dense on sglang/vllm; backend selected by
-  GEMM_TUNING_BACKEND.
+  GEMM dispatch tuning request. Current GEAK owns the default KERNEL phase and
+  decides applicability internally. Private forge tuning is available only when
+  the operator set exactly KERNEL_OPT_BACKEND_ORDER=forge.
 pipeline_phase: deep
 typical_runtime_min: 20.0
 applicable_when:
-  # forge handles any precision (bf16/fp16/fp8/fp4/mxfp4), dense or MoE; do not
-  # pre-filter on precision/MoE (real e2e KEEPs include bf16 dense). Gate only
-  # on a supported framework + the deep phase.
-  - "framework in ('sglang', 'vllm', 'vllm-aiter')"
-  - "operator_bottleneck_identified or phase == 'deep'"
+  - "phase == 'deep'"

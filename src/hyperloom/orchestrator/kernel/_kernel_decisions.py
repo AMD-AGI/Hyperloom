@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Kernel-decision write-owner functions.
@@ -245,6 +245,7 @@ def record_kernel_integrate_result(
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
+        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
     }
     attempts.append(attempt)
     best_gain = max(

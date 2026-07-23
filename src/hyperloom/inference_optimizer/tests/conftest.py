@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Pytest hooks and shared helpers for the inference_optimizer tests package."""
@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)

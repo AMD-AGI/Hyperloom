@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared workload-env materialization (single source of truth).
@@ -86,24 +86,6 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 # Truthy-false spellings that disable the accuracy gate.
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
-# Truthy spellings that (re)enable a normally-off toggle.
-_RUN_EVAL_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
-
-
-def sweep_run_eval_enabled() -> bool:
-    """Whether ``sweep`` / ``conc_sweep`` variants should run the accuracy eval.
-
-    The GSM8K accuracy eval is invariant to concurrency / workload shape, so it
-    is OFF by default for sweeps (the accuracy gate still runs on every
-    ``explore`` / ``baseline`` benchmark). Opt back in with
-    ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1`` (truthy).
-
-    Returns:
-        ``True`` only when ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL`` is set to a
-        truthy value; ``False`` otherwise (the default).
-    """
-    return str(os.environ.get("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", "")).strip().lower() in _RUN_EVAL_TRUE_VALUES
 
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
@@ -796,6 +778,12 @@ def materialize_config_with_envs(
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
+    # Final dedup after reference/server_args merges: collapse repeated
+    # vLLM/atom single-value flags to last-wins so recipe/variant values
+    # override earlier ones (no-op for sglang).
+    _final_args = str(envs.get(framework_env, "")).strip()
+    if _final_args:
+        envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
     # re-inject the image-quality reference here (the single scriptable choke

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coverage for Coordinator pure/sync helper methods.
@@ -421,7 +421,8 @@ def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)  # default: forge
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
     ss = coord.shared_state
     ss.last_gemm_tuning = {}
     # forge backend: any precision on a supported framework is eligible.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Drop scoreboard tests."""
@@ -208,7 +208,7 @@ def test_orchestration_prompt_has_no_scoreboard_block():
     )
     for needle in forbidden:
         assert needle not in prompt, f"prompt still references retired scoring token {needle!r}"
-    assert "Inv-9.1" in prompt
+    assert "no system-side" in prompt.lower() or "no system-side" in prompt
     assert "Phase-aware action selection" in prompt
 
 
@@ -271,7 +271,7 @@ def test_orchestration_md_has_no_score_view():
     )
     for needle in forbidden:
         assert needle not in fragment, f"orchestration.md still references retired token {needle!r}"
-    assert "§3.9" in fragment
+    assert "decision priority" in fragment.lower()
 
 
 def test_cli_exposes_legacy_action_scores_flag():

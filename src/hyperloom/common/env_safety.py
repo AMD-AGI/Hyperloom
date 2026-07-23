@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared environment-variable safety helpers.
@@ -14,6 +14,8 @@ import re
 from collections.abc import Mapping
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_PYTHON_PACKAGE_ROOT_BASENAMES: frozenset[str] = frozenset({"site-packages", "dist-packages"})
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
@@ -137,6 +139,18 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
+def is_python_package_root(path: object) -> bool:
+    """True when ``path`` is a ``site-packages``/``dist-packages`` dir.
+
+    Already on the import path, so keeping it off PYTHONPATH avoids shadowing an
+    isolated venv's packages; a source checkout root returns False.
+    """
+    name = str(path or "").strip().rstrip("/")
+    if not name:
+        return False
+    return name.rsplit("/", 1)[-1] in _PYTHON_PACKAGE_ROOT_BASENAMES
+
+
 def valid_env_key(key: object) -> bool:
     return bool(_ENV_KEY_RE.fullmatch(str(key or "")))
 
@@ -192,6 +206,7 @@ __all__ = [
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_kernel_agent_env_key",
+    "is_python_package_root",
     "scrub_child_process_env",
     "valid_env_key",
 ]

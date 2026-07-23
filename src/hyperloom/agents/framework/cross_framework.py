@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Cross-framework audit helpers for framework-agent P1.
@@ -225,8 +225,6 @@ def run_cross_framework_audit(request: dict[str, Any]) -> dict[str, Any]:
     metrics["dst_symbols_present"] = sym_present
     semantic_status = "partially_present" if present else "not_present"
     risks = ["cross-framework port: raw git apply impossible; specialist must rewrite"]
-    if request.get("use_llm"):
-        risks.append("use_llm ignored in cross-framework mode (P1); LLM validation deferred")
     if present == 0 and roots_source != "explicit":
         risks.append(f"target roots not explicit (roots_source={roots_source}); verify target_framework_source_roots")
     return _verdict(

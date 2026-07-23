@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """PR/ref exploration engine; candidates come from ``sources.enumerate_candidates`` (honours ``search_modes``), enrichment + filtering happen here.

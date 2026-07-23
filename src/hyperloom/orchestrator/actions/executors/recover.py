@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Real ``recover`` ActionRunner — release leaked GPU VRAM.
@@ -7,22 +7,13 @@ Counterpart of the Robustness ``gpu_memory_leaked`` signal: when a crashed
 server leaves the ROCm KFD tables attributing VRAM to dead PIDs, every
 subsequent server start aborts on insufficient free memory. Invoked via
 ``delegate{action_name="recover", ...}`` (Robustness-only by PolicyGate)
-for tiered cleanup:
+for a soft cleanup: ``pgrep`` stale owners, SIGTERM, wait
+``SERVER_KILL_WAIT_S``, SIGKILL survivors.
 
-1. **soft** — ``pgrep`` stale owners, SIGTERM, wait ``SERVER_KILL_WAIT_S``,
-   SIGKILL survivors.
-2. **hard** (opt-IN, env-gated) — only when soft leaves VRAM pinned AND
-   ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET`` is explicitly truthy AND the
-   session's own GPUs can be derived from ``ROCR_VISIBLE_DEVICES``: shell out
-   to ``rocm-smi --gpureset --gpu=<session ids>`` (30s timeout). It NEVER
-   issues an implicit ``--gpu=all`` — a full-node reset is tenant-affecting
-   and must not arm by default (esp. on shared nodes). With the env gate off
-   or the device scope unknown, the hard reset is skipped and the reason is
-   recorded in ``gpureset_skipped_reason``.
-
-We deliberately do NOT reload amdgpu, restart the pod/Ray head, or touch
-persistent runtime config (would kill the optimizer or need root). A
-failed recover surfaces as ``state == "needs_review"``.
+We deliberately do NOT reload amdgpu, reset the GPU, restart the pod/Ray
+head, or touch persistent runtime config (would kill the optimizer, need
+root, or affect other tenants). A failed recover surfaces as
+``state == "needs_review"``.
 
 Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
 
@@ -30,15 +21,9 @@ Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
         "state":                  "succeeded" | "needs_review",
         "reason":                 echoed from params,
         "force_gpu_cleanup":      bool,
-        "allow_reset_env":        bool,                       # gate state
         "killed_pids":            [{pid, cmd, signal}, ...],  # actually killed
         "pre_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # before cleanup
         "mid_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # after kills
-        "post_free_mb_per_gpu":   [{gpu_id, free_mb}, ...],   # after gpureset
-        "gpureset_attempted":     bool,
-        "gpureset_target_gpus":   [int, ...],   # session GPU ids scoped for reset
-        "gpureset_skipped_reason":str | None,   # why a hard reset was skipped
-        "gpureset_result":        {returncode, stdout, stderr, error} | {},
         "error_class":            str,                        # only on failure
     }
 """
@@ -75,58 +60,6 @@ _OWNER_PATTERNS: tuple[str, ...] = (
 )
 
 
-def _env_gate_allows_gpureset() -> bool:
-    """Whether hard GPU reset is permitted during recovery.
-
-    Opt-IN: disabled unless ``HYPERLOOM_RECOVER_ALLOW_GPU_RESET`` is explicitly
-    truthy. A ``rocm-smi --gpureset`` is a tenant-affecting operation, so it
-    must never arm by default (esp. on shared nodes). Even when enabled, the
-    reset is scoped to the session's own GPUs (see :func:`_session_gpu_ids`);
-    it never resets ``--gpu=all`` implicitly.
-
-    Returns:
-        bool: ``True`` only when the env gate is explicitly enabled.
-    """
-    return os.getenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _session_gpu_ids() -> list[int] | None:
-    """Physical GPU ids this session owns, parsed from ``ROCR_VISIBLE_DEVICES``.
-
-    Returns a sorted list of integer physical card indices to scope the
-    gpureset to, or ``None`` when the env is unset/empty or contains a
-    non-integer token (e.g. a GPU UUID). When ``None`` the session's device
-    set cannot be safely determined, so the caller skips the hard reset
-    rather than falling back to the tenant-affecting ``--gpu=all``.
-
-    NOTE: ``rocm-smi --gpu=<id>`` indexes PHYSICAL cards and
-    ``ROCR_VISIBLE_DEVICES`` holds physical indices, so the values pass
-    through unchanged — they are deliberately NOT remapped to the masked
-    logical 0..N-1 space (doing so would reset another tenant's cards).
-
-    Returns:
-        list[int] | None: Sorted physical GPU ids, or ``None`` when unknown.
-    """
-    raw = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if not raw:
-        return None
-    ids: list[int] = []
-    for tok in raw.split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            ids.append(int(tok))
-        except ValueError:
-            return None  # non-int token -> cannot safely scope a reset
-    return sorted(set(ids)) or None
-
-
 def _is_multi_node_sandbox() -> bool:
     """True when running in multi-node mode (nodes >= 2).
 
@@ -144,7 +77,7 @@ def _is_multi_node_sandbox() -> bool:
     (SSH to the actual pods).
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
-    IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+    IS the GPU pod, so the local rocm-smi probe is meaningful.
 
     Returns:
         ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
@@ -168,8 +101,6 @@ class RecoverExecutor:
 
     # Time we wait between SIGTERM and SIGKILL for a stuck owner.
     SERVER_KILL_WAIT_S: float = 5.0
-    # Hard timeout for the ``rocm-smi --gpureset`` shell-out.
-    GPURESET_TIMEOUT_S: float = 30.0
     # Free MiB above which a GPU is considered healthy. Matches the
     # robustness-agent default ``GpuLeakConfig.free_mb_threshold``.
     FREE_MB_HEALTHY: float = 500.0
@@ -179,8 +110,7 @@ class RecoverExecutor:
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the GPU recovery sequence and report the outcome.
 
-        Probes GPU memory, optionally TERM/KILLs stale owner processes,
-        optionally attempts an env-gated ``rocm-smi --gpureset``, and
+        Probes GPU memory, optionally TERM/KILLs stale owner processes, and
         re-probes to decide success. Writes ``result.json`` to the task
         workspace when one is available.
 
@@ -191,19 +121,17 @@ class RecoverExecutor:
         Returns:
             dict[str, Any]: The recovery result, including ``state``
             (``"succeeded"`` / ``"needs_review"``), per-stage GPU memory
-            probes, killed PIDs, and gpureset details.
+            probes, and killed PIDs.
         """
         params: dict[str, Any] = dict(getattr(ctx.task, "params", {}) or {})
         reason = str(params.get("reason", ""))
         force_cleanup = bool(params.get("force_gpu_cleanup", False))
-        allow_reset = _env_gate_allows_gpureset()
         workspace = self._workspace_dir(ctx)
 
         log.info(
-            "recover_executor: start reason=%r force=%s allow_reset_env=%s",
+            "recover_executor: start reason=%r force=%s",
             reason,
             force_cleanup,
-            allow_reset,
         )
 
         # Infera CPU-only sandbox: no local GPUs to reclaim (they live on remote
@@ -214,20 +142,16 @@ class RecoverExecutor:
         if _is_multi_node_sandbox():
             log.info(
                 "recover_executor: infera CPU-only sandbox detected; skipping "
-                "local rocm-smi probe + gpureset (GPUs are on remote pods)."
+                "local rocm-smi probe (GPUs are on remote pods)."
             )
             result = {
                 "state": "succeeded",
                 "reason": reason,
                 "force_gpu_cleanup": force_cleanup,
-                "allow_reset_env": allow_reset,
                 "cpu_only_sandbox": True,
                 "killed_pids": [],
                 "pre_free_mb_per_gpu": [],
                 "mid_free_mb_per_gpu": [],
-                "post_free_mb_per_gpu": [],
-                "gpureset_attempted": False,
-                "gpureset_result": {},
             }
             if workspace is not None:
                 await asyncio.to_thread(self._write_result_json, workspace, result)
@@ -249,51 +173,17 @@ class RecoverExecutor:
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)
 
-        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, always
-        # scoped to this session's own GPUs (never implicit --gpu=all).
-        gpu_ids = _session_gpu_ids()
-        gpureset_result: dict[str, Any] | None = None
-        gpureset_skipped_reason: str | None = None
-        if force_cleanup and allow_reset and not self._all_recovered(mid):
-            if gpu_ids:
-                gpureset_result = await asyncio.to_thread(
-                    self._try_rocm_smi_gpureset,
-                    gpu_ids,
-                )
-            else:
-                gpureset_skipped_reason = "no_session_gpu_scope"
-                log.warning(
-                    "recover_executor: refusing implicit full-node gpureset — "
-                    "ROCR_VISIBLE_DEVICES is unset/unparseable so the cards "
-                    "this session owns cannot be confirmed. Set "
-                    "ROCR_VISIBLE_DEVICES to scope the reset to your GPUs. "
-                    "Skipping hard reset."
-                )
-        elif force_cleanup and not allow_reset and not self._all_recovered(mid):
-            gpureset_skipped_reason = "gpureset_disabled"
-
-        # 5) Final probe (only matters if we attempted gpureset).
-        post = await asyncio.to_thread(self._probe_gpu_free_mb) if gpureset_result is not None else mid
-
-        succeeded = self._all_recovered(post)
+        succeeded = self._all_recovered(mid)
         result: dict[str, Any] = {
             "state": "succeeded" if succeeded else "needs_review",
             "reason": reason,
             "force_gpu_cleanup": force_cleanup,
-            "allow_reset_env": allow_reset,
             "killed_pids": killed,
             "pre_free_mb_per_gpu": pre,
             "mid_free_mb_per_gpu": mid,
-            "post_free_mb_per_gpu": post,
-            "gpureset_attempted": gpureset_result is not None,
-            "gpureset_target_gpus": gpu_ids or [],
-            "gpureset_skipped_reason": gpureset_skipped_reason,
-            "gpureset_result": gpureset_result or {},
         }
         if not succeeded:
-            result["error_class"] = (
-                "gpu_unhealthy_after_gpureset" if gpureset_result is not None else "gpu_unhealthy_after_soft_cleanup"
-            )
+            result["error_class"] = "gpu_unhealthy_after_soft_cleanup"
 
         if workspace is not None:
             await asyncio.to_thread(self._write_result_json, workspace, result)
@@ -301,12 +191,11 @@ class RecoverExecutor:
             result["result_path"] = str(workspace / "result.json")
 
         log.info(
-            "recover_executor: %s killed=%d gpureset=%s healthy_gpus=%d/%d",
+            "recover_executor: %s killed=%d healthy_gpus=%d/%d",
             result["state"],
             len(killed),
-            result["gpureset_attempted"],
-            sum(1 for g in post if g.get("free_mb", 0) >= self.FREE_MB_HEALTHY),
-            len(post),
+            sum(1 for g in mid if g.get("free_mb", 0) >= self.FREE_MB_HEALTHY),
+            len(mid),
         )
         return result
 
@@ -578,61 +467,6 @@ class RecoverExecutor:
             return True
         except (ProcessLookupError, PermissionError):
             return False
-
-    # hard cleanup — rocm-smi --gpureset (opt-in env gate, session-scoped)
-    def _try_rocm_smi_gpureset(self, gpu_ids: list[int]) -> dict[str, Any]:
-        """Attempt a best-effort ``rocm-smi --gpureset`` scoped to ``gpu_ids``.
-
-        ``gpu_ids`` are this session's own PHYSICAL card indices (from
-        :func:`_session_gpu_ids`); they are passed verbatim to ``--gpu=`` so
-        only the session's cards are reset — never ``--gpu=all``.
-
-        Args:
-            gpu_ids (list[int]): Physical GPU indices to reset (non-empty).
-
-        Returns:
-            dict[str, Any]: A result record with the return code, the target
-            GPUs and captured output, or an ``error`` key when ``rocm-smi`` is
-            missing or the call times out.
-        """
-        if not shutil.which("rocm-smi"):
-            return {"error": "rocm-smi not on PATH"}
-        gpu_arg = ",".join(str(i) for i in gpu_ids)
-        log.warning(
-            "recover_executor: HYPERLOOM_RECOVER_ALLOW_GPU_RESET enabled; "
-            "attempting `rocm-smi --gpureset --gpu=%s` (session-scoped, best "
-            "effort, typically requires root)",
-            gpu_arg,
-        )
-        try:
-            proc = subprocess.run(
-                ["rocm-smi", "--gpureset", f"--gpu={gpu_arg}"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.GPURESET_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired as exc:
-            log.warning(
-                "recover_executor: gpureset timed out after %.0fs",
-                self.GPURESET_TIMEOUT_S,
-            )
-            return {
-                "returncode": None,
-                "error": "timeout",
-                "timeout_s": self.GPURESET_TIMEOUT_S,
-                "stdout": (exc.stdout or "")[:400] if exc.stdout else "",
-                "stderr": (exc.stderr or "")[:400] if exc.stderr else "",
-            }
-        except (FileNotFoundError, OSError) as exc:
-            log.warning("recover_executor: gpureset failed to launch: %s", exc)
-            return {"error": f"launch_failed: {exc}"}
-        return {
-            "returncode": proc.returncode,
-            "stdout": (proc.stdout or "")[-2000:],
-            "stderr": (proc.stderr or "")[-2000:],
-        }
-
 
 # Module-level callable for ``register_executor("recover", recover_executor)``.
 recover_executor = RecoverExecutor()

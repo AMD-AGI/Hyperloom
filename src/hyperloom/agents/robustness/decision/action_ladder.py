@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Translate Symptoms into Coordinator Intents.
@@ -30,9 +30,34 @@ from ..role.envelope import (
     build_delegate,
     build_heartbeat,
     build_kill_task,
+    build_prune_branch,
     build_send_message,
 )
 from ..signals import Symptom, SymptomSeverity
+
+
+# HIGH symptoms whose remediation is to prune an action family. Value is a fixed
+# family, or None to resolve it from the symptom's subject/evidence "family".
+_PRUNE_SYMPTOMS: dict[str, str | None] = {
+    "repeated_failure": None,
+    "same_payload_loop": None,
+    "kernel_opt_no_progress": "kernel_opt",
+    "geak_budget_starvation": "kernel_opt",
+    "amdahl_kernel_ceiling_low": "kernel_opt",
+}
+
+
+def _prune_family_for(sym: Symptom) -> str:
+    """Resolve the action family a prune-eligible symptom targets ("" when none)."""
+    fixed = _PRUNE_SYMPTOMS.get(sym.name)
+    if fixed:
+        return fixed
+    for holder in (sym.subject, sym.evidence):
+        if isinstance(holder, dict):
+            family = str(holder.get("family") or "").strip()
+            if family:
+                return family
+    return ""
 
 
 log = logging.getLogger(__name__)
@@ -293,6 +318,13 @@ class ActionLadder:
                     idempotency_key=(f"report-{slug}-tick-{self._last_tick_index}"),
                 )
             )
+            return intents
+        # Stuck / no-lever families: prune the branch so its budget lands
+        # elsewhere. Family resolves from a fixed map or the symptom subject.
+        if sym.name in _PRUNE_SYMPTOMS:
+            family = _prune_family_for(sym)
+            if family:
+                intents.append(build_prune_branch(family, reason=sym.summary))
             return intents
         # Every other HIGH symptom is strategic: the alert above carries
         # evidence + suggestion; Orchestration decides how to act.
