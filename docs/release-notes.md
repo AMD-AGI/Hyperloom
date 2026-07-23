@@ -79,17 +79,14 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   cleanup. When unset, single-node serving uses the local subprocess path.
   Multi-node is unchanged (gated off).
 
-- **Accuracy-gate and eval-result integrity**: lm-eval output is wired to a
+- **Accuracy-gate and eval-result integrity**: `lm-eval` output is wired to a
   session-scoped `EVAL_RESULT_DIR`; a baseline that produces no accuracy
   verdict now hard-stops instead of optimizing an unvalidated baseline; leaked
   eval results are salvaged back from the InferenceX checkout / local-disk
   mirror; and session-breakdown attribution no longer fabricates credit from a
   seeded stack.
 
-- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic
-  directly (provider-only paths), with env-driven, consistent gateway
-  auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
-  the Critic can run over the native provider endpoint.
+- **Provider-direct LLM configuration**: Hyperloom connects directly to Anthropic (provider-only paths), with env-driven gateway auth/endpoint resolution, case-insensitive Anthropic-endpoint handling, and support for running the Critic over the native provider endpoint.
 
 - **Model-path and workload-default consistency**: A single `--model` value (local
   path or HF repo id) resolves identically across baseline, roofline, and the
@@ -116,7 +113,7 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   pool cap is decoupled from the dispatch budget.
 
 - **Profiling / roofline / TraceLens**: GPU information is restored in
-  profiler traces (torch-trace `"kernel"` category), and a stale TRACELENS_ROOT
+  profiler traces (torch-trace `"kernel"` category), and a stale `TRACELENS_ROOT`
   inherited from the kernel-agent env file no longer breaks TraceLens discovery.
 
 - **Orchestrator reliability and long-run durability**: `reports/final.json` is
