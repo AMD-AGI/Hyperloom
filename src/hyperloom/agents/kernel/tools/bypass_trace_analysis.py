@@ -41,6 +41,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
 import _trace_shape_manifest as _tsm  # noqa: E402
+
+# Shared provenance builder (WP-0). Optional import: this tool is also invoked
+# standalone by absolute path, where the ``hyperloom`` package may not be on the
+# path -- in that case we fall back to a minimal env-derived stub.
+try:
+    from hyperloom.common.provenance import build_provenance as _shared_build_provenance
+except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
+    _shared_build_provenance = None
 from _idle_gate import (  # noqa: E402
     build_high_idle_warning,
     resolve_idle_pct_threshold,
@@ -241,14 +249,20 @@ def _variant_label(path: Path) -> str:
     return m.group(1).lower() if m else path.stem
 
 
-def _wp1_provenance_stub(args: argparse.Namespace) -> dict[str, Any]:
-    """Minimal provenance block for WP-1 (replaced by the shared WP-0 builder).
+def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
+    """Provenance block for the TraceShapeManifest.
 
-    Sources model/framework/platform from CLI args and the standard serving env
-    vars; unknown fields default to ``None`` (the manifest never fails to write
-    on missing provenance). Flagged so a later stage can tell a stub apart from
-    a full provenance block.
+    Delegates to the shared ``hyperloom.common.provenance.build_provenance``
+    (WP-0) so the trace manifest and the session manifest never drift. Falls
+    back to a minimal env-derived stub only when the shared module is not
+    importable (standalone tool invocation without the package installed); the
+    ``_provenance_source`` tag distinguishes the two.
     """
+    if _shared_build_provenance is not None:
+        try:
+            return _shared_build_provenance(args, env=os.environ, probe=True)
+        except Exception:  # noqa: BLE001 — provenance must never break the manifest.
+            pass
 
     def _env(*names: str) -> Any:
         for n in names:
@@ -312,7 +326,7 @@ def _maybe_build_shape_manifest(
         manifest = _tsm.build_shape_manifest(
             main_analysis=analyze,
             capture_variants=capture_variants,
-            provenance=_wp1_provenance_stub(args),
+            provenance=_build_manifest_provenance(args),
             main_trace_hash=main_hash,
             capture_trace_hashes=capture_hashes,
             analysis_route="bypass",
