@@ -644,14 +644,14 @@ def _infera_restart_config_matches(
         return False
     current_env_fp = _mn_cli._variant_env_fingerprint()
     stored_env_fp = str(state.get("last_restart_env_fingerprint") or "")
-    # Old state files have no env fingerprint. Preserve the prior fast path only
-    # when the current request has no effective env controls; any set/unset
-    # request must force one fresh launch and persist its identity.
-    env_match = (
-        stored_env_fp == current_env_fp
-        if stored_env_fp
-        else current_env_fp == _mn_cli._variant_env_fingerprint({}, [])
-    )
+    # Strict equality (mirrors the RayJob path). Old state files (pre-fingerprint)
+    # store an empty string, and a real fingerprint is a non-empty SHA-256 hex, so
+    # they never match — forcing ONE fresh relaunch that writes the fingerprint
+    # rather than risking a resume onto a server still carrying the prior
+    # variant's tuning env (a baseline after an env-only variant would otherwise
+    # benchmark stale env). The extra relaunch only costs the first post-upgrade
+    # round; every round after has a stored fingerprint.
+    env_match = stored_env_fp == current_env_fp
     base_match = (
         str(state.get("last_restart_framework") or "") == framework
         and str(state.get("last_restart_model") or "") == str(args.model)

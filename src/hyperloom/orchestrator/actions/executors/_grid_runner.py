@@ -575,6 +575,66 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _measurement_rank_key(measurement: dict[str, Any]) -> tuple[int, float, float]:
+    """Rank key for choosing among benchmark workspaces.
+
+    A valid measurement outranks any invalid one; ties break on completed
+    requests then output throughput so a sparse retry cannot beat a fuller pass.
+
+    Args:
+        measurement: A measurement dict from :func:`extract_benchmark_measurement`.
+
+    Returns:
+        tuple[int, float, float]: ``(valid, completed_requests, output_throughput)``.
+    """
+
+    def _f(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    valid = 1 if measurement.get("valid_measurement") else 0
+    return valid, _f(measurement.get("completed_requests")), _f(measurement.get("output_throughput"))
+
+
+def _select_best_measurement(
+    candidates: list[Path],
+    *,
+    subprocess_started_unix: float,
+) -> tuple[Path, dict[str, Any] | None, dict[str, Any]]:
+    """Pick the best ``benchmark_*`` workspace among ``candidates``.
+
+    A connection-refused retry appends a newer ``benchmark_*`` next to the first
+    pass, so the naive ``candidates[-1]`` can select a sparse/empty retry over a
+    fuller first pass. Re-parse every candidate and keep the highest-ranked
+    (valid first, then completed requests, then throughput); on an all-invalid
+    tie the newest wins so the failure path still reports the latest attempt.
+
+    Args:
+        candidates: Non-empty, ascending (oldest→newest) list of workspaces.
+        subprocess_started_unix: Earliest launch time so the mtime-gated leak
+            salvage inside :func:`extract_benchmark_measurement` still adopts
+            first-pass leaks.
+
+    Returns:
+        tuple[Path, dict | None, dict]: ``(workspace, report, measurement)``.
+    """
+    best: tuple[tuple[int, float, float, int], Path, dict[str, Any] | None, dict[str, Any]] | None = None
+    for idx, ws in enumerate(candidates):
+        rep = _parse_report(ws)
+        meas = extract_benchmark_measurement(
+            rep,
+            workspace=ws,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        rank = (*_measurement_rank_key(meas), idx)
+        if best is None or rank > best[0]:
+            best = (rank, ws, rep, meas)
+    assert best is not None  # candidates is non-empty by contract
+    return best[1], best[2], best[3]
+
+
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
@@ -1448,8 +1508,12 @@ async def run_grid(
         )
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
-        # leak destinations per-variant.
+        # leak destinations per-variant. ``variant_first_started_unix`` keeps the
+        # ORIGINAL start across a connection-refused retry (which resets
+        # ``variant_started_unix``) so first-pass leaks stay inside the salvage
+        # mtime gate.
         variant_started_unix = time.time()
+        variant_first_started_unix = variant_started_unix
         try:
             await _mn_prebench_regate()
             rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
@@ -1721,7 +1785,7 @@ async def run_grid(
         harvest_destination = candidates[-1] if candidates else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
-            subprocess_started_unix=variant_started_unix,
+            subprocess_started_unix=variant_first_started_unix,
         )
         if harvested:
             log.info(
@@ -1764,14 +1828,15 @@ async def run_grid(
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
-        workspace = candidates[-1]
-        report = _parse_report(workspace)
-        report_path = workspace / "benchmark_report.json"
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
-            subprocess_started_unix=variant_started_unix,
+        # Choose the best workspace across all benchmark_* (a conn-refused retry
+        # appends a newer one): valid first, then completed requests / throughput,
+        # so a sparse/empty retry never shadows a fuller first pass. Use the
+        # earliest start time so first-pass leaks stay salvageable.
+        workspace, report, measurement = _select_best_measurement(
+            candidates,
+            subprocess_started_unix=variant_first_started_unix,
         )
+        report_path = workspace / "benchmark_report.json"
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if rc != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
@@ -1949,15 +2014,27 @@ def _snapshot_variant_server_logs(slot: Path) -> None:
     """
     try:
         src = slot / "server_logs"
-        if not src.is_dir():
-            return
         seen: set[Path] = set()
         logs: list[Path] = []
-        for _pat in _SERVER_LOG_GLOBS:
-            for _p in src.glob(_pat):
-                if _p not in seen:
-                    seen.add(_p)
-                    logs.append(_p)
+        if src.is_dir():
+            for _pat in _SERVER_LOG_GLOBS:
+                for _p in src.glob(_pat):
+                    if _p not in seen:
+                        seen.add(_p)
+                        logs.append(_p)
+        run_level_used = False
+        if not logs:
+            # Infera writes per-pod logs to the RUN-level HYPERLOOM_MN_SERVER_LOG_DIR
+            # (host-suffixed mn_infera_server_*.log), not the per-variant slot, so
+            # the slot is empty. Fall back to it so an infera mid-benchmark crash
+            # still produces a snapshot (note: run-scoped, may span variants).
+            run_dir = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
+            if run_dir.startswith("/") and "$" not in run_dir and Path(run_dir).is_dir():
+                for _p in sorted(Path(run_dir).glob("mn_infera_server_*.log")):
+                    if _p not in seen:
+                        seen.add(_p)
+                        logs.append(_p)
+                run_level_used = bool(logs)
         logs = sorted(logs)
         if not logs:
             return
@@ -1976,7 +2053,14 @@ def _snapshot_variant_server_logs(slot: Path) -> None:
             sections.append(f"===== {path.name} (last {_SERVER_LOG_TAIL_BYTES}B) =====\n{tail}")
         if not sections:
             return
-        header = f"death_markers={sorted(hits)}\n\n" if hits else "death_markers=[] (no known crash signature)\n\n"
+        source_note = (
+            "# source: run-level HYPERLOOM_MN_SERVER_LOG_DIR (run-scoped, may span variants)\n"
+            if run_level_used
+            else ""
+        )
+        header = source_note + (
+            f"death_markers={sorted(hits)}\n\n" if hits else "death_markers=[] (no known crash signature)\n\n"
+        )
         (slot / "server_death_snapshot.txt").write_text(header + "\n\n".join(sections), encoding="utf-8")
     except OSError as exc:  # noqa: BLE001 - snapshot is best-effort diagnostics
         log.warning("_grid_runner: failed to write server_death_snapshot.txt at %s: %s", slot, exc)

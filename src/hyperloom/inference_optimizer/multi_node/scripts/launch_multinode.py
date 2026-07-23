@@ -699,12 +699,16 @@ def _extra_arg_value(extra_args: list[str], flag: str) -> str | None:
     Returns:
         str | None: The following token / ``=``-value, or ``None`` if absent.
     """
+    value: str | None = None
     for i, tok in enumerate(extra_args):
+        # Last-wins (argparse semantics; matches launch_infera_node): a later
+        # duplicate --moe-a2a-backend overrides an earlier one, so both backends
+        # classify the same effective value.
         if tok == flag and i + 1 < len(extra_args):
-            return extra_args[i + 1]
-        if tok.startswith(flag + "="):
-            return tok.split("=", 1)[1]
-    return None
+            value = extra_args[i + 1]
+        elif tok.startswith(flag + "="):
+            value = tok.split("=", 1)[1]
+    return value
 
 
 def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
@@ -1048,7 +1052,13 @@ def main() -> int:
         dtp = 0
         ib_dev = ""
 
-    extra_args = args.extra_args.split() if args.extra_args else []
+    # shlex.split (not str.split) so quoted values stay one token and tokenization
+    # matches launch_infera_node + the launcher's own quoting; a malformed quote
+    # falls back to whitespace split rather than aborting the launch.
+    try:
+        extra_args = shlex.split(args.extra_args) if args.extra_args else []
+    except ValueError:
+        extra_args = args.extra_args.split() if args.extra_args else []
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")

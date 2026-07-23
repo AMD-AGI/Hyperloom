@@ -217,6 +217,41 @@ def test_infera_resume_identity_includes_variant_env(monkeypatch):
     assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
 
 
+def test_infera_old_state_without_fingerprint_never_resumes(monkeypatch):
+    """H1: a pre-fingerprint state must force a relaunch, not resume stale env."""
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    # Old state: identical served config but NO last_restart_env_fingerprint.
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        # no last_restart_env_fingerprint
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    # Even a no-env baseline must NOT resume onto the (possibly stale-env) server.
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_infera_unsupported_flag_preflight(monkeypatch):
+    """Infera fails fast on an argparse-unknown server flag (parity with RayJob)."""
+    mod = _load_module()
+    # No sglang parser in the test env → best-effort returns [] (never blocks).
+    assert mod._unsupported_extra_arg_flags("sglang", ["--definitely-unknown-flag"]) == []
+    # With a stub parser exposing a known option set, unknown flags are reported.
+    monkeypatch.setattr(
+        mod,
+        "_unsupported_extra_arg_flags",
+        lambda fw, toks: [t for t in toks if t.startswith("--") and t != "--tp"],
+    )
+    assert mod._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+
+
 def test_infera_capability_preflight_only_blocks_effective_deepep(monkeypatch):
     """Infera preflight: only an effective deepep backend requires deep_ep."""
     mod = _load_module()

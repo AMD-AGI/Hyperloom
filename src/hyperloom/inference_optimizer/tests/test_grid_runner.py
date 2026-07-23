@@ -1238,3 +1238,87 @@ class TestCompactJsonServerArgs:
     def test_empty_is_noop(self):
         assert _grid_runner.compact_json_server_args("", "vllm") == ""
         assert _grid_runner.compact_json_server_args(None, "vllm") == ""
+
+
+# Section: connection-retry best-workspace selection (M1)
+
+
+def _write_benchmark_report(ws: Path, *, output_throughput, completed_requests) -> None:
+    """Materialize a benchmark_* workspace with a benchmark_report.json."""
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "throughput": {
+                    "output_throughput": output_throughput,
+                    "completed_requests": completed_requests,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_select_best_measurement_prefers_fuller_first_pass_over_sparse_retry(tmp_path):
+    """A newer but sparse retry must not shadow a fuller valid first pass."""
+    first = tmp_path / "benchmark_20260101_000000"
+    _write_benchmark_report(first, output_throughput=1000.0, completed_requests=500)
+    retry = tmp_path / "benchmark_20260101_000100"  # newer (sorts last)
+    _write_benchmark_report(retry, output_throughput=10.0, completed_requests=3)
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == first
+    assert meas.get("valid_measurement") is True
+    assert float(meas.get("output_throughput")) == 1000.0
+
+
+def test_select_best_measurement_picks_valid_retry_when_first_invalid(tmp_path):
+    """When the first pass has no valid measurement, a valid retry is chosen."""
+    first = tmp_path / "benchmark_20260101_000000"
+    first.mkdir()  # no benchmark_report.json → invalid
+    retry = tmp_path / "benchmark_20260101_000100"
+    _write_benchmark_report(retry, output_throughput=42.0, completed_requests=8)
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == retry
+    assert meas.get("valid_measurement") is True
+
+
+def test_select_best_measurement_all_invalid_returns_newest(tmp_path):
+    """All-invalid tie falls back to the newest workspace for error reporting."""
+    old = tmp_path / "benchmark_20260101_000000"
+    old.mkdir()
+    new = tmp_path / "benchmark_20260101_000100"
+    new.mkdir()
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == new
+    assert not meas.get("valid_measurement")
+
+
+def test_snapshot_falls_back_to_run_level_infera_logs(tmp_path, monkeypatch):
+    """Infera: empty per-variant slot → snapshot reads run-level server logs."""
+    slot = tmp_path / "slot"
+    (slot / "server_logs").mkdir(parents=True)  # exists but empty (infera case)
+    run_dir = tmp_path / "run_logs"
+    run_dir.mkdir()
+    (run_dir / "mn_infera_server_10.0.0.1_r0.log").write_text(
+        "loading weights...\nMemory access fault by GPU node-2\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(run_dir))
+
+    gr._snapshot_variant_server_logs(slot)
+
+    snap = slot / "server_death_snapshot.txt"
+    assert snap.is_file()
+    body = snap.read_text(encoding="utf-8")
+    assert "run-level HYPERLOOM_MN_SERVER_LOG_DIR" in body
+    assert "Memory access fault" in body
+    assert "mn_infera_server_10.0.0.1_r0.log" in body

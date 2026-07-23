@@ -618,6 +618,16 @@ def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
     assert "NCCL_DEBUG" in effective_unsets
 
 
+def test_extra_arg_value_last_wins(monkeypatch):
+    """Duplicate --moe-a2a-backend resolves last-wins (parity with infera)."""
+    lm = _load_script_module("lm_test_extra_arg_lastwins", "launch_multinode.py")
+    assert lm._extra_arg_value(
+        ["--moe-a2a-backend", "deepep", "--moe-a2a-backend", "mori"], "--moe-a2a-backend"
+    ) == "mori"
+    assert lm._extra_arg_value(["--moe-a2a-backend=deepep", "--moe-a2a-backend=nixl"], "--moe-a2a-backend") == "nixl"
+    assert lm._extra_arg_value(["--other", "x"], "--moe-a2a-backend") is None
+
+
 def test_resolve_multinode_log_dir_one_time_override_not_persisted():
     """A per-variant --log-file is a one-time override, never the persisted default."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli

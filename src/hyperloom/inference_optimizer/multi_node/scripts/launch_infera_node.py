@@ -109,6 +109,39 @@ def _denied_extra_args(raw: str) -> list[str]:
     return out
 
 
+def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[str]:
+    """Return ``--`` flags not registered on the installed server build's parser.
+
+    Node-side mirror of ``launch_multinode._unsupported_extra_arg_flags`` so the
+    Infera path also fails fast on an unknown server flag instead of dying in
+    argparse seconds into a full (re)launch and stalling until the health
+    timeout. Best-effort: returns ``[]`` when the parser cannot be introspected
+    (missing/unknown framework, import error) so it never blocks spuriously.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+        extra_args: Tokenized extra server args.
+
+    Returns:
+        list[str]: Flag tokens not registered on the build's parser, or ``[]``.
+    """
+    flags = [t for t in extra_args if t.startswith("--")]
+    if not flags:
+        return []
+    try:
+        if framework == "sglang":
+            from sglang.launch_server import parser as _sgl_parser
+
+            known = set(getattr(_sgl_parser, "_option_string_actions", {}).keys())
+        else:
+            return []
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return []
+    if not known:
+        return []
+    return [f for f in flags if f.split("=", 1)[0] not in known]
+
+
 def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
     """Best-effort default ``--moe-a2a-backend`` for the installed build.
 
@@ -1001,6 +1034,20 @@ def main() -> int:
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return 2
+
+    # Preflight: reject flags this framework build's argparse does not accept,
+    # before the expensive kill + (re)launch (parity with the RayJob path).
+    try:
+        _extra_tokens = shlex.split(args.extra_args or "")
+    except ValueError:
+        _extra_tokens = (args.extra_args or "").split()
+    unsupported = _unsupported_extra_arg_flags(args.framework, _extra_tokens)
+    if unsupported:
+        _log(
+            f"ERROR unsupported server flags for {args.framework} build: "
+            f"{unsupported}; failing fast before (re)launch (flag names vary by version)."
+        )
         return 2
 
     # Capability preflight: a flag may be argparse-valid but need an optional
