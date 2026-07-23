@@ -64,6 +64,27 @@ def _derive_gpu_arch(gpu_type: str) -> str:
     return ""
 
 
+def _repo_matches_targeted_build_component(repo_url: str, component: str) -> bool:
+    """Return whether a repo name is compatible with a targeted-build recipe.
+
+    This deliberately ignores the origin/owner: specialists may discover and
+    request forks on any host.  It only prevents routing an unrelated repository
+    into a component-specific recipe.  An empty URL is valid because each recipe
+    has its own built-in default repository.
+    """
+    repo = (repo_url or "").strip().rstrip("/")
+    if not repo:
+        return True
+    repo_name = repo.rsplit("/", 1)[-1].removesuffix(".git").lower()
+    hints = {
+        "aiter": ("aiter",),
+        "framework_ext": ("aiter",),
+        "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
+        "vllm_source": ("vllm",),
+    }
+    return any(hint in repo_name for hint in hints.get(component, ()))
+
+
 def _maybe_build_runtime_candidate(
     capability_gap: Any,
     *,
@@ -4157,6 +4178,13 @@ class FrameworkPhase(PhaseHandler):
                 if (arch_stall and not is_compiled_gap)
                 else f"Rung-5 auto-escalation from {signature.kind}"
             )
+            if not _repo_matches_targeted_build_component(repo_url, component):
+                log.warning(
+                    "ENABLEMENT: targeted_build repo/component mismatch component=%s repo_url=%s",
+                    component,
+                    repo_url,
+                )
+                return
             action = TargetedBuildAction(
                 gap_id=f"gap.enablement.{signature.kind}",
                 framework=framework or "vllm",
@@ -4247,6 +4275,14 @@ class FrameworkPhase(PhaseHandler):
                 repo_url = _repo or repo_url
                 ref = _ref or ref
                 source_pr_url = _pr
+            if not _repo_matches_targeted_build_component(repo_url, component):
+                log.warning(
+                    "ENABLEMENT: specialist-requested build repo/component mismatch "
+                    "component=%s repo_url=%s",
+                    component,
+                    repo_url,
+                )
+                return
             capability = str(req.get("capability") or "").strip()
             reason = str(req.get("reason") or "").strip() or "specialist-requested targeted build"
             action = TargetedBuildAction(

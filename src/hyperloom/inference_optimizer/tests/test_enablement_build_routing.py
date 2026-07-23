@@ -17,7 +17,10 @@ import pytest
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.framework import _derive_gpu_arch
+from hyperloom.orchestrator.phases.framework import (
+    _derive_gpu_arch,
+    _repo_matches_targeted_build_component,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,18 @@ def test_derive_gpu_arch_empty():
 
 def test_derive_gpu_arch_case_insensitive():
     assert _derive_gpu_arch("MI355X") == "gfx950"
+
+
+def test_targeted_build_repo_match_ignores_origin():
+    assert _repo_matches_targeted_build_component("https://example.test/forks/aiter.git", "aiter")
+    assert _repo_matches_targeted_build_component("git@example.test:team/vllm.git", "vllm_source")
+
+
+def test_targeted_build_repo_match_rejects_wrong_component():
+    assert not _repo_matches_targeted_build_component(
+        "https://example.test/forks/unrelated.git",
+        "aiter",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +241,34 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     assert action.gpu_arch == "gfx950"
     # Consume-once: the marker is cleared so the next tick does not re-enqueue.
     assert coord.shared_state.enablement_last_specialist_task_id == ""
+
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_rejects_repo_component_mismatch(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi355x"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-wrong-repo"
+    wd = coord.session_dir / "runs" / "specialist" / tid
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "needs_targeted_build": {
+                    "component": "aiter",
+                    "repo_url": "https://example.test/forks/unrelated.git",
+                }
+            }
+        )
+    )
+    coord.shared_state.enablement_last_specialist_task_id = tid
+
+    await Coordinator._maybe_enqueue_specialist_requested_build(coord)
+
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
 
 @pytest.mark.asyncio

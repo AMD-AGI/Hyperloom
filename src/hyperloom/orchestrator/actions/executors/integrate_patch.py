@@ -83,6 +83,15 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
 )
 _SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
+_LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
+    "patches",
+    "enablement_base_patches",
+    "localization_candidate",
+    "runtime_candidate",
+    "artifacts",
+    "config_changes",
+    "enablement_setup_commands",
+)
 
 
 def _is_allowlisted_setup_command(cmd: str) -> bool:
@@ -107,13 +116,11 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     # Drop quoted segments (their contents cannot act as shell operators).
     scrubbed = re.sub(r"'[^']*'", " ", scrubbed)
     scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
-    # Drop version-specifier / comparison operators used by pip & friends:
-    #   ``>=`` ``<=`` ``==`` ``!=`` ``~=`` and a bare ``>``/``<`` that is
-    #   immediately followed by a version-like token (digit or letter), which
-    #   is a requirement spec, never a redirection (redirection needs a path
-    #   target, typically separated by whitespace).
-    scrubbed = re.sub(r"(>=|<=|==|!=|~=)", " ", scrubbed)
-    scrubbed = re.sub(r"[<>](?=[0-9A-Za-z])", " ", scrubbed)
+    # Drop an unquoted pip-style version comparison only when it is attached to
+    # the package token and the version starts with a digit (``pkg>=4.58``).
+    # Whitespace-prefixed operators and non-version targets remain visible to
+    # the metacharacter check below (``foo >evil``, ``2>evil``, ``foo <evil``).
+    scrubbed = re.sub(r"(?<=[0-9A-Za-z_.\]])(?:>=|<=|>|<)(?=\d)", " ", scrubbed)
     # Any remaining shell chaining/redirection metacharacter => unsafe.
     if re.search(r"[;&|<>]", scrubbed):
         return False
@@ -1339,6 +1346,19 @@ class IntegratePatchExecutor:
 
         # Launch-only mode: pure bench of a pre-built runtime (no specialist, no Critic).
         if params.get("enablement_launch_only"):
+            mutation_fields = [key for key in _LAUNCH_ONLY_MUTATION_FIELDS if params.get(key)]
+            if mutation_fields:
+                return {
+                    "status": "failed",
+                    "error_class": "launch_only_mutation_forbidden",
+                    "error": (
+                        "enablement_launch_only accepts a pre-built runtime_override "
+                        f"but no mutation fields; received {mutation_fields}"
+                    ),
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "config_changes_applied": {},
+                }
             task_id = str(getattr(ctx.task, "task_id", "") or "build_launch_probe")
             scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
             scratch.mkdir(parents=True, exist_ok=True)

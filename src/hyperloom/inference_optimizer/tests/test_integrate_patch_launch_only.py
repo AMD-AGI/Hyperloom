@@ -96,6 +96,33 @@ async def test_launch_only_skips_critic_gate(tmp_path):
     assert res["status"] == "kept"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("patches", ["candidate.patch"]),
+        ("enablement_base_patches", ["base.patch"]),
+        ("localization_candidate", {"kind": "pr_backport"}),
+        ("runtime_candidate", {"kind": "runtime_candidate"}),
+        ("artifacts", [{"source": "x", "target": "y"}]),
+        ("config_changes", {"EXTRA_VLLM_ARGS": "--unsafe"}),
+        ("enablement_setup_commands", ["pip install package"]),
+    ],
+)
+async def test_launch_only_rejects_mutation_fields(tmp_path, field, value):
+    session = tmp_path / "s"
+    session.mkdir()
+    _write_minimal_config(session / "bench.yaml")
+    ex = IntegratePatchExecutor(session_dir=session)
+    params = {**_params_base(session), field: value}
+
+    res = await ex(_make_ctx("probe-mutation", params))
+
+    assert res["status"] == "failed"
+    assert res["error_class"] == "launch_only_mutation_forbidden"
+    assert field in res["error"]
+
+
 # ---------------------------------------------------------------------------
 # _stage_apply: launch-only falls through to bench when no patches exist
 # ---------------------------------------------------------------------------
