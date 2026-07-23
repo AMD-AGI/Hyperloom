@@ -92,15 +92,6 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
-   TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
-
-   - OS-independent and runs anywhere Python does.
-   - Not limited to MI300X/MI325X/MI355X; it's hardware-agnostic.
-
-   See the `TraceLens documentation <https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html>`_ for more information.
-
-.. note::
-
    MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
    keeps the resolved GPU type distinct (``mi325x``), but Magpie benchmark
    rendering reuses the MI300X runner scripts and image family unless a dedicated
