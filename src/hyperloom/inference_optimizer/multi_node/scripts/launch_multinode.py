@@ -350,14 +350,18 @@ def _probe_mec_firmware_lt_177() -> bool:
     return False
 
 
-def _subprocess_env() -> dict[str, str]:
+def _subprocess_env(unset_env: list[str] | None = None) -> dict[str, str]:
     """Build the framework launcher subprocess env.
 
     Puts ``/opt/venv/bin`` first on PATH (framework venv) and inherits
     ``os.environ`` (keeps injected API keys / SGLANG_* / VLLM_* tunings).
     Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
     and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
-    caller-set values.
+    caller-set values. Finally removes explicitly unset inherited keys so a
+    variant can ablate pod/raylet defaults.
+
+    Args:
+        unset_env: Inherited environment keys to remove before server spawn.
 
     Returns:
         dict[str, str]: The environment mapping for the launcher subprocess.
@@ -379,6 +383,8 @@ def _subprocess_env() -> dict[str, str]:
     parts = cur_path.split(":") if cur_path else []
     if venv_bin not in parts:
         env["PATH"] = f"{venv_bin}:{cur_path}" if cur_path else venv_bin
+    for key in unset_env or []:
+        env.pop(str(key), None)
     return env
 
 
@@ -468,6 +474,7 @@ def _spawn_remote(
     pid_dir: str,
     log_dir: str,
     extra_args: list[str],
+    unset_env: list[str] | None = None,
     torch_profiler_dir: str = "",
     ep: int = 1,
     pd_role: str = "",
@@ -495,6 +502,7 @@ def _spawn_remote(
         pid_dir: Directory the PID file is written to.
         log_dir: Directory the log file is written to.
         extra_args: Extra args appended verbatim to the launcher.
+        unset_env: Inherited pod/raylet env keys removed before server spawn.
         torch_profiler_dir: Optional shared dir exported as
             ``SGLANG_TORCH_PROFILER_DIR``.
         ep: Expert-parallel size.
@@ -523,7 +531,7 @@ def _spawn_remote(
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
-    sub_env = _subprocess_env()
+    sub_env = _subprocess_env(unset_env)
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared
     # dir when a reused server skips this launch.
     tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
@@ -884,6 +892,11 @@ def main() -> int:
     p.add_argument("--pid-dir", required=True)
     p.add_argument("--log-dir", required=True)
     p.add_argument(
+        "--unset-env-json",
+        default="[]",
+        help="JSON list of inherited pod/raylet env keys removed before each rank launches",
+    )
+    p.add_argument(
         "--dist-init-port",
         type=int,
         default=int(os.environ.get("RAYJOB_DIST_INIT_PORT") or _DEFAULT_DIST_INIT_PORT),
@@ -962,6 +975,21 @@ def main() -> int:
             f"Use launch_server.sh for single-pod restarts."
         )
         return 2
+
+    try:
+        parsed_unset = json.loads(args.unset_env_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        _log(f"ERROR --unset-env-json is not valid JSON: {exc}")
+        return 2
+    if not isinstance(parsed_unset, list):
+        _log("ERROR --unset-env-json must decode to a list")
+        return 2
+    unset_env = list(dict.fromkeys(str(key).strip() for key in parsed_unset if str(key).strip()))
+    # Keep driver-side fallbacks (e.g. NCCL_IB_HCA) consistent with the rank
+    # subprocess environment. Explicit overrides were removed from this list by
+    # the controller before submission.
+    for key in unset_env:
+        os.environ.pop(key, None)
 
     # Validate PD args; populate defaults.
     pd_mode = (args.pd_mode or "colocated").lower()
@@ -1058,6 +1086,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
                 pd_role="prefill",
@@ -1091,6 +1120,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
                 pd_role="decode",
@@ -1122,6 +1152,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
             )

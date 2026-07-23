@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -152,3 +154,64 @@ def test_build_sglang_cmd_no_dp_size_without_dp_attention():
     )()
     cmd = mod._build_sglang_cmd(ns, node_rank=0, leader="10.0.0.1", advertise_host="10.0.0.2")
     assert "--dp-size" not in cmd
+
+
+def test_forward_controls_apply_after_recovered_pid1_env(monkeypatch):
+    """Infera must apply unset then explicit overrides after PID1 recovery."""
+    mod = _load_module()
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_UNSET_FWD_ENV",
+        json.dumps(["NCCL_DEBUG", "NCCL_PROTO"]),
+    )
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"NCCL_PROTO": "LL"}),
+    )
+    recovered = {
+        "NCCL_DEBUG": "INFO",
+        "NCCL_PROTO": "Simple",
+        "RCCL_MSCCL_ENABLE": "1",
+    }
+
+    forwarded = infera._collect_forward_env()
+    assert json.loads(forwarded["HYPERLOOM_MN_UNSET_FWD_ENV"]) == ["NCCL_DEBUG"]
+    assert json.loads(forwarded["HYPERLOOM_MN_EXTRA_FWD_ENV"]) == {"NCCL_PROTO": "LL"}
+    recovered["HYPERLOOM_MN_UNSET_FWD_ENV"] = forwarded["HYPERLOOM_MN_UNSET_FWD_ENV"]
+    recovered["HYPERLOOM_MN_EXTRA_FWD_ENV"] = forwarded["HYPERLOOM_MN_EXTRA_FWD_ENV"]
+
+    env = mod._apply_forward_env_controls(recovered)
+
+    assert "NCCL_DEBUG" not in env
+    assert env["NCCL_PROTO"] == "LL"
+    assert env["RCCL_MSCCL_ENABLE"] == "1"
+    assert "HYPERLOOM_MN_UNSET_FWD_ENV" not in env
+    assert "HYPERLOOM_MN_EXTRA_FWD_ENV" not in env
+
+
+def test_infera_resume_identity_includes_variant_env(monkeypatch):
+    """An env-only Infera variant must not resume a server with stale env."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_env_fingerprint": mn_cli._variant_env_fingerprint(),
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is True
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"NCCL_PROTO": "LL"}))
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV")
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO"]))
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False

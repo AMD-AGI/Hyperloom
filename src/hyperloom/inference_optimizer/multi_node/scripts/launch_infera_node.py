@@ -233,6 +233,46 @@ def _recover_container_env() -> dict[str, str]:
     return env
 
 
+def _apply_forward_env_controls(env: dict[str, str]) -> dict[str, str]:
+    """Apply variant unsets then explicit overrides to recovered pod env.
+
+    The SSH launcher must recover PID1 variables first for LWS/Kubernetes
+    discovery. That recovery also restores base NCCL/RCCL/SGLANG values, so
+    variant controls are carried as JSON payloads and applied afterwards.
+
+    Args:
+        env: Environment after :func:`_recover_container_env`.
+
+    Returns:
+        dict[str, str]: Environment with controls consumed and applied.
+    """
+    out = dict(env)
+    raw_unset = out.pop("HYPERLOOM_MN_UNSET_FWD_ENV", "")
+    if raw_unset:
+        try:
+            parsed_unset = json.loads(raw_unset)
+            if isinstance(parsed_unset, list):
+                for raw_key in parsed_unset:
+                    key = str(raw_key).strip()
+                    if key:
+                        out.pop(key, None)
+        except (ValueError, TypeError):
+            _log("WARN invalid HYPERLOOM_MN_UNSET_FWD_ENV JSON; ignoring")
+
+    raw_extra = out.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", "")
+    if raw_extra:
+        try:
+            parsed_extra = json.loads(raw_extra)
+            if isinstance(parsed_extra, dict):
+                for raw_key, raw_value in parsed_extra.items():
+                    key = str(raw_key).strip()
+                    if key:
+                        out[key] = str(raw_value)
+        except (ValueError, TypeError):
+            _log("WARN invalid HYPERLOOM_MN_EXTRA_FWD_ENV JSON; ignoring")
+    return out
+
+
 def _resolve_pod_ip(env: dict[str, str]) -> str:
     """Return this pod's routable IP (never a loopback address).
 
@@ -878,7 +918,7 @@ def main() -> int:
     p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
     args = p.parse_args()
 
-    env = _recover_container_env()
+    env = _apply_forward_env_controls(_recover_container_env())
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:

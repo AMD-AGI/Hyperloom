@@ -468,6 +468,79 @@ def test_subprocess_env_idempotent_if_already_first(monkeypatch):
     assert env["PATH"].count("/opt/venv/bin") == 1
 
 
+def test_rayjob_unset_is_applied_to_rank_subprocess_env(monkeypatch):
+    """A RayJob rank must remove inherited pod env requested by unset_envs."""
+    lm = _load_script_module("lm_test_env_unset", "launch_multinode.py")
+    monkeypatch.setenv("NCCL_PROTO", "Simple")
+    monkeypatch.setenv("RCCL_MSCCL_ENABLE", "1")
+
+    env = lm._subprocess_env(["NCCL_PROTO"])
+
+    assert "NCCL_PROTO" not in env
+    assert env["RCCL_MSCCL_ENABLE"] == "1"
+
+
+def test_rayjob_env_fingerprint_includes_unset_without_leaking_values(monkeypatch):
+    """Unset-only variants must not collide, and fingerprints must hide values."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    baseline = mn_cli._variant_env_fingerprint()
+
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO"]))
+    unset_only = mn_cli._variant_env_fingerprint()
+    assert unset_only != baseline
+
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"NCCL_PROTO": "LL", "CUSTOM_TOKEN": "sensitive-value"}),
+    )
+    with_override = mn_cli._variant_env_fingerprint()
+    assert with_override != unset_only
+    assert "sensitive-value" not in with_override
+    assert len(with_override) == 64
+
+
+def test_rayjob_env_spec_applies_unset_before_explicit_override(monkeypatch):
+    """An explicit variant value wins when the same inherited key is unset."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setenv("NCCL_PROTO", "Simple")
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO", "NCCL_DEBUG"]))
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"NCCL_PROTO": "LL"}))
+
+    forwarded, effective_unsets = mn_cli._rayjob_forward_env_spec()
+
+    assert forwarded["NCCL_PROTO"] == "LL"
+    assert effective_unsets == ["NCCL_DEBUG"]
+
+
+def test_rayjob_launch_entrypoint_forwards_unset_json():
+    """The controller must carry effective unsets into launch_multinode."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=16,
+        no_wait_health=False,
+        extra_args="",
+        ep=1,
+        pd_mode="colocated",
+    )
+    entrypoint = mn_cli._build_multinode_launch_entrypoint(
+        args,
+        nnodes=2,
+        pid_dir="/tmp/pids",
+        log_dir="/tmp/logs",
+        unset_env=["NCCL_PROTO"],
+    )
+
+    assert "--unset-env-json" in entrypoint
+    assert json.dumps(["NCCL_PROTO"]) in entrypoint
+
+
 def test_detach_framework_launch_starts_sleep(tmp_path):
     lm = _load_script_module("lm_test_detach_sleep", "launch_multinode.py")
     log_f = tmp_path / "r0.log"
