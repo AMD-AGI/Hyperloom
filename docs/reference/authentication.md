@@ -15,17 +15,17 @@ page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most two classes of configuration:
 
-- **LLM gateway credentials**: at least one upstream base URL and one API
+- **LLM gateway credentials**: At least one upstream base URL and one API
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- **Path / workspace layout**: run bare-metal setup from the installed
+- **Path / workspace layout**: Run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
    (writable artifact root; default `/workspace/hyperloom`); setup writes the
    runtime env files and updates `.env`.
 
-In the **single-gateway** setup, GEAK keys and Anthropic / OpenAI
-aliases are **derived** from `SAFE_API_KEY` and
+In the single-gateway setup, GEAK keys and Anthropic / OpenAI
+aliases are derived from `SAFE_API_KEY` and
 `OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
 the inference optimizer CLI preflight. You normally do not set those
 aliases by hand. Split-gateway and GEAK gateway endpoint overrides are the

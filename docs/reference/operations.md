@@ -139,12 +139,12 @@ Back up the following artifacts from each session.
 
 | Artifact                                | Source path                                                       | Retention                                                                                                |
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
-| Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
-| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.   |
-| Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                |
-| Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
-| Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |
-| Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/runs/<session_id>/{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                                  |
+| Session manifest + state                | `$SESSION_DIR/manifest.json`,<br>`$SESSION_DIR/state.json`        | Until the session ends; not normally needed afterwards.                                                  |
+| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/`<br>`session_breakdown.json`                | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.                 |
+| Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT`<br>`:-$USER_DATA_PATH/kb}`            | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                    |
+| Robustness findings                     | `$SESSION_DIR/agents/`<br>`robustness/findings/`<br>`<session_id>.jsonl` | 30 days minimum; longer if your incident process needs it.                                        |
+| Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.          |
+| Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                    |
 
 ### Suggested cron
 
@@ -218,17 +218,19 @@ ingest it whole on session end.
 4. Robustness writes a fresh `findings/<session>.jsonl` segment; old
    segments remain.
 
-> To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
-> that exited abnormally — without re-running the optimization loop — use the
-> dedicated subcommand instead of `--resume`:
-> ```bash
-> python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
-> ```
-> `--force` re-runs even when the session already looks complete;
-> `--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
-> generations (use only when the live emitter never ran, or it duplicates
-> generations). `--resume` = keep optimizing; `recover-session` = rebuild the
-> breakdown artifact.
+To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
+that exited abnormally — without re-running the optimization loop — use the
+dedicated subcommand instead of `--resume`:
+
+```bash
+  python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+```
+
+`--force` re-runs even when the session already looks complete;
+`--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
+generations (use only when the live emitter never ran, or it duplicates
+generations). `--resume` = keep optimizing; `recover-session` = rebuild the
+breakdown artifact.
 
 ### Scenario B: PV lost or corrupted
 
