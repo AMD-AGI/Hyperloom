@@ -178,7 +178,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 
 
 @pytest.mark.asyncio
-async def test_geak_handoff_preserves_serving_fidelity_knobs(
+async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,3 +225,4 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs(
     assert handoff["mem_fraction"] == pytest.approx(0.9)
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
     assert handoff["raw_baseline_tput"] == 100.0
+    assert handoff["e2e_metric"] == "output"
