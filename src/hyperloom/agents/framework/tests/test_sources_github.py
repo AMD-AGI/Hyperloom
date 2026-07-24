@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for framework_agent.sources.github. Hermetic - monkeypatches urlopen; verifies best-effort policy (returns [] on failure) and keyword-driven query composition."""

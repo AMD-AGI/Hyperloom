@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for the small helpers inside ``kernel_request_handlers``."""
@@ -22,14 +22,16 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 class TestForgeGemmHelperCoverage:
-    def test_resolve_backend_payload_env_and_default(self, monkeypatch):
+    def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)
-        assert krh._resolve_gemm_tuning_backend({}) == "forge"
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         assert krh._resolve_gemm_tuning_backend({}) == "geak"
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "forge"
-        # Unknown values fall back to the default.
-        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "forge"
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        assert krh._resolve_gemm_tuning_backend({}) == "geak"
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "geak"
+        assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "geak"
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+        assert krh._resolve_gemm_tuning_backend({}) == "forge"
 
     def test_parse_forge_gemm_sentinel(self):
         payload = {"status": "ok", "micro_decision": "candidate"}
@@ -784,19 +786,18 @@ class TestCoerceRuntimeValue:
 
 
 class TestBackendOrder:
-    def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
+    def test_kernel_opt_backends_alias_does_not_enable_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
         monkeypatch.setenv("KERNEL_OPT_BACKENDS", "forge")
 
-        assert krh._backend_order({}) == ["forge"]
+        assert krh._backend_order({}) == []
 
-    def test_documented_kernel_opt_backends_env_is_case_normalized(self, monkeypatch):
+    def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        # tokens are lowercased/trimmed; unknown backends are filtered out
         monkeypatch.setenv("KERNEL_OPT_BACKENDS", " FORGE , Foo ")
 
-        assert krh._backend_order({}) == ["forge"]
+        assert krh._backend_order({}) == []
 
 
 class TestCandidateEnvAllowed:
@@ -1377,7 +1378,7 @@ class TestRunGemmTuningHandler:
         tool.parent.mkdir(parents=True)
         tool.write_text("# placeholder\n")
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
         model.mkdir()
@@ -1431,7 +1432,7 @@ class TestRunGemmTuningHandler:
         tool.parent.mkdir(parents=True)
         tool.write_text("# placeholder\n")
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
         model.mkdir()
@@ -1505,7 +1506,7 @@ class TestRunGemmTuningHandler:
         tool.parent.mkdir(parents=True)
         tool.write_text("# placeholder\n")
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
-        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
         model.mkdir()
@@ -1581,15 +1582,16 @@ class TestRunGemmTuningHandler:
         assert result["shape_capture"]["shape_count"] == 1
         assert result["status"] == "ok"
 
-    def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
+    def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
 
         result = asyncio.run(krh.run_gemm_tuning_handler({}, session_dir=tmp_path))
 
-        assert result["status"] == "skipped"
-        assert result["error_class"] == "fp8_only_action"
+        assert result["status"] == "failed"
+        assert result["error_class"] == "kernel_agent_root_missing"
 
     def test_builds_task_file_input_not_task_argv(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
@@ -1636,7 +1638,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
         result = asyncio.run(
-            krh.run_gemm_tuning_handler(
+            krh._run_geak_gemm_tuning(
                 {
                     "benchmark_script": "/workspace/run_sglang_test.sh",
                     "dry_run": True,
@@ -1698,7 +1700,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
         result = asyncio.run(
-            krh.run_gemm_tuning_handler(
+            krh._run_geak_gemm_tuning(
                 {"dry_run": True, "task_id": "auto"},
                 session_dir=tmp_path,
             )
@@ -1706,7 +1708,7 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
-    def test_geak_without_config_falls_back_to_forge(self, tmp_path, monkeypatch):
+    def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         monkeypatch.delenv("GEAK_CONFIG", raising=False)
         root = tmp_path / "kernel-agent"
@@ -1724,28 +1726,21 @@ class TestRunGemmTuningHandler:
             baseline_tput=4479.0,
         )
         state.save(tmp_path)
-        called: dict[str, object] = {}
-
-        async def fake_forge(payload: dict, *, session_dir: Path):
-            called["payload"] = payload
-            called["session_dir"] = session_dir
-            return {"status": "complete", "backend": "forge", "engine": "forge"}
 
         async def fail_geak_subprocess(cmd, *, timeout_sec):
             raise AssertionError("legacy GEAK subprocess should not run without config")
 
-        monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
         monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
 
-        result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path))
+        result = asyncio.run(krh._run_geak_gemm_tuning({"task_id": "legacy-geak"}, session_dir=tmp_path))
 
-        assert called["session_dir"] == tmp_path
-        assert result["backend"] == "forge"
-        assert result["requested_backend"] == "geak"
-        assert result["fallback_backend"] == "forge"
-        assert result["fallback_reason"] == "legacy_geak_config_missing"
+        assert result["status"] == "skipped"
+        assert result["backend"] == "geak"
+        assert result["decision"] == "REVERT"
+        assert result["error_class"] == "legacy_geak_config_missing"
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
             precision="bf16",
@@ -1797,6 +1792,7 @@ class TestRunGemmTuningHandler:
         """run_gemm_tuning_handler appends a source-attribution audit row backfilled as a ``gemm_tuning:<engine>`` span."""
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
             precision="bf16",
@@ -1842,6 +1838,7 @@ class TestRunGemmTuningHandler:
         assert row["tuners_run"][0]["tuner"] == "fmoe_ck"
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
             precision="bf16",
@@ -1887,6 +1884,7 @@ class TestRunGemmTuningHandler:
 
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
             precision="bf16",

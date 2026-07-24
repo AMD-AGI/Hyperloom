@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
@@ -663,6 +663,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
         self._resumed_from = self._detect_resume_state()
+        # Reap serving processes orphaned by a prior monitor-process crash
+        # (e.g. a raylet death that took the optimizer down mid-benchmark),
+        # scoped strictly to this session's own pidfiles. No-op on a fresh
+        # session; on resume it clears a leftover SGLang/vLLM server so it
+        # cannot pollute the shared benchmark port. Best-effort; never fatal.
+        self._reap_orphaned_servers_best_effort()
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
             self.shared_state.model_class = self._model_class_override or _infer_model_class_from_config(
@@ -1298,6 +1304,31 @@ class Coordinator(metaclass=_CoordinatorMeta):
         ss = self.shared_state
         return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
+    def _reap_orphaned_servers_best_effort(self) -> None:
+        """Reap leftover single-node serving processes from a prior crash.
+
+        Scoped to this session's own pidfiles and gated on a cmdline match, so a
+        co-located session's server and a recycled pid are never touched. A
+        no-op on multi-node (servers live on pods) and on a fresh session.
+        Best-effort: any failure is logged and swallowed so boot never fails.
+        """
+        try:
+            from ..actions.executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return
+            from ..actions.executors._server_lifecycle import reap_orphaned_servers
+
+            reaped = reap_orphaned_servers(self.session_dir)
+            if reaped:
+                log.warning(
+                    "coordinator: reaped %d orphaned serving process(es) at boot: %s",
+                    len(reaped),
+                    reaped,
+                )
+        except Exception:  # noqa: BLE001 - boot-time cleanup must never be fatal
+            log.exception("coordinator: orphan server reaper failed (ignored)")
+
     # Advisory disk guard: when the session partition runs low, LRU-trim the
     # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
     _DISK_FREE_MIN_GB: float = 20.0
@@ -1400,6 +1431,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
+            # A phase-entry hook may have finished by setting a pending phase
+            # hint (for example current GEAK returning no_gain -> skip_to_sweep).
+            # Consume that before prompting agents again so stale phase prompts
+            # cannot enqueue legacy work.
+            await self._advance_phase_if_needed()
+            if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
+                await self._advance_phase_if_needed()
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
@@ -1522,6 +1560,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 try:
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
+                    try:
+                        await self._advance_phase_if_needed()
+                        if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
+                            await self._advance_phase_if_needed()
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("phase advance before reactors (run) failed")
+                        self._record_coordinator_exception(
+                            stage="advance_phase_pre_reactor",
+                            exc=exc,
+                            tick=tick_n,
+                        )
                     in_closing = self.shared_state.closing_phase
                     # One reactor + dispatcher pass; during closing skip LLM passes.
                     if not in_closing:

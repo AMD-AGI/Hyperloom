@@ -30,6 +30,12 @@ curl -sS -o /dev/null -w "[hl] gateway /models HTTP=%{http_code}\n" \
 #      use it as-is (e.g. a bind-mounted /mnt/vast/hyperloom) -> no network clone;
 #    - otherwise clone from GitHub into the default temp dir.
 export HYPERLOOM_SOURCE_DIR="${HYPERLOOM_SOURCE_DIR:-/tmp/Hyperloom-main}"
+# CI e2e uses a stable per-PR path (…/pr_<N>/hyperloom); wipe any prior checkout so a
+# re-triggered run always clones the branch's latest commit instead of reusing stale code.
+if [ "${HL_CI_E2E:-0}" = "1" ] && [ -e "$HYPERLOOM_SOURCE_DIR" ]; then
+  echo "[hl] CI e2e: removing stale checkout at $HYPERLOOM_SOURCE_DIR before fresh clone"
+  rm -rf "$HYPERLOOM_SOURCE_DIR"
+fi
 if [ -f "$HYPERLOOM_SOURCE_DIR/pyproject.toml" ] || [ -d "$HYPERLOOM_SOURCE_DIR/.git" ]; then
   echo "[hl] using existing Hyperloom source at $HYPERLOOM_SOURCE_DIR (no clone)"
 else

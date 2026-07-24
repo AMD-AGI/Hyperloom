@@ -15,17 +15,17 @@ page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most two classes of configuration:
 
-- **LLM gateway credentials**: at least one upstream base URL and one API
+- **LLM gateway credentials**: At least one upstream base URL and one API
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- **Path / workspace layout**: run bare-metal setup from the installed
+- **Path / workspace layout**: Run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
    (writable artifact root; default `/workspace/hyperloom`); setup writes the
    runtime env files and updates `.env`.
 
-In the **single-gateway** setup, GEAK keys and Anthropic / OpenAI
-aliases are **derived** from `SAFE_API_KEY` and
+In the single-gateway setup, GEAK keys and Anthropic / OpenAI
+aliases are derived from `SAFE_API_KEY` and
 `OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
 the inference optimizer CLI preflight. You normally do not set those
 aliases by hand. Split-gateway and GEAK gateway endpoint overrides are the
@@ -124,7 +124,6 @@ shared key. GEAK inherits the OpenAI-side URL and key.
 To pin models in split mode:
 
 ```bash
-export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
 export CLAUDE_MODEL=orchestration-model-id-on-the-anthropic-side
 export CODEX_MODEL=model-id-on-the-openai-side
 ```
@@ -132,18 +131,19 @@ export CODEX_MODEL=model-id-on-the-openai-side
 ### Non-AMD / self-hosted gateway
 
 Point `OPENAI_BASE_URL` and `SAFE_API_KEY` (or the split keys above) at
-your own LiteLLM-compatible gateway (Vultr, TensorWave, on-prem, etc.).
-Then opt out of the AMD-only orchestration model gate and pin models your
-gateway actually serves:
+your own LiteLLM-compatible gateway (Vultr, TensorWave, on-prem, etc.) and
+pin models your gateway actually serves:
 
 ```bash
-export INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1
 export CLAUDE_MODEL=your-gateway-orchestration-model
 export CODEX_MODEL=your-gateway-kernel-model
 ```
 
-With the opt-out set, preflight validates model IDs against your
-gateway's `/models` catalog instead of hard-gating to AMD opus-4-7/4-6.
+Custom orchestration models are allowed by default: preflight validates the
+chosen `CLAUDE_MODEL` against your gateway's `/models` catalog. To restore the
+stricter AMD Claude allowlist (`claude-opus-4-8` preferred, `claude-opus-4-7` /
+`claude-opus-4-6` fallback), set
+`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 
 ---
 
@@ -209,7 +209,10 @@ The AMD primus-safe gateway accepts both header styles natively.
 At preflight, the inference optimizer CLI:
 
 - Resolves Anthropic and OpenAI base URLs.
-- Writes `~/.claude/config.json` `customApiUrl` and `primaryApiKey`.
+- Writes `~/.claude/config.json`: `customApiUrl` is set to the resolved
+  Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
+  (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
+  `SAFE_API_KEY`).
 - Fills the provider credentials needed by child processes.
 
 **401 recovery:**
@@ -219,7 +222,7 @@ At preflight, the inference optimizer CLI:
 2. Re-run preflight (any `python -m hyperloom.inference_optimizer.cli ...` command) or
    `bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only`.
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   configured upstream gateway.
+   resolved Anthropic-side upstream gateway.
 
 GEAK uses the generated runtime configuration directly.
 

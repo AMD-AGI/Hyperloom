@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Decision-framework regression tests.
@@ -444,6 +444,7 @@ async def test_run_optimization_handler_batches_reusable_kernels_and_selects_bes
     tmp_path,
     monkeypatch,
 ):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
     # Disable the default min_gpu_pct gate so the test focuses on the batch best-selection.

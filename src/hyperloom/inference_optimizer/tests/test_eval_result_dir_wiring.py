@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Regression tests for the ``$EVAL_RESULT_DIR`` wiring (P0 accuracy-gate fix).
@@ -205,6 +205,17 @@ def _make_ctx(params: dict) -> SimpleNamespace:
     return SimpleNamespace(task=task, extra={})
 
 
+class _StopRecorder:
+    """Minimal SharedState stub capturing baseline stop requests."""
+
+    def __init__(self) -> None:
+        self.stop_reason = ""
+
+    def set_stop_reason(self, value, **_kwargs):
+        self.stop_reason = value
+        return value
+
+
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
@@ -280,6 +291,66 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     assert result["status"] == "succeeded"
     assert result.get("accuracy") == pytest.approx(0.83)
     assert result.get("accuracy_task") == "gsm8k"
+
+
+def test_baseline_anchors_relative_result_dir_before_accuracy_parse(tmp_path):
+    """A relative result_dir must mean the same directory to Magpie and Hyperloom."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        cwd = Path(kwargs["cwd"])
+        captured["env"] = env
+        _fake_workspace(slot)
+
+        # The subprocess interprets relative RESULT_DIR from its cwd
+        # (the per-task output_dir). Hyperloom must parse from the same absolute
+        # location, not from the coordinator/repo cwd.
+        result_root = Path(env["RESULT_DIR"])
+        if not result_root.is_absolute():
+            result_root = cwd / result_root
+        _write_lm_eval_output(result_root / "eval_processed")
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    shared_state = _StopRecorder()
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "baseline_double_run": False,
+            "framework": "vllm",
+            "result_dir": "runs/baseline/mp-backend",
+        }
+    )
+    ctx.task.kind = "baseline"
+    ctx.extra["shared_state"] = shared_state
+
+    with (
+        patch("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", return_value=None),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert Path(captured["env"]["RESULT_DIR"]).is_absolute()
+    assert result.get("output_dir") == str(output_dir)
+    assert result.get("accuracy") == pytest.approx(0.83)
+    assert result.get("accuracy_task") == "gsm8k"
+    assert shared_state.stop_reason == ""
 
 
 def test_baseline_parses_accuracy_after_eval_result_dir_cleanup(tmp_path):

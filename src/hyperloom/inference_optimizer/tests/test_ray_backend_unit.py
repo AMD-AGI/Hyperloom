@@ -312,6 +312,7 @@ class _LeaseFakeRay:
 
     def __init__(self):
         self.killed: list = []
+        self.shutdown_called = 0
 
     def cluster_resources(self) -> dict:
         return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
@@ -326,6 +327,9 @@ class _LeaseFakeRay:
 
     def kill(self, actor):
         self.killed.append(actor)
+
+    def shutdown(self):
+        self.shutdown_called += 1
 
 
 def test_serving_lease_run_session_kill_success(monkeypatch: pytest.MonkeyPatch):
@@ -375,6 +379,26 @@ def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pyte
     assert "ray_actor_error" in err
     # Handle dropped so the next run re-creates the actor.
     assert lease._actor is None
+
+
+def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pytest.MonkeyPatch):
+    """Actor death should disconnect the stale driver before Ray's GCS fatal path."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    backend = rb.RayExecutionBackend()
+    backend._ensured = True
+    backend._started = True
+    monkeypatch.setattr(rb, "_BACKEND", backend)
+
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(fake.exceptions.RayActorError("socket closed"))
+    rc, _out, err = lease.run_session_kill(["x"], timeout=5)
+
+    assert rc == 1
+    assert "ray_actor_error" in err
+    assert fake.shutdown_called == 1
+    assert backend._ensured is False
+    assert backend._started is False
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
