@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import re
 from collections import Counter, defaultdict
 from typing import Any
@@ -34,9 +33,10 @@ from _bypass_source_resolver import editable_trace_source, resolve_source
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
+    build_operator_identity,
     build_task_group_shape_cases,
-    native_operation_key,
-    normalize_operation_key,
+    legacy_operator_identity_keys,
+    operator_identity_key,
 )
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
@@ -203,21 +203,40 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
         Ordered task-group dicts (``tg001`` first = heaviest), or ``[]`` when no
         candidate is routable-with-source.
     """
-    buckets: dict[tuple, dict[str, Any]] = {}
+    buckets: dict[str, dict[str, Any]] = {}
     for c in hot_kernels:
         if not c.get("reusable_native_kernel"):
             continue
         src = str(c.get("source_file") or "").strip()
         if not src:
             continue
+        reported_source = src
         operation = str(c.get("name") or "")
-        source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
-        operation_key = (
-            native_operation_key(operation)
-            if source_kind == "native"
-            else normalize_operation_key(operation)
+        function_name = operation
+        legacy_function_name = str(
+            c.get("device_kernel_name") or operation
         )
-        key: tuple = (source_kind, src, operation_key)
+        source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
+        identity = build_operator_identity(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=function_name,
+        )
+        src = str(identity["source_path"])
+        operation_key = str(identity["operation"])
+        key = operator_identity_key(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=function_name,
+        )
+        legacy_keys = legacy_operator_identity_keys(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=legacy_function_name,
+        )
         shapes = c.get("input_shapes") or []
         row = {
             "kernel_id": c.get("kernel_id", ""),
@@ -239,11 +258,10 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
         if bucket is None:
             bucket = buckets[key] = {
                 "task_group_id": "",
-                "task_group_key": json.dumps(
-                    key,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+                "task_group_key": key,
+                "operator_identity": identity,
+                "identity_route": "bypass",
+                "legacy_task_group_keys": legacy_keys,
                 "operation": operation,
                 "operation_key": operation_key,
                 "source_path": src,
@@ -255,6 +273,15 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
                 "aggregate_gpu_pct": 0.0,
                 "source": "bypass",
             }
+        else:
+            bucket["legacy_task_group_keys"] = list(
+                dict.fromkeys(
+                    [
+                        *(bucket.get("legacy_task_group_keys") or []),
+                        *legacy_keys,
+                    ]
+                )
+            )
         if row["kernel_id"] and row["kernel_id"] not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(row["kernel_id"])
         bucket["rows"].append(row)

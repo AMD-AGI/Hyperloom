@@ -19,6 +19,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _bypass_report as bypass_report  # noqa: E402
 import _idle_gate as idle_gate  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
@@ -3198,6 +3199,94 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
     assert first_key == second_key
 
 
+def test_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    operation = "fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "fused_operator_kernel",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): forward",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert (
+        set(bypass_group["legacy_task_group_keys"])
+        & set(skill_group["legacy_task_group_keys"])
+    )
+    assert bypass_group["task_group_key"].startswith('{"function":')
+
+
+def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.cu"
+    src.write_text("// native kernel\n", encoding="utf-8")
+    operation = "aiter::fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "_ZN5aiter14fused_operatorIfEEv",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): fused_operator",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert (
+        set(bypass_group["legacy_task_group_keys"])
+        & set(skill_group["legacy_task_group_keys"])
+    )
+    legacy_skill_key = json.dumps(
+        (
+            "native",
+            "aiter::fused_operator",
+            str(src.resolve()),
+            "fused_operator",
+        ),
+        separators=(",", ":"),
+    )
+    assert legacy_skill_key in bypass_group["legacy_task_group_keys"]
+    assert legacy_skill_key in skill_group["legacy_task_group_keys"]
+
+
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
     src = tmp_path / "gpt_oss.py"
@@ -3244,6 +3333,39 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
     )
     rms_group = by_op["vllm::rocm_aiter_triton_add_rmsnorm_pad"]
     assert rms_group["kernel_ids"] == ["k002"]
+
+
+def test_aggregate_keeps_same_operation_in_different_functions_separate(
+    tmp_path,
+):
+    src = tmp_path / "operator.py"
+    src.write_text(
+        "def first(x):\n    return x\n\n"
+        "def second(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    candidates = [
+        {
+            "kernel_id": "k001",
+            "name": "shared_operation",
+            "duration_us": 100.0,
+            "tracelens_launcher_path": f"{src}(1): first",
+        },
+        {
+            "kernel_id": "k002",
+            "name": "shared_operation",
+            "duration_us": 90.0,
+            "tracelens_launcher_path": f"{src}(4): second",
+        },
+    ]
+
+    groups = tlr.aggregate_by_source_function(candidates)
+
+    assert len(groups) == 2
+    assert {group["function_name"] for group in groups} == {
+        "first",
+        "second",
+    }
 
 
 def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_path):
