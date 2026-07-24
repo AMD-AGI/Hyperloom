@@ -1606,7 +1606,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
             quant_type = "per_token"
         else:
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1625,35 +1626,59 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
 
     Priority: current_best workspace (matches the resolved server args)
     → baseline workspace → most recent server.log under runs/.
+
+    The server log is written by the benchmark server at startup and lives in
+    the warmup_round benchmark directory (where the server process was first
+    launched). When ``current_best.workspace`` points to the measure_round
+    benchmark directory (one level sibling), the log is not there — so we also
+    check sibling ``warmup_round/`` dirs and walk up to the parent run
+    directory.
     """
-    # current_best workspace — matches the resolved runtime args.
+    def _find_server_log_near(workspace_str: str) -> str | None:
+        if not workspace_str:
+            return None
+        ws = Path(workspace_str)
+        # Direct hit (server started in this exact dir).
+        if (ws / "server.log").is_file():
+            return str(ws / "server.log")
+        # Sibling warmup_round — benchmark dirs sit under
+        # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
+        parent = ws.parent  # e.g. measure_round/
+        if parent.name in ("warmup_round", "measure_round"):
+            run_hash_dir = parent.parent
+        else:
+            run_hash_dir = parent
+        warmup = run_hash_dir / "warmup_round"
+        if warmup.is_dir():
+            for child in warmup.iterdir():
+                sl = child / "server.log"
+                if sl.is_file():
+                    return str(sl)
+        return None
+
     current_best = getattr(state, "current_best", None) or {}
     if isinstance(current_best, dict):
-        cb_workspace = str(current_best.get("workspace") or "").strip()
-        if cb_workspace:
-            log_path = Path(cb_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Baseline workspace — the initial server run.
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
-        bl_workspace = last_baseline.get("workspace") or ""
-        if bl_workspace:
-            log_path = Path(bl_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(last_baseline.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Fallback: check known run subdirs (bounded, not recursive glob).
+    # Fallback: check known run subdirs with sufficient depth for the nested
+    # layout ({phase}/{hash}/{warmup_round|measure_round}/{bench_dir}/server.log).
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
         best: Path | None = None
         best_mtime: float = 0.0
-        for sub in ("baseline", "explore", "gemm_tuning"):
+        for sub in ("baseline", "explore", "gemm_tuning", "roofline"):
             sub_dir = runs_dir / sub
             if not sub_dir.is_dir():
                 continue
-            for log in sub_dir.glob("*/server.log"):
+            for log in sub_dir.glob("**/server.log"):
                 try:
                     mt = log.stat().st_mtime
                 except OSError:
@@ -1826,15 +1851,17 @@ def _model_hidden_size(model_path: str) -> int | None:
     return None
 
 
-def _resolve_fp8_quant_type(model_path: str) -> str:
+def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "") -> str:
     """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
-    - ``blockscale`` only when the checkpoint ships block-quantized weights
-      (``config.json`` ``quantization_config.weight_block_size`` or a block-style
-      ``quant_method``) -- the a8w8 blockscale GEMM path.
+    - ``bpreshuffle`` when the checkpoint uses block-quantized weights AND the
+      target GPU is gfx950 (MI355X) -- aiter automatically upgrades blockscale
+      to the bpreshuffle kernel on CDNA4 for better memory access patterns.
+    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942
+      (MI300X/MI325X) or when GPU type is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
       ``--quantization fp8`` (the a8w8 per-token path).
     - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
@@ -1844,22 +1871,46 @@ def _resolve_fp8_quant_type(model_path: str) -> str:
     data = _read_model_config(model_path)
     if data is None:
         return "auto"
-    # Check both the top-level config and a nested ``text_config`` (multimodal
-    # checkpoints sometimes carry the quantization_config there), mirroring
-    # ``_model_hidden_size``.
     candidates: list[dict] = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
+    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                return "blockscale"
+                is_blockscale = True
+                break
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                return "blockscale"
+                is_blockscale = True
+                break
+    if is_blockscale:
+        if _is_gfx950(gpu_type):
+            return "bpreshuffle"
+        return "blockscale"
     return "per_token"
+
+
+_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
+
+
+def _is_gfx950(gpu_type: str) -> bool:
+    """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
+    key = (gpu_type or "").strip().lower()
+    if key in _GFX950_GPU_TYPES:
+        return True
+    if not key or key == "auto":
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
+            ).stdout
+            return "gfx950" in out.lower()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
