@@ -67,10 +67,13 @@ The reactor pipeline (M1) on each tick:
    — pairs the alert with `kill_task` (stale lease),
    `delegate(recover, force_gpu_cleanup=True)` (gpu_memory_leaked), or
    `delegate(report)` (deadline_warning / deadline_imminent /
-   deadline_hard_cutoff / recover_unsuccessful). Strategic
-   `escalate_strategy_change` and `prune_branch` are NOT emitted from
-   the ladder anymore — the alert detail carries the suggested hint
-   so Orchestration can act on it.
+   deadline_hard_cutoff / recover_unsuccessful). It also emits
+   `prune_branch` for the no-lever / repeated-failure HIGH symptoms
+   (`repeated_failure` once sustained, `same_payload_loop`,
+   `kernel_opt_no_progress`, `geak_budget_starvation`,
+   `amdahl_kernel_ceiling_low`). Strategic `escalate_strategy_change` is
+   NOT emitted from the ladder — the alert detail carries the suggested
+   hint so Orchestration can act on it.
 4. **Filter** — `PolicyAware` validates every intent against the
    Robustness allowlist before emit.
 5. **Persist** — `FindingSink` appends one JSONL row per intent batch.
@@ -100,7 +103,7 @@ The reactor pipeline (M1) on each tick:
 | `send_message{topic, body_md}` | string body | LOW severity observations + tick heartbeats (`topic="heartbeat"`). |
 | `alert{severity, summary, detail}` | medium/high | MEDIUM diagnosis + HIGH alarm. The suggestion field on the symptom is mirrored into `detail` so Orchestration can act on it. |
 | `kill_task{task_id, reason, scope:"task"}` | scope MUST be `"task"` | Cancel queued/running task. Used by I3 `stale_lease` (resource-safety only). Server kills go through `delegate(recover)` (IR-5). |
-| `prune_branch{family, reason}` | family ∈ {baseline, profile, explore, sweep, kernel_opt, integrate, ...} | Allowed by PolicyGate but not auto-emitted by the ladder. Reserved for explicit operator / Orchestration drives. |
+| `prune_branch{family, reason}` | family ∈ {baseline, profile, explore, sweep, kernel_opt, integrate, ...} | Auto-emitted by the ladder for no-lever / repeated-failure HIGH symptoms (`repeated_failure` once sustained, `same_payload_loop`, `kernel_opt_no_progress`, `geak_budget_starvation`, `amdahl_kernel_ceiling_low`); also available to explicit operator / Orchestration drives. |
 | `escalate_strategy_change{reason, next_action_hint, severity}` | — | Priority-0 broadcast hint. Allowed by PolicyGate but not auto-emitted by the ladder. Orchestration owns the phase-advance decision. |
 | `delegate(recover, params={force_gpu_cleanup:bool})` | — | Self-healing GPU/server cleanup. Owner = `recover_executor.py`. Auto-emitted on `gpu_memory_leaked`. |
 | `delegate(server_lifecycle, params={...})` | — | Spawn `patch_applier` for managed server restart. |

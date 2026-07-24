@@ -1090,3 +1090,79 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
         "BASE_ENV": "1",
         "VLLM_ROCM_USE_AITER": "1",
     }
+
+
+@pytest.mark.asyncio
+async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monkeypatch):
+    """TOCTOU regression: when a task was queued at baseline tput/args, but an
+    Explore KEEP advanced current_best before execution, bench must use the live
+    stack top and REVERT if the measured tput sits below it."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-toctou", patch_contents=[_VALID_PATCH])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    captured_bench: dict[str, Any] = {}
+
+    async def _fake_bench(**kwargs):
+        captured_bench["base_tput"] = kwargs.get("params", {}).get("base_tput")
+        captured_bench["base_extra_args"] = kwargs.get("params", {}).get("base_extra_args")
+        captured_bench["base_extra_envs"] = kwargs.get("params", {}).get("base_extra_envs")
+        # Simulate 3801 — below the explore winner 4616.
+        return {"output_throughput": 3801.0, "error": ""}, {"accuracy_pass": None}
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    live_state = SimpleNamespace(
+        current_best={
+            "tput": 4616.0,
+            "extra_server_args": "--no-scheduler-reserve-full-isl",
+            "extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"},
+        },
+        baseline_tput=1083.0,
+        baseline_accuracy=0.95,
+        specialist_patch_verdicts={"t-spec-toctou": "approve"},
+        get_specialist_patch_verdict=lambda sid: "approve",
+    )
+
+    # Task params frozen at baseline time (stale).
+    params = {
+        "specialist_task_id": "t-spec-toctou",
+        "framework_source_root": str(repo),
+        "base_tput": 1083.0,
+        "base_extra_args": "",
+        "enable_stack_rebench": False,
+    }
+    task = Task(
+        task_id="t-int-toctou",
+        kind="integrate_patch",
+        state="queued",
+        params=params,
+        idempotency_key="t-int-toctou",
+        requires_lanes=tuple(),
+    )
+    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": live_state})
+
+    with patch.object(ip_mod, "materialize_config_with_envs", return_value=tmp_path / "cfg.yaml"):
+        (tmp_path / "cfg.yaml").write_text("benchmark: {}\n", encoding="utf-8")
+        result = await executor(ctx)
+
+    # Params must have been rebound to the live stack top.
+    assert captured_bench["base_tput"] == pytest.approx(4616.0), "stale base_tput not replaced"
+    assert captured_bench["base_extra_args"] == "--no-scheduler-reserve-full-isl", "stale base_extra_args not replaced"
+    assert captured_bench["base_extra_envs"] == {"VLLM_ROCM_USE_AITER_MOE": "0"}, "live envs not propagated"
+
+    # 3801 < 4616 → REVERT, not KEEP.
+    assert result["status"] == "reverted", f"expected revert, got {result['status']}"

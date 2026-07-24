@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_str_list
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -1544,17 +1544,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
@@ -1651,7 +1640,7 @@ class WritebackCollaborator:
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
             try:
-                self._coord._harvest_research_scout(done_payload)
+                await self._coord._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "research-scout harvest failed for task=%s",
@@ -1764,8 +1753,8 @@ class WritebackCollaborator:
                 added,
             )
 
-    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+    async def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+        """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
         numbers it emits are intentionally ignored here: measured competitor
@@ -1773,15 +1762,13 @@ class WritebackCollaborator:
         LLM-written numbers must never be persisted as a consumable target.
 
         Args:
-            done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints and PR ids.
+            done_payload: The completed research-scout task payload.
         """
         from ..knowledge import research_hints as _research_hints
 
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            block = {}
-        hints = block.get("hints") or []
+        hints = done_payload.get("new_findings") or []
+        if not isinstance(hints, list):
+            hints = []
         try:
             added, dropped = _research_hints.append_hints(
                 self.session_dir,
@@ -1797,10 +1784,18 @@ class WritebackCollaborator:
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
+        for hint in hints:
+            if isinstance(hint, dict) and hint.get("source"):
+                pr_ids.append(hint["source"])
+        proposals = done_payload.get("proposal_set") or []
+        if isinstance(proposals, list):
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                for key in ("pr_evidence", "source_evidence"):
+                    refs = proposal.get(key)
+                    if isinstance(refs, list):
+                        pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
@@ -1810,6 +1805,12 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
+        compacted = await self._coord._maybe_checkpoint_orchestration(
+            tick=int(getattr(self.shared_state, "tick", 0) or 0),
+            force=True,
+        )
+        if not compacted:
+            self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -1917,7 +1918,9 @@ class WritebackCollaborator:
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                            str(bv.get("effective_extra_server_args") or "")
+                        )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -1931,6 +1934,11 @@ class WritebackCollaborator:
                 _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
+                if isinstance(bv, dict):
+                    for _src_key in ("source_snapshot", "framework_root", "base_sha"):
+                        val = bv.get(_src_key)
+                        if val:
+                            stack_entry[_src_key] = str(val)
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -1940,12 +1948,20 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
+        # Merge envs: start from previous stack top envs so source-layer KEEPs
+        # (config_changes_applied={}) do not clear prior explore/env layers.
+        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
+        _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+        _merged_envs = dict(_prev_envs)
+        for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
+            _merged_envs.pop(_key, None)
+        _merged_envs.update(_new_envs)
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
             "extra_server_args": full_args,
-            "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+            "extra_envs": _merged_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
@@ -1957,7 +1973,9 @@ class WritebackCollaborator:
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
+                    str(bv.get("effective_extra_server_args") or "")
+                )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
@@ -2710,6 +2728,7 @@ class WritebackCollaborator:
             "kept": kept_flag,
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []

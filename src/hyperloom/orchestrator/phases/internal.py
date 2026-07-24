@@ -38,10 +38,13 @@ class InternalTasksPhase(PhaseHandler):
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return None
         idempotency_key = f"internal-research-scout-round{int(round_id)}"
-        try:
-            seen = sorted(self._framework_known_candidate_ids())
-        except Exception:  # noqa: BLE001 — defensive
-            seen = list(getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
+        seen = sorted(
+            {
+                str(item).strip()
+                for item in (getattr(self.shared_state, "research_scout_seen_pr_ids", []) or [])
+                if str(item).strip()
+            }
+        )
         params: dict[str, Any] = {
             "domain": "research_scout_specialist",
             "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
@@ -58,12 +61,32 @@ class InternalTasksPhase(PhaseHandler):
             "seen_pr_ids": seen,
             "readonly": True,
         }
-        proven = self._warm_recipe_proven_items()
+        proven = list(self._warm_recipe_proven_items())
+        search = getattr(self.shared_state, "explore_search", None) or {}
+        accepted = search.get("accepted") if isinstance(search, dict) else []
+        if isinstance(accepted, list):
+            for variant in accepted:
+                if not isinstance(variant, dict):
+                    continue
+                name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
+                if name:
+                    sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
+                    source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
+                    proven.append({"name": name, "source": source})
         if proven:
             params["already_proven"] = proven
         recipe_sites = [s.strip() for s in re.split(r"[,\s]+", os.environ.get("HYPERLOOM_RECIPE_SITES", "")) if s.strip()]
         if recipe_sites:
             params["recipe_sites"] = recipe_sites
+        rounds = getattr(self.shared_state, "specialist_rounds", None) or []
+        if isinstance(rounds, list):
+            for row in reversed(rounds):
+                if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
+                    continue
+                questions = [str(item).strip() for item in (row.get("residual_questions") or []) if str(item).strip()]
+                if questions:
+                    params["notes"] = "\n".join(f"- {question}" for question in questions)
+                break
         await self._warm_specialist_params(params)
         try:
             task, was_existing = await self.tasks.create_or_return_existing(

@@ -232,9 +232,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    # Force the single-server-per-arm path (the behaviour under test).
-    os.environ["INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER"] = "1"
-
     source = args.session_dir.expanduser().resolve()
     out_dir = args.out_dir or source.parent / f"{source.name}_conc_flowtest_{int(time.time())}"
     out_dir = Path(out_dir).expanduser().resolve()
