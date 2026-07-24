@@ -6,10 +6,7 @@ myst:
 ---
 # Run a Hyperloom optimization
 
-This topic assumes you have already completed installation. If you haven't:
-
-- **Quickstart**: see [Quickstart](../../examples/README.md),
-  then return here to launch your first run.
+This topic assumes you have already completed installation. If you haven't, go through [Hyperloom Quickstart](../install/install.md) then return here to launch your first run.
 
 ## Launch from Cursor
 
@@ -51,7 +48,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `1,2,4,8,16,32,64,128`) |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `256,128,64,32,16,8,4,2`) |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 

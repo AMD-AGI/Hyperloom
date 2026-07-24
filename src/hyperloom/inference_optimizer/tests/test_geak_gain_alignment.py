@@ -365,6 +365,10 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {
+        "status": "awaiting_rebench",
+        "revalidation_task_id": "reval-1",
+    }
 
     called = {"n": 0}
 
@@ -386,6 +390,9 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
+    assert not ss.geak_pending
+    assert ss.resume_pending_revalidation is False
+    assert ss.geak_result["revalidation_status"] == "fallback_failed"
 
 
 @pytest.mark.asyncio

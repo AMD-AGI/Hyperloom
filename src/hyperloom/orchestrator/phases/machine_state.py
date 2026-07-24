@@ -1427,6 +1427,16 @@ def kernel_work_pending(state: Any) -> bool:
     time/budget exits are still handled by :func:`exit_normal_kernel`.
     """
     if _geak_phase_terminal(state):
+        result = getattr(state, "geak_result", None) or {}
+        pending = getattr(state, "geak_pending", None) or {}
+        if (
+            isinstance(result, dict)
+            and str(result.get("status") or "").strip().lower() == "ok"
+            and isinstance(pending, dict)
+            and str(pending.get("status") or "").strip().lower() == "awaiting_rebench"
+            and bool(str(pending.get("revalidation_task_id") or "").strip())
+        ):
+            return True
         return False
 
     try:

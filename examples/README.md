@@ -13,26 +13,27 @@ both the install target and the agent workspace. Prepare a dedicated clean
 directory first, then open that directory in Cursor, Claude Code, or Codex before
 running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker for a validated, reproducible stack.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
 - Access to the Anthropic LLM provider.
-- `gh` (GitHub CLI), authenticated, to download the published GitHub release
-  asset (the wheel is distributed as a Release asset, not via PyPI), or a
-  locally downloaded Hyperloom wheel.
+- Access to the published GitHub release wheel, or a locally downloaded
+  Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
-From the agent terminal in that workspace, download the latest release wheel and
-install it into the current directory:
+From the agent terminal in that workspace, install the published release wheel
+into the current directory:
 
 ```bash
-gh auth login
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
@@ -79,9 +80,6 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
-
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-because setup should run directly in the current container environment.
 
 ## Setup Scenarios
 

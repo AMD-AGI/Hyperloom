@@ -20,7 +20,6 @@ upstream SKILL file for the component you're touching:
 **Symptom**: A tool exits with one of:
 
 * `HTTP 401 Unauthorized`
-* `Primus.00009 token not present`
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 
@@ -198,11 +197,9 @@ context.
 baseline files; logs mention a missing `profiler_mcp` or one of the
 other GEAK MCP packages.
 
-**Cause.** `install.sh` did not finish installing the GEAK MCP packages
-(`rag-mcp`, `profiler-mcp`, `cross-session-memory-mcp`,
-`automated-test-discovery`). `metrix-mcp` is no longer installed separately;
-its functionality is provided through `profiler-mcp`. Common trigger: pip
-install failed on a transient registry hiccup and the installer continued.
+**Cause.** `install.sh` did not finish installing GEAK and its
+dependencies. Common trigger: pip install failed on a transient registry
+hiccup and the installer continued.
 
 **Fix**:
 
