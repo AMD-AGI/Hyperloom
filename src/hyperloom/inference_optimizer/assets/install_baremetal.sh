@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 # Install Hyperloom for bare-metal hosts (no-Docker / bare-host orchestrator).
@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.0.0a1}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
@@ -43,12 +43,12 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.md (SGLang v0.5.12,
-# ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
-# v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
-# is the nearest published ROCm 7.2 wheel. AITER_REF can pin ROCm/aiter to a
-# released tag; when unset, the installer selects the newest tag compatible
-# with the already-installed ROCm torch/triton stack.
+# Framework versions track docs/compatibility.rst (SGLang v0.5.12, ROCm 7.2).
+# vLLM installs 0.21.0+rocm722 from the wheels.vllm.ai pip index, matching the
+# v0.21.0 Docker image version. The pip index only publishes the rocm722
+# variant (no rocm720 wheel exists there), so the ROCm layer is 7.2.2. AITER_REF
+# can pin ROCm/aiter to a released tag; when unset, the installer selects the
+# newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-v0.5.12}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
@@ -62,7 +62,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.21.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
@@ -363,9 +363,16 @@ PY
     fi
   fi
 
-  local m
+  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel.
+  local m dep_py
   for m in triton aiter sgl_kernel; do
-    _py_has "$py" "$m" && log "runtime dep ${m}: OK" || warn "runtime dep ${m}: missing (some phases may degrade)"
+    dep_py="$py"
+    if [ "$m" != "sgl_kernel" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
+       && [ -x "${VLLM_VENV_ROOT}/bin/python" ] \
+       && printf '%s' ",${FRAMEWORKS}," | grep -q ",vllm,"; then
+      dep_py="${VLLM_VENV_ROOT}/bin/python"
+    fi
+    _py_has "$dep_py" "$m" && log "runtime dep ${m}: OK" || warn "runtime dep ${m}: missing (some phases may degrade)"
   done
 
   [ "$rc" -ne 0 ] && die "base preflight failed. Fix the items above, or pass --skip-base-check to override."
@@ -497,11 +504,17 @@ list_aiter_tags_newest_first() {
 }
 
 install_aiter_ref_with_constraints() {
-  local py="$1" aiter_root="$2" ref="$3" constraint_file="$4"
+  local py="$1" aiter_root="$2" ref="$3" constraint_file="$4" aiter_use_system_triton
   checkout_aiter_ref "$aiter_root" "$ref"
-  "$py" -m pip install --constraint "$constraint_file" \
+  aiter_use_system_triton="${AITER_USE_SYSTEM_TRITON:-1}"
+  case "$aiter_use_system_triton" in
+    0|1) ;;
+    *) warn "AITER_USE_SYSTEM_TRITON must be 0 or 1"; return 1 ;;
+  esac
+  AITER_USE_SYSTEM_TRITON="$aiter_use_system_triton" "$py" -m pip install --constraint "$constraint_file" \
     --config-settings editable_mode=compat -e "$aiter_root" || return 1
-  "$py" -c "import aiter" >/dev/null
+  "$py" -c "import aiter" >/dev/null || return 1
+  check_torch_triton_alignment "$py" || return 1
 }
 
 install_compatible_aiter() {
@@ -616,7 +629,7 @@ PY
     log "sglang + sgl_kernel already importable; skipping amd-sglang install"
   fi
 
-  if ! _py_has "$py" aiter; then
+  if ! "$py" -c "import aiter" >/dev/null 2>&1; then
     install_compatible_aiter "$py" "$aiter_root"
   else
     log "aiter already importable; skipping AITER source install"
@@ -857,26 +870,22 @@ PY
 }
 
 download_rocm_profiler_hotfix_libs() {
-  local tmp_dir archive
+  local tmp_dir archive url
   tmp_dir="$(mktemp -d)"
-  command -v gh >/dev/null 2>&1 || {
+  command -v curl >/dev/null 2>&1 || {
     rm -rf "$tmp_dir"
-    warn "gh CLI not found; cannot download ROCm profiler hotfix asset"
+    warn "curl not found; cannot download ROCm profiler hotfix asset"
     return 1
   }
-  gh auth status >/dev/null 2>&1 || {
+  # Public release asset; no auth needed on an open-source repo.
+  url="https://github.com/${HYPERLOOM_WHEEL_REPO}/releases/download/${HYPERLOOM_WHEEL_TAG}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
+  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}" >&2
+  if ! curl -fSL -o "$archive" "$url" >&2; then
     rm -rf "$tmp_dir"
-    warn "gh is not authenticated; cannot download ROCm profiler hotfix asset"
-    return 1
-  }
-  log "downloading ROCm profiler hotfix asset ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}" >&2
-  if ! gh release download "$HYPERLOOM_WHEEL_TAG" -R "$HYPERLOOM_WHEEL_REPO" \
-    -p "$ROCM_PROFILER_HOTFIX_ASSET" -D "$tmp_dir" >&2; then
-    rm -rf "$tmp_dir"
-    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${HYPERLOOM_WHEEL_REPO}@${HYPERLOOM_WHEEL_TAG}"
+    warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
     return 1
   fi
-  archive="${tmp_dir}/${ROCM_PROFILER_HOTFIX_ASSET}"
   if ! tar -xzf "$archive" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
     warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"

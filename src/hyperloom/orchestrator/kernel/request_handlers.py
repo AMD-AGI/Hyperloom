@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Coordinator-side handlers for Kernel-agent REQUEST kinds.
@@ -1489,18 +1489,19 @@ exec {shlex.quote(runner)}
     return path
 
 
-def _resolve_gemm_tuning_backend(payload: dict) -> str:
-    """Resolve GEMM tuning backend: forge or geak.
+def _forge_explicitly_enabled() -> bool:
+    """Return true only for the single supported forge opt-in switch.
 
-    Precedence:
-    1. payload['gemm_tuning_backend']
-    2. GEMM_TUNING_BACKEND env var
-    3. Default: 'forge'
+    KernelForge is private infrastructure, so forge must never be selected by
+    request payloads, legacy aliases, or GEMM_TUNING_BACKEND.  The only runtime
+    contract that enables forge is an exact KERNEL_OPT_BACKEND_ORDER=forge.
     """
-    raw = str(payload.get("gemm_tuning_backend") or os.environ.get("GEMM_TUNING_BACKEND") or "").strip().lower()
-    if raw in ("forge", "geak"):
-        return raw
-    return "forge"
+    return str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+
+
+def _resolve_gemm_tuning_backend(payload: dict) -> str:
+    """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
+    return "forge" if _forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -2182,29 +2183,16 @@ async def _run_geak_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Legacy GEAK FP8 block-scale GEMM tuning (sglang-only)."""
+    """Legacy GEAK GEMM tuning wrapper.
+
+    Hyperloom does not decide precision/framework applicability here; it passes
+    the workload metadata through and lets GEAK decide.
+    """
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
     precision = _normalize_precision(payload.get("precision") or state.precision)
-    if precision != "fp8":
-        return {
-            "status": "skipped",
-            "decision": "REVERT",
-            "error_class": "fp8_only_action",
-            "error": f"GEAK GEMM tuning only applies to FP8 workloads (precision={precision or '(unset)'})",
-            "precision": precision,
-        }
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-    if framework != "sglang":
-        return {
-            "status": "skipped",
-            "decision": "REVERT",
-            "error_class": "unsupported_framework",
-            "error": f"GEAK GEMM tuning first version supports SGLang only (framework={framework or '(unset)'})",
-            "framework": framework,
-            "precision": precision,
-        }
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}
@@ -2260,11 +2248,22 @@ async def _run_geak_gemm_tuning(
     if geak_config:
         input_payload["config"] = geak_config
     elif not payload.get("dry_run"):
-        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
-        result.setdefault("requested_backend", "geak")
-        result.setdefault("fallback_backend", "forge")
-        result.setdefault("fallback_reason", "legacy_geak_config_missing")
-        return result
+        return {
+            "status": "skipped",
+            "decision": "REVERT",
+            "backend": "geak",
+            "engine": "geak",
+            "error_class": "legacy_geak_config_missing",
+            "error": (
+                "GEAK GEMM tuning requires GEAK_CONFIG. "
+                "Forge fallback is disabled unless KERNEL_OPT_BACKEND_ORDER=forge."
+            ),
+            "workspace": str(workspace),
+            "precision": precision,
+            "framework": framework,
+            "model_path": model_path,
+            "benchmark_script": benchmark_script,
+        }
     if payload.get("dry_run"):
         input_payload["dry_run"] = True
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -2302,12 +2301,11 @@ async def run_gemm_tuning_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEMM tuning via forge-gemm-tune (deterministic) or GEAK (legacy).
+    """Run GEMM tuning via GEAK, or forge only when explicitly enabled.
 
     Backend selection:
-    1. payload['gemm_tuning_backend']
-    2. GEMM_TUNING_BACKEND env var
-    3. Default: 'forge'
+    1. Exact ``KERNEL_OPT_BACKEND_ORDER=forge`` -> forge.
+    2. Everything else -> GEAK.
 
     Args:
         payload: The GEMM-tuning request payload.
@@ -3077,31 +3075,16 @@ def _optimization_wrapper_timeout_sec(payload: dict) -> int:
 
 
 def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
-    """Return the raw, lowercased kernel backend order from payload/env.
+    """Return the effective kernel backend order.
 
-    This is the single source of truth for kernel-backend selection and is
-    shared by both the per-kernel ladder (:func:`_backend_order`) and the
-    phase-level GEAK e2e check (:func:`geak_selected`).  Unknown tokens
-    are kept here on purpose; callers filter to the set they understand.
-
-    Precedence (highest to lowest): ``payload['backend_order']`` ->
-    ``KERNEL_OPT_BACKEND_ORDER`` env -> ``KERNEL_OPT_BACKENDS`` env.  When none
-    is set, the phase-level GEAK delegate is the default.
-
-    Args:
-        payload: Optional request payload that may carry ``backend_order``.
-
-    Returns:
-        list[str]: The ordered, lowercased backend tokens (may be empty).
+    Forge is deliberately not request-selectable.  The only supported forge
+    opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
+    missing value, legacy alias, or payload override stays on the GEAK
+    whole-phase backend.
     """
-    raw = (
-        (payload or {}).get("backend_order")
-        or os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-        or os.environ.get("KERNEL_OPT_BACKENDS")
-    )
-    if not raw:
-        return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
-    return [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+    if _forge_explicitly_enabled():
+        return ["forge"]
+    return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
 
 def geak_selected(payload: dict | None = None) -> bool:
@@ -3149,52 +3132,14 @@ def _kernel_ladder_budget_sec(payload: dict) -> int:
 
 
 def _backend_order(payload: dict) -> list[str]:
-    """Resolve the ordered list of optimization backends to try.
+    """Resolve the per-kernel backend ladder.
 
-    Precedence (highest to lowest):
-
-    1. ``payload['backend_order']`` – explicit per-request override.
-    2. ``KERNEL_OPT_BACKEND_ORDER`` env var – comma-separated list.
-    3. ``KERNEL_OPT_BACKENDS`` env var – accepted as an alias for
-       ``KERNEL_OPT_BACKEND_ORDER``.
-    4. Empty, because the no-env default is the phase-level ``geak`` delegate.
-
-    All backend names are normalized to lowercase before filtering, so
-    values like ``"GEAK"`` or ``"Forge"`` are treated the same as their
-    lowercase equivalents.  Unknown backends are silently dropped.
-
-    Args:
-        payload (dict): Request payload that may carry ``backend_order``.
-
-    Returns:
-        list[str]: The filtered, ordered backend names (subset of
-            ``{"forge"}``).
-
-    Raises:
-        ValueError: When the requested order contains only removed out-of-band
-            backends (``claude``/``codex``/``cursor``), instead of silently
-            substituting forge.
+    The per-kernel ladder is disabled unless forge is explicitly opted in via
+    ``KERNEL_OPT_BACKEND_ORDER=forge``.  GEAK owns the default whole KERNEL
+    phase, so request payloads and legacy aliases cannot select forge.
     """
     order = _raw_kernel_backend_order(payload)
-    # `forge` is the only per-kernel backend; bare ``geak`` is a phase-level delegate.
-    allowed = {"forge"}
-    filtered = [backend for backend in order if backend in allowed]
-    if filtered:
-        return filtered
-    # The out-of-band backends (claude/codex/cursor) have been removed. Fail
-    # loudly instead of silently substituting forge, so a caller that explicitly
-    # requested a removed backend gets an actionable error rather than an
-    # unexpected forge run (which would then depend on the private KernelForge).
-    removed_oob = {"claude", "codex", "cursor"}
-    requested_removed = sorted({backend for backend in order if backend in removed_oob})
-    if requested_removed:
-        raise ValueError(
-            "kernel backend(s) no longer available: "
-            + ", ".join(requested_removed)
-            + ". Set KERNEL_OPT_BACKEND_ORDER to 'forge' (per-kernel) or "
-            "'geak' (whole-phase)."
-        )
-    return []
+    return ["forge"] if order == ["forge"] else []
 
 
 def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
@@ -3846,8 +3791,8 @@ async def _run_optimization_batch(
     # per-repo lock, so keep the batch serial whenever forge is in the ladder.
     if "forge" in _backend_order(payload):
         max_parallel = 1
-    # parallel_backends is off by default (single forge backend); only an
-    # explicit override enables it.
+    # parallel_backends is off by default; it only matters when explicit
+    # per-kernel forge mode is enabled.
     parallel_backends = _should_parallelize_backends(payload, len(candidates))
     # When forced on, halve the GPU budget so pre-Ray backend setup fits.
     if parallel_backends:

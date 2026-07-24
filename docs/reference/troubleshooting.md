@@ -20,7 +20,6 @@ upstream SKILL file for the component you're touching:
 **Symptom**: A tool exits with one of:
 
 * `HTTP 401 Unauthorized`
-* `Primus.00009 token not present`
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 
@@ -118,8 +117,10 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-> **Note**: `inference_optimizer.cli` does *not* auto-start Ray.
-> Always start it before launching `python -m hyperloom.inference_optimizer.cli optimize`.
+> **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
+> head. If `ray_current_cluster` points at a stale or incompatible cluster, stop
+> Ray first so Hyperloom can create a fresh head with the required GPU and
+> custom-resource configuration.
 
 ---
 
@@ -196,11 +197,9 @@ context.
 baseline files; logs mention a missing `profiler_mcp` or one of the
 other GEAK MCP packages.
 
-**Cause.** `install.sh` did not finish installing the GEAK MCP packages
-(`rag-mcp`, `profiler-mcp`, `cross-session-memory-mcp`,
-`automated-test-discovery`). `metrix-mcp` is no longer installed separately;
-its functionality is provided through `profiler-mcp`. Common trigger: pip
-install failed on a transient registry hiccup and the installer continued.
+**Cause.** `install.sh` did not finish installing GEAK and its
+dependencies. Common trigger: pip install failed on a transient registry
+hiccup and the installer continued.
 
 **Fix**:
 

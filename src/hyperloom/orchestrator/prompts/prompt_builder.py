@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Compose the Orchestration agent's system prompt from typed inputs.
@@ -699,11 +699,9 @@ you want to wind down sooner.
 
   request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
 
-  Usually only when `last_gemm_tuning` is empty (the Coordinator also auto-runs
-  it at KERNEL entry; eligibility is decided backend-side). Exception: if the
-  last forge FP8 attempt reports `micro_decision='no_improvement'` with no
-  E2E-validatable candidates, one `precision='bf16', tuner='sglang_dense_bf16'`
-  fallback is allowed.
+  Current GEAK owns the KERNEL phase by default and decides GEMM applicability
+  internally. Only use this legacy request in explicit per-kernel forge mode
+  (`KERNEL_OPT_BACKEND_ORDER=forge`).
 
 ### `kernel_opt` — payload for `run_optimization`
 
@@ -724,10 +722,10 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
                    candidates_path: <trace_analyze_done.candidates_path>,
                    budget_minutes: 60}}
 
-  Backend auto-pick: DO NOT add a `backends` field. The kernel-agent's
-  `choose_backends()` auto-picks the forge backend per kernel.
-  Pinning a backend forces every kernel through it — the exact #144 last
-  comment Layer 2 regression. Read `kernel_opt_attempts` +
+  Backend policy: DO NOT add a `backends` field. Current GEAK owns the
+  KERNEL phase by default. Forge per-kernel mode is available only when the
+  operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
+  Read `kernel_opt_attempts` +
   `pending_keep_kernels` to
   see what's still queueable; the batch handler filters
   rejected/in-flight/exhausted candidates.

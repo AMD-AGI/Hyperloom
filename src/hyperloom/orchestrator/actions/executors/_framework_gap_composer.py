@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Compose ``gap_description`` + ``keywords`` for the framework arm.

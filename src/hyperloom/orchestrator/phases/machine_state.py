@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Phase state machine.
@@ -412,7 +412,7 @@ DEFAULT_MAX_MACRO_CYCLES: int = 1000
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 1800.0  # 30 min
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 10800.0  # 3 h
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
@@ -1399,6 +1399,24 @@ def _kernel_opt_max_failures() -> int:
     return resolve_kernel_opt_max_failures()
 
 
+def _geak_phase_terminal(state: Any) -> bool:
+    """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
+    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
+        return False
+    result = getattr(state, "geak_result", None) or {}
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    return status in {
+        "ok",
+        "no_gain",
+        "error",
+        "failed",
+        "skipped",
+        "baseline_reproduction_failed",
+    }
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1408,6 +1426,19 @@ def kernel_work_pending(state: Any) -> bool:
     hot reusable kernels that have not received a kernel_opt attempt. Hard
     time/budget exits are still handled by :func:`exit_normal_kernel`.
     """
+    if _geak_phase_terminal(state):
+        result = getattr(state, "geak_result", None) or {}
+        pending = getattr(state, "geak_pending", None) or {}
+        if (
+            isinstance(result, dict)
+            and str(result.get("status") or "").strip().lower() == "ok"
+            and isinstance(pending, dict)
+            and str(pending.get("status") or "").strip().lower() == "awaiting_rebench"
+            and bool(str(pending.get("revalidation_task_id") or "").strip())
+        ):
+            return True
+        return False
+
     try:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
             return True

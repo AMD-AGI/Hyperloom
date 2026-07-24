@@ -34,7 +34,7 @@ Resolve the run mode in this order and skip the interactive question when a valu
 is already present:
 
 1. `HYPERLOOM_RUN_MODE` in the shell environment (`baremetal` or `docker`).
-2. Otherwise, ask the user (Step 2 question 6).
+2. Otherwise, ask the user (Step 2 question 5).
 
 `HYPERLOOM_RUN_MODE` is a value resolved for this session from the shell
 environment. Keep it for the current run; the example (workload) skill uses it to
@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install ./hyperloom_inference_optimizer-*-py3-none-any.whl --target .
+python3 -m pip install https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -75,49 +75,32 @@ custom model id) present two options — `Use default (<value>)` and `Custom` �
 and only when the user picks `Custom` ask a plain-text follow-up for the exact
 value.
 
-1. Choose one LLM mode (two options):
-   - `Anthropic`
-   - `DeepSeek`
-
-   Present exactly those two option labels. Do not add parenthetical
-   descriptions, vendor examples, or base URLs to this first question.
-
-2. Ask the base URL as a structured follow-up after the mode is chosen.
-   - For `Anthropic`, present exactly these three option labels in this order:
+1. Ask the Anthropic base URL with the structured UI.
+   - Present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
      - `Use AMD gateway (https://llm-api.amd.com/anthropic)`.
      - `Custom`.
-   - For `DeepSeek`, present exactly these two option labels in this order:
-     - `Use default (https://api.deepseek.com/anthropic)`.
-     - `Custom`.
    - If the user picks `Custom`, ask a plain-text follow-up for the URL.
 
-3. Explain that secrets must be edited in `.env`, not pasted into chat.
+2. Explain that secrets must be edited in `.env`, not pasted into chat.
    - Never ask the user to paste API keys into the conversation.
    - Create `.env` with placeholders for secret values.
    - Ask the user to edit `.env` directly and replace placeholders.
    - After the user confirms the file is edited, validate only whether secret keys are set; do not print secret values.
 
-4. Collect provider-specific non-secret values and write secret placeholders:
+3. Collect non-secret values and write secret placeholders:
 
    Ask the base URL and model questions below with the structured UI using two
    options — `Use default (<value>)` and `Custom` — and only ask a plain-text
    follow-up for the exact value when the user picks `Custom`.
 
-   For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
    - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
-
-   For `DeepSeek`:
-   - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `DEEPSEEK_BASE_URL` with exactly these option labels in this order:
-     `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
-   - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-v4-pro)` / `Custom`.
-5. Explain `USER_DATA_PATH`:
+4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
      `session` subdirectory) as the default/recommended option, using its
@@ -127,27 +110,26 @@ value.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
-6. Ask where to run Hyperloom (sets `HYPERLOOM_RUN_MODE` for this session). Skip
+5. Ask where to run Hyperloom (sets `HYPERLOOM_RUN_MODE` for this session). Skip
    this question if `HYPERLOOM_RUN_MODE` is already set in the shell environment
    (see [Run Mode Resolution](#run-mode-resolution)); just confirm it and use it
    for this run.
 
    Present exactly these two option labels in this order:
 
-   1. `docker`
+   1. `docker (Recommended)`
    2. `baremetal`
 
-   - `docker`: record docker as the run mode; the example (workload) skill will
-     generate a ROCm container later. Choose this when the host does not have the
-     framework installed but Docker with GPU access is available.
-   - `baremetal`: run the setup backend directly on this host. Choose this when
-     the host provides ROCm, or when Hyperloom is already installed inside a
-     Docker container and setup should run directly in that current container
-     environment.
-   - If the user is unsure and is already inside a framework image or shell with
-     a working framework, recommend `baremetal`; otherwise recommend `docker`.
+   When asking, add a one-line reminder that Docker is recommended because it
+   ships a validated ROCm + framework stack and keeps the host untouched, while
+   baremetal is for advanced users and may cause environment-specific issues or
+   modify the host environment.
 
-7. Only when the user chose `docker`, resolve the Docker target host
+   - `docker (Recommended)`: record `docker` as the run mode; the example
+     (workload) skill generates a ROCm container later.
+   - `baremetal`: run the setup backend directly on this host.
+
+6. Only when the user chose `docker`, resolve the Docker target host
    (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run
    `docker run` / `docker exec` later.
 
@@ -176,15 +158,17 @@ value.
      skill will first SSH to that host and run all Docker commands there. Do not
      start or restart any Slurm job from setup.
 
-8. Only when the user chose `baremetal`, ask whether to install a serving
-   framework (used as the `--install-framework` value in Step 4):
-   - `none`: use an already-installed vLLM/SGLang framework stack on the host.
-   - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
-     pins its own torch, so it runs in an isolated env and never touches the
-     host torch/SGLang stack.
-   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
-   - If the user is unsure, recommend `none` when a framework is already present;
-     otherwise recommend `vllm (isolated)`.
+7. Only when the user chose `baremetal`, ask whether to install a serving
+   framework (used as the `--install-framework` value in Step 4). Present exactly
+   these three option labels in this order and do not reorder them by
+   recommendation:
+   1. `none`: use an already-installed vLLM/SGLang framework stack on the host.
+   2. `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   3. `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
+      pins its own torch, so it runs in an isolated env and never touches the
+      host torch/SGLang stack.
+   - Do not mark any option as recommended. Present the three options in the exact
+     order above without a default selection.
 
 ## Step 3: Write `.env`
 
@@ -198,7 +182,7 @@ Before writing, explicitly tell the user:
 - A dedicated workspace is recommended to avoid modifying an existing project's
   `.env`.
 
-- For every value the user chose in this run (LLM mode, base URL, model, run
+- For every value the user chose in this run (base URL, model, run
   mode, `USER_DATA_PATH`, Docker target host), write exactly what the user
   selected. This wins over any pre-existing value in `.env` or the shell
   environment — e.g. if the user picked the Anthropic official URL, write
@@ -209,13 +193,11 @@ Before writing, explicitly tell the user:
 - Do not write `HYPERLOOM_INSTALL_SOURCE`.
 - Do not overwrite an existing non-placeholder secret key.
 
-Write only the keys for the selected LLM mode, plus the common keys. Do not
-write keys that belong to a mode the user did not choose.
+Write the Anthropic keys plus the common keys:
 
 - `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
-- `DeepSeek`: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`.
 
-Common keys (all modes):
+Common keys:
 
 - `USER_DATA_PATH`
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
@@ -229,7 +211,7 @@ Common keys (all modes):
 
 ### AMD APIM subscription header
 
-Only for `Anthropic`, if the chosen base URL host is `llm-api.amd.com`, that
+If the chosen base URL host is `llm-api.amd.com`, that
 gateway requires the API key to also be sent as an
 `Ocp-Apim-Subscription-Key` header. Write the custom-headers key as a reference
 to the same API key, so the user only fills one secret:
@@ -243,8 +225,8 @@ scripts may load `.env` with a shell `source`, so an unquoted value containing a
 space and a colon (`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and
 fails with exit 127.
 
-Do not add custom headers for DeepSeek. Skip this key entirely when the selected
-Anthropic base URL host is not `llm-api.amd.com`.
+Skip this key entirely when the selected Anthropic base URL host is not
+`llm-api.amd.com`.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
@@ -342,8 +324,7 @@ mode, ask the user whether they want to run a demo optimization now, and if so
 which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
-- `8h` — medium-length Qwen3-14B-FP8 run.
-- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 run (long-run budget accounting: fixed per-cycle budget window).
+- `12h` — medium-length Qwen3-14B-FP8 run.
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
@@ -367,8 +348,7 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `8h` → `hyperloom-qwen3-14b-fp8-8h`
-- `24h` → `hyperloom-qwen3-30b-a3b-instruct-2507-24h`
+- `12h` → `hyperloom-qwen3-14b-fp8-12h`
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,

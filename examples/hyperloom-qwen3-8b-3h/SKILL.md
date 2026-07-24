@@ -39,12 +39,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.

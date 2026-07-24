@@ -19,24 +19,26 @@ current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Cursor, Claude Code,
 or Codex before running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker for a validated, reproducible stack.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
-- Access to one LLM provider: Anthropic or DeepSeek.
+- Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
 ### Install Hyperloom
 
-From the agent terminal in that workspace, download the latest release wheel
-from GitHub Releases, then install Hyperloom using the following command:
+From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
@@ -65,33 +67,24 @@ values already written to `.env`.
 
 It asks for these values with a fixed option order:
 
-1. LLM mode:
-   - `Anthropic`
-   - `DeepSeek`
-2. Anthropic URL, when Anthropic is selected:
+1. Anthropic URL:
    - `Use default (https://api.anthropic.com)`
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
-3. DeepSeek URL, when DeepSeek is selected:
-   - `Use default (https://api.deepseek.com/anthropic)`
+2. Model:
+   - `Use default (claude-opus-4-8)`
    - `Custom`
-4. Model:
-   - `Use default (<provider default>)`
-   - `Custom`
-5. Secrets:
+3. Secrets:
    - Setup writes placeholders in `.env`.
    - Edit secrets directly in `.env`; never paste API keys into chat.
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
-6. `USER_DATA_PATH`:
+4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
    - Custom path
-7. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
+5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
-
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-to enable setup to run directly in the current container environment.
 
 ## Setup scenarios
 
@@ -166,7 +159,6 @@ LLM defaults:
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-v4-pro` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there.
@@ -178,14 +170,13 @@ Common keys:
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
 Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
-`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. Production SGLang installs require a pinned
-`AITER_REF` 40-character commit SHA by default; set `AITER_ALLOW_UNPINNED=1`
-only for local compatibility exploration. `SGLANG_ROCM_INDEX_URL` is optional
-and lets operators provide an approved ROCm wheel index (for example an AMD ROCm
-PyPI mirror) without baking infrastructure URLs into the public installer. If it
-is unset, pip uses its configured default indexes. Kernel-agent paths
-(`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later
-by the workload skill's `install.sh`.
+`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
+tag or commit; when unset the installer selects the newest tag compatible with
+the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
+is controlled by `SGLANG_ROCM_EXTRA` (default `rocm720`) and
+`SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
+`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
+workload skill's `install.sh`.
 
 Specialist subprocesses inherit only a minimal non-secret environment by
 default. If a deployment still relies on parent-process LLM key variables,
@@ -207,10 +198,7 @@ custom run:
 
 - [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md): Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](../../examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md): Qwen3-14B-FP8, medium-length FP8 run.
-- [`24h`](../../examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md):
-  Qwen3-30B-A3B-Instruct-2507, long-horizon run (long-run budget accounting:
-  fixed per-cycle budget window).
+- [`12h`](../../examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md): Qwen3-14B-FP8, medium-length FP8 run.
 - [`custom advanced`](../../examples/hyperloom-custom-advanced/SKILL.md): user-selected
   model, framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase
   toggles, and advanced CLI flags.
@@ -354,12 +342,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Then run all Hyperloom commands inside that container with

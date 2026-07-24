@@ -484,7 +484,7 @@ The Hyperloom team commits to the following compatibility guarantees.
 Consumers can rely on these guarantees for production indexing and
 alerting.
 
-## See also
+## Related topics
 
 Use the following resources for related reference information.
 

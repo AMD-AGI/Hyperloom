@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Stage 3-gate tests: Magpie install/preflight is gated by benchmark backend.
@@ -126,6 +126,9 @@ def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
+    # Pin the free-port picker so the port assertion is deterministic
+    # (resolve now assigns a per-session free port on the common path).
+    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
     info = sl.resolve_lifecycle_params(cfg_path)
     # bypass now honors the YAML lifecycle block, so a serving framework
     # with profiling off is eligible.

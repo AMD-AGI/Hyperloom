@@ -13,26 +13,27 @@ both the install target and the agent workspace. Prepare a dedicated clean
 directory first, then open that directory in Cursor, Claude Code, or Codex before
 running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker for a validated, reproducible stack.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
-- Access to one LLM provider: Anthropic or DeepSeek.
-- `gh` (GitHub CLI), authenticated, to download the published GitHub release
-  asset (the wheel is distributed as a Release asset, not via PyPI), or a
-  locally downloaded Hyperloom wheel.
+- Access to the Anthropic LLM provider.
+- Access to the published GitHub release wheel, or a locally downloaded
+  Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
-From the agent terminal in that workspace, download the latest release wheel and
-install it into the current directory:
+From the agent terminal in that workspace, install the published release wheel
+into the current directory:
 
 ```bash
-gh auth login
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
@@ -61,33 +62,24 @@ values already written to `.env`.
 
 It asks for these values with a fixed option order:
 
-1. LLM mode:
-   - `Anthropic`
-   - `DeepSeek`
-2. Anthropic URL, when Anthropic is selected:
+1. Anthropic URL:
    - `Use default (https://api.anthropic.com)`
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
-3. DeepSeek URL, when DeepSeek is selected:
-   - `Use default (https://api.deepseek.com/anthropic)`
+2. Model:
+   - `Use default (claude-opus-4-8)`
    - `Custom`
-4. Model:
-   - `Use default (<provider default>)`
-   - `Custom`
-5. Secrets:
+3. Secrets:
    - Setup writes placeholders in `.env`.
    - Edit secrets directly in `.env`; never paste API keys into chat.
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
-6. `USER_DATA_PATH`:
+4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
    - Custom path
-7. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
+5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
-
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-because setup should run directly in the current container environment.
 
 ## Setup Scenarios
 
@@ -162,7 +154,6 @@ LLM defaults:
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-v4-pro` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there.
@@ -192,10 +183,7 @@ run:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`24h`](hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md) —
-  Qwen3-30B-A3B-Instruct-2507, long-horizon run (long-run budget accounting:
-  fixed per-cycle budget window).
+- [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.
@@ -337,12 +325,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Then run all Hyperloom commands inside that container with

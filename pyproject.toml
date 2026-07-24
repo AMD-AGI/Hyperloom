@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "0.9.0"
+version = "1.0.0a1"
 description = "Inference Optimizer — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -142,12 +142,9 @@ where = ["src"]
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-30b-a3b-instruct-2507-24h" = ["examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h" = ["examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]

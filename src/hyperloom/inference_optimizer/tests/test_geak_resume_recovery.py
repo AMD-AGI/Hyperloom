@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Regression tests for crash-safe GEAK handback recovery."""
 
@@ -107,10 +107,12 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     # The main-flow rebench was enqueued to validate the recovered candidate.
     rebench = [t for t in coord.tasks.created if (t.params or {}).get("geak_fallback")]
     assert rebench, "recovery must enqueue a geak main-flow rebench"
+    assert coord.shared_state.geak_pending["revalidation_task_id"] == rebench[0].task_id
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["geak_result"]["status"] == "ok"
     assert saved["geak_pending"]["status"] == "awaiting_rebench"
+    assert saved["geak_pending"]["revalidation_task_id"] == rebench[0].task_id
 
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
 

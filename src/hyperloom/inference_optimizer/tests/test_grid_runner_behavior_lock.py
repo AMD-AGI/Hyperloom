@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Behavior-lock tests for ``run_grid``: pulse matrix, ``keep_going_on_failure``
@@ -388,6 +388,12 @@ class TestAutoWarmupTeardown:
 
     def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+        # Pin the free-port picker so the teardown-port assertion is
+        # deterministic (baseline uses a per-session free port).
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+            lambda: 8888,
+        )
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
         state = {"n": 0}

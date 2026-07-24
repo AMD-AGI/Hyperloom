@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared action-surface constants.
@@ -36,6 +36,7 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
+        "conc_sweep",
         "roofline",
         "profile",
         "replay_warm_recipe",
