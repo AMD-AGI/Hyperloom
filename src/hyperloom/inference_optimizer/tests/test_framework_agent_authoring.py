@@ -1150,6 +1150,22 @@ def test_framework_agent_repo_url_origin_framework_known() -> None:
     )
 
 
+def test_framework_agent_repo_url_origin_framework_preserves_default_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "HYPERLOOM_VLLM_REPO_URL",
+        "https://github.com/vllm-project/vllm.git",
+    )
+    assert (
+        Coordinator._framework_agent_repo_url_origin_framework(
+            "git@github.com:vllm-project/vllm.git"
+        )
+        == "vllm"
+    )
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/vllm.git") == "vllm"
+
+
 def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:
     """Kernel-level pr_intel_specialist repos (aiter/triton/rccl) have no framework mapping."""
     assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/aiter.git") == ""

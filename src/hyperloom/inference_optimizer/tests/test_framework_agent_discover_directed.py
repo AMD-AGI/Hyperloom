@@ -72,8 +72,11 @@ def _call_discover(stub: _CoordinatorStub) -> bool:
     )
 
 
-def test_repo_urls_cover_global_allowlist_with_framework_primary():
+def test_repo_urls_cover_global_allowlist_with_framework_primary(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """The repo set leads with the framework's own repo, includes every PR_QUERY_REPOS entry, de-duplicated and order-preserving."""
+    monkeypatch.delenv("HYPERLOOM_VLLM_REPO_URL", raising=False)
     stub = _CoordinatorStub(Path("/tmp"))
     urls = stub._framework_agent_discover_repo_urls("sglang")
 
@@ -82,6 +85,22 @@ def test_repo_urls_cover_global_allowlist_with_framework_primary():
         expected = f"https://github.com/{repo}.git"
         assert expected in urls or repo in "".join(urls)
     assert len(urls) == len(set(urls))
+
+
+def test_vllm_repo_override_replaces_rocm_fork_in_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An explicit upstream override becomes primary without querying both forks."""
+
+    monkeypatch.setenv(
+        "HYPERLOOM_VLLM_REPO_URL",
+        "HTTPS://GITHUB.COM/vllm-project/vllm",
+    )
+    stub = _CoordinatorStub(Path("/tmp"))
+    urls = stub._framework_agent_discover_repo_urls("vllm")
+
+    assert urls[0] == "https://github.com/vllm-project/vllm.git"
+    assert "https://github.com/ROCm/vllm.git" not in urls
 
 
 def test_discover_merges_candidates_across_repos(

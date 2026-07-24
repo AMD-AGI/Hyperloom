@@ -19,7 +19,13 @@ the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+
+from hyperloom.agents.framework.repo_map import (
+    VLLM_REPO_URL_ENV,
+    github_repo_name,
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,15 @@ PR_QUERY_REPOS: tuple[str, ...] = (
     "ROCm/HIP",
     "NVIDIA/TensorRT-LLM",
 )
+
+
+def pr_query_repos() -> tuple[str, ...]:
+    """Return the effective PR-query allowlist with any vLLM override."""
+
+    override = github_repo_name(os.environ.get(VLLM_REPO_URL_ENV, ""))
+    if not override:
+        return PR_QUERY_REPOS
+    return tuple(override if repo == "ROCm/vllm" else repo for repo in PR_QUERY_REPOS)
 
 
 # Canonical catalogue; PolicyGate R2's `specialist_unknown_domain` rule reads this set.
@@ -368,4 +383,5 @@ __all__ = [
     "domain_for_tag",
     "get_domain",
     "normalize_dispatch_tags",
+    "pr_query_repos",
 ]

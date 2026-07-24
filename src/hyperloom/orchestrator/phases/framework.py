@@ -2645,7 +2645,7 @@ class FrameworkPhase(PhaseHandler):
             An order-preserving, deduped list of repo URLs to query.
         """
         from ..framework import client as _fa_client
-        from ..specialists.domains import PR_QUERY_REPOS
+        from ..specialists.domains import pr_query_repos
 
         urls: list[str] = []
 
@@ -2663,7 +2663,7 @@ class FrameworkPhase(PhaseHandler):
         _add(_fa_client.repo_url_for_framework(framework))
 
         # Global allowlist (owner/name -> URL).
-        for repo in PR_QUERY_REPOS:
+        for repo in pr_query_repos():
             repo = str(repo or "").strip()
             if repo and "/" in repo:
                 _add(f"https://github.com/{repo}.git")
@@ -2696,14 +2696,24 @@ class FrameworkPhase(PhaseHandler):
             The lowercase framework name, or ``""`` when ``repo_url`` doesn't
             match any known framework's canonical repo.
         """
-        from ..framework import client as _fa_client
+        from hyperloom.agents.framework.repo_map import (
+            canonical_github_repo_url,
+            default_repo_url_for_framework,
+            repo_url_for_framework,
+        )
 
-        normalized = (repo_url or "").strip().rstrip("/").lower()
+        try:
+            normalized = canonical_github_repo_url(repo_url).lower()
+        except ValueError:
+            return ""
         if not normalized:
             return ""
         for fw in ("sglang", "vllm", "atom", "xdit"):
-            fw_url = (_fa_client.repo_url_for_framework(fw) or "").strip().rstrip("/").lower()
-            if fw_url and fw_url == normalized:
+            urls = {
+                canonical_github_repo_url(repo_url_for_framework(fw)).lower(),
+                canonical_github_repo_url(default_repo_url_for_framework(fw)).lower(),
+            }
+            if normalized in urls - {""}:
                 return fw
         return ""
 

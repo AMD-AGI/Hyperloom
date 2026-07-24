@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework import repo_map
 from hyperloom.orchestrator.framework import client as fac
 
 # Reference the resolver's own constant so the two never drift apart.
@@ -22,9 +23,36 @@ _FA_MODULE = fac._FA_MODULE
 
 
 # -- repo_url_for_framework -----------------------------------------------
-def test_repo_url_for_framework_known_and_unknown() -> None:
+def test_repo_url_for_framework_known_and_unknown(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_VLLM_REPO_URL", raising=False)
     assert fac.repo_url_for_framework("sglang").endswith("sglang.git")
+    assert fac.repo_url_for_framework("vllm") == "https://github.com/ROCm/vllm.git"
     assert fac.repo_url_for_framework("nope") == ""
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        "https://github.com/vllm-project/vllm.git",
+        "HTTPS://GITHUB.COM/vllm-project/vllm",
+        "git@github.com:vllm-project/vllm.git",
+        "vllm-project/vllm",
+    ),
+)
+def test_repo_url_for_framework_vllm_override(monkeypatch, override) -> None:
+    monkeypatch.setenv("HYPERLOOM_VLLM_REPO_URL", override)
+    assert fac.repo_url_for_framework("vllm") == "https://github.com/vllm-project/vllm.git"
+    assert repo_map.default_repo_url_for_framework("vllm") == "https://github.com/ROCm/vllm.git"
+
+
+@pytest.mark.parametrize(
+    "override",
+    ("https://gitlab.com/vllm-project/vllm.git", "not-a-repo", "https://github.com/a/b/c"),
+)
+def test_repo_url_for_framework_rejects_invalid_override(monkeypatch, override) -> None:
+    monkeypatch.setenv("HYPERLOOM_VLLM_REPO_URL", override)
+    with pytest.raises(ValueError, match="repository override"):
+        fac.repo_url_for_framework("vllm")
 
 
 # -- _resolve_fa_command ---------------------------------------------------

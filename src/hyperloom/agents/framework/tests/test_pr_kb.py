@@ -26,12 +26,14 @@ def test_repo_slug_examples():
     assert pr_kb_slug.repo_slug("ROCm/aiter") == "rocm-aiter"
     assert pr_kb_slug.repo_slug("sgl-project/sglang") == "sgl-project-sglang"
     assert pr_kb_slug.repo_slug("https://github.com/ROCm/vllm.git") == "rocm-vllm"
+    assert pr_kb_slug.repo_slug("https://github.com/vllm-project/vllm.git") == "vllm-project-vllm"
 
 
 def test_slug_builders(monkeypatch):
     monkeypatch.delenv("PR_KB_SLUG_PREFIX", raising=False)
     assert pr_kb_slug.files_slug("ROCm/vllm", 42) == "pr-kb-files/rocm-vllm/pr/42"
     assert pr_kb_slug.index_slug("ROCm/vllm") == "pr-kb-index/rocm-vllm"
+    assert pr_kb_slug.index_slug("vllm-project/vllm") == "pr-kb-index/vllm-project-vllm"
 
 
 def test_slug_prefix_override(monkeypatch):

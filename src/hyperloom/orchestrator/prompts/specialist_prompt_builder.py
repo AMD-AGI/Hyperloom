@@ -428,8 +428,8 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return [
         "You are a **cross-repo PR researcher**. Your role is NOT to propose",
         "configuration knobs — it is to surface PRs / commits / issues from",
-        "(ROCm/aiter, sgl-project/sglang, ROCm/vllm, triton-lang/triton,",
-        "ROCm/rccl) that other specialists should follow up on.",
+        "ROCm/aiter, triton-lang/triton, and the approved repositories listed",
+        "in the PR MONITOR section for other specialists to follow up on.",
         "",
         "**What to do**",
         "- Use ``mcp__pr_monitor__*`` + ``WebSearch`` to find recent PRs",
@@ -1660,7 +1660,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: Markdown lines for the PR-query capability section.
     """
-    from hyperloom.orchestrator.specialists.domains import PR_QUERY_REPOS
+    from hyperloom.orchestrator.specialists.domains import pr_query_repos
 
     rows = ["## 6. PR MONITOR", ""]
     if not inp.pr_monitor_available:
@@ -1672,7 +1672,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Repos you may query:",
     ]
-    for repo in PR_QUERY_REPOS:
+    for repo in pr_query_repos():
         rows.append(f"- {repo}")
     return rows
 

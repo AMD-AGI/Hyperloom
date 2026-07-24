@@ -139,6 +139,16 @@ def test_pr_intel_specialist_mentions_cross_repo_research():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
+def test_pr_intel_specialist_uses_vllm_repo_override(monkeypatch):
+    monkeypatch.setenv(
+        "HYPERLOOM_VLLM_REPO_URL",
+        "git@github.com:vllm-project/vllm.git",
+    )
+    text = _build("pr_intel_specialist")
+    assert "vllm-project/vllm" in text
+    assert "ROCm/vllm" not in text
+
+
 def test_static_recon_specialist_mentions_reconnaissance_and_bridge_candidates():
     """The static-recon focus must steer read-only source grep for disabled switches and a bridge_candidates output block."""
     text = _build("static_recon_specialist")
