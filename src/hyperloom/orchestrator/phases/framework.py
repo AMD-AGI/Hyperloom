@@ -582,6 +582,7 @@ class FrameworkPhase(PhaseHandler):
                 "confidence": float((audit or {}).get("confidence") or 0.0),
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
         try:
@@ -813,35 +814,36 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        # Livelock break (cross-resume): a specialist that finished before a
-        # resume is returned here by idempotency key without re-running, so its
-        # empty deliverable never got a terminal progress row. Stamp
-        # author_empty now and skip the no-op re-dispatch so the pump advances.
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
             already_rows = self._framework_processed_candidate_keys()
-            # Only stamp when the deliverable is genuinely NOT in flight;
-            # _framework_agent_authoring_inflight also checks pending
-            # integrate_patch proposals so a benched deliverable is not mislabeled.
             authoring_inflight = await self._framework_agent_authoring_inflight()
             if cand_id and cand_id not in already_rows and not authoring_inflight:
-                log.info(
-                    "FRAMEWORK: authoring specialist already terminal w/o progress "
-                    "row (cross-resume harvest miss) candidate=%s state=%s — stamping "
-                    "author_empty to break re-dispatch livelock",
-                    cand_id,
-                    getattr(spec_task, "state", ""),
-                )
                 try:
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=spec_task,
-                        done_payload={},
+                    recovered = await self._recover_framework_agent_authoring_outcome(
+                        specialist_task=spec_task,
                     )
                 except Exception:  # noqa: BLE001 — never wedge the pump
                     log.exception(
-                        "FRAMEWORK: livelock-break empty-outcome stamp failed candidate=%s",
+                        "FRAMEWORK: terminal authoring outcome recovery failed candidate=%s",
                         cand_id,
+                    )
+                    recovered = False
+                if not recovered:
+                    log.warning(
+                        "FRAMEWORK: terminal authoring outcome unavailable candidate=%s state=%s",
+                        cand_id,
+                        getattr(spec_task, "state", ""),
+                    )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="recovery_failed",
+                        rationale="authoring outcome unrecoverable from persisted results",
+                        provenance="pump",
                     )
                 return ""
         # Map specialist task -> candidate so the authored-outcome bridge can
@@ -2076,8 +2078,7 @@ class FrameworkPhase(PhaseHandler):
         """Dispatch a local-exploration specialist when the arm is enabled.
 
         Used as the discovery-exhaustion fallback: rather than marking the phase
-        done, author a patch from the live source. No-op (returns ``False``)
-        when the arm is disabled so callers fall back to the historical exit.
+        done, author a patch from the live source. No-op when the arm is disabled.
 
         Args:
             reason: Short provenance tag recorded on the dispatch log line.
@@ -2132,17 +2133,14 @@ class FrameworkPhase(PhaseHandler):
             f"- framework: {framework or '(session framework)'}",
             "",
             "How to work:",
-            "- Read the live framework source (your framework_source_roots) and the",
+            "- Read installed package source (your framework_source_roots) and the",
             "  latest profiling breakdown to locate the serving hot path",
             "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
             "- You MAY use WebSearch / WebFetch to compare the live tree against the",
             "  LATEST upstream code (e.g. the framework's main branch) and port a",
             "  newer optimisation when the local checkout is behind.",
-            "- You MAY read /opt/rocm and the HIP source for understanding, and you",
-            "  MAY edit framework Python and aiter source (aiter JIT-recompiles via",
-            "  ninja/hipcc, so edits take effect on the next launch). Do NOT edit",
-            "  compiled /opt/rocm libraries that need a full rebuild to take effect —",
-            "  leave those to the kernel agent.",
+            "- You MAY inspect and patch installed package source. State expected",
+            "  reload, JIT, or rebuild behavior in the deliverable.",
             "",
             "Deliverable — EITHER is valid (pick what actually moves throughput):",
             "- a unified-diff source patch in your worktree (``patches_written``), OR",
@@ -2200,9 +2198,6 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        # Livelock break (cross-resume): a specialist that finished before a
-        # resume is returned by idempotency key without re-running; stamp its
-        # empty outcome so the pump advances instead of re-dispatching.
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
@@ -2210,14 +2205,29 @@ class FrameworkPhase(PhaseHandler):
             authoring_inflight = await self._framework_agent_authoring_inflight()
             if cand_id and cand_id not in already_rows and not authoring_inflight:
                 try:
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=spec_task,
-                        done_payload={},
+                    recovered = await self._recover_framework_agent_authoring_outcome(
+                        specialist_task=spec_task,
                     )
                 except Exception:  # noqa: BLE001 — never wedge the pump
                     log.exception(
-                        "FRAMEWORK local-explore: livelock-break empty-outcome stamp failed candidate=%s",
+                        "FRAMEWORK local-explore: terminal outcome recovery failed candidate=%s",
                         cand_id,
+                    )
+                    recovered = False
+                if not recovered:
+                    log.warning(
+                        "FRAMEWORK local-explore: terminal outcome unavailable candidate=%s state=%s",
+                        cand_id,
+                        getattr(spec_task, "state", ""),
+                    )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=str(candidate.get("batch_id") or ""),
+                        status="recovery_failed",
+                        rationale="local-explore outcome unrecoverable from persisted results",
+                        provenance="pump",
                     )
                 return ""
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
@@ -2418,9 +2428,12 @@ class FrameworkPhase(PhaseHandler):
     def _framework_agent_ranker_client(self) -> Any:
         """Return an OpenAI-compatible async client for ranking, or ``None``.
 
-        Reuses the ProposalScorer's client when present (same gateway/auth);
-        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
-        ``OPENAI_BASE_URL``. Cached on first successful build.
+        Reuses the ProposalScorer's client when present (same gateway/auth),
+        then the orchestration backend's own client (so the LLM ranker is on by
+        default whenever orchestration has LLM credentials); otherwise builds
+        one from the orchestration backend's configured key/URL env (falling
+        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        Cached on first successful build.
         """
         import os
 
@@ -2437,14 +2450,35 @@ class FrameworkPhase(PhaseHandler):
                     return client
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
+        # Reuse the orchestration backend's own OpenAI-compatible client when it
+        # exposes one (e.g. CodexBackend): same gateway + auth as the running
+        # session, so the ranker is default-on without extra configuration.
+        backend = self.backends.get("orchestration")
+        backend_client = getattr(backend, "_client", None)
+        if backend_client is not None and hasattr(backend_client, "chat"):
+            self._coord._fa_ranker_client = backend_client
+            return backend_client
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError:
             return None
-        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Resolve credentials from the orchestration backend's configured env
+        # names first (so a split-gateway orchestration key is reused), then the
+        # shared gateway defaults.
+        api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
+        base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
+        api_key = (
+            os.environ.get(api_key_env)
+            or os.environ.get("SAFE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
         if not api_key:
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        base_url = (
+            os.environ.get(base_url_env)
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
+        )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()
@@ -3104,6 +3138,7 @@ class FrameworkPhase(PhaseHandler):
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             "candidate_count": len(norm),
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
@@ -3473,6 +3508,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
             "provenance": str(provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
         # onto the row too, without clobbering the canonical fields above, so
@@ -3759,7 +3795,10 @@ class FrameworkPhase(PhaseHandler):
             result: The task result; only ``kept``/``reverted`` statuses are
                 recorded.
         """
-        res = getattr(result, "result", None)
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("framework_agent_authoring")):
+            return
+        res = result if isinstance(result, dict) else getattr(result, "result", None)
         if not isinstance(res, dict):
             return
         status = str(res.get("status") or "")
@@ -3777,7 +3816,6 @@ class FrameworkPhase(PhaseHandler):
         # Do NOT stamp a progress row here — that would block the retry pump.
         if status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore"):
             return
-        params = getattr(task, "params", None) or {}
         # Resolve the FRAMEWORK candidate id (a PR URL) that this authored
         # patch belongs to. The integrate_patch task carries only
         # ``specialist_task_id``; map that back to the originating candidate via
@@ -3800,38 +3838,23 @@ class FrameworkPhase(PhaseHandler):
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": "",
-            "status": status,
-            "provenance": "authored",
-            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-            "gain_pct": gain,
-            "kept": status == "kept",
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=status == "kept",
-                provenance="authored",
-                reason=str(res.get("reason") or ""),
-                gain_pct=gain,
-                accuracy_pass=res.get("accuracy_pass"),
-                extra={"specialist_task_id": str(params.get("specialist_task_id") or "")},
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: authored decision.json write failed", exc_info=True)
+        progress = getattr(self.shared_state, "framework_agent_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            self.shared_state.framework_agent_phase_progress = progress
+        matching = [
+            row
+            for row in progress
+            if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id
+        ]
+        if any(str(row.get("provenance") or "") != "authored_empty" for row in matching):
+            return
+        if matching:
+            progress[:] = [
+                row
+                for row in progress
+                if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
+            ]
         # Roll the batch max-gain stat the plateau judge reads.
         batches = getattr(self.shared_state, "framework_agent_batches", None) or []
         if isinstance(batches, list) and batch_id:
@@ -3841,13 +3864,24 @@ class FrameworkPhase(PhaseHandler):
                     if gain > prev:
                         entry["max_gain_pct_observed_in_batch"] = gain
                     break
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "FRAMEWORK authored-outcome: save failed for task=%s",
-                getattr(task, "task_id", "?"),
-            )
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status=status,
+            kept=status == "kept",
+            rationale=str(res.get("reason") or ""),
+            provenance="authored",
+            gain_pct=gain,
+            extra={
+                "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+                "accuracy_pass": res.get("accuracy_pass"),
+                "specialist_task_id": spec_tid,
+                "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+            },
+        )
+        if not recorded:
+            return
         log.info(
             "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
@@ -3855,6 +3889,61 @@ class FrameworkPhase(PhaseHandler):
             status,
             gain,
         )
+
+    async def _recover_framework_agent_authoring_outcome(
+        self,
+        *,
+        specialist_task: "Task",
+    ) -> bool:
+        """Recover a missed authoring outcome from persisted delegated results."""
+        params = getattr(specialist_task, "params", None) or {}
+        specialist_task_id = str(getattr(specialist_task, "task_id", "") or "")
+        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        if not specialist_task_id or not cand_id:
+            return False
+        messages = await self.bus.tail(n=10000, topic="delegated_result")
+        for message in messages:
+            payload = getattr(message, "payload", None) or {}
+            if (
+                str(payload.get("task_id") or "") != specialist_task_id
+                or str(payload.get("kind") or "") != "specialist"
+            ):
+                continue
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            done_payload = result.get("specialist_done")
+            if isinstance(done_payload, dict):
+                self._record_framework_agent_authoring_empty_outcome(
+                    task=specialist_task,
+                    done_payload=done_payload,
+                )
+                if cand_id in self._framework_processed_candidate_keys():
+                    return True
+            break
+        for message in messages:
+            payload = getattr(message, "payload", None) or {}
+            if str(payload.get("kind") or "") != "integrate_patch":
+                continue
+            task_id = str(payload.get("task_id") or "")
+            if not task_id:
+                continue
+            try:
+                integrate_task = await self.tasks.get(task_id)
+            except Exception:  # noqa: BLE001 — stale bus entries are ignored
+                continue
+            integrate_params = getattr(integrate_task, "params", None) or {}
+            if (
+                str(integrate_params.get("specialist_task_id") or "") != specialist_task_id
+                or not bool(integrate_params.get("framework_agent_authoring"))
+            ):
+                continue
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            self._record_framework_agent_authored_outcome(
+                task=integrate_task,
+                result=result,
+            )
+            if cand_id in self._framework_processed_candidate_keys():
+                return True
+        return False
 
     def _record_framework_agent_authoring_empty_outcome(
         self,
@@ -3881,8 +3970,6 @@ class FrameworkPhase(PhaseHandler):
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
-            return
-        if (self.shared_state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
@@ -3935,10 +4022,6 @@ class FrameworkPhase(PhaseHandler):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        if cand_id in self._framework_processed_candidate_keys():
-            return
         # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
         sem = str((audit or {}).get("semantic_status") or "").strip().lower()
@@ -3949,40 +4032,18 @@ class FrameworkPhase(PhaseHandler):
         else:
             status = "author_empty"
         reason = str(inner.get("summary") or "").strip()[:500]
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": "",
-            "status": status,
-            "provenance": "authored_empty",
-            "kept": False,
-            "gain_pct": 0.0,
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=False,
-                provenance="authored_empty",
-                reason=reason,
-                gain_pct=0.0,
-                extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: authored-empty decision.json write failed", exc_info=True)
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "FRAMEWORK authored-empty: save failed for task=%s",
-                getattr(task, "task_id", "?"),
-            )
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status=status,
+            kept=False,
+            rationale=reason,
+            provenance="authored_empty",
+            gain_pct=0.0,
+            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+        )
+        if not recorded:
+            return
         log.info(
             "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
             cand_id,

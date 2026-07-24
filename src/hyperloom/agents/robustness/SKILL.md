@@ -128,7 +128,7 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `crash_count_high` (≥ 5) | high | `alert(high)` + `escalate_strategy_change` | M1 |
 | `crash_count_emergency` (≥ 10) | high | `alert(high)` + `escalate_strategy_change` | M1 |
 | `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | M1 |
-| `repeated_failure` (≥ 2 same family) | medium | `alert(medium)` (high tier triggers `prune_branch`) | M1 |
+| `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(medium)`; HIGH tier also emits `prune_branch(family)` | M1 |
 | `pod_not_running` (Failed) | high | `alert(high)` | M1 |
 | `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
 | `pod_no_metrics` (≥ no_metrics_warn_s) | low | `send_message(observation)` | M1 |

@@ -238,32 +238,6 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_forged_task_bypass_env_allows_without_verdict(tmp_path, monkeypatch):
-    # The out-of-band operator override still forces through with no verdict.
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
-
-    class _SS:
-        def get_specialist_patch_verdict(self, tid):
-            return ""
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True},
-            extra={"shared_state": _SS()},
-        )
-    )
-    # With bypass set, the verdict gate does not reject; apply_only short-circuits the bench.
-    assert res["status"] != "rejected_by_critic"
-
-
-@pytest.mark.asyncio
 async def test_keep_path(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()
@@ -843,7 +817,8 @@ async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg)},
         output_root=tmp_path,
-        config_changes_applied={"E": "1"},
+        extra_server_args_applied="",
+        extra_envs_applied={"E": "1"},
         specialist_task_id="abcdef123456",
     )
     assert bench["output_throughput"] == 200.0
@@ -865,7 +840,8 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
         output_root=tmp_path,
-        config_changes_applied={},
+        extra_server_args_applied="",
+        extra_envs_applied={},
         specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is True
@@ -886,7 +862,8 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
         output_root=tmp_path,
-        config_changes_applied={},
+        extra_server_args_applied="",
+        extra_envs_applied={},
         specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is False
@@ -908,7 +885,8 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         _, gate = await ex._bench_patch(
             params={"config_path": str(cfg)},
             output_root=tmp_path,
-            config_changes_applied={},
+            extra_server_args_applied="",
+            extra_envs_applied={},
             specialist_task_id="abcdef123456",
         )
     assert gate["accuracy_pass"] is None
@@ -922,7 +900,8 @@ async def test_bench_patch_config_not_found(tmp_path):
         await ex._bench_patch(
             params={"config_path": str(tmp_path / "missing.yaml")},
             output_root=tmp_path,
-            config_changes_applied={},
+            extra_server_args_applied="",
+            extra_envs_applied={},
             specialist_task_id="abc",
         )
 

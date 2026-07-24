@@ -17,6 +17,7 @@ from hyperloom.agents.robustness.sources.base import SourceData
 def _ctx(
     *,
     tick: int = 0,
+    macro_cycle: int = 0,
     cumulative_gain_validated: float = 0.0,
     elapsed_minutes: float = 0.0,
     optimization_stack_size: int = 0,
@@ -29,6 +30,7 @@ def _ctx(
     snap = SharedStateSnapshot(
         session_id="sess-1",
         tick=tick,
+        macro_cycle=macro_cycle,
         cumulative_gain_validated=cumulative_gain_validated,
         elapsed_minutes=elapsed_minutes,
         optimization_stack_size=optimization_stack_size,
@@ -113,6 +115,15 @@ def test_plateau_resets_on_movement():
     det.evaluate(_ctx(tick=1, cumulative_gain_validated=5.0), SourceData())
     out = det.evaluate(_ctx(tick=2, cumulative_gain_validated=7.0), SourceData())
     assert all(s.name != "gain_plateau" for s in out)
+
+
+def test_gain_plateau_history_resets_on_macro_cycle():
+    det = ProgressDetector(ProgressConfig(gain_window_ticks=2, gain_epsilon_pct=0.5))
+    det.evaluate(_ctx(tick=0, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
+    out = det.evaluate(_ctx(tick=1, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
+    assert any(sym.name == "gain_plateau" for sym in out)
+    out = det.evaluate(_ctx(tick=2, macro_cycle=1, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
+    assert all(sym.name != "gain_plateau" for sym in out)
 
 
 def test_closing_phase_short_circuits():

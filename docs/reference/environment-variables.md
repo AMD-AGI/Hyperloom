@@ -115,7 +115,7 @@ The following variables control the kernel optimization backend ladder.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`off`) | Opt-in switch for routing single-node serving benchmarks and `needs_gpu` specialists through Ray actors. Set to `1` / `true` / `yes` / `on` to enable Ray-managed leases. Leave unset, or set `0` / `false` / `no` / `off`, to use the local subprocess path. Multi-node serving remains controlled by the multi-node backend. |
+| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`on` for single-node) | Controls whether single-node serving benchmarks and `needs_gpu` specialists run through Ray actors. When unset, single-node runs are routed through Ray-managed leases while multi-node stays on the multi-node backend. Set to `0` / `false` / `no` / `off` to force the local subprocess path, or `1` / `true` / `yes` / `on` to force Ray. |
 
 ---
 
@@ -132,6 +132,19 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 |----------|---------|-------------|
 | `HYPERLOOM_CODEX_WEB_SEARCH` | Unset (off) | Set to `1`/`true` to route every Codex turn through the OpenAI Responses API with the built-in `web_search` tool. Default keeps the existing `chat.completions` path unchanged. |
 | `HYPERLOOM_`<br>`CODEX_WEB_SEARCH`<br>`_CONTEXT_SIZE` | `medium` | Passed through as the `web_search` tool's `search_context_size` (`low` / `medium` / `high`). Ignored unless `HYPERLOOM_CODEX_WEB_SEARCH` is on. |
+
+---
+
+## Single-node Ray GPU scheduling
+
+These variables tune the single-node Ray execution path (active when
+`INFERENCE_OPTIMIZER_RAY_EXEC=1` and `--nodes=1`). They have no effect on
+multi-node runs or when the Ray backend is disabled.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serialises execution on the physical GPU(s) via `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
 
 ---
 
