@@ -27,12 +27,13 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
   three hours remain. This removes legacy cyclic-mode branches and makes phase
   progression more predictable across bounded and long-horizon runs.
 
-- **Opt-in Ray serving and GPU execution**: The opt-in Ray path now places all
-  serving and GPU-specialist operations under the whole-machine `serving_slot`
+- **Ray-managed single-node serving and GPU execution**: The Ray path now places
+  all serving and GPU-specialist operations under the whole-machine `serving_slot`
   mutex, including framework-agent benchmarks, `integrate_patch`, and concurrency
   sweeps. GPU specialists can queue without blocking the Coordinator, serving
   receives scheduling priority, and stale AITER JIT locks are cleaned before
-  server launch. Local subprocess execution remains the default; multi-node
+  server launch. Single-node runs default to the Ray path; set
+  `INFERENCE_OPTIMIZER_RAY_EXEC=0` to force local subprocess execution. Multi-node
   behavior is unchanged.
 
 - **vLLM and serving-environment reliability**: Hyperloom now isolates co-located
