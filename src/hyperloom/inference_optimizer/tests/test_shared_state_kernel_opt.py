@@ -644,6 +644,15 @@ def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
     assert "k001" not in state.rejected_kernel_ids
 
 
+def test_integrate_attempt_is_stamped_with_macro_cycle(state: SharedState):
+    state.macro_cycle = 2
+    entry = state.record_kernel_integrate_result(
+        _integrate_result("k001", decision="KEEP", gain_pct=1.0),
+    )
+    assert entry is not None
+    assert entry["attempts"][-1]["cycle"] == 2
+
+
 def test_integrate_fault_rejected_after_budget_exhausted(state: SharedState):
     """The first fault stays retryable; the second exhausts the budget and rejects."""
     entry = state.record_kernel_integrate_result(

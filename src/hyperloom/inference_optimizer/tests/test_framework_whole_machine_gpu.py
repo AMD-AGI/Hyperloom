@@ -399,3 +399,143 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
     assert probe.entries
     # First card of the carved (serving-disjoint) pool, not card 0.
     assert probe.gpu_ids_by_task[probe.entries[0]] == [4]
+
+
+# ── 6. serving-priority defer: GPU specialist stays queued, lane released ─────
+
+
+@pytest.mark.asyncio
+async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path, monkeypatch):
+    """§3.4 dispatcher E2E: when serving_slot_busy()==True the GPU specialist is
+    deferred (stays queued), its executor is never called, and the SQLite
+    gpu_research_lane lease is released so it leaves no held holder."""
+    import hyperloom.orchestrator.actions.executors._ray_backend as _rb
+
+    # Enable serving-priority and make the slot always appear busy.
+    monkeypatch.setattr(_rb, "ray_serving_priority_enabled", lambda: True)
+    monkeypatch.setattr(_rb, "serving_slot_busy", lambda: True)
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "scope": "freeform",
+            "task_description": "probe a kernel while serving is active",
+            "needs_gpu": True,
+            "gpu_count": 1,
+        },
+        idempotency_key="serving-priority-defer",
+        requires_lanes=["research_lane", "gpu_research_lane"],
+        lease_ttl_sec=3600,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    # Executor must NOT have run — the task should still be queued.
+    assert not probe.entries, "executor must not run while serving slot is busy"
+    still_queued = await coord.tasks.queued()
+    assert any(t.idempotency_key == "serving-priority-defer" for t in still_queued), (
+        "GPU specialist must remain queued when serving slot is busy"
+    )
+
+    # The SQLite lane lease must have been released — no residual holder.
+    holders = await coord.locks.lane_holders()
+    assert holders.get("gpu_research_lane", 0) == 0, (
+        "gpu_research_lane must not remain held after defer"
+    )
+    assert holders.get("research_lane", 0) == 0, (
+        "research_lane must not remain held after defer"
+    )
+
+
+@pytest.mark.asyncio
+async def test_serving_priority_defers_on_second_probe_racing_admit(tmp_path, monkeypatch):
+    """§3.4 immediate-probe regression: a serving start that races between the
+    pass start and the per-task admit must still trigger a defer.
+
+    This test uses a call-count-based side_effect so the first call
+    (ray_serving_priority_enabled check) returns True, and the first
+    serving_slot_busy() probe (at admit time) returns True — simulating a
+    serving start that happened between the pass beginning and admit.
+    """
+    import hyperloom.orchestrator.actions.executors._ray_backend as _rb
+
+    # serving-priority enabled; the slot was free at the start of the pass
+    # but became busy by the time we probe at admit.
+    busy_calls: list[bool] = []
+
+    def _slot_busy_racing() -> bool:
+        busy_calls.append(True)
+        # Returns True on every call — simulates serving starting mid-pass.
+        return True
+
+    monkeypatch.setattr(_rb, "ray_serving_priority_enabled", lambda: True)
+    monkeypatch.setattr(_rb, "serving_slot_busy", _slot_busy_racing)
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "scope": "freeform",
+            "task_description": "probe right as serving started",
+            "needs_gpu": True,
+            "gpu_count": 1,
+        },
+        idempotency_key="serving-priority-race",
+        requires_lanes=["research_lane", "gpu_research_lane"],
+        lease_ttl_sec=3600,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    # The per-task probe must have been called at least once.
+    assert busy_calls, "serving_slot_busy must be called at admit time"
+
+    # Task must be deferred.
+    assert not probe.entries, "executor must not run when slot is busy at admit"
+    still_queued = await coord.tasks.queued()
+    assert any(t.idempotency_key == "serving-priority-race" for t in still_queued)
+
+    # Lane must be released.
+    holders = await coord.locks.lane_holders()
+    assert holders.get("gpu_research_lane", 0) == 0
+    assert holders.get("research_lane", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, monkeypatch):
+    """§3.4 inverse: when serving_slot_busy()==False the GPU specialist IS
+    admitted (executor runs), so the serving-priority gate is not overly
+    aggressive."""
+    import hyperloom.orchestrator.actions.executors._ray_backend as _rb
+
+    monkeypatch.setattr(_rb, "ray_serving_priority_enabled", lambda: True)
+    monkeypatch.setattr(_rb, "serving_slot_busy", lambda: False)
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+
+    await coord.tasks.create_or_return_existing(
+        kind="specialist",
+        params={
+            "scope": "freeform",
+            "task_description": "probe a kernel while slot is free",
+            "needs_gpu": True,
+            "gpu_count": 1,
+        },
+        idempotency_key="serving-priority-free",
+        requires_lanes=["research_lane", "gpu_research_lane"],
+        lease_ttl_sec=3600,
+    )
+
+    await coord._pump_dispatcher_once()
+
+    assert probe.entries, "executor must run when serving slot is free"
+    assert not await coord.tasks.queued()

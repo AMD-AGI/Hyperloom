@@ -985,6 +985,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_plan_cycle_focus": "phase_explore",
         "_record_cycle_strategy_for_current_cycle": "phase_explore",
         "_cycle_strategy_seed_block": "phase_explore",
+        "_cycle_directive_fallback": "phase_explore",
+        "_reseed_orch_prompt_for_cycle": "phase_explore",
         "_apply_macro_cycle_reloop": "phase_explore",
         "_run_cycle_soft_restart": "phase_explore",
         "_restart_inference_servers": "phase_explore",
