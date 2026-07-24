@@ -146,8 +146,9 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# Full workload sweep action; named constant so the
-# ``sweep_phase_singleton`` rule has a single source of truth.
+# Full workload sweep action; named constant so the ``sweep_phase_singleton``
+# rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
+# action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
 SWEEP_ACTION_NAME: str = "sweep"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
@@ -920,6 +921,9 @@ class PolicyGate:
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
+        # conc_sweep has no equivalent guard here: it is a Coordinator-internal
+        # action (never LLM-delegated), so _validate_phase_action rejects any LLM
+        # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")

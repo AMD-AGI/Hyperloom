@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_str_list
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -1670,7 +1670,7 @@ class WritebackCollaborator:
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
             try:
-                self._coord._harvest_research_scout(done_payload)
+                await self._coord._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "research-scout harvest failed for task=%s",
@@ -1796,7 +1796,7 @@ class WritebackCollaborator:
                 added,
             )
 
-    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+    async def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
@@ -1848,7 +1848,12 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
-        self._coord._reset_orchestration_conversation()
+        compacted = await self._coord._maybe_checkpoint_orchestration(
+            tick=int(getattr(self.shared_state, "tick", 0) or 0),
+            force=True,
+        )
+        if not compacted:
+            self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -1992,7 +1997,10 @@ class WritebackCollaborator:
         # (config_changes_applied={}) do not clear prior explore/env layers.
         _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
         _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
-        _merged_envs = {**_prev_envs, **_new_envs}
+        _merged_envs = dict(_prev_envs)
+        for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
+            _merged_envs.pop(_key, None)
+        _merged_envs.update(_new_envs)
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),

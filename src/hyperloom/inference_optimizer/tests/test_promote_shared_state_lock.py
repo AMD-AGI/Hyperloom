@@ -597,6 +597,32 @@ async def test_integrate_keep_preserves_prior_explore_envs(session_dir):
     )
 
 
+def test_lift_applies_unset_envs_before_new_envs(session_dir):
+    coord = _coord(session_dir)
+    coord.shared_state.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "",
+        "extra_envs": {"KEEP": "old", "DROP": "old", "RESTORE": "old"},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {
+            "name": "env-update",
+            "extra_server_args": "",
+            "extra_envs": {"KEEP": "new", "RESTORE": "new"},
+            "unset_envs": ["DROP", "RESTORE"],
+        },
+    )
+
+    assert coord.shared_state.current_best["extra_envs"] == {
+        "KEEP": "new",
+        "RESTORE": "new",
+    }
+
+
 @pytest.mark.asyncio
 async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
     """source_snapshot/framework_root/base_sha from the lift bv reach the stack entry."""

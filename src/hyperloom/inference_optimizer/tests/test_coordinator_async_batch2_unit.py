@@ -1571,7 +1571,11 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 async def test_record_specialist_result_research_scout(coord: Coordinator, monkeypatch) -> None:
     task = _ptask("rec-spec-2", "specialist")
     harvested: list[dict] = []
-    monkeypatch.setattr(coord, "_harvest_research_scout", lambda dp: harvested.append(dp))
+
+    async def harvest(done_payload):
+        harvested.append(done_payload)
+
+    monkeypatch.setattr(coord, "_harvest_research_scout", harvest)
     await coord._record_specialist_result(
         task=task,
         done_payload={
