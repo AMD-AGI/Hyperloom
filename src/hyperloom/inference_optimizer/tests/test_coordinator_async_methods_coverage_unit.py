@@ -280,12 +280,30 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
 
 
 # -- _harvest_research_scout -----------------------------------------------
-def test_harvest_research_scout_empty_and_populated(coord: Coordinator) -> None:
+@pytest.mark.asyncio
+async def test_harvest_research_scout_empty_and_populated(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
     from hyperloom.orchestrator.knowledge import research_hints
 
-    coord._harvest_research_scout({})
+    events: list[str] = []
+
+    async def checkpoint(**kwargs):
+        assert kwargs["force"] is True
+        events.append("checkpoint")
+        return False
+
+    def reset():
+        events.append("reset")
+        coord._orchestration_seeded = False
+
+    monkeypatch.setattr(coord, "_maybe_checkpoint_orchestration", checkpoint)
+    monkeypatch.setattr(coord, "_reset_orchestration_conversation", reset)
+
+    await coord._harvest_research_scout({})
     coord._orchestration_seeded = True
-    coord._harvest_research_scout(
+    await coord._harvest_research_scout(
         {
             "new_findings": [
                 {
@@ -306,9 +324,11 @@ def test_harvest_research_scout_empty_and_populated(coord: Coordinator) -> None:
     assert research_hints.load_hints(coord.session_dir)[0]["what"] == "enable aiter"
     assert "https://example.test/aiter" in coord.shared_state.research_scout_seen_pr_ids
     assert coord._orchestration_seeded is False
+    assert events == ["checkpoint", "reset", "checkpoint", "reset"]
 
 
-def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
+@pytest.mark.asyncio
+async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
     """LLM-authored competitor numbers must never be persisted as a consumable
     competitor target.
 
@@ -320,7 +340,7 @@ def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Co
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 
-    coord._harvest_research_scout(
+    await coord._harvest_research_scout(
         {
             "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
             "competitor_target": {

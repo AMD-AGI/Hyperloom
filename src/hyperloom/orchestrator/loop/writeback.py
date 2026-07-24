@@ -1640,7 +1640,7 @@ class WritebackCollaborator:
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
             try:
-                self._coord._harvest_research_scout(done_payload)
+                await self._coord._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "research-scout harvest failed for task=%s",
@@ -1753,7 +1753,7 @@ class WritebackCollaborator:
                 added,
             )
 
-    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+    async def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
@@ -1805,7 +1805,12 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
-        self._coord._reset_orchestration_conversation()
+        compacted = await self._coord._maybe_checkpoint_orchestration(
+            tick=int(getattr(self.shared_state, "tick", 0) or 0),
+            force=True,
+        )
+        if not compacted:
+            self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
