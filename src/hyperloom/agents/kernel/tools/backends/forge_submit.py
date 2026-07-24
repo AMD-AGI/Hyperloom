@@ -1453,8 +1453,13 @@ def _export_best_artifacts(
     else:
         try:
             shutil.copy2(worktree_kernel_file, primary)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning(
+                "forge export: could not copy primary artifact %s to %s: %s",
+                worktree_kernel_file,
+                primary,
+                exc,
+            )
 
     # A recovered run exports only the validated commit. A normally completed
     # run without checkpoint evidence retains the legacy working-tree export.
@@ -1484,8 +1489,13 @@ def _export_best_artifacts(
                 continue
             try:
                 shutil.copy2(srcp, dstp)
-            except OSError:
-                pass
+            except OSError as exc:
+                log.warning(
+                    "forge export: could not copy changed artifact %s to %s: %s",
+                    srcp,
+                    dstp,
+                    exc,
+                )
 
     # Full multi-file patch (excludes pre-existing dirty).
     patch_cmd = ["git", "-C", workspace, "diff", base_commit]
@@ -1795,12 +1805,16 @@ def _terminate_forge_process(
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
-        pass
+        log.debug("forge process group %d exited before SIGTERM", proc.pid)
     except (PermissionError, OSError):
         try:
             proc.terminate()
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug(
+                "forge process %d exited before terminate fallback: %s",
+                proc.pid,
+                exc,
+            )
     try:
         stdout, stderr = proc.communicate(timeout=grace_sec)
         _signal_processes(descendants, signal.SIGKILL)
@@ -1818,12 +1832,16 @@ def _terminate_forge_process(
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            log.debug("forge process group %d exited before SIGKILL", proc.pid)
         except (PermissionError, OSError):
             try:
                 proc.kill()
-            except OSError:
-                pass
+            except OSError as exc:
+                log.debug(
+                    "forge process %d exited before kill fallback: %s",
+                    proc.pid,
+                    exc,
+                )
         try:
             stdout, stderr = proc.communicate(timeout=5)
             return stdout or "", stderr or ""

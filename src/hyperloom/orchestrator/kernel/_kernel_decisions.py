@@ -1104,9 +1104,6 @@ def untried_hot_reusable_kernels(
         attempt = attempts.get(member_id) or {}
         if not isinstance(attempt, dict) or not attempt:
             return False
-        recorded_key = str(attempt.get("task_group_key") or "")
-        if group_key and recorded_key:
-            return group_key == recorded_key
         recorded_source = str(attempt.get("last_source_file") or "")
         return not source or not recorded_source or source == recorded_source
 
