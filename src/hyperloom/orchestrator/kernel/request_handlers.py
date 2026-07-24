@@ -1180,6 +1180,50 @@ def _fill_integrate_defaults_from_state(
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
 
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_records = state.pending_kernel_integration_records()
+    pending_record = next(
+        (
+            record
+            for record in pending_records
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is None and resolved.get("kernel_id"):
+        requested_kernel_id = str(resolved.get("kernel_id") or "")
+        requested_task_key = str(resolved.get("task_group_key") or "")
+        pending_record = next(
+            (
+                record
+                for record in pending_records
+                if str(record.get("kernel_id") or "") == requested_kernel_id
+                and (
+                    not requested_task_key
+                    or str(record.get("task_group_key") or "")
+                    == requested_task_key
+                )
+            ),
+            None,
+        )
+    if pending_record is not None:
+        resolved.setdefault(
+            "integration_id",
+            str(pending_record.get("integration_id") or ""),
+        )
+        resolved.setdefault(
+            "kernel_id",
+            str(pending_record.get("kernel_id") or ""),
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
         bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if bt > 0:
@@ -1236,6 +1280,47 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     kernel_id = str(resolved.get("kernel_id") or "")
     state = SharedState.load_or_init(session_dir)
     last_kernel = state.last_kernel_opt or {}
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_record = next(
+        (
+            record
+            for record in state.pending_kernel_integration_records()
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is not None:
+        kernel_id = str(pending_record.get("kernel_id") or kernel_id)
+        resolved["kernel_id"] = kernel_id
+        resolved["integration_id"] = str(
+            pending_record.get("integration_id") or integration_id
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+        _fill_integrate_snapshot_from_bundle(
+            resolved,
+            pending_record.get("artifact_bundle"),
+        )
+        if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
+            resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
+        if not resolved.get("patch_path"):
+            resolved["patch_path"] = str(
+                pending_record.get("deploy_patch_path")
+                or pending_record.get("artifact_path")
+                or ""
+            )
+        if not resolved.get("kernel_repo") and pending_record.get(
+            "deploy_repo_root"
+        ):
+            resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
+        if not resolved.get("source_file") and pending_record.get("source_file"):
+            resolved["source_file"] = str(pending_record["source_file"])
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch + snapshot dir so the whole
@@ -4026,6 +4111,7 @@ def _batch_kernel_candidates(
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
+    attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
         _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
@@ -4050,6 +4136,7 @@ def _batch_kernel_candidates(
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
             attempts_by_kid = dict(state.kernel_opt_attempts or {})
+            attempts_by_task = dict(state.kernel_opt_task_attempts or {})
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
             log.exception(
@@ -4133,6 +4220,15 @@ def _batch_kernel_candidates(
         grouped_kernel_ids.update(member_ids)
         group_id = str(group.get("task_group_id") or "")
         group_key = str(group.get("task_group_key") or "")
+        group_key_aliases = {
+            group_key,
+            *[
+                str(alias)
+                for alias in (group.get("legacy_task_group_keys") or [])
+                if str(alias)
+            ],
+        }
+        group_key_aliases.discard("")
         primary = str(group.get("primary_kernel_id") or "")
         if any(member_id in in_flight for member_id in member_ids):
             for member_id in member_ids:
@@ -4144,12 +4240,24 @@ def _batch_kernel_candidates(
         recorded_ledger = next(
             (
                 (ledger_id, entry)
-                for ledger_id, entry in attempts_by_kid.items()
+                for ledger_id, entry in {
+                    **attempts_by_kid,
+                    **attempts_by_task,
+                }.items()
                 if isinstance(entry, dict)
                 and (
                     (
                         group_key
-                        and str(entry.get("task_group_key") or "") == group_key
+                        and (
+                            str(entry.get("stable_task_key") or "")
+                            == group_key
+                            or str(entry.get("task_group_key") or "")
+                            == group_key
+                            or str(entry.get("stable_task_key") or "")
+                            in group_key_aliases
+                            or str(entry.get("task_group_key") or "")
+                            in group_key_aliases
+                        )
                     )
                     or (
                         not group_key
@@ -4433,6 +4541,22 @@ def _stamp_task_group_result(
     stamped = dict(result)
     stamped.setdefault("task_group_id", str(task_group.get("task_group_id") or ""))
     stamped.setdefault("task_group_key", str(task_group.get("task_group_key") or ""))
+    stamped.setdefault(
+        "identity_route",
+        str(task_group.get("identity_route") or ""),
+    )
+    stamped.setdefault(
+        "operator_identity",
+        dict(task_group.get("operator_identity") or {}),
+    )
+    stamped.setdefault(
+        "legacy_task_group_keys",
+        [
+            str(item)
+            for item in (task_group.get("legacy_task_group_keys") or [])
+            if str(item)
+        ],
+    )
     stamped.setdefault(
         "task_group_kernel_ids",
         [str(item) for item in (task_group.get("kernel_ids") or []) if str(item)],
@@ -5588,6 +5712,8 @@ async def integrate_handler(
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
         "task_group_key": str(payload.get("task_group_key") or ""),
+        "identity_route": str(payload.get("identity_route") or ""),
+        "integration_id": str(payload.get("integration_id") or ""),
     }
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"

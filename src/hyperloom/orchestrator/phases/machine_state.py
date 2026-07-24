@@ -1466,13 +1466,21 @@ def kernel_work_pending(state: Any) -> bool:
             if source_file:
                 integrated_sources.add(source_file)
 
-    attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    attempts = (
+        getattr(state, "kernel_opt_task_attempts", None)
+        or getattr(state, "kernel_opt_attempts", None)
+        or {}
+    )
     if not isinstance(attempts, dict):
         return False
-    for kid, attempt in attempts.items():
-        kernel_id = str(kid or "")
+    for ledger_id, attempt in attempts.items():
         if not isinstance(attempt, dict):
             continue
+        kernel_id = str(
+            attempt.get("current_kernel_id")
+            or attempt.get("kernel_id")
+            or ledger_id
+        )
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
         integrated = False

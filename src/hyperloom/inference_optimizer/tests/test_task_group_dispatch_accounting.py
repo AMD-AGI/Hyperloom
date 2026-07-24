@@ -387,6 +387,59 @@ def test_stable_group_key_survives_member_id_reranking(tmp_path):
     ) == []
 
 
+def test_versioned_group_identity_matches_legacy_ledger_alias(tmp_path):
+    candidates_path = tmp_path / "candidates.json"
+    legacy_key = '["py","operator","/repo/operator.py","forward"]'
+    versioned_key = (
+        '{"operation":"operator","source_kind":"py",'
+        '"source_path":"/repo/operator.py","version":2}'
+    )
+    candidates_payload = {
+        "hot_kernels": [
+            {
+                "kernel_id": "k002",
+                "name": "operator",
+                "gpu_pct": 20.0,
+                "source_file": "/repo/operator.py",
+                "reusable_native_kernel": True,
+            }
+        ],
+        "reusable_native_kernel_ids": ["k002"],
+        "task_groups": [
+            {
+                "task_group_id": "tg001",
+                "task_group_key": versioned_key,
+                "legacy_task_group_keys": [legacy_key],
+                "primary_kernel_id": "k002",
+                "kernel_ids": ["k002"],
+                "rows": [],
+            }
+        ],
+    }
+    candidates_path.write_text(json.dumps(candidates_payload))
+    state = SharedState.load_or_init(tmp_path)
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k009",
+            "source_file": "/repo/operator.py",
+            "task_group_id": "tg004",
+            "task_group_key": legacy_key,
+            "task_group_primary_kernel_id": "k009",
+            "task_group_kernel_ids": ["k009"],
+            "proposal": {"decision": "KEEP"},
+            "verification": {"micro_speedup": 1.1},
+            "attempts": [],
+        }
+    )
+    state.save(tmp_path)
+
+    assert krh._batch_kernel_candidates(
+        {"candidates_path": str(candidates_path)},
+        session_dir=tmp_path,
+    ) == []
+
+
 def test_group_ledger_migrates_to_reranked_member_id():
     state = SharedState()
     task_group_key = '["py","operator","/repo/operator.py","forward"]'
@@ -418,6 +471,90 @@ def test_group_ledger_migrates_to_reranked_member_id():
     assert len(state.kernel_opt_attempts["k002"]["history"]) == 2
 
 
+def test_pending_keep_refreshes_ordinal_after_rerank():
+    state = SharedState()
+    task_group_key = "stable-task"
+    base_result = {
+        "status": "ok",
+        "source_file": "/repo/operator.py",
+        "task_group_id": "tg004",
+        "task_group_key": task_group_key,
+        "task_group_kernel_ids": ["k009"],
+        "proposal": {"decision": "KEEP"},
+        "verification": {
+            "micro_speedup": 1.2,
+            "best_artifact_path": "/artifacts/operator.py",
+        },
+        "attempts": [],
+    }
+    state.record_kernel_opt(
+        {
+            **base_result,
+            "kernel_id": "k009",
+            "task_group_primary_kernel_id": "k009",
+        }
+    )
+    state.record_kernel_opt(
+        {
+            **base_result,
+            "kernel_id": "k002",
+            "task_group_id": "tg001",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+        }
+    )
+
+    pending = state.pending_kernel_integration_records()
+    assert len(pending) == 1
+    assert pending[0]["kernel_id"] == "k002"
+    assert state.pending_keep_kernel_ids() == ["k002"]
+
+
+def test_cross_route_alias_migrates_one_stable_task():
+    state = SharedState()
+    operator_alias = "operator-v2-without-function"
+    base_result = {
+        "status": "ok",
+        "source_file": "/repo/operator.py",
+        "task_group_kernel_ids": ["k009"],
+        "proposal": {"decision": "KEEP"},
+        "verification": {
+            "micro_speedup": 1.2,
+            "best_artifact_path": "/artifacts/operator.py",
+        },
+        "attempts": [],
+    }
+    state.record_kernel_opt(
+        {
+            **base_result,
+            "kernel_id": "k009",
+            "task_group_id": "tg004",
+            "task_group_key": "bypass-task-key",
+            "legacy_task_group_keys": [operator_alias],
+            "identity_route": "bypass",
+            "task_group_primary_kernel_id": "k009",
+        }
+    )
+    state.record_kernel_opt(
+        {
+            **base_result,
+            "kernel_id": "k002",
+            "task_group_id": "tg001",
+            "task_group_key": "skill-task-key",
+            "legacy_task_group_keys": [operator_alias],
+            "identity_route": "skill",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+        }
+    )
+
+    assert set(state.kernel_opt_task_attempts) == {"skill-task-key"}
+    assert state.kernel_opt_task_attempts["skill-task-key"]["attempts"] == 2
+    pending = state.pending_kernel_integration_records()
+    assert len(pending) == 1
+    assert pending[0]["kernel_id"] == "k002"
+
+
 def test_group_ledger_migration_preserves_displaced_task():
     state = SharedState()
 
@@ -443,6 +580,151 @@ def test_group_ledger_migration_preserves_displaced_task():
     assert state.kernel_opt_attempts["k001"]["task_group_key"] == "task-b"
     assert state.kernel_opt_attempts["k002"]["attempts"] == 2
     assert state.kernel_opt_attempts["k001"]["attempts"] == 1
+
+
+def test_single_way_ordinal_reuse_preserves_pending_keep(tmp_path):
+    state = SharedState.load_or_init(tmp_path)
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k002",
+            "source_file": "/repo/old.py",
+            "task_group_id": "tg-old",
+            "task_group_key": "task-old",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+            "proposal": {"decision": "KEEP"},
+            "verification": {
+                "micro_speedup": 1.2,
+                "best_artifact_path": "/artifacts/old.py",
+            },
+            "attempts": [],
+        }
+    )
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k002",
+            "source_file": "/repo/new.py",
+            "task_group_id": "tg-new",
+            "task_group_key": "task-new",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+            "proposal": {"decision": "PARTIAL"},
+            "verification": {"micro_speedup": 1.0},
+            "attempts": [],
+        }
+    )
+    state.save(tmp_path)
+
+    reloaded = SharedState.load_or_init(tmp_path)
+    assert set(reloaded.kernel_opt_task_attempts) == {
+        "task-old",
+        "task-new",
+    }
+    pending = reloaded.pending_kernel_integration_records()
+    assert len(pending) == 1
+    assert pending[0]["task_key"] == "task-old"
+    assert pending[0]["artifact_path"] == "/artifacts/old.py"
+
+    resolved, error = krh._resolve_integrate_payload(
+        {
+            "integration_id": pending[0]["integration_id"],
+            "base_tput": 100.0,
+        },
+        session_dir=tmp_path,
+    )
+
+    assert error is None
+    assert resolved["kernel_id"] == "k002"
+    assert resolved["task_group_key"] == "task-old"
+    assert resolved["patch_path"] == "/artifacts/old.py"
+    assert resolved["source_file"] == "/repo/old.py"
+
+    reloaded.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "integration_id": pending[0]["integration_id"],
+            "kernel_id": "k002",
+            "task_group_key": "task-old",
+            "patch_path": "/artifacts/old.py",
+            "target_file": "/repo/old.py",
+            "gain_pct": 1.5,
+        }
+    )
+
+    assert reloaded.pending_kernel_integration_records() == []
+
+
+def test_integrate_rejection_does_not_poison_reused_ordinal(tmp_path):
+    state = SharedState.load_or_init(tmp_path)
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k002",
+            "source_file": "/repo/old.py",
+            "task_group_id": "tg-old",
+            "task_group_key": "task-old",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+            "proposal": {"decision": "KEEP"},
+            "verification": {
+                "micro_speedup": 1.2,
+                "best_artifact_path": "/artifacts/old.py",
+            },
+            "attempts": [],
+        }
+    )
+    pending = state.pending_kernel_integration_records()[0]
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "REVERT",
+            "integration_id": pending["integration_id"],
+            "kernel_id": "k002",
+            "task_group_key": "task-old",
+            "patch_path": "/artifacts/old.py",
+            "target_file": "/repo/old.py",
+            "gain_pct": -1.0,
+        }
+    )
+    state.save(tmp_path)
+    assert "k002" not in state.rejected_kernel_ids
+
+    candidates_path = tmp_path / "candidates.json"
+    candidates_path.write_text(
+        json.dumps(
+            {
+                "hot_kernels": [
+                    {
+                        "kernel_id": "k002",
+                        "name": "new_operator",
+                        "gpu_pct": 20.0,
+                        "source_file": "/repo/new.py",
+                        "reusable_native_kernel": True,
+                    }
+                ],
+                "reusable_native_kernel_ids": ["k002"],
+                "task_groups": [
+                    {
+                        "task_group_id": "tg-new",
+                        "task_group_key": "task-new",
+                        "primary_kernel_id": "k002",
+                        "kernel_ids": ["k002"],
+                        "rows": [],
+                    }
+                ],
+            }
+        )
+    )
+
+    selected = krh._batch_kernel_candidates(
+        {"candidates_path": str(candidates_path)},
+        session_dir=tmp_path,
+    )
+
+    assert [candidate["kernel_id"] for candidate in selected] == ["k002"]
 
 
 @pytest.mark.asyncio

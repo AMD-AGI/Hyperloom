@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
 CASE_SELECTOR_KEY = "CASE_ID"
+OPERATOR_IDENTITY_VERSION = 2
 
 
 def normalize_operation_key(operation: str) -> str:
@@ -74,6 +76,129 @@ def native_operation_key(operation: str) -> str:
         components.append(component)
         index = end + length
     return "::".join(components) if components else normalized
+
+
+def canonical_source_path(source_path: str) -> str:
+    """Return one route-independent absolute source identity."""
+    value = str(source_path or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(Path(value).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return str(Path(value).expanduser().absolute())
+
+
+def build_operator_identity(
+    *,
+    source_kind: str,
+    source_path: str,
+    operation: str,
+    function_name: str = "",
+) -> dict[str, Any]:
+    """Build the versioned operator identity shared by all TraceLens routes."""
+    kind = "native" if str(source_kind).lower() == "native" else "py"
+    operation_key = (
+        native_operation_key(operation)
+        if kind == "native"
+        else normalize_operation_key(operation)
+    )
+    identity = {
+        "version": OPERATOR_IDENTITY_VERSION,
+        "source_kind": kind,
+        "source_path": canonical_source_path(source_path),
+        "operation": operation_key,
+    }
+    function_key = (
+        native_operation_key(function_name)
+        if kind == "native"
+        else str(function_name or "").strip()
+    )
+    if function_key:
+        identity["function"] = function_key
+    return identity
+
+
+def operator_identity_key(
+    *,
+    source_kind: str,
+    source_path: str,
+    operation: str,
+    function_name: str = "",
+) -> str:
+    """Serialize a canonical operator identity as a stable ledger key."""
+    return json.dumps(
+        build_operator_identity(
+            source_kind=source_kind,
+            source_path=source_path,
+            operation=operation,
+            function_name=function_name,
+        ),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def legacy_operator_identity_keys(
+    *,
+    source_kind: str,
+    source_path: str,
+    operation: str,
+    function_name: str = "",
+) -> list[str]:
+    """Return both historical route-specific keys for state migration."""
+    kind = "native" if str(source_kind).lower() == "native" else "py"
+    raw_source = str(source_path or "").strip()
+    sources = list(
+        dict.fromkeys(
+            [
+                canonical_source_path(source_path),
+                raw_source,
+            ]
+        )
+    )
+    operation_key = (
+        native_operation_key(operation)
+        if kind == "native"
+        else normalize_operation_key(operation)
+    )
+    function_keys = {
+        (
+            native_operation_key(function_name)
+            if kind == "native"
+            else str(function_name or "")
+        ),
+        operation_key,
+    }
+    if kind == "native" and "::" in operation_key:
+        function_keys.add(operation_key.rsplit("::", 1)[-1])
+    function_keys.discard("")
+    legacy = []
+    legacy.append(
+        operator_identity_key(
+            source_kind=kind,
+            source_path=source_path,
+            operation=operation,
+        )
+    )
+    for source in sources:
+        legacy.append(
+            json.dumps(
+                (kind, source, operation_key),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        legacy.extend(
+            json.dumps(
+                (kind, operation_key, source, function_key),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for function_key in sorted(function_keys)
+        )
+    return list(dict.fromkeys(legacy))
 
 
 def _shape_entries(row: dict[str, Any]) -> list[Any]:
