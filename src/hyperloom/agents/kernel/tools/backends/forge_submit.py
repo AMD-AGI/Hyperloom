@@ -2875,12 +2875,15 @@ def submit(
         result["artifacts"] = [str(path) for path in artifacts]
         return result
     finally:
-        _finalize_forge_workspace(
-            inplace=inplace,
-            restore_info=restore_info,
-            driver=driver,
-            workspace=workspace,
-            output_dir=output_dir,
-            branch=branch,
-            nogit_scratch=nogit_scratch,
-        )
+        try:
+            _finalize_forge_workspace(
+                inplace=inplace,
+                restore_info=restore_info,
+                driver=driver,
+                workspace=workspace,
+                output_dir=output_dir,
+                branch=branch,
+                nogit_scratch=nogit_scratch,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("forge workspace finalization failed")

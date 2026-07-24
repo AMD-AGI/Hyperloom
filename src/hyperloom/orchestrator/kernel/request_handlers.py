@@ -1673,10 +1673,17 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             run_hash_dir = parent
         warmup = run_hash_dir / "warmup_round"
         if warmup.is_dir():
+            candidates: list[tuple[float, str]] = []
             for child in warmup.iterdir():
                 sl = child / "server.log"
                 if sl.is_file():
-                    return str(sl)
+                    try:
+                        candidates.append((sl.stat().st_mtime, str(sl)))
+                    except OSError:
+                        continue
+            if candidates:
+                candidates.sort(reverse=True)
+                return candidates[0][1]
         return None
 
     current_best = getattr(state, "current_best", None) or {}
@@ -1925,15 +1932,20 @@ def _is_gfx950(gpu_type: str) -> bool:
     if key in _GFX950_GPU_TYPES:
         return True
     if not key or key == "auto":
-        try:
-            import subprocess
-            out = subprocess.run(
-                ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
-            ).stdout
-            return "gfx950" in out.lower()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        return _is_gfx950_rocminfo()
     return False
+
+
+@functools.lru_cache(maxsize=1)
+def _is_gfx950_rocminfo() -> bool:
+    """Cached rocminfo probe for gfx950 arch."""
+    try:
+        out = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        return "gfx950" in out.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
