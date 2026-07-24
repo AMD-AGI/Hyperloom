@@ -2192,6 +2192,25 @@ def run_attempt(
 
     backend_paths: dict[str, str] = {}
     if not args.dry_run:
+        if isinstance(result, dict):
+            forge_workspace = str(result.get("forge_workspace") or "")
+            if forge_workspace:
+                backend_paths["forge_workspace"] = forge_workspace
+            artifacts = result.get("artifacts")
+            if isinstance(artifacts, list):
+                forge_patch = next(
+                    (
+                        str(path)
+                        for path in artifacts
+                        if str(path).endswith(("forge.patch", ".diff"))
+                    ),
+                    "",
+                )
+                if forge_patch:
+                    backend_paths["forge_patch"] = forge_patch
+            changed_files = result.get("changed_files")
+            if isinstance(changed_files, list):
+                backend_paths["forge_changed_files"] = json.dumps(changed_files)
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
@@ -2995,16 +3014,17 @@ def build_verification(
     if best is not None and artifact_valid:
         bp = best.get("backend_paths") or {}
         winning_patch = ""
-        for key in ("partial_report", "report"):
+        for key in ("forge_patch", "partial_report", "report"):
             cand = str(bp.get(key) or "")
             if cand.endswith((".patch", ".diff")):
                 winning_patch = cand
                 break
         if winning_patch and Path(winning_patch).is_file():
             snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            forge_workspace = str(bp.get("forge_workspace") or "")
             snap = build_patch_snapshot(
                 winning_patch,
-                worktree=None,
+                worktree=Path(forge_workspace) if forge_workspace else None,
                 kernel_repo=kernel_repo,
                 clean_base=kernel_repo,
                 out_dir=snap_out,
