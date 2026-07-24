@@ -571,6 +571,43 @@ def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_path: Path):
+    """A terminal specialist with no recoverable outcome stamps a terminal row so the pump cannot re-select it forever."""
+    stub = _Stub(tmp_path, authoring=True)
+    candidate = {
+        "candidate_id": "cand-x",
+        "pr_url": "https://github.com/o/r/pull/1",
+        "batch_id": "b0",
+    }
+
+    async def _create_or_return_existing(**kwargs: Any) -> Any:
+        terminal = SimpleNamespace(
+            kind=kwargs.get("kind"),
+            task_id="specialist-terminal",
+            params=kwargs.get("params") or {},
+            state="succeeded",
+        )
+        return terminal, True
+
+    stub.tasks.create_or_return_existing = _create_or_return_existing
+    # Empty bus -> recovery finds no delegated_result and returns False.
+    stub.bus.messages = []
+
+    tid = await Coordinator._enqueue_framework_agent_authoring_specialist(  # type: ignore[arg-type]
+        stub,
+        candidate,
+    )
+
+    assert tid == ""
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "cand-x"
+    assert rows[0]["status"] == "recovery_failed"
+    # Candidate is now marked processed so the pump will not re-select it.
+    assert "cand-x" in stub._framework_processed_candidate_keys()
+
+
+@pytest.mark.asyncio
 async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
     stub.shared_state.phase = "EXPLORE"

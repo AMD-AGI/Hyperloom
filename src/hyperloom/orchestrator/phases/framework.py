@@ -835,6 +835,15 @@ class FrameworkPhase(PhaseHandler):
                         cand_id,
                         getattr(spec_task, "state", ""),
                     )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="recovery_failed",
+                        rationale="authoring outcome unrecoverable from persisted results",
+                        provenance="pump",
+                    )
                 return ""
         # Map specialist task -> candidate so the authored-outcome bridge can
         # resolve the PR-URL candidate id from the downstream integrate_patch.
@@ -2213,6 +2222,15 @@ class FrameworkPhase(PhaseHandler):
                         "FRAMEWORK local-explore: terminal outcome unavailable candidate=%s state=%s",
                         cand_id,
                         getattr(spec_task, "state", ""),
+                    )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=str(candidate.get("batch_id") or ""),
+                        status="recovery_failed",
+                        rationale="local-explore outcome unrecoverable from persisted results",
+                        provenance="pump",
                     )
                 return ""
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
