@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install ./hyperloom_inference_optimizer-*-py3-none-any.whl --target .
+python3 -m pip install https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -120,16 +120,14 @@ value.
    1. `docker (Recommended)`
    2. `baremetal`
 
+   When asking, add a one-line reminder that Docker is recommended because it
+   ships a validated ROCm + framework stack and keeps the host untouched, while
+   baremetal is for advanced users and may cause environment-specific issues or
+   modify the host environment.
+
    - `docker (Recommended)`: record `docker` as the run mode; the example
-     (workload) skill will generate a ROCm container later. Choose this when
-     the host does not have the framework installed but Docker with GPU access
-     is available.
-   - `baremetal`: run the setup backend directly on this host. Choose this when
-     the host provides ROCm, or when Hyperloom is already installed inside a
-     Docker container and setup should run directly in that current container
-     environment.
-   - If the user is unsure and is already inside a framework image or shell with
-     a working framework, recommend `baremetal`; otherwise recommend `docker`.
+     (workload) skill generates a ROCm container later.
+   - `baremetal`: run the setup backend directly on this host.
 
 6. Only when the user chose `docker`, resolve the Docker target host
    (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run

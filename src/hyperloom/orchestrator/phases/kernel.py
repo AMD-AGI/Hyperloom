@@ -586,6 +586,36 @@ class KernelPhase(PhaseHandler):
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
 
+        async def _enqueue_geak_revalidation(*, reason: str) -> bool:
+            """Enqueue and persist the rebench that keeps a GEAK win pending."""
+            try:
+                summary = await self._enqueue_internal_stack_rebench(reason=reason)
+            except Exception as exc:  # noqa: BLE001 - defensive
+                log.exception("geak: enqueue same-harness revalidation failed")
+                summary = {"skipped": True, "reason": repr(exc)}
+
+            task_id = str(summary.get("task_id") or "") if isinstance(summary, dict) else ""
+            task_state = str(summary.get("task_state") or "queued").strip().lower() if task_id else ""
+            pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            if task_id and task_state in {"queued", "running"}:
+                pending["status"] = "awaiting_rebench"
+                pending["revalidation_task_id"] = task_id
+                state.geak_pending = pending
+                state.save(self.session_dir)
+                return True
+
+            pending["status"] = "rebench_unavailable"
+            pending["revalidation_error"] = str(
+                (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
+            )[:500]
+            state.geak_pending = pending
+            state.save(self.session_dir)
+            log.warning(
+                "geak: same-harness revalidation unavailable; candidate remains audit-only (%s)",
+                pending["revalidation_error"],
+            )
+            return False
+
         # Crash-recovery: a validated result.json written before a coordinator
         # crash is promoted on resume, guarded by ``_geak_win_already_recorded``
         # so a prior cycle's result.json does not short-circuit a fresh entry.
@@ -598,10 +628,7 @@ class KernelPhase(PhaseHandler):
             )
             _promote_recovered_result(recovered, recovered_from="existing_result_json")
             if recovered.get("status") == "ok":
-                try:
-                    await self._enqueue_internal_stack_rebench(reason="geak_e2e_win_recovered")
-                except Exception:  # noqa: BLE001 - defensive
-                    log.exception("geak: enqueue rebench for recovered result failed")
+                await _enqueue_geak_revalidation(reason="geak_e2e_win_recovered")
             return
 
         try:
@@ -711,10 +738,7 @@ class KernelPhase(PhaseHandler):
                 )
                 # Rebench-first: enqueue the main-flow rebench (candidate stays
                 # pending if a budget cap prevents it from running).
-                try:
-                    await self._enqueue_internal_stack_rebench(reason="geak_e2e_win_sigterm_recovered")
-                except Exception:  # noqa: BLE001 - defensive
-                    log.exception("geak: enqueue rebench for sigterm-recovered result failed")
+                await _enqueue_geak_revalidation(reason="geak_e2e_win_sigterm_recovered")
                 return
             _finish_skip(
                 {
@@ -800,10 +824,7 @@ class KernelPhase(PhaseHandler):
         # Enqueue the same-harness config-identity rebench — the ONLY path that
         # writes the headline. Until it lands the candidate stays pending.
         if str(result.get("status") or "") == "ok":
-            try:
-                await self._enqueue_internal_stack_rebench(reason="geak_e2e_win")
-            except Exception:  # noqa: BLE001 - defensive
-                log.exception("geak: enqueue same-harness revalidation failed")
+            await _enqueue_geak_revalidation(reason="geak_e2e_win")
         self._record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),

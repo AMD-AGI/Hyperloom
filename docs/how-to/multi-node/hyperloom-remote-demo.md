@@ -1,11 +1,11 @@
 # Hyperloom Remote Demo — Multi-Node Inference Optimization
 
-Optimize inference on a **multi-node** GPU cluster (`--nodes >= 2`): Hyperloom
+Optimize inference on a multi-node GPU cluster (`--nodes >= 2`): Hyperloom
 benchmarks a long-lived remote server, restarts it with new settings each round,
 and improves throughput.
 
-**How you run it:** hand the agent (or Primus-Claw) the
-[**workload skill**](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md),
+To run it, hand the agent (or Primus-Claw) the
+[workload skill](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md),
 which carries the exact `optimize` flags and environment for either backend,
 and the agent launches and monitors the run for you. This page explains what
 that skill contains and what each variable means.
@@ -15,7 +15,7 @@ that skill contains and what each variable means.
 Pick one; both serve the same model, differ in control plane:
 
 - **infera**: GPU pods idle with sshd; Hyperloom SSHes in to (re)launch sglang
-  each round. Supports **PD disaggregation** (separate prefill / decode pods).
+  each round. Supports *PD disaggregation* (separate prefill / decode pods).
 - **rayjob**: pods run under Ray; restarts go through the Ray dashboard.
 
 Requires `--mn-image` pointing at an operator-supplied image
@@ -24,21 +24,21 @@ image).
 
 ## Two ways to connect the cluster
 
-- **Path A: SaFE-managed** *(default)*: the optimizer runs in a **Primus-SaFE**
+- **Path A: SaFE-managed** (default): The optimizer runs in a *Primus-SaFE*
   sandbox with `SAFE_API_URL` + `SAFE_API_KEY` (both auto-injected by the
   platform). Hyperloom creates the GPU pods (`create-infera` / `create-rayjob`)
   and tears them down with `stop-multi-job`.
   **[Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)** is AMD's open-source
   training and inference management platform.
-- **Path B: External**: the cluster is **already running** with **no SaFE
-  API**; you point Hyperloom at it with `HYPERLOOM_MN_EXT_*` env vars (see below).
+- **Path B: External**: The cluster is already running with no SaFE
+  API; you point Hyperloom at it with `HYPERLOOM_MN_EXT_*` env vars (see below).
 
 If both SaFE creds and `HYPERLOOM_MN_EXT_*` are set, **SaFE wins** (Path A).
 
 ## Shared filesystem (mandatory, both paths)
 
-Multi-node **cannot run** without a cluster-wide shared mount (`NFS_SHARED_ROOT`,
-NFS or equivalent) visible at the **same absolute path** on the sandbox and every
+Multi-node *can't run* without a cluster-wide shared mount (`NFS_SHARED_ROOT`,
+NFS or equivalent) visible at the *same absolute path* on the sandbox and every
 GPU pod. It holds model weights, tool checkouts, and session artifacts /
 profiler traces; `USER_DATA_PATH` normally lives under it too, so both sides read
 the same files.
@@ -65,7 +65,7 @@ from the environment (platform-injected under SaFE).
 Give the agent the pinned skill:
 
 ```text
-Use the skill at docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
+Use the skill at docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
 ```
 
 It contains two ready-to-run blocks — **Workload A (infera + PD)** and
@@ -167,11 +167,9 @@ of the SSH/IPs vars.
 
 ---
 
-## Further reading
+## Related topics
 
-- **Workload skill (copy-paste flags/env):**
-  `docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`
-- **Primus-SaFE:** [github.com/AMD-AGI/Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
-- **Multi-node CLI, SSH & external-mode semantics:**
-  `src/hyperloom/inference_optimizer/multi_node/SKILL.md`
-- **Local single-node counterpart:** `examples/hyperloom-local-demo.md`
+- [Workload skill (copy-paste flags/env)](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
+- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
+- [Multi-node CLI, SSH & external-mode semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
+- [Local single-node counterpart](https://github.com/AMD-AGI/Hyperloom/blob/main/examples/README.md)

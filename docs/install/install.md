@@ -19,6 +19,13 @@ current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Cursor, Claude Code,
 or Codex before running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker for a validated, reproducible stack.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
@@ -27,16 +34,11 @@ or Codex before running the install command.
 
 ### Install Hyperloom
 
-From the agent terminal in that workspace, download the latest release wheel
-from GitHub Releases, then install Hyperloom using the following command:
+From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
@@ -83,9 +85,6 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
-
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-to enable setup to run directly in the current container environment.
 
 ## Setup scenarios
 
@@ -171,14 +170,13 @@ Common keys:
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
 Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
-`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. Production SGLang installs require a pinned
-`AITER_REF` 40-character commit SHA by default; set `AITER_ALLOW_UNPINNED=1`
-only for local compatibility exploration. `SGLANG_ROCM_INDEX_URL` is optional
-and lets operators provide an approved ROCm wheel index (for example an AMD ROCm
-PyPI mirror) without baking infrastructure URLs into the public installer. If it
-is unset, pip uses its configured default indexes. Kernel-agent paths
-(`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later
-by the workload skill's `install.sh`.
+`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
+tag or commit; when unset the installer selects the newest tag compatible with
+the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
+is controlled by `SGLANG_ROCM_EXTRA` (default `rocm720`) and
+`SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
+`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
+workload skill's `install.sh`.
 
 Specialist subprocesses inherit only a minimal non-secret environment by
 default. If a deployment still relies on parent-process LLM key variables,
