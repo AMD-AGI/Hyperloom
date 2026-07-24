@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_str_list
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -1947,7 +1947,10 @@ class WritebackCollaborator:
         # (config_changes_applied={}) do not clear prior explore/env layers.
         _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
         _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
-        _merged_envs = {**_prev_envs, **_new_envs}
+        _merged_envs = dict(_prev_envs)
+        for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
+            _merged_envs.pop(_key, None)
+        _merged_envs.update(_new_envs)
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
