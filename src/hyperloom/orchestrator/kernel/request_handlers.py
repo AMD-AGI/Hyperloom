@@ -1905,21 +1905,14 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "") -> str:
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
-    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                is_blockscale = True
-                break
+                return "blockscale"
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                is_blockscale = True
-                break
-    if is_blockscale:
-        if _is_gfx950(gpu_type):
-            return "bpreshuffle"
-        return "blockscale"
+                return "blockscale"
     return "per_token"
 
 
