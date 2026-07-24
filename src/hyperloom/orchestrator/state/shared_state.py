@@ -650,8 +650,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-domain "empty proposal_set" streak; reset on non-empty specialist_done. Robustness escalates on persistent emptiness.
-    specialist_domain_empty_streak: dict[str, int] = field(default_factory=dict)
     # Per-kb_anchor coverage counters: EXPLORE rounds since a specialist was
     # dispatched / since a KEEP landed. Both ++ once per EXPLORE round, reset on
     # dispatch / KEEP.
@@ -791,6 +789,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Bounded rollback ring (cap 10) of prior good ``orchestration_memory``
     # records; recovers a later degenerate compaction from a prior snapshot.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Bounded ring (cap 10) of per-macro-cycle directives injected into the
+    # orchestration system prompt; entries: {cycle, directive, source, ts}.
+    cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
@@ -1147,6 +1149,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
+                    tp=int(self.tp or 0) or None,
+                    max_model_len=int(self.max_model_len or 0) or None,
+                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,

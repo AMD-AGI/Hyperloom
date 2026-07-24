@@ -27,7 +27,6 @@ log = logging.getLogger(__name__)
 DEFAULT_SESSION_DIR = Path("/workspace/hyperloom")
 ENV_USER_DATA_PATH = "USER_DATA_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
-ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
 ENV_CACHE_DIR = "HYPERLOOM_CACHE_DIR"
 ENV_REPO_ROOT = "REPO_ROOT"
@@ -42,9 +41,7 @@ _WARNED_NO_USER_DATA = False
 
 # Per-session directory skeleton mkdir-ed by make_session_dir(). Splits into
 # workspace-shared roots (runtime/, logs/ — one per $USER_DATA_PATH) and
-# per-session roots (one per model+timestamp). Default layout is
-# ``per_model_ts``; set $INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for the
-# legacy single-dir layout.
+# per-session roots (one per model+timestamp).
 _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
     "personas",
@@ -115,19 +112,6 @@ def workspace_root() -> Path:
     return DEFAULT_SESSION_DIR
 
 
-def _layout_mode() -> str:
-    """Effective layout mode: ``flat`` or ``per_model_ts`` (default), pinnable
-    via the env override.
-
-    Returns:
-        Either ``"flat"`` or ``"per_model_ts"``.
-    """
-    raw = (os.environ.get(ENV_SESSION_LAYOUT) or "").strip().lower()
-    if raw in ("flat", "per_model_ts"):
-        return raw
-    return "per_model_ts"
-
-
 def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
     """Reduce ``model_name`` (path, HF id, or Path) to a filename-safe
     basename (trailing path component). Empty/all-invalid -> ``"session"``.
@@ -151,8 +135,7 @@ def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
 def session_dir() -> Path:
     """Absolute session directory for the current run. Resolution order:
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` (pin from make_session_dir,
-    inherited by subprocesses) -> ``$USER_DATA_PATH`` (flat layout) ->
-    ``DEFAULT_SESSION_DIR``.
+    inherited by subprocesses) -> ``$USER_DATA_PATH`` -> ``DEFAULT_SESSION_DIR``.
 
     Returns:
         The absolute session directory for the current run.
@@ -205,14 +188,14 @@ def find_latest_per_session_dir(
 
 def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     """Create the session directory + per-session + workspace-shared
-    skeletons. In ``per_model_ts`` mode with a ``model_name`` the session_dir
-    is ``<workspace_root>/<model>/<UTC_ts>/`` and is pinned via
+    skeletons. With a ``model_name`` the session_dir is
+    ``<workspace_root>/<model>/<UTC_ts>/`` and is pinned via
     ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; otherwise it is
-    workspace_root (flat layout). Idempotent.
+    workspace_root. Idempotent.
 
     Args:
         model_name: Model name selecting the per-model subtree, or ``None``
-            for the flat layout.
+            to use workspace_root directly.
 
     Returns:
         The created (and pinned) session directory.
@@ -222,7 +205,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
     for sub in _WORKSPACE_SKELETON:
         (ws / sub).mkdir(parents=True, exist_ok=True)
 
-    if _layout_mode() == "per_model_ts" and model_name:
+    if model_name:
         basename = _sanitize_model_basename(model_name)
         ts = utc_now_compact()
         sd = ws / basename / ts
@@ -400,7 +383,6 @@ __all__ = [
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
-    "ENV_SESSION_LAYOUT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "asset_actions_dir",

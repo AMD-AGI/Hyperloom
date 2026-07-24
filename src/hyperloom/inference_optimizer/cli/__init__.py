@@ -198,6 +198,8 @@ def _build_orchestration_prompt(
     max_minutes: int,
     no_explore: bool = False,
     no_framework_agent: bool = False,
+    macro_cycle: int = 0,
+    cycle_directive: str = "",
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -209,6 +211,8 @@ def _build_orchestration_prompt(
         max_minutes (int): The wall-clock budget in minutes.
         no_explore (bool): When ``True`` the EXPLORE phase is disabled.
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
+        macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
+        cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -228,6 +232,8 @@ def _build_orchestration_prompt(
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
+        macro_cycle=int(macro_cycle),
+        cycle_directive=cycle_directive,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -1129,6 +1135,38 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     return phase_budget_pct
 
 
+def _detect_checkpoint_precision(model_path: str | None) -> str:
+    """Detect weight precision from model config.json; returns '' on failure."""
+    if not model_path:
+        return ""
+    try:
+        from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+        summary = summarize_model_config(str(model_path))
+    except Exception:  # noqa: BLE001
+        return ""
+    quant = (summary.get("quantization") or "").strip().lower()
+    if quant:
+        if quant.startswith("fp8"):
+            return "fp8"
+        if quant in ("fp4", "mxfp4", "nvfp4"):
+            return "fp4"
+        if quant in ("int8", "w8a8_int8"):
+            return "int8"
+        if quant in ("int4", "awq", "gptq"):
+            return "int4"
+        return quant
+    dtype = (summary.get("torch_dtype") or "").strip().lower()
+    _DTYPE_MAP = {
+        "bfloat16": "bf16",
+        "float16": "fp16",
+        "float32": "fp32",
+        "float8_e4m3fn": "fp8",
+        "float8_e5m2": "fp8",
+    }
+    return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
+
+
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
@@ -1162,7 +1200,19 @@ def _resolve_workload_knobs(
     precision = getattr(args, "precision", None)
     if not precision:
         persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
-        precision = persisted or DEFAULT_PRECISION
+        if persisted:
+            precision = persisted
+        else:
+            detected = _detect_checkpoint_precision(getattr(args, "model", None))
+            precision = detected or DEFAULT_PRECISION
+    else:
+        detected = _detect_checkpoint_precision(getattr(args, "model", None))
+        if detected and detected != precision:
+            print(
+                f"WARN: --precision={precision!r} but checkpoint dtype is {detected!r}; "
+                "using --precision flag as specified.",
+                file=sys.stderr,
+            )
     args.precision = precision
 
 
@@ -1385,12 +1435,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir = picked
                 print("  --resume: auto-picked latest per-session subdir")
             else:
-                # Legacy flat layout — workspace_root itself is the session_dir.
+                # No per-session subdir found — workspace_root itself is the
+                # session_dir (e.g. resuming a pre-existing single-dir session).
                 session_dir = ws
                 print(
                     f"  --resume: no per-session subdir found under "
-                    f"{ws}/<model>/<ts>/; falling back to flat layout "
-                    f"({ws})"
+                    f"{ws}/<model>/<ts>/; falling back to {ws}"
                 )
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
@@ -1708,7 +1758,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
-        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/.
         # Use the resolved identity so a quantized run is named after the source
         # model (e.g. "<model>-quantized") instead of the generic export-dir
         # basename "quantized".
@@ -1987,6 +2037,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
+    _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
+    _initial_directive = str(
+        (dict(getattr(coordinator.shared_state, "orchestration_memory", {}) or {})).get(
+            "next_cycle_directive", ""
+        )
+        or ""
+    )
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
@@ -1996,12 +2053,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
+            macro_cycle=_initial_macro_cycle,
+            cycle_directive=_initial_directive,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
     if not no_kernel:
         prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
+    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the
+    # orchestration prompt without reaching back into argparse. A user-supplied
+    # --orch-prompt is never clobbered.
+    import functools as _functools
+
+    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
+    coordinator._rebuild_orch_prompt = _functools.partial(
+        _build_orchestration_prompt,
+        no_kernel=no_kernel,
+        no_explore=no_explore,
+        no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+        framework=framework_for_prompt,
+        objective=objective,
+        max_minutes=max_minutes_for_prompt,
+    )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     try:
         coordinator.framework_agent_discover_timeout_sec = float(

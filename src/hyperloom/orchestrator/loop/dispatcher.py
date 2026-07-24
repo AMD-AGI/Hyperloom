@@ -325,21 +325,25 @@ class DispatcherCollaborator:
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-        # §3.4 serving priority: if serving currently holds the whole-machine
-        # slot, pause admitting NEW GPU research specialists this pass (they stay
-        # in the SQLite queue and are re-considered next pass) so a research
-        # pile-up cannot starve serving. Computed once per pass (a single cheap
-        # Ray probe); best-effort — any failure leaves it False (no pause).
-        serving_priority_pause = False
+        # §3.4 serving priority: pre-compute whether serving-priority is enabled
+        # once per pass (a pure env-var read, zero cost). The actual slot probe
+        # (serving_slot_busy()) is deferred to just before each GPU specialist
+        # admit so we don't miss a serving start that happened after the pass
+        # began. Both reads are best-effort — any failure leaves the check False
+        # (no pause) so dispatch is never blocked.
+        _ray_serving_priority_enabled = False
+        _serving_slot_busy_fn = None
         try:
             from ..actions.executors._ray_backend import (
-                ray_serving_priority_enabled,
-                serving_slot_busy,
+                ray_serving_priority_enabled as _rsp_enabled,
+                serving_slot_busy as _ssb,
             )
 
-            serving_priority_pause = ray_serving_priority_enabled() and serving_slot_busy()
+            if _rsp_enabled():
+                _ray_serving_priority_enabled = True
+                _serving_slot_busy_fn = _ssb
         except Exception:  # noqa: BLE001 — never block dispatch on the probe
-            serving_priority_pause = False
+            pass
         for task in queued:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
@@ -390,7 +394,17 @@ class DispatcherCollaborator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
-                    if serving_priority_pause:
+                    # §3.4: probe serving-slot state immediately before admitting
+                    # this GPU specialist (not once per pass) so a serving start
+                    # that races the pass does not slip through. Still best-effort:
+                    # any probe failure is treated as False (no pause).
+                    _immediate_pause = False
+                    if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
+                        try:
+                            _immediate_pause = _serving_slot_busy_fn()
+                        except Exception:  # noqa: BLE001 — never block dispatch
+                            _immediate_pause = False
+                    if _immediate_pause:
                         # §3.4: serving is active — defer this GPU specialist to a
                         # later pass (keep it queued) rather than piling onto the
                         # contended GPU. Release the SQLite lane lease taken above
