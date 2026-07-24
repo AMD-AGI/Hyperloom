@@ -344,8 +344,8 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     # source patches when PR discovery is empty instead of skipping the phase.
     PHASE_FRAMEWORK_AGENT: 0.20,
     PHASE_EXPLORE: 0.35,
-    PHASE_KERNEL_AGENT: 0.28,
-    PHASE_SWEEP: 0.12,
+    PHASE_KERNEL_AGENT: 0.35,
+    PHASE_SWEEP: 0.05,
     PHASE_CLOSE: 0.02,
 }
 
