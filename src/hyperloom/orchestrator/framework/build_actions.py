@@ -234,14 +234,22 @@ class BuildResult:
         )
 
 
-def build_novelty_key(action: TargetedBuildAction) -> tuple[str, str, str, tuple[str, ...]]:
+def build_novelty_key(
+    action: TargetedBuildAction,
+) -> tuple[str, str, str, str, str, tuple[str, ...]]:
     """Repeat-vs-novel identity for the stall gate.
 
-    Two attempts with the same ``(component, ref, gpu_arch, build_command)``
-    tuple are a *repeat* (advances the stall streak); any differing tuple is a
-    *novel* attempt (does not stall).
+    Build requests are distinct across repositories and capabilities.
     """
-    return (action.component, action.ref, action.gpu_arch, tuple(action.build_command))
+    repo_url = action.repo_url.strip().rstrip("/").removesuffix(".git").lower()
+    return (
+        action.component,
+        repo_url,
+        action.capability,
+        action.ref,
+        action.gpu_arch,
+        tuple(action.build_command),
+    )
 
 
 import re as _re

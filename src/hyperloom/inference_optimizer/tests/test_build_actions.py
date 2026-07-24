@@ -141,6 +141,14 @@ def test_novelty_key_novel_arch_and_command_differ():
     assert build_novelty_key(a) != build_novelty_key(c)
 
 
+def test_novelty_key_novel_repo_and_capability_differ():
+    a = _action(repo_url="https://github.com/ROCm/aiter", capability="decode")
+    b = _action(repo_url="https://github.com/example/aiter", capability="decode")
+    c = _action(repo_url="https://github.com/ROCm/aiter", capability="prefill")
+    assert build_novelty_key(a) != build_novelty_key(b)
+    assert build_novelty_key(a) != build_novelty_key(c)
+
+
 # ---------------------------------------------------------------------------
 # resolve_build_ref
 # ---------------------------------------------------------------------------
