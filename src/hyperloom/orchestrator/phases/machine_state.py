@@ -1510,6 +1510,11 @@ def kernel_work_pending(state: Any) -> bool:
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
         rejected_reason = str(attempt.get("rejected_reason") or "").strip()
+        integration_status = str(
+            attempt.get("integration_status") or ""
+        ).strip().lower()
+        if integration_status in {"integrated", "rejected"}:
+            continue
         if kernel_id in rejected and (not task_group_key or rejected_reason):
             continue
         if decision == "KEEP":
