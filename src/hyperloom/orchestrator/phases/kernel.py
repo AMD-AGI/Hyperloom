@@ -93,8 +93,10 @@ class KernelPhase(PhaseHandler):
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            # No GEMM tuning here: refresh the snapshot before the LLM drives GEAK.
+            # GEMM tuning and fusion are independently gated. Refresh the
+            # snapshot, run fusion when eligible, then let the LLM drive GEAK.
             await self._maybe_reprofile_for_kernel()
+            await self._maybe_run_forge_fusion_before_kernel_opt()
             return
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
@@ -167,11 +169,7 @@ class KernelPhase(PhaseHandler):
         )
         # Capture explore + GEMM-tuning gains before inline GEAK.
         await self._maybe_reprofile_for_kernel()
-        # Autonomous kernel fusion (forge-fusion) between GEMM tuning and generic
-        # kernel-opt; gated + non-blocking (a failure falls through to kernel-opt).
-        if self._fusion_required_before_kernel_opt():
-            await self._run_forge_fusion_after_gemm()
-            await self._maybe_reprofile_for_kernel()
+        await self._maybe_run_forge_fusion_before_kernel_opt()
         if self._should_continue_kernel_after_gemm():
             await self._run_kernel_opt_after_gemm()
 
@@ -1606,9 +1604,16 @@ class KernelPhase(PhaseHandler):
             return False
         return True
 
-    async def _run_forge_fusion_after_gemm(self) -> None:
-        """Run autonomous kernel fusion (forge-fusion) after GEMM tuning."""
-        log.info("KERNEL entry: running forge-fusion (autonomous kernel fusion) after GEMM")
+    async def _maybe_run_forge_fusion_before_kernel_opt(self) -> None:
+        """Run the independently gated forge-fusion stage before kernel_opt."""
+        if not self._fusion_required_before_kernel_opt():
+            return
+        await self._run_forge_fusion()
+        await self._maybe_reprofile_for_kernel()
+
+    async def _run_forge_fusion(self) -> None:
+        """Run autonomous kernel fusion during KERNEL entry."""
+        log.info("KERNEL entry: running forge-fusion (autonomous kernel fusion)")
         try:
             from ..kernel.request_handlers import run_fusion_handler
 
