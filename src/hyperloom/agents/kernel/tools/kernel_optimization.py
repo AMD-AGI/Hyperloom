@@ -3127,7 +3127,7 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    KEEP_THRESHOLD = 1.05
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(f"speedup {verification['micro_speedup']:.3f}x below KEEP threshold {KEEP_THRESHOLD:.2f}x")
     if verification["e2e_gain_pct"] is not None and verification["e2e_gain_pct"] < 0:
