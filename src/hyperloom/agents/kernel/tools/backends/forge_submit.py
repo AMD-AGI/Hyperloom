@@ -10,18 +10,34 @@ Emits optimized source plus an optimization_report.md artifact for integration.
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import signal
 import site
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+class _ForgeLoopTimeout(RuntimeError):
+    """The isolated Forge CLI exceeded the caller's hard timeout."""
+
+
+class _WorktreePreparationError(RuntimeError):
+    """A new isolated workspace could not be prepared safely."""
+
+
+class _RetainedWorkspaceCollision(FileExistsError):
+    """The requested workspace path already contains a retained attempt."""
 
 
 def _ensure_forge_on_path() -> str:
@@ -75,6 +91,105 @@ _COMPILED_SOURCE_TYPE_TO_FELLOW = {
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
     """Run a subprocess, capturing text output (never raises on non-zero)."""
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
+def _wait_for_process_group_exit(process_group: int, timeout_s: float) -> None:
+    """Wait briefly for every process in a signalled group to stop running."""
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.02)
+
+
+def _run_isolated_process_group(
+    command: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout_s: float,
+    termination_grace_s: float = 2.0,
+) -> tuple[subprocess.CompletedProcess, bool]:
+    """Run a command in a new session and reap its process group on timeout."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    partial_stdout: str | bytes | None = None
+    partial_stderr: str | bytes | None = None
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as error:
+        timed_out = True
+        partial_stdout = error.stdout
+        partial_stderr = error.stderr
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=termination_grace_s)
+        except subprocess.TimeoutExpired as termination_error:
+            if termination_error.stdout is not None:
+                partial_stdout = termination_error.stdout
+            if termination_error.stderr is not None:
+                partial_stderr = termination_error.stderr
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        else:
+            # The leader can exit after SIGTERM while a descendant remains in
+            # the session. Kill the original group before workspace recovery.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        _wait_for_process_group_exit(process.pid, termination_grace_s)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=termination_grace_s)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        _wait_for_process_group_exit(process.pid, termination_grace_s)
+        raise
+
+    def _text(value: str | bytes | None, fallback: str | bytes | None) -> str:
+        selected = value if value is not None else fallback
+        if isinstance(selected, bytes):
+            return selected.decode(errors="replace")
+        return selected or ""
+
+    return (
+        subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout=_text(stdout, partial_stdout),
+            stderr=_text(stderr, partial_stderr),
+        ),
+        timed_out,
+    )
 
 
 def _resolve_gpu_target(candidate: dict) -> str:
@@ -142,6 +257,18 @@ def _default_branch(repo: str) -> str:
     return ""
 
 
+def _new_forge_branch(output_dir: Path, source_file: str) -> str:
+    """Return a valid, unique retained branch name for one Forge attempt."""
+
+    def _component(value: str, fallback: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-")
+        return cleaned or fallback
+
+    session_id = _component(output_dir.parent.name, "session")
+    kernel_id = _component(Path(source_file).stem, "kernel")
+    return f"forge/{session_id}/{kernel_id}-{uuid.uuid4().hex[:12]}"
+
+
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
@@ -160,16 +287,21 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
         return None  # source_file not inside the repo
 
     wt = output_dir / "worktree"
-    # Clean any stale worktree at this path first.
-    if wt.exists():
-        _run(["git", "-C", repo, "worktree", "remove", "--force", str(wt)], timeout=60)
-        shutil.rmtree(wt, ignore_errors=True)
+    # A prior attempt at this path is retained for inspection. Never remove or
+    # reuse it, and never let the caller reinterpret it as a no-git scratch.
+    if wt.exists() or wt.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {wt}")
     _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
 
-    base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+    base = _run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
+    if base.returncode != 0 or not base.stdout.strip():
+        raise _WorktreePreparationError("could not resolve the source repository HEAD")
+    base_commit = base.stdout.strip()
     add = _run(["git", "-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
-        return None
+        raise _WorktreePreparationError(
+            "git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip())
+        )
 
     # Local git identity so IterationLoop commit/revert works.
     _run(["git", "-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
@@ -219,7 +351,7 @@ def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
     output_dir: Path,
-    branch: str,  # noqa: ARG001  (kept for API symmetry with _prepare_worktree)
+    branch: str,
 ) -> tuple[str, str, str] | None:
     """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A).
 
@@ -279,9 +411,10 @@ def _prepare_worktree_nogit(
         copy_subtrees = None
 
     scratch_dir = output_dir / "worktree"
-    # Clean any leftover scratch from a previous (failed) attempt.
-    if scratch_dir.exists():
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir.exists() or scratch_dir.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
+    if not branch or branch in {"main", "master"}:
+        raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
         ignored: list[str] = []
@@ -308,7 +441,7 @@ def _prepare_worktree_nogit(
 
     # Bootstrap a real git repo so IterationLoop's commit/revert works.
     for cmd in [
-        ["git", "-C", str(scratch_dir), "init"],
+        ["git", "-C", str(scratch_dir), "init", "-b", branch],
         ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
         ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
         ["git", "-C", str(scratch_dir), "add", "-A"],
@@ -328,6 +461,13 @@ def _prepare_worktree_nogit(
     if base_commit_proc.returncode != 0:
         shutil.rmtree(scratch_dir, ignore_errors=True)
         return None
+    current_branch = _run(["git", "-C", str(scratch_dir), "branch", "--show-current"], timeout=30)
+    if current_branch.returncode != 0 or current_branch.stdout.strip() != branch:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise _WorktreePreparationError(
+            f"no-git scratch branch mismatch: expected {branch!r}, "
+            f"got {current_branch.stdout.strip()!r}"
+        )
     base_commit = base_commit_proc.stdout.strip()
     scratch_kernel = str(scratch_dir / rel)
     log.info("forge: non-git scratch worktree ready at %s (kernel=%s)", scratch_dir, scratch_kernel)
@@ -549,6 +689,39 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
             backup = Path(source_file).read_bytes()
         except OSError:
             return _skip()
+        staged_snapshot = _run(
+            [
+                "git",
+                "-C",
+                repo,
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--",
+                ".",
+            ],
+            timeout=60,
+        )
+        unstaged_snapshot = _run(
+            [
+                "git",
+                "-C",
+                repo,
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--",
+                ".",
+            ],
+            timeout=60,
+        )
+        if staged_snapshot.returncode != 0 or unstaged_snapshot.returncode != 0:
+            return _skip()
+        original_staged_diff = staged_snapshot.stdout or ""
+        original_unstaged_diff = unstaged_snapshot.stdout or ""
         _run(["git", "-C", repo, "config", "user.name", "forge-bot"], timeout=30)
         _run(["git", "-C", repo, "config", "user.email", "forge-bot@local"], timeout=30)
         # Create a temp branch for the forge loop to commit/revert on (deleted
@@ -581,6 +754,8 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         "relpath": relpath,
         "lock_fd": lock_fd,
         "base_commit": base_commit,
+        "original_staged_diff": original_staged_diff,
+        "original_unstaged_diff": original_unstaged_diff,
     }
     return repo, source_file, restore
 
@@ -601,42 +776,181 @@ def _restore_inplace(restore: dict) -> None:
     if not restore:
         return
     repo = restore["repo"]
-    # Abort any in-progress revert the loop may have left.
-    _run(["git", "-C", repo, "revert", "--abort"], timeout=30)
     orig_branch = restore.get("orig_branch") or ""
     orig_head = restore.get("orig_head") or ""
     base_commit = restore.get("base_commit") or orig_head
-    # Restore every file that differs from the pre-forge baseline back to its
-    # base_commit content (working tree + index), undoing all tracked edits.
-    # Done while still on the temp branch so base_commit is reachable.
-    if base_commit:
-        diff = _run(["git", "-C", repo, "diff", "--name-only", base_commit], timeout=60)
-        for rel in (diff.stdout or "").splitlines():
-            rel = rel.strip()
-            if rel:
-                _run(["git", "-C", repo, "checkout", base_commit, "--", rel], timeout=30)
-    # Move HEAD back to the original ref WITHOUT touching the working tree.
-    if orig_branch and orig_branch != "HEAD":
-        # Was on a named branch: point HEAD back at it via symbolic-ref.
-        _run(["git", "-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"], timeout=30)
-    elif orig_head:
-        # Was on detached HEAD: re-detach via update-ref --no-deref so the
-        # working tree is not touched.
-        _run(["git", "-C", repo, "update-ref", "--no-deref", "HEAD", orig_head], timeout=30)
-    # Reset the index to match orig_head (without touching working tree).
-    if orig_head:
-        _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
-    # Ensure the primary source_file is exactly the pre-forge bytes even if the
-    # git restore above raced or partially applied.
+    temp_branch = restore.get("branch") or ""
+    original_staged_diff = restore.get("original_staged_diff") or ""
+    original_unstaged_diff = restore.get("original_unstaged_diff") or ""
+    errors: list[str] = []
+
+    def _record_failure(proc: subprocess.CompletedProcess, operation: str) -> None:
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            errors.append(f"{operation}: {detail}")
+
     try:
-        Path(restore["source_file"]).write_bytes(restore["backup"])
-    except OSError:
-        pass
-    # Delete the temp branch (safe now that HEAD points elsewhere).
-    if restore.get("branch"):
-        _run(["git", "-C", repo, "branch", "-D", restore["branch"]], timeout=30)
-    # Release the per-repo in-place lock last, after full restore.
-    _release_repo_lock(restore.get("lock_fd"))
+        # Abort any in-progress revert the loop may have left. A non-zero result
+        # normally means no revert was active, so later verification decides
+        # whether restoration actually succeeded.
+        _run(["git", "-C", repo, "revert", "--abort"], timeout=30)
+
+        # Restore every tracked file that differs from the exact pre-forge
+        # baseline. Keep untracked campaign data untouched for preservation.
+        if base_commit:
+            diff = _run(["git", "-C", repo, "diff", "--name-only", base_commit], timeout=60)
+            _record_failure(diff, "list Forge-tracked changes")
+            if diff.returncode == 0:
+                for rel in (diff.stdout or "").splitlines():
+                    rel = rel.strip()
+                    if not rel:
+                        continue
+                    restored = _run(
+                        [
+                            "git",
+                            "-C",
+                            repo,
+                            "restore",
+                            "--source",
+                            base_commit,
+                            "--staged",
+                            "--worktree",
+                            "--",
+                            rel,
+                        ],
+                        timeout=30,
+                    )
+                    _record_failure(restored, f"restore tracked path {rel}")
+
+        # Move HEAD back to the original ref without replacing the restored
+        # working tree.
+        if orig_branch and orig_branch != "HEAD":
+            moved = _run(
+                ["git", "-C", repo, "symbolic-ref", "HEAD", f"refs/heads/{orig_branch}"],
+                timeout=30,
+            )
+            _record_failure(moved, "restore original branch")
+        elif orig_head:
+            moved = _run(
+                ["git", "-C", repo, "update-ref", "--no-deref", "HEAD", orig_head],
+                timeout=30,
+            )
+            _record_failure(moved, "restore detached HEAD")
+
+        # Restore the original index while preserving the pre-existing dirty
+        # working-tree bytes captured by base_commit.
+        if orig_head:
+            reset = _run(["git", "-C", repo, "reset", orig_head, "--", "."], timeout=30)
+            _record_failure(reset, "restore original index")
+        try:
+            Path(restore["source_file"]).write_bytes(restore["backup"])
+        except OSError as error:
+            errors.append(f"restore source bytes: {error}")
+        if original_staged_diff:
+            reapplied = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "apply",
+                    "--cached",
+                    "--binary",
+                    "--whitespace=nowarn",
+                    "-",
+                ],
+                input=original_staged_diff,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            _record_failure(reapplied, "restore original staged changes")
+
+        # Delete only the in-place temporary branch. Isolated worktree branches
+        # are retained and never reach this path.
+        if temp_branch:
+            listed = _run(["git", "-C", repo, "branch", "--list", temp_branch], timeout=30)
+            _record_failure(listed, "inspect temporary branch")
+            if listed.returncode == 0 and listed.stdout.strip():
+                deleted = _run(["git", "-C", repo, "branch", "-D", temp_branch], timeout=30)
+                _record_failure(deleted, "delete temporary branch")
+
+        # Fail closed if any silent git failure left the live repository in a
+        # different tracked state than the pre-forge snapshot.
+        if orig_head:
+            head = _run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
+            _record_failure(head, "verify restored HEAD")
+            if head.returncode == 0 and head.stdout.strip() != orig_head:
+                errors.append(
+                    f"restored HEAD mismatch: expected {orig_head}, found {head.stdout.strip()}"
+                )
+            staged = _run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    "--",
+                    ".",
+                ],
+                timeout=60,
+            )
+            _record_failure(staged, "inspect restored staged changes")
+            if staged.returncode == 0 and (staged.stdout or "") != original_staged_diff:
+                errors.append("restored staged diff does not match the pre-forge snapshot")
+            unstaged = _run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    "--",
+                    ".",
+                ],
+                timeout=60,
+            )
+            _record_failure(unstaged, "inspect restored unstaged changes")
+            if unstaged.returncode == 0 and (unstaged.stdout or "") != original_unstaged_diff:
+                errors.append("restored unstaged diff does not match the pre-forge snapshot")
+        if base_commit:
+            worktree = _run(
+                ["git", "-C", repo, "diff", "--quiet", "--exit-code", base_commit, "--", "."],
+                timeout=60,
+            )
+            _record_failure(worktree, "verify restored tracked worktree")
+        if orig_branch and orig_branch != "HEAD":
+            branch = _run(
+                ["git", "-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"],
+                timeout=30,
+            )
+            _record_failure(branch, "verify restored branch")
+            if branch.returncode == 0 and branch.stdout.strip() != orig_branch:
+                errors.append(
+                    f"restored branch mismatch: expected {orig_branch}, found {branch.stdout.strip()}"
+                )
+        if temp_branch:
+            leftover = _run(["git", "-C", repo, "branch", "--list", temp_branch], timeout=30)
+            _record_failure(leftover, "verify temporary branch removal")
+            if leftover.returncode == 0 and leftover.stdout.strip():
+                errors.append(f"temporary branch still exists: {temp_branch}")
+        try:
+            if Path(restore["source_file"]).read_bytes() != restore["backup"]:
+                errors.append("restored source bytes do not match the pre-forge snapshot")
+        except OSError as error:
+            errors.append(f"verify restored source bytes: {error}")
+    except Exception as error:  # noqa: BLE001 - always release the repository lock
+        errors.append(f"unexpected restore failure: {error}")
+    finally:
+        _release_repo_lock(restore.get("lock_fd"))
+
+    if errors:
+        raise RuntimeError("in-place repository restore failed: " + "; ".join(errors))
 
 
 def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -> None:
@@ -787,13 +1101,43 @@ def _validate_test_command_argv_like(test_command: str) -> str:
     return cmd
 
 
-def _build_driver_adapter(test_command: str, worktree: str, output_dir: Path) -> str:
+def _write_generated_driver(workspace: str | Path, content: str) -> str:
+    """Atomically allocate a unique hidden driver inside ``workspace``."""
+    workspace_path = Path(workspace)
+    fd, raw_path = tempfile.mkstemp(
+        prefix=".forge_driver_",
+        suffix=".py",
+        dir=str(workspace_path),
+        text=True,
+    )
+    path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(content)
+        path.chmod(0o755)
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return str(path)
+
+
+def _build_driver_adapter(
+    test_command: str,
+    worktree: str,
+    output_dir: Path,
+    *,
+    inplace: bool = False,
+) -> str:
     """Write the driver-adapter script and return its path."""
     test_command = _validate_test_command_argv_like(test_command)
-    adapter = output_dir / "forge_driver_adapter.py"
-    adapter.write_text(_ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree))
-    adapter.chmod(0o755)
-    return str(adapter)
+    del output_dir, inplace  # The long-horizon CLI requires the driver inside workspace.
+    return _write_generated_driver(
+        worktree,
+        _ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree),
+    )
 
 
 # Auto-generated Forge-native driver for harness-less candidates. Imports the
@@ -1232,7 +1576,12 @@ main()
 '''
 
 
-def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path, inplace: bool = False) -> str | None:
+def _autogen_forge_driver(
+    candidate: dict,
+    worktree_kernel: str,
+    workspace_dir: Path,
+    inplace: bool = False,
+) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
@@ -1245,35 +1594,27 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
     """
     op = str(candidate.get("operation") or "").lower()
     hint = (op + " " + str(candidate.get("name") or "") + " " + worktree_kernel).lower()
-    drv = output_dir / "forge_autogen_driver.py"
     is_compiled_source = worktree_kernel.lower().endswith((".cuh", ".cu", ".hip", ".cpp"))
+    content: str | None = None
     if "moe" in hint:
         if not inplace:
             return None
-        drv.write_text(_AUTOGEN_MOE_DRIVER)
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+        content = _AUTOGEN_MOE_DRIVER
+    elif any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
+        content = _AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel)
     # Activation driver uses importlib — only valid for .py kernel files;
     # compiled sources with activation names use compile-only instead.
-    if any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in _ATTENTION_OP_HINTS):
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+    elif any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
+        content = _AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel)
+    elif any(t in hint for t in _ATTENTION_OP_HINTS):
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
     # HIP C++ fallback: compiled files with no op-template match still get a
     # compile-only driver so hip-fellow can iterate and verify compilation.
-    if is_compiled_source:
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    return None
+    elif is_compiled_source:
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
+    if content is None:
+        return None
+    return _write_generated_driver(workspace_dir, content)
 
 
 def _tensor_dim_lists(candidate: dict) -> list[list[int]]:
@@ -1408,6 +1749,111 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
     return report
+
+
+def _restore_verified_best(workspace: str, branch: str, best: dict) -> str:
+    """Restore tracked state and the retained branch to a verified KEEP commit.
+
+    The Forge subprocess may be killed while a candidate is staged or while
+    HEAD points at an uncheckpointed commit. Restore the index/worktree from the
+    durable best first, then move the branch ref with compare-and-swap
+    ``update-ref``. Untracked campaign data and generated drivers are preserved.
+    Returns the resolved full commit hash.
+    """
+
+    def _checked(cmd: list[str], operation: str, timeout: int = 60) -> subprocess.CompletedProcess:
+        proc = _run(cmd, timeout=timeout)
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            raise RuntimeError(f"{operation} failed: {detail}")
+        return proc
+
+    raw_commit = str(best.get("commit_hash") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", raw_commit):
+        raise RuntimeError(f"verified best has an invalid commit hash: {raw_commit!r}")
+    resolved = _checked(
+        ["git", "-C", workspace, "rev-parse", "--verify", f"{raw_commit}^{{commit}}"],
+        "verified best commit lookup",
+        timeout=30,
+    ).stdout.strip()
+    if not resolved:
+        raise RuntimeError(f"verified best commit is unavailable: {raw_commit}")
+
+    current_branch = _checked(
+        ["git", "-C", workspace, "symbolic-ref", "--quiet", "--short", "HEAD"],
+        "Forge branch lookup",
+        timeout=30,
+    ).stdout.strip()
+    recorded_branch = str(best.get("git_branch") or "").strip()
+    if current_branch != branch:
+        raise RuntimeError(
+            f"Forge branch mismatch: expected {branch!r}, found {current_branch!r}"
+        )
+    if recorded_branch and recorded_branch != branch:
+        raise RuntimeError(
+            f"verified best branch mismatch: expected {branch!r}, "
+            f"recorded {recorded_branch!r}"
+        )
+
+    old_head = _checked(
+        ["git", "-C", workspace, "rev-parse", "--verify", "HEAD"],
+        "Forge HEAD lookup",
+        timeout=30,
+    ).stdout.strip()
+    _checked(
+        ["git", "-C", workspace, "merge-base", "--is-ancestor", resolved, old_head],
+        "verified best lineage check",
+        timeout=30,
+    )
+    _checked(
+        [
+            "git",
+            "-C",
+            workspace,
+            "restore",
+            "--source",
+            resolved,
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+        ],
+        "verified best tracked restore",
+        timeout=120,
+    )
+    _checked(
+        [
+            "git",
+            "-C",
+            workspace,
+            "update-ref",
+            f"refs/heads/{branch}",
+            resolved,
+            old_head,
+        ],
+        "verified best branch update",
+        timeout=30,
+    )
+    restored_head = _checked(
+        ["git", "-C", workspace, "rev-parse", "--verify", "HEAD"],
+        "restored Forge HEAD lookup",
+        timeout=30,
+    ).stdout.strip()
+    if restored_head != resolved:
+        raise RuntimeError(
+            f"restored Forge HEAD mismatch: expected {resolved}, found {restored_head}"
+        )
+    _checked(
+        ["git", "-C", workspace, "diff", "--quiet", "--exit-code", "HEAD", "--", "."],
+        "restored Forge worktree verification",
+        timeout=60,
+    )
+    _checked(
+        ["git", "-C", workspace, "diff", "--cached", "--quiet", "--exit-code", "HEAD", "--", "."],
+        "restored Forge index verification",
+        timeout=60,
+    )
+    return resolved
 
 
 def _export_best_artifacts(
@@ -1684,20 +2130,126 @@ def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str, timeo
     return False, f"baseline correctness not confirmed (rc={proc.returncode})"
 
 
+def _freshest_verified_best(workspace: str | Path) -> dict | None:
+    """Select the newest durable verified best from campaign state/publication.
+
+    ``run_state.json`` is written before ``best_result.json`` during KEEP
+    finalization, so a hard timeout can leave the state one verified iteration
+    ahead of the publication. Selection is therefore by iteration, with the run
+    state winning an equal-commit tie. Equal iterations naming different commits
+    are contradictory and must fail closed.
+    """
+
+    def _json_object(path: Path) -> dict | None:
+        try:
+            parsed = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _number(value: object) -> float | int | None:
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    campaign_root = Path(workspace) / "forge_experiments"
+    candidates: list[dict] = []
+
+    state = _json_object(campaign_root / "run_state.json")
+    if state is not None:
+        best = state.get("best")
+        best = best if isinstance(best, dict) else {}
+        try:
+            iteration = int(best.get("iteration", 0) or 0)
+        except (TypeError, ValueError):
+            iteration = 0
+        commit_hash = str(best.get("commit_hash") or "").strip()
+        best_ms = _number(best.get("wall_ms"))
+        if iteration > 0 and commit_hash and best_ms is not None:
+            candidates.append(
+                {
+                    "source": "run_state.json",
+                    "iteration": iteration,
+                    "commit_hash": commit_hash,
+                    "baseline_ms": _number(state.get("baseline_wall_ms")),
+                    "best_ms": best_ms,
+                    "git_branch": str(state.get("git_branch") or "").strip(),
+                }
+            )
+
+    published = _json_object(campaign_root / "best_result.json")
+    if published is not None and published.get("correctness_passed") is True:
+        try:
+            iteration = int(published.get("iteration", 0) or 0)
+        except (TypeError, ValueError):
+            iteration = 0
+        commit_hash = str(published.get("commit_hash") or "").strip()
+        baseline_ms = _number(published.get("baseline_wall_ms"))
+        best_ms = _number(published.get("best_wall_ms"))
+        if iteration > 0 and commit_hash and best_ms is not None:
+            candidates.append(
+                {
+                    "source": "best_result.json",
+                    "iteration": iteration,
+                    "commit_hash": commit_hash,
+                    "baseline_ms": baseline_ms,
+                    "best_ms": best_ms,
+                    "git_branch": "",
+                }
+            )
+
+    if not candidates:
+        return None
+    commits_by_iteration: dict[int, set[str]] = {}
+    for candidate in candidates:
+        commits_by_iteration.setdefault(candidate["iteration"], set()).add(candidate["commit_hash"])
+    conflicts = {
+        iteration: commits
+        for iteration, commits in commits_by_iteration.items()
+        if len(commits) > 1
+    }
+    if conflicts:
+        detail = ", ".join(
+            f"iteration {iteration}: {sorted(commits)}"
+            for iteration, commits in sorted(conflicts.items())
+        )
+        raise ValueError(f"conflicting verified best commits: {detail}")
+
+    selected = max(
+        candidates,
+        key=lambda candidate: (
+            candidate["iteration"],
+            candidate["source"] == "run_state.json",
+        ),
+    )
+    if selected["baseline_ms"] is None:
+        baselines = [
+            candidate
+            for candidate in candidates
+            if candidate["baseline_ms"] is not None
+        ]
+        if baselines:
+            selected = dict(selected)
+            selected["baseline_ms"] = max(
+                baselines,
+                key=lambda candidate: candidate["iteration"],
+            )["baseline_ms"]
+    selected["improved"] = bool(
+        selected["baseline_ms"] is not None
+        and selected["best_ms"] is not None
+        and selected["best_ms"] < selected["baseline_ms"]
+    )
+    return selected
+
+
 def _run_loop_via_cli(
     *,
     worktree_kernel: str,
     driver: str,
     workspace: str,
     shapes: dict,
-    snr_threshold: float,
-    max_iters: int,
     max_hours: float,
-    branch: str,
     gpu_target: str,
     fellow: str,
     program_md_file: str,
-    experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
 ) -> tuple:
@@ -1705,8 +2257,8 @@ def _run_loop_via_cli(
 
     Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
     out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung fellow can no longer freeze the orchestrator: the
-    ``subprocess timeout`` kills the whole tree. Returns
+    process. A hung fellow can no longer freeze the orchestrator: timeout
+    handling terminates and reaps the isolated process group. Returns
     (baseline_ms, best_ms, improved, loop_output, loop_exc).
 
     The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
@@ -1714,12 +2266,12 @@ def _run_loop_via_cli(
     """
     import json as _json
 
-    result_json = experiments_dir.parent / "forge_cli_result.json"
     forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
     if forge_root:
         env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
+    env["FORGE_FELLOW"] = fellow
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
     # aiter JITs each op from source, so an edit only takes effect on rebuild:
@@ -1743,22 +2295,8 @@ def _run_loop_via_cli(
         workspace,
         "--shapes-json",
         _json.dumps(shapes),
-        "--snr-threshold",
-        str(snr_threshold),
-        "--max-iters",
-        str(max_iters),
         "--max-hours",
-        str(max_hours),
-        "--git-branch",
-        branch,
-        "--gpu-target",
-        gpu_target,
-        "--fellow",
-        fellow,
-        "--experiments-dir",
-        str(experiments_dir),
-        "--result-json",
-        str(result_json),
+        str(max(1.0, float(max_hours))),
     ]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
@@ -1766,13 +2304,17 @@ def _run_loop_via_cli(
     loop_exc = None
     out = ""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env, cwd=workspace)
+        proc, timed_out = _run_isolated_process_group(
+            cmd,
+            cwd=workspace,
+            env=env,
+            timeout_s=timeout_s,
+        )
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        if proc.returncode != 0:
+        if timed_out:
+            loop_exc = _ForgeLoopTimeout(f"forge-loop timed out after {timeout_s}s")
+        elif proc.returncode != 0:
             loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}")
-    except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
 
@@ -1785,25 +2327,52 @@ def _run_loop_via_cli(
     except OSError:  # noqa: S110
         pass
 
-    # Parse the result: prefer the JSON sidecar, else the sentinel line.
+    # Parse the graceful result from stdout. A hard timeout has no sentinel, so
+    # fall back to the incrementally published campaign files in the retained
+    # worktree.
     baseline_ms = best_ms = None
     improved = False
     parsed = None
-    try:
-        if result_json.exists():
-            parsed = _json.loads(result_json.read_text())
-    except Exception:
-        parsed = None
-    if parsed is None and "__FORGE_RESULT__" in out:
+    if "__FORGE_RESULT__" in out:
         try:
             seg = out.split("__FORGE_RESULT__")[1]
             parsed = _json.loads(seg)
         except Exception:
             parsed = None
+    if loop_exc is not None or parsed is None:
+        try:
+            freshest = _freshest_verified_best(workspace)
+        except Exception as error:  # noqa: BLE001 - preserve timeout classification
+            message = f"verified best selection failed: {type(error).__name__}: {error}"
+            loop_exc = (
+                _ForgeLoopTimeout(f"{loop_exc}; {message}")
+                if isinstance(loop_exc, _ForgeLoopTimeout)
+                else RuntimeError(message)
+            )
+            parsed = None
+        else:
+            if freshest is not None:
+                parsed = {
+                    "baseline_ms": freshest.get("baseline_ms"),
+                    "best_ms": freshest.get("best_ms"),
+                    "improved": freshest.get("improved"),
+                }
+            elif loop_exc is not None:
+                # Never trust a sentinel from a failed process when no durable,
+                # canonically verified KEEP record exists.
+                parsed = None
     if parsed:
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
-        improved = bool(parsed.get("improved"))
+        improved = (
+            bool(parsed.get("improved"))
+            if "improved" in parsed
+            else bool(
+                isinstance(baseline_ms, (int, float))
+                and isinstance(best_ms, (int, float))
+                and best_ms < baseline_ms
+            )
+        )
     return baseline_ms, best_ms, improved, out, loop_exc
 
 
@@ -1838,34 +2407,92 @@ def _usage_has_token_counter(usage: object) -> bool:
     return False
 
 
-def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | None]:
-    """Recover the forge run's LLM usage + key-step timeline from the CLI sidecar.
+def _forge_trace_from_campaign(workspace: Path) -> tuple[dict | None, dict | None]:
+    """Recover Forge LLM usage from the retained campaign experiment.
 
     The forge loop runs in an isolated subprocess, so its in-process usage /
-    IterationResults are not reachable here. When the forge-loop CLI serializes
-    them into ``forge_cli_result.json`` (keys ``llm_usage`` / ``steps``),
-    surface them so ``submit`` can re-emit the canonical FORGE_LLM_USAGE /
-    FORGE_STEPS markers.
-
-    Returns ``(llm_usage, steps)``; either is ``None`` when the sidecar is
-    missing or lacks that field, leaving the markers a no-op.
+    IterationResults are not reachable here. The current experiment JSON is
+    selected through run_state.last_experiment_id. Step serialization is not
+    part of the long-horizon CLI contract, so the second tuple item is None.
     """
-    sidecar = Path(output_dir) / "forge_cli_result.json"
+    campaign_root = Path(workspace) / "forge_experiments"
     try:
-        if not sidecar.exists():
+        state = json.loads((campaign_root / "run_state.json").read_text())
+        experiment_id = str(state.get("last_experiment_id") or "")
+        if not experiment_id:
             return None, None
-        import json as _json
-
-        parsed = _json.loads(sidecar.read_text())
+        parsed = json.loads((campaign_root / f"{experiment_id}.json").read_text())
     except Exception:  # noqa: BLE001 — best-effort: a bad sidecar is not fatal
         return None, None
     if not isinstance(parsed, dict):
         return None, None
     usage = parsed.get("llm_usage")
     usage = usage if _usage_has_token_counter(usage) else None
-    steps = parsed.get("steps")
-    steps = steps if isinstance(steps, dict) and steps.get("steps") else None
-    return usage, steps
+    return usage, None
+
+
+def _finalize_forge_workspace(
+    *,
+    inplace: bool,
+    restore_info: dict | None,
+    driver: str,
+    workspace: str,
+    output_dir: Path,
+    branch: str,
+    nogit_scratch: bool,
+) -> None:
+    """Restore live repos, but retain isolated Forge workspaces for inspection."""
+    if inplace:
+        cleanup_errors: list[str] = []
+        campaign_root = Path(workspace) / "forge_experiments"
+        if campaign_root.is_dir():
+            destination = Path(output_dir) / "forge_experiments"
+            try:
+                if destination.exists():
+                    raise FileExistsError(
+                        f"refusing to overwrite preserved campaign: {destination}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(campaign_root), str(destination))
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to preserve in-place campaign artifacts: {error}"
+                )
+        driver_paths: set[Path] = set()
+        try:
+            driver_paths.update(Path(workspace).glob(".forge_driver_*.py"))
+        except OSError as error:
+            cleanup_errors.append(
+                f"failed to enumerate generated in-place drivers: {error}"
+            )
+        if driver:
+            driver_paths.add(Path(driver))
+        for driver_path in driver_paths:
+            if not driver_path.name.startswith(".forge_driver_"):
+                continue
+            try:
+                driver_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to remove generated in-place driver: {error}"
+                )
+        try:
+            _restore_inplace(restore_info)
+        except Exception as error:  # noqa: BLE001 - combine cleanup/restore failures
+            cleanup_errors.append(f"failed to restore in-place repository: {error}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "in-place workspace cleanup failed: " + "; ".join(cleanup_errors)
+            )
+        return
+    log.info(
+        "forge: retaining workspace for inspection: %s (branch=%s, nogit=%s)",
+        workspace,
+        branch,
+        nogit_scratch,
+    )
 
 
 def submit(
@@ -1935,9 +2562,7 @@ def submit(
             skipped=True,
         )
 
-    session_id = output_dir.parent.name or "forge"
-    kernel_id = Path(source_file).stem
-    branch = f"forge/{session_id}/{kernel_id}"
+    branch = _new_forge_branch(output_dir, source_file)
 
     repo = kernel_repo or _git_toplevel(source_file)
     # Editable-finder packages import the live path via a meta_path finder that
@@ -1946,46 +2571,59 @@ def submit(
     inplace = _needs_inplace(repo)
     restore_info: dict | None = None
     nogit_scratch = False
-    if inplace:
-        prep = _prepare_inplace(source_file, repo, branch)
-        if prep is None:
-            return _normalized(
-                2,
-                "",
-                "forge: editable-finder package but repo is not a usable git checkout; skipping",
-                time.time() - started,
-                skipped=True,
-            )
-        workspace, worktree_kernel, restore_info = prep
-        base_commit = restore_info.get("base_commit") or ""
-    else:
-        wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
-        if wt_info is None:
-            # Non-git source (e.g. pip-installed dist-packages): scaffold an
-            # ephemeral scratch worktree with git init. Disable with
-            # FORGE_DISABLE_NOGIT=1.
-            if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+    try:
+        if inplace:
+            prep = _prepare_inplace(source_file, repo, branch)
+            if prep is None:
                 return _normalized(
                     2,
                     "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                    "forge: editable-finder package but repo is not a usable git checkout; skipping",
                     time.time() - started,
                     skipped=True,
                 )
-            wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+            workspace, worktree_kernel, restore_info = prep
+            base_commit = restore_info.get("base_commit") or ""
+        else:
+            wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
             if wt_info is None:
-                return _normalized(
-                    2,
-                    "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched)",
-                    time.time() - started,
-                    skipped=True,
-                )
-            nogit_scratch = True
-        workspace, worktree_kernel, base_commit = wt_info
+                # Non-git source (e.g. pip-installed dist-packages): scaffold an
+                # isolated scratch worktree with git init. Disable with
+                # FORGE_DISABLE_NOGIT=1.
+                if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+                if wt_info is None:
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                nogit_scratch = True
+            workspace, worktree_kernel, base_commit = wt_info
+    except (_RetainedWorkspaceCollision, _WorktreePreparationError) as error:
+        result = _normalized(
+            2,
+            "",
+            f"forge: workspace preparation skipped safely: {error}",
+            time.time() - started,
+            skipped=True,
+        )
+        result["cli_workspace"] = str(output_dir / "worktree")
+        result["output_dir"] = str(output_dir)
+        return result
 
+    driver = ""
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -1994,10 +2632,20 @@ def submit(
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
         if test_command:
-            driver = _build_driver_adapter(test_command, workspace, output_dir)
+            driver = _build_driver_adapter(
+                test_command,
+                workspace,
+                output_dir,
+                inplace=inplace,
+            )
             log.info("forge driver: harness adapter from test_command")
         else:
-            driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+            driver = _autogen_forge_driver(
+                candidate,
+                worktree_kernel,
+                Path(workspace),
+                inplace=inplace,
+            )
             if driver is None:
                 log.warning(
                     "forge driver: autogen failed for op=%r kernel=%s", candidate.get("operation"), worktree_kernel
@@ -2021,7 +2669,12 @@ def submit(
         if test_command and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
             gate_ok, gate_detail = _baseline_correctness_ok(driver, workspace, gpu_target, timeout_s)
             if not gate_ok:
-                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                autogen_fallback = _autogen_forge_driver(
+                    candidate,
+                    worktree_kernel,
+                    Path(workspace),
+                    inplace=inplace,
+                )
                 if autogen_fallback:
                     log.info(
                         "forge driver: harness gate failed (%s), falling back to autogen driver -> %s",
@@ -2071,24 +2724,6 @@ def submit(
         # os.environ, which would leak to sibling ladder backends).
         shapes = _shapes_from_candidate(candidate)
         forge_log = output_dir / "forge_loop.log"
-        experiments_dir = output_dir / "forge_experiments"
-        experiments_dir.mkdir(parents=True, exist_ok=True)
-        max_iters = int(os.environ.get("FORGE_MAX_ITERS", "8"))
-        # Compiled/ASM fellows can only tweak host-side params of a precompiled
-        # kernel, so their KEEP rate is structurally low. Cap their iteration
-        # budget; triton-fellow keeps the full budget. Configurable via
-        # FORGE_COMPILED_MAX_ITERS (>= FORGE_MAX_ITERS to disable).
-        if fellow != "triton-fellow":
-            _compiled_cap = int(os.environ.get("FORGE_COMPILED_MAX_ITERS", "3"))
-            if _compiled_cap < max_iters:
-                log.info(
-                    "forge: capping compiled/ASM fellow %s iters %d -> %d (low-yield kernel, see F3)",
-                    fellow,
-                    max_iters,
-                    _compiled_cap,
-                )
-                max_iters = _compiled_cap
-        snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
@@ -2098,39 +2733,73 @@ def submit(
             driver=driver,
             workspace=workspace,
             shapes=shapes,
-            snr_threshold=snr_threshold,
-            max_iters=max_iters,
-            max_hours=max(0.05, timeout_s / 3600.0),
-            branch=branch,
+            max_hours=max(1.0, timeout_s / 3600.0),
             gpu_target=gpu_target,
             fellow=fellow,
             program_md_file=str(prompt_file),
-            experiments_dir=experiments_dir,
             forge_log=forge_log,
             timeout_s=timeout_s,
         )
-        _, changed_files = _export_best_artifacts(workspace, base_commit, worktree_kernel, source_file, output_dir)
+        verified_best = None
+        recovery_error: Exception | None = None
+        if loop_exc is not None:
+            try:
+                recovery_candidate = _freshest_verified_best(workspace)
+                if recovery_candidate is not None:
+                    _restore_verified_best(workspace, branch, recovery_candidate)
+                    verified_best = recovery_candidate
+                    baseline_ms = recovery_candidate.get("baseline_ms")
+                    best_ms = recovery_candidate.get("best_ms")
+                    improved = bool(recovery_candidate.get("improved"))
+                else:
+                    # Metrics without a durable KEEP commit are not exportable.
+                    best_ms = None
+                    improved = False
+            except Exception as error:  # noqa: BLE001 - surface recovery failure
+                verified_best = None
+                recovery_error = error
+                best_ms = None
+                improved = False
+
+        optimized_artifact = ""
+        changed_files: list[str] = []
+        artifact_eligible = loop_exc is None or verified_best is not None
+        report: Path | None = None
+        if artifact_eligible:
+            optimized_artifact, changed_files = _export_best_artifacts(
+                workspace,
+                base_commit,
+                worktree_kernel,
+                source_file,
+                output_dir,
+            )
         if changed_files:
             try:
                 (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
             except OSError:
                 pass
-        _write_report(output_dir, baseline_ms, best_ms, improved)
-        if loop_exc and baseline_ms is None:
-            # Hard failure with no measurement -> surface as forge failure.
-            return _normalized(1, "", f"forge cli loop failed: {loop_exc}", time.time() - started)
+        if artifact_eligible:
+            report = _write_report(output_dir, baseline_ms, best_ms, improved)
         gbrain_active = bool(
             os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
         )
+        returncode = (
+            124
+            if isinstance(loop_exc, _ForgeLoopTimeout)
+            else 1
+            if loop_exc is not None
+            else 0
+        )
+        status = "partial (timeout)" if returncode == 124 else "failed" if returncode else "done"
         msg = (
-            f"forge done (cli): baseline={baseline_ms} best={best_ms} "
+            f"forge {status} (cli): baseline={baseline_ms} best={best_ms} "
             f"improved={improved} fellow={fellow} gpu={gpu_target} "
             f"gbrain={'on' if gbrain_active else 'off'}"
         )
-        # Surface the run's LLM token spend + key-step timeline from the CLI
-        # sidecar as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so
-        # the tracer can attribute forge's cost + decision process.
-        forge_usage, forge_steps = _forge_trace_from_sidecar(output_dir)
+        # Surface the retained campaign's LLM token spend as the canonical
+        # FORGE_LLM_USAGE marker. The long-horizon CLI no longer emits a result
+        # sidecar or serialized step timeline.
+        forge_usage, forge_steps = _forge_trace_from_campaign(Path(workspace))
         if forge_usage:
             import json as _json_usage
 
@@ -2139,21 +2808,79 @@ def submit(
             import json as _json_steps
 
             msg += "\nFORGE_STEPS " + _json_steps.dumps(forge_steps, sort_keys=True)
-        res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "", time.time() - started)
+        stderr = ""
+        if loop_exc is not None:
+            stderr = f"forge cli loop failed: {loop_exc}"
+        if recovery_error is not None:
+            stderr += (
+                ("; " if stderr else "")
+                + f"verified best recovery failed: {type(recovery_error).__name__}: "
+                + str(recovery_error)
+            )
+        res = _normalized(
+            returncode,
+            msg + "\n" + (loop_output or "")[-3000:],
+            stderr,
+            time.time() - started,
+        )
         if forge_usage:
             res["llm_usage"] = forge_usage
         if forge_steps:
             res["steps"] = forge_steps
+        # Upper Hyperloom scans cli_workspace for optimized_versions/report to
+        # promote timeout results to partial. Expose the retained Forge worktree
+        # separately for manual inspection.
         res["cli_workspace"] = str(output_dir)
+        res["forge_workspace"] = str(workspace)
         res["output_dir"] = str(output_dir)
+        artifacts = [str(report)] if report is not None else []
+        if optimized_artifact and Path(optimized_artifact).is_file():
+            res["optimized_artifact"] = optimized_artifact
+            artifacts.append(optimized_artifact)
+        for artifact in (
+            output_dir / "optimized_versions" / "forge.patch",
+            output_dir / "optimized_versions" / "changed_files.txt",
+        ):
+            if artifact.is_file():
+                artifacts.append(str(artifact))
+        res["artifacts"] = artifacts
+        res["changed_files"] = changed_files
         return res
     except Exception as exc:  # noqa: BLE001
-        return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
+        result = _normalized(
+            1,
+            "",
+            f"forge submit failed: {type(exc).__name__}: {exc}",
+            time.time() - started,
+        )
+        result["cli_workspace"] = str(output_dir if inplace else workspace)
+        result["output_dir"] = str(output_dir)
+        optimized_path = (
+            output_dir
+            / "optimized_versions"
+            / f"v1_forge{Path(source_file).suffix or '.py'}"
+        )
+        artifacts = [
+            path
+            for path in (
+                output_dir / "optimization_report.md",
+                optimized_path,
+                output_dir / "optimized_versions" / "forge.patch",
+                output_dir / "optimized_versions" / "changed_files.txt",
+            )
+            if path.is_file()
+        ]
+        if optimized_path.is_file():
+            result["optimized_artifact"] = str(optimized_path)
+        result["artifacts"] = [str(path) for path in artifacts]
+        return result
     finally:
-        if inplace:
-            _restore_inplace(restore_info)
-        elif nogit_scratch:
-            # Scratch worktree has no branch in any live repo; delete the dir.
-            shutil.rmtree(workspace, ignore_errors=True)
-        else:
-            _remove_worktree(kernel_repo, source_file, workspace, branch)
+        _finalize_forge_workspace(
+            inplace=inplace,
+            restore_info=restore_info,
+            driver=driver,
+            workspace=workspace,
+            output_dir=output_dir,
+            branch=branch,
+            nogit_scratch=nogit_scratch,
+        )
