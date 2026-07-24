@@ -1250,6 +1250,11 @@ class TestRunGemmTuningHandler:
         assert "--profiler-config.torch_profiler_record_shapes True" in task.params["extra_server_args"]
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
+        assert not any(
+            name.startswith(("HL_TUNABLEOP_", "PYTORCH_TUNABLEOP_"))
+            for name in task.params["extra_envs"]
+        )
+        assert "PYTORCH_TUNABLEOP_ENABLED" in task.params["unset_envs"]
 
     @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
     def test_shape_capture_rejects_unsafe_explicit_port(self, port):

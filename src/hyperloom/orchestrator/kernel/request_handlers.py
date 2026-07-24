@@ -2341,14 +2341,6 @@ async def _capture_vllm_tunableop_shapes(
         {
             "PORT": str(capture_port),
             "RUN_EVAL": "false",
-            "HL_TUNABLEOP_MODE": "",
-            "HL_TUNABLEOP_FILE": "",
-            "HL_TUNABLEOP_VERBOSE": "",
-            "PYTORCH_TUNABLEOP_ENABLED": "1",
-            "PYTORCH_TUNABLEOP_TUNING": "0",
-            "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
-            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
-            "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
         }
     )
     if profile_mode:
@@ -2356,6 +2348,19 @@ async def _capture_vllm_tunableop_shapes(
             {
                 "VLLM_ROCM_USE_AITER": "1",
                 "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            }
+        )
+    else:
+        capture_envs.update(
+            {
+                "HL_TUNABLEOP_MODE": "",
+                "HL_TUNABLEOP_FILE": "",
+                "HL_TUNABLEOP_VERBOSE": "",
+                "PYTORCH_TUNABLEOP_ENABLED": "1",
+                "PYTORCH_TUNABLEOP_TUNING": "0",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
+                "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
             }
         )
     for env_name, state_name in (
