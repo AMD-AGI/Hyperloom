@@ -829,7 +829,240 @@ def _serialize_sdk_message(message: Any, *, seq: int) -> dict[str, Any]:
     usage = getattr(message, "usage", None)
     if isinstance(usage, dict) and usage:
         record["usage"] = _json_safe(usage)
+    is_error = getattr(message, "is_error", None)
+    if isinstance(is_error, bool):
+        record["is_error"] = is_error
+    subtype = getattr(message, "subtype", None)
+    if isinstance(subtype, str) and subtype:
+        record["subtype"] = subtype
     return record
+
+
+_RECOVERY_MAX_TURNS = 64
+_PENDING_SUBAGENTS_RE = re.compile(
+    r"^(?:now\s+)?waiting for\s+(?:the\s+)?(?:final|remaining)"
+    r"(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten))?"
+    r"\s+subagents?\s*\(([^)]+)\)\.\s*$",
+    re.IGNORECASE,
+)
+_SUCCESS_STATUS_LINES = {"**Status:** SUCCESS", "**Status**: SUCCESS"}
+_TERMINAL_WAIT_RE = re.compile(
+    r"^\s*(?:I'll|I will) wait for the subagent completion notifications"
+    r"(?: before continuing to Step 7\.4/7\.5)?\.\s*$",
+    re.IGNORECASE,
+)
+
+
+def _without_fenced_blocks(text: str) -> str:
+    """Remove fenced examples so templates cannot satisfy findings checks."""
+
+    output: list[str] = []
+    fence = ""
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        marker_match = re.match(r"^(`{3,}|~{3,})", stripped)
+        marker = marker_match.group(1) if marker_match else ""
+        if fence:
+            if marker and marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = ""
+            continue
+        if marker:
+            fence = marker
+            continue
+        output.append(line)
+    return "\n".join(output)
+
+
+def _section_has_content(text: str, heading: str) -> bool:
+    """Return whether a level-two findings section has a nonempty body."""
+
+    match = re.search(
+        rf"^{re.escape(heading)}\s*$\n(.*?)(?=^##\s|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return bool(match and match.group(1).strip())
+
+
+def _findings_file_is_complete(path: Path, *, subagent_name: str) -> bool:
+    """Check the common findings contract while tolerating status variants."""
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    text = _without_fenced_blocks(text)
+    if not all(
+        _section_has_content(text, heading)
+        for heading in ("## Recommendations", "## Detailed Analysis")
+    ):
+        return False
+    status_like_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if re.match(
+            r"^\s*(?:[-*+]\s*)?(?:\*\*\s*)?status\b",
+            line,
+            re.IGNORECASE,
+        )
+    ]
+    if status_like_lines:
+        return len(status_like_lines) == 1 and status_like_lines[0] in _SUCCESS_STATUS_LINES
+    return subagent_name == "kernel_fusion"
+
+
+def _lost_completion_findings(
+    output_dir: Path,
+    result_messages: list[str],
+) -> list[Path]:
+    """Resolve completed files for the last pending-subagent barrier."""
+
+    if not any(_TERMINAL_WAIT_RE.fullmatch(result) for result in result_messages):
+        return []
+    if not result_messages:
+        return []
+    latest = _PENDING_SUBAGENTS_RE.fullmatch(result_messages[-1])
+    if latest is None:
+        return []
+
+    names = [name.strip().lower() for name in latest.group(1).split(",")]
+    if not names or any(not re.fullmatch(r"[a-z0-9_]+", name) for name in names):
+        return []
+    if len(names) != len(set(names)):
+        return []
+
+    findings: list[Path] = []
+    for name in names:
+        candidates = (
+            output_dir / "category_findings" / f"{name}_findings.md",
+            output_dir / "system_findings" / f"{name}_findings.md",
+        )
+        existing = [path for path in candidates if path.is_file()]
+        if len(existing) != 1 or not _findings_file_is_complete(
+            existing[0],
+            subagent_name=name,
+        ):
+            return []
+        findings.append(existing[0])
+    return findings
+
+
+def _build_aggregation_recovery_prompt(
+    *,
+    skill_path: Path,
+    output_dir: Path,
+    findings: list[Path],
+) -> str:
+    """Build the aggregation-only prompt for lost completion notifications."""
+
+    findings_text = "\n".join(f"- {path}" for path in findings)
+    return f"""The parent exited while waiting for subagents whose completed
+findings already exist:
+{findings_text}
+
+Read {skill_path}. Do not launch subagents or rerun analysis. Resume at Step
+7.4, aggregate the existing findings through Step 11, and write
+{output_dir / "analysis.md"}.
+"""
+
+
+async def _consume_sdk_stream(
+    *,
+    prompt: str,
+    options: Any,
+    sdk_query_factory: Callable[..., Any],
+    transcript_path: Path,
+    transcript_mode: str,
+    transcript_seq: int,
+    idle_timeout: float,
+    log: Callable[[str], None] | None,
+    log_prefix: str,
+) -> tuple[list[str], str, int, bool, list[str]]:
+    """Consume one Claude SDK stream with timeout and transcript capture."""
+
+    chunks: list[str] = []
+    sdk_error = ""
+    transcript_written = False
+    result_messages: list[str] = []
+    try:
+        transcript_fh: Any = transcript_path.open(transcript_mode, encoding="utf-8")
+    except OSError as exc:
+        transcript_fh = None
+        if log:
+            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
+
+    stream: Any = None
+    stream_iter: Any = None
+
+    async def _close_stream() -> None:
+        seen: set[int] = set()
+        for target in (stream_iter, stream):
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            aclose = getattr(target, "aclose", None)
+            if aclose is None:
+                continue
+            try:
+                await asyncio.wait_for(aclose(), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                pass
+
+    try:
+        stream = sdk_query_factory(prompt=prompt, options=options)
+        stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
+        while True:
+            try:
+                if idle_timeout > 0:
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
+                else:
+                    message = await stream_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                sdk_error = f"stream idle timeout: no SDK message for {idle_timeout:.0f}s (gateway stall)"
+                if log:
+                    log(f"[claude-sdk] WARNING: {sdk_error}")
+                await _close_stream()
+                break
+            if transcript_fh is not None:
+                try:
+                    record = _serialize_sdk_message(message, seq=transcript_seq)
+                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    transcript_fh.flush()
+                    transcript_seq += 1
+                    transcript_written = True
+                except Exception:  # noqa: BLE001
+                    # Transcript is diagnostic-only; swallow and keep going.
+                    pass
+            for text in _iter_message_text(message):
+                chunks.append(text)
+                if log:
+                    log(f"{log_prefix} {text[:1000]}")
+            if type(message).__name__.endswith("ResultMessage"):
+                result_messages.append(str(getattr(message, "result", "") or ""))
+            if getattr(message, "is_error", False):
+                subtype = str(getattr(message, "subtype", "") or "unknown")
+                sdk_error = f"SDK terminal error: {subtype}"
+                if log:
+                    log(f"[claude-sdk] WARNING: {sdk_error}")
+                await _close_stream()
+                break
+    except Exception as exc:  # noqa: BLE001
+        # SDK may error after writing artifacts; treat artifact presence as truth.
+        sdk_error = f"{type(exc).__name__}: {exc}"
+        if log:
+            log(f"[claude-sdk] WARNING: {sdk_error}")
+        await _close_stream()
+    finally:
+        if transcript_fh is not None:
+            try:
+                transcript_fh.close()
+            except OSError as exc:
+                if log:
+                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
+
+    return chunks, sdk_error, transcript_seq, transcript_written, result_messages
 
 
 async def run_tracelens_skill(
@@ -949,8 +1182,6 @@ async def run_tracelens_skill(
         # Older SDK builds lack cwd; absolute paths make retrying without it safe.
         kwargs.pop("cwd", None)
         options = sdk_options_cls(**kwargs)
-    chunks: list[str] = []
-    sdk_error = ""
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
 
@@ -958,73 +1189,72 @@ async def run_tracelens_skill(
     # Best-effort: a logging-side error must never abort a successful run, so
     # every write and the handle open are guarded.
     transcript_path = output_dir / "agent_transcript.jsonl"
-    transcript_written = False
-    transcript_seq = 0
-    try:
-        transcript_fh: Any = transcript_path.open("w", encoding="utf-8")
-    except OSError as exc:  # noqa: BLE001
-        transcript_fh = None
-        if log:
-            log(f"[claude-sdk] WARNING: cannot open transcript {transcript_path}: {exc}")
     # Drive the SDK stream manually so each next message is bounded by a
     # per-message idle timeout (inactivity, not a total budget); the in-process
     # SDK has no client-side read timeout and would otherwise block on a stall.
     idle_timeout = _resolve_stream_idle_timeout_sec()
-    stream = sdk_query_factory(prompt=prompt, options=options)
-    stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
-    try:
-        while True:
-            try:
-                if idle_timeout > 0:
-                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
-                else:
-                    message = await stream_iter.__anext__()
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                # Gateway stream stalled mid-response: abort and tear the
-                # generator down so its transport/subprocess does not leak.
-                sdk_error = f"stream idle timeout: no SDK message for {idle_timeout:.0f}s (gateway stall)"
-                if log:
-                    log(f"[claude-sdk] WARNING: {sdk_error}")
-                aclose = getattr(stream_iter, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
-                break
-            if transcript_fh is not None:
-                try:
-                    record = _serialize_sdk_message(message, seq=transcript_seq)
-                    transcript_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    transcript_fh.flush()
-                    transcript_seq += 1
-                    transcript_written = True
-                except Exception:  # noqa: BLE001
-                    # Transcript is diagnostic-only; swallow and keep going.
-                    pass
-            for text in _iter_message_text(message):
-                chunks.append(text)
-                if log:
-                    log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001
-        # SDK may error after writing artifacts; treat artifact presence as truth.
-        sdk_error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[claude-sdk] WARNING: {sdk_error}")
-    finally:
-        if transcript_fh is not None:
-            try:
-                transcript_fh.close()
-            except OSError as exc:
-                # Closing the diagnostic transcript must never abort an
-                # otherwise-successful run; surface it as a warning instead.
-                if log:
-                    log(f"[claude-sdk] WARNING: cannot close transcript {transcript_path}: {exc}")
+    chunks, sdk_error, transcript_seq, transcript_written, result_messages = await _consume_sdk_stream(
+        prompt=prompt,
+        options=options,
+        sdk_query_factory=sdk_query_factory,
+        transcript_path=transcript_path,
+        transcript_mode="w",
+        transcript_seq=0,
+        idle_timeout=idle_timeout,
+        log=log,
+        log_prefix="[claude-sdk]",
+    )
 
     # Final report is ``analysis.md``.
     report_path = output_dir / "analysis.md"
+    if not report_path.exists() and not sdk_error:
+        findings = _lost_completion_findings(output_dir, result_messages)
+        if findings:
+            if log:
+                log(
+                    "TraceLens SDK runner: pending findings completed but "
+                    "notifications were lost; resuming aggregation once"
+                )
+            recovery_kwargs = dict(kwargs)
+            recovery_kwargs["max_turns"] = min(
+                int(recovery_kwargs.get("max_turns") or _RECOVERY_MAX_TURNS),
+                _RECOVERY_MAX_TURNS,
+            )
+            recovery_kwargs["allowed_tools"] = [
+                tool for tool in recovery_kwargs.get("allowed_tools", []) if tool != "Task"
+            ]
+            try:
+                recovery_options = sdk_options_cls(**recovery_kwargs)
+            except TypeError:
+                recovery_kwargs.pop("cwd", None)
+                recovery_options = sdk_options_cls(**recovery_kwargs)
+            recovery_prompt = _build_aggregation_recovery_prompt(
+                skill_path=skill_path,
+                output_dir=output_dir,
+                findings=findings,
+            )
+            (
+                recovery_chunks,
+                recovery_error,
+                transcript_seq,
+                recovery_transcript_written,
+                _recovery_result_messages,
+            ) = await _consume_sdk_stream(
+                prompt=recovery_prompt,
+                options=recovery_options,
+                sdk_query_factory=sdk_query_factory,
+                transcript_path=transcript_path,
+                transcript_mode="a",
+                transcript_seq=transcript_seq,
+                idle_timeout=idle_timeout,
+                log=log,
+                log_prefix="[claude-sdk-recovery]",
+            )
+            chunks.extend(recovery_chunks)
+            transcript_written = transcript_written or recovery_transcript_written
+            if recovery_error:
+                sdk_error = "; ".join(part for part in (sdk_error, f"aggregation recovery: {recovery_error}") if part)
+
     if not report_path.exists():
         if sdk_error:
             raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")

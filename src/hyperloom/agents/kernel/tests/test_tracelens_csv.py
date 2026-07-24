@@ -1837,6 +1837,356 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     assert "tracelens_category_manifest" not in res.artifact_paths
 
 
+class _RecoveryOptions:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class _RecoveryMessage:
+    def __init__(self, text: str):
+        self.content = [type("_TextBlock", (), {"text": text})()]
+
+
+class _RecoveryResultMessage:
+    content = []
+
+    def __init__(
+        self,
+        result: str = (
+            "I'll wait for the subagent completion notifications"
+            " before continuing to Step 7.4/7.5."
+        ),
+        *,
+        is_error: bool = False,
+    ):
+        self.result = result
+        self.is_error = is_error
+        self.subtype = "error_max_turns" if is_error else "success"
+
+
+def _write_completed_finding(
+    output_dir: Path,
+    name: str,
+    *,
+    directory: str = "category_findings",
+    status: str = "**Status:** SUCCESS\n\n",
+) -> None:
+    findings_dir = output_dir / directory
+    findings_dir.mkdir(parents=True, exist_ok=True)
+    (findings_dir / f"{name}_findings.md").write_text(
+        f"# {name}\n\n{status}"
+        "## Recommendations\n\n- completed\n\n"
+        "## Detailed Analysis\n\ncompleted\n",
+        encoding="utf-8",
+    )
+
+
+def _run_recovery_test(tmp_path: Path, query):
+    import asyncio
+
+    return asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=tmp_path / "out",
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=5,
+            sdk_query_factory=query,
+            sdk_options_cls=_RecoveryOptions,
+        )
+    )
+
+
+def test_missing_analysis_md_recovers_lost_gemm_notification(tmp_path):
+    """Reproduce the observed stale GEMM notification and recover once."""
+    output_dir = tmp_path / "out"
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_query(*, prompt, options):
+        calls.append((prompt, options.kwargs))
+        if len(calls) == 1:
+            _write_completed_finding(output_dir, "gemm")
+            yield _RecoveryResultMessage()
+            yield _RecoveryResultMessage("Now waiting for the final subagent (gemm).")
+            return
+        assert "waiting for subagents whose completed" in prompt
+        assert "Task" not in options.kwargs["allowed_tools"]
+        assert options.kwargs["max_turns"] == tlr._RECOVERY_MAX_TURNS
+        (output_dir / "analysis.md").write_text("# recovered report\n", encoding="utf-8")
+        yield _RecoveryMessage("recovered")
+
+    res = _run_recovery_test(tmp_path, _fake_query)
+    assert len(calls) == 2
+    assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
+    transcript = (output_dir / "agent_transcript.jsonl").read_text(encoding="utf-8")
+    assert "final subagent (gemm)" in transcript
+    assert "recovered" in transcript
+
+
+def test_missing_analysis_md_recovers_multiple_named_subagents(tmp_path):
+    """Recover when every subagent named at the final barrier has completed."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _write_completed_finding(output_dir, "gemm", status="**Status**: SUCCESS\n\n")
+            _write_completed_finding(
+                output_dir,
+                "kernel_fusion",
+                directory="system_findings",
+                status="",
+            )
+            yield _RecoveryResultMessage()
+            yield _RecoveryResultMessage(
+                "Waiting for the final two subagents (gemm, kernel_fusion)."
+            )
+            return
+        (output_dir / "analysis.md").write_text("# recovered report\n", encoding="utf-8")
+        yield _RecoveryMessage("recovered")
+
+    _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 2
+
+
+def test_missing_named_subagent_prevents_recovery(tmp_path):
+    """Do not aggregate while any subagent named at the barrier is incomplete."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        yield _RecoveryResultMessage()
+        yield _RecoveryResultMessage("Waiting for the final two subagents (gemm, other).")
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        "**status:** success\n\n",
+        "**Status** SUCCESS\n\n",
+        "**Status:** FAILED\n\n",
+        "**Status:** SUCCESS_PENDING\n\n",
+        "**Status:** SUCCESS\n**Status:** FAILED\n\n",
+        "- **Status:** FAILED\n\n",
+    ),
+)
+def test_failed_or_unfinished_findings_are_incomplete(tmp_path, status):
+    path = tmp_path / "category_findings" / "gemm_findings.md"
+    _write_completed_finding(tmp_path, "gemm", status=status)
+    assert not tlr._findings_file_is_complete(path, subagent_name="gemm")
+
+
+def test_empty_findings_sections_are_incomplete(tmp_path):
+    path = tmp_path / "category_findings" / "gemm_findings.md"
+    path.parent.mkdir()
+    path.write_text(
+        "# GEMM\n\n**Status:** SUCCESS\n\n## Recommendations\n\n## Detailed Analysis\n",
+        encoding="utf-8",
+    )
+    assert not tlr._findings_file_is_complete(path, subagent_name="gemm")
+
+
+def test_statusless_findings_are_only_allowed_for_kernel_fusion(tmp_path):
+    path = tmp_path / "system_findings" / "kernel_fusion_findings.md"
+    _write_completed_finding(
+        tmp_path,
+        "kernel_fusion",
+        directory="system_findings",
+        status="",
+    )
+    assert tlr._findings_file_is_complete(path, subagent_name="kernel_fusion")
+    assert not tlr._findings_file_is_complete(path, subagent_name="gemm")
+
+
+def test_fenced_template_does_not_count_as_findings(tmp_path):
+    path = tmp_path / "category_findings" / "gemm_findings.md"
+    path.parent.mkdir()
+    path.write_text(
+        "```markdown\n**Status:** SUCCESS\n"
+        "## Recommendations\nfake\n## Detailed Analysis\nfake\n```\n",
+        encoding="utf-8",
+    )
+    assert not tlr._findings_file_is_complete(path, subagent_name="gemm")
+
+
+@pytest.mark.parametrize("system_status", ("", "**Status:** FAILED\n\n"))
+def test_duplicate_findings_paths_prevent_recovery(tmp_path, system_status):
+    """Ambiguous category/system ownership must fail closed."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        _write_completed_finding(
+            output_dir,
+            "gemm",
+            directory="system_findings",
+            status=system_status,
+        )
+        yield _RecoveryResultMessage()
+        yield _RecoveryResultMessage("Waiting for the final subagent (gemm).")
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+def test_latest_result_message_must_be_the_barrier(tmp_path):
+    """Later subagent chatter after the barrier must block recovery."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        yield _RecoveryResultMessage()
+        yield _RecoveryResultMessage("Waiting for the final subagent (gemm).")
+        yield _RecoveryResultMessage("Continuing to wait.")
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+def test_terminal_wait_with_trailing_abort_does_not_recover(tmp_path):
+    """The terminal result must be the exact wait decision, not later prose."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        yield _RecoveryResultMessage(
+            "I'll wait for the subagent completion notifications. Abort instead."
+        )
+        yield _RecoveryResultMessage("Waiting for the final subagent (gemm).")
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+def test_missing_analysis_md_does_not_recover_without_incident_signal(tmp_path):
+    """A completed GEMM file alone is not enough to trigger recovery."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        yield _RecoveryMessage("ordinary completion")
+
+    with pytest.raises(RuntimeError, match="analysis.md"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+def test_missing_analysis_md_does_not_retry_terminal_sdk_error(tmp_path):
+    """An SDK-declared terminal error must not trigger recovery."""
+    output_dir = tmp_path / "out"
+    calls = 0
+    stream_closed = False
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls, stream_closed
+        calls += 1
+        try:
+            _write_completed_finding(output_dir, "gemm")
+            yield _RecoveryResultMessage()
+            yield _RecoveryResultMessage(
+                "Now waiting for the final subagent (gemm).",
+                is_error=True,
+            )
+            yield _RecoveryMessage("must not be consumed")
+        finally:
+            stream_closed = True
+
+    with pytest.raises(RuntimeError, match="error_max_turns"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+    assert stream_closed is True
+
+
+def test_missing_analysis_md_does_not_retry_sdk_error(tmp_path):
+    """A transport failure must not trigger a second expensive SDK invocation."""
+    output_dir = tmp_path / "out"
+    calls = 0
+
+    async def _fake_query(*, prompt, options):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        _write_completed_finding(output_dir, "gemm")
+        yield _RecoveryMessage("Now waiting for the final subagent (gemm).")
+        raise RuntimeError("transport failed")
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert calls == 1
+
+
+def test_iterator_setup_error_closes_stream(tmp_path):
+    """An __aiter__ failure must close the stream and transcript."""
+    closed = False
+
+    class _BrokenStream:
+        def __aiter__(self):
+            raise RuntimeError("iterator setup failed")
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    def _fake_query(*, prompt, options):  # noqa: ARG001
+        return _BrokenStream()
+
+    with pytest.raises(RuntimeError, match="iterator setup failed"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert closed is True
+
+
+def test_iterator_error_closes_distinct_owning_stream(tmp_path):
+    """Cleanup falls back to the stream when its iterator has no aclose."""
+    closed = False
+
+    class _BrokenIterator:
+        async def __anext__(self):
+            raise RuntimeError("iteration failed")
+
+    class _OwningStream:
+        def __aiter__(self):
+            return _BrokenIterator()
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    def _fake_query(*, prompt, options):  # noqa: ARG001
+        return _OwningStream()
+
+    with pytest.raises(RuntimeError, match="iteration failed"):
+        _run_recovery_test(tmp_path, _fake_query)
+    assert closed is True
+
+
 def test_t2_missing_analysis_md_still_raises(tmp_path):
     """Negative control: a missing ``analysis.md`` is still a hard error (T2 only relaxes sidecars)."""
     import asyncio
