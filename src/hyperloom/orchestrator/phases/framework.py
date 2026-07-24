@@ -4211,7 +4211,12 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
-    async def _maybe_enqueue_specialist_requested_build(self) -> None:
+    async def _maybe_enqueue_specialist_requested_build(
+        self,
+        *,
+        task_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         """Enqueue a targeted build the enablement specialist explicitly requested.
 
         The enablement specialist may emit a ``needs_targeted_build`` object in its
@@ -4227,29 +4232,37 @@ class FrameworkPhase(PhaseHandler):
         import os as _os
 
         state = self.shared_state
-        task_id = str(getattr(state, "enablement_last_specialist_task_id", "") or "").strip()
+        marker_task_id = str(getattr(state, "enablement_last_specialist_task_id", "") or "").strip()
+        task_id = str(task_id or marker_task_id).strip()
         if not task_id:
             return
-        # Consume-once: clear the marker regardless of outcome below.
-        state.enablement_last_specialist_task_id = ""
+
+        def _consume_marker() -> None:
+            if marker_task_id == task_id:
+                state.enablement_last_specialist_task_id = ""
+
         try:
             if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+                _consume_marker()
                 return
             from ..actions.executors._multi_node_env import is_multi_node
 
             if is_multi_node():
+                _consume_marker()
                 return
-            done_path = self.session_dir / "runs" / "specialist" / task_id / "specialist_done.json"
-            if not done_path.is_file():
-                return
-            import json as _json
+            if payload is None:
+                done_path = self.session_dir / "runs" / "specialist" / task_id / "specialist_done.json"
+                if not done_path.is_file():
+                    return
+                import json as _json
 
-            try:
-                payload = _json.loads(done_path.read_text())
-            except Exception:  # noqa: BLE001 — malformed/partial done is non-fatal
-                return
+                try:
+                    payload = _json.loads(done_path.read_text())
+                except Exception:  # noqa: BLE001 — malformed/partial done is non-fatal
+                    return
             req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
             if not isinstance(req, dict) or not req:
+                _consume_marker()
                 return
 
             from ..framework.build_actions import (
@@ -4282,6 +4295,7 @@ class FrameworkPhase(PhaseHandler):
                     component,
                     repo_url,
                 )
+                _consume_marker()
                 return
             capability = str(req.get("capability") or "").strip()
             reason = str(req.get("reason") or "").strip() or "specialist-requested targeted build"
@@ -4299,6 +4313,7 @@ class FrameworkPhase(PhaseHandler):
             )
             build_task_id = await self.enqueue_targeted_build(action)
             if build_task_id:
+                _consume_marker()
                 log.info(
                     "ENABLEMENT: enqueued specialist-requested targeted_build "
                     "component=%s capability=%s ref=%s task=%s",

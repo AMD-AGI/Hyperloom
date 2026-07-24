@@ -726,6 +726,25 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     assert params.get("config_changes") == {}
 
 
+@pytest.mark.asyncio
+async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) -> None:
+    done = {
+        "proposal_set": [{"name": "build-aiter"}],
+        "needs_targeted_build": {
+            "component": "aiter",
+            "capability": "deepseek_v4_decode",
+            "ref": "v0.1.15.post2",
+        },
+    }
+
+    await coord._maybe_autosubmit_framework_config(
+        task=_enablement_authoring_task(),
+        done_payload=done,
+    )
+
+    assert not coord.state.pending_proposals
+
+
 # --------------------------------------------------------------------------
 # _record_framework_agent_authored_outcome
 # --------------------------------------------------------------------------

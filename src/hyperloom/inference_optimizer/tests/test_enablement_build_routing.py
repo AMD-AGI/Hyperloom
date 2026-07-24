@@ -244,6 +244,33 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_specialist_requested_build_enqueued_from_payload(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi355x"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    payload = {
+        "needs_targeted_build": {
+            "component": "aiter",
+            "capability": "deepseek_v4_decode",
+            "repo_url": "https://github.com/ROCm/aiter",
+            "ref": "v0.1.15.post2",
+        }
+    }
+    await Coordinator._maybe_enqueue_specialist_requested_build(
+        coord,
+        task_id="spec-direct",
+        payload=payload,
+    )
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    assert TargetedBuildAction.from_state(queued[0].params).ref == "v0.1.15.post2"
+
+
+@pytest.mark.asyncio
 async def test_specialist_requested_build_rejects_repo_component_mismatch(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi355x"

@@ -1706,6 +1706,19 @@ class WritebackCollaborator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
+        if bool((task.params or {}).get("enablement")) and isinstance(
+            done_payload.get("needs_targeted_build"), dict
+        ):
+            try:
+                await self._maybe_enqueue_specialist_requested_build(
+                    task_id=str(task.task_id or ""),
+                    payload=done_payload,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "specialist build request failed for task=%s",
+                    task.task_id,
+                )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(

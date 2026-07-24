@@ -1566,6 +1566,16 @@ class ExplorePhase(PhaseHandler):
             return
         config_changes = _framework_config_levers_from_done(done_payload)
         is_enablement = bool(spec_params.get("enablement"))
+        build_request = done_payload.get("needs_targeted_build")
+        if (
+            is_enablement
+            and isinstance(build_request, dict)
+            and build_request
+            and not config_changes
+            and not done_payload.get("setup_commands")
+            and not done_payload.get("artifacts_written")
+        ):
+            return
         # Normally route only when there are config levers to test. For an
         # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
         # integrate_patch owns the enablement stall accounting, so an enablement
