@@ -928,6 +928,7 @@ async def run_grid(
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
+    session_deadline_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute each grid variant and return all per-variant results.
 
@@ -938,6 +939,11 @@ async def run_grid(
     close) is owned by the caller so it can also span multiple ``run_grid``
     calls that reuse one persistent server (conc_sweep arm, explore warmup +
     decision).
+
+    ``session_deadline_sec`` is a ``time.monotonic()`` deadline for the whole
+    session budget; when the clock passes it, every remaining variant is marked
+    ``skipped`` instead of run, so a wall-clock timeout stops the grid mid-way
+    rather than draining all variants first.
     """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -992,6 +998,16 @@ async def run_grid(
             log.debug("robustness pulse swallowed: %r", exc)
 
     for i, variant in enumerate(grid):
+        # Session-budget stop: skip the remaining variants once the wall-clock
+        # deadline has passed so a timeout halts the grid instead of draining it.
+        if session_deadline_sec is not None and time.monotonic() >= session_deadline_sec:
+            log.warning(
+                "grid_runner: session deadline reached; skipping %d remaining variant(s)",
+                len(grid) - i,
+            )
+            for skipped_variant in grid[i:]:
+                results.append(_session_deadline_skip_result(skipped_variant))
+            break
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         # Capability fast-fail: drop a variant whose env flag the build cannot
         # honour before booting a doomed server, still recording the failure so
@@ -1778,6 +1794,19 @@ async def run_grid(
         )
         await _pulse_after_variant(i)
     return results
+
+
+def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
+    """Synthetic ``skipped`` result for a variant dropped when the session budget ran out."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="skipped",
+        error="session wall-clock budget exhausted before this variant ran",
+        error_class="session_time_exhausted",
+        note=variant.note,
+    )
 
 
 SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
