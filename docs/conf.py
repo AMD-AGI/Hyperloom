@@ -84,12 +84,10 @@ extensions = [
 ]
 
 
-
 html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "rocm.docs.amd.com")
 html_context = {}
 if os.environ.get("READTHEDOCS", "") == "True":
     html_context["READTHEDOCS"] = True
-
 
 numfig = False
 
