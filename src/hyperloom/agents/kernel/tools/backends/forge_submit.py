@@ -1795,29 +1795,81 @@ def _signal_processes(processes: list[tuple[int, int]], sig: int) -> None:
             continue
 
 
+def _process_group_members(pgid: int) -> list[tuple[int, int, str]]:
+    """Return live ``(pid, start_time, state)`` members of one process group."""
+    members: list[tuple[int, int, str]] = []
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError:
+        return members
+    for entry in proc_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_text = (entry / "stat").read_text()
+            closing_paren = stat_text.rfind(")")
+            fields = stat_text[closing_paren + 2 :].split()
+            if int(fields[2]) != pgid:
+                continue
+            members.append((int(entry.name), int(fields[19]), fields[0]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return members
+
+
+def _signal_process_group(
+    pgid: int,
+    sig: int,
+    *,
+    phase: str,
+) -> bool | None:
+    """Signal a Forge-owned process group and warn on non-race failures."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return None
+    except (PermissionError, OSError) as exc:
+        log.warning(
+            "forge process-group %s failed: pgid=%d signal=%d error=%s",
+            phase,
+            pgid,
+            sig,
+            exc,
+        )
+        return False
+
+
 def _terminate_forge_process(
     proc: subprocess.Popen,
     *,
     grace_sec: int = _FORGE_SHUTDOWN_GRACE_SEC,
 ) -> tuple[str, str]:
     """Terminate the forge-loop process group, escalating after a grace period."""
+    pgid = proc.pid
     descendants = _descendant_processes(proc.pid)
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        log.debug("forge process group %d exited before SIGTERM", proc.pid)
-    except (PermissionError, OSError):
+    if _signal_process_group(
+        pgid,
+        signal.SIGTERM,
+        phase="SIGTERM",
+    ) is False:
+        _signal_processes(descendants, signal.SIGTERM)
         try:
             proc.terminate()
         except OSError as exc:
-            log.debug(
-                "forge process %d exited before terminate fallback: %s",
+            log.warning(
+                "forge direct-process terminate fallback failed: pid=%d error=%s",
                 proc.pid,
                 exc,
             )
     try:
         stdout, stderr = proc.communicate(timeout=grace_sec)
         _signal_processes(descendants, signal.SIGKILL)
+        _signal_process_group(
+            pgid,
+            signal.SIGKILL,
+            phase="post-reap SIGKILL",
+        )
         return stdout or "", stderr or ""
     except subprocess.TimeoutExpired:
         descendants = list(
@@ -1829,23 +1881,47 @@ def _terminate_forge_process(
             )
         )
         _signal_processes(descendants, signal.SIGKILL)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            log.debug("forge process group %d exited before SIGKILL", proc.pid)
-        except (PermissionError, OSError):
+        if _signal_process_group(
+            pgid,
+            signal.SIGKILL,
+            phase="timeout SIGKILL",
+        ) is False:
             try:
                 proc.kill()
             except OSError as exc:
-                log.debug(
-                    "forge process %d exited before kill fallback: %s",
+                log.warning(
+                    "forge direct-process kill fallback failed: pid=%d error=%s",
                     proc.pid,
                     exc,
                 )
         try:
             stdout, stderr = proc.communicate(timeout=5)
+            _signal_process_group(
+                pgid,
+                signal.SIGKILL,
+                phase="final SIGKILL",
+            )
             return stdout or "", stderr or ""
         except subprocess.TimeoutExpired:
+            _signal_process_group(
+                pgid,
+                signal.SIGKILL,
+                phase="reap-timeout SIGKILL",
+            )
+            residual = _process_group_members(pgid)
+            _signal_processes(
+                [(pid, start_time) for pid, start_time, _state in residual],
+                signal.SIGKILL,
+            )
+            log.warning(
+                "forge process group was not reaped after SIGKILL: "
+                "pgid=%d residual=%s",
+                pgid,
+                [
+                    {"pid": pid, "state": state}
+                    for pid, _start_time, state in residual
+                ],
+            )
             return "", ""
 
 

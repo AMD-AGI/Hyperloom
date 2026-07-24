@@ -699,10 +699,33 @@ def record_kernel_integrate_result(
         state.rejected_kernel_ids.append(kernel_id)
     entry["rejected"] = rejected
     state.kernel_integrate_attempts[key] = entry
+    task_key = str(
+        (
+            pending_record.get("task_key")
+            if isinstance(pending_record, dict)
+            else ""
+        )
+        or task_group_key
+        or ""
+    )
     if isinstance(pending_record, dict):
         pending_record["status"] = "rejected"
         pending_record["rejected_at"] = _now_iso()
         pending_record["rejected_reason"] = reason
+    if task_key:
+        stable_attempt = (state.kernel_opt_task_attempts or {}).get(task_key)
+        if isinstance(stable_attempt, dict):
+            stable_attempt["integration_status"] = "rejected"
+            stable_attempt["integration_rejected_reason"] = reason
+            stable_attempt["integration_rejected_at"] = _now_iso()
+        ordinal_attempt = (state.kernel_opt_attempts or {}).get(kernel_id)
+        if (
+            isinstance(ordinal_attempt, dict)
+            and str(ordinal_attempt.get("stable_task_key") or "") == task_key
+        ):
+            ordinal_attempt["integration_status"] = "rejected"
+            ordinal_attempt["integration_rejected_reason"] = reason
+            ordinal_attempt["integration_rejected_at"] = _now_iso()
     return entry
 
 

@@ -727,6 +727,51 @@ def test_integrate_rejection_does_not_poison_reused_ordinal(tmp_path):
     assert [candidate["kernel_id"] for candidate in selected] == ["k002"]
 
 
+def test_grouped_integrate_revert_clears_kernel_work_pending():
+    state = SharedState()
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k002",
+            "source_file": "/repo/operator.py",
+            "task_group_id": "tg001",
+            "task_group_key": "stable-task",
+            "task_group_primary_kernel_id": "k002",
+            "task_group_kernel_ids": ["k002"],
+            "proposal": {"decision": "KEEP"},
+            "verification": {
+                "micro_speedup": 1.2,
+                "best_artifact_path": "/artifacts/operator.py",
+            },
+            "attempts": [],
+        }
+    )
+    pending = state.pending_kernel_integration_records()[0]
+
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "REVERT",
+            "integration_id": pending["integration_id"],
+            "kernel_id": "k002",
+            "task_group_key": "stable-task",
+            "patch_path": "/artifacts/operator.py",
+            "target_file": "/repo/operator.py",
+            "gain_pct": -1.0,
+        }
+    )
+
+    assert (
+        state.kernel_opt_task_attempts["stable-task"]["integration_status"]
+        == "rejected"
+    )
+    assert (
+        state.kernel_opt_attempts["k002"]["integration_status"]
+        == "rejected"
+    )
+    assert kernel_work_pending(state) is False
+
+
 @pytest.mark.asyncio
 async def test_single_dispatch_serializes_grouped_candidate(tmp_path, monkeypatch):
     candidate = {
