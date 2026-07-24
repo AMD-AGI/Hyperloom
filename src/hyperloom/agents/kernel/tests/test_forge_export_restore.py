@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import logging
 from pathlib import Path
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
@@ -364,6 +365,88 @@ def test_prepare_inplace_autorecovers_from_stale_forge_branch():
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
         assert _git(repo, "branch", "--list", branch).strip() == "", "run temp branch must be deleted"
         print("PASS test_prepare_inplace_autorecovers_from_stale_forge_branch")
+
+
+def test_terminate_forge_process_sweeps_group_after_parent_exit(monkeypatch):
+    calls = []
+
+    class Proc:
+        pid = 123
+
+        @staticmethod
+        def communicate(timeout=None):
+            return "stdout", "stderr"
+
+    monkeypatch.setattr(forge_submit, "_descendant_processes", lambda _pid: [])
+    monkeypatch.setattr(
+        forge_submit.os,
+        "killpg",
+        lambda pgid, sig: calls.append((pgid, sig)),
+    )
+
+    out, err = forge_submit._terminate_forge_process(Proc(), grace_sec=0)
+
+    assert (out, err) == ("stdout", "stderr")
+    assert calls == [
+        (123, forge_submit.signal.SIGTERM),
+        (123, forge_submit.signal.SIGKILL),
+    ]
+
+
+def test_terminate_forge_process_reports_unreaped_group(
+    monkeypatch,
+    caplog,
+):
+    group_signals = []
+    process_signals = []
+
+    class Proc:
+        pid = 123
+
+        @staticmethod
+        def communicate(timeout=None):
+            raise subprocess.TimeoutExpired("forge-loop", timeout)
+
+        @staticmethod
+        def kill():
+            raise AssertionError("killpg succeeded; direct fallback is invalid")
+
+    monkeypatch.setattr(forge_submit, "_descendant_processes", lambda _pid: [])
+    monkeypatch.setattr(
+        forge_submit,
+        "_process_group_members",
+        lambda _pgid: [(456, 99, "D")],
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_proc_identity",
+        lambda _pid: (1, 99),
+    )
+    monkeypatch.setattr(
+        forge_submit.os,
+        "killpg",
+        lambda pgid, sig: group_signals.append((pgid, sig)),
+    )
+    monkeypatch.setattr(
+        forge_submit.os,
+        "kill",
+        lambda pid, sig: process_signals.append((pid, sig)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=forge_submit.log.name):
+        out, err = forge_submit._terminate_forge_process(
+            Proc(),
+            grace_sec=0,
+        )
+
+    assert (out, err) == ("", "")
+    assert group_signals == [
+        (123, forge_submit.signal.SIGTERM),
+        (123, forge_submit.signal.SIGKILL),
+        (123, forge_submit.signal.SIGKILL),
+    ]
+    assert process_signals == [(456, forge_submit.signal.SIGKILL)]
+    assert "was not reaped after SIGKILL" in caplog.text
 
 
 if __name__ == "__main__":
