@@ -5087,6 +5087,100 @@ def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     return ""
 
 
+def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
+    """Best-effort orphaned-lock sweep immediately before an integrate boot."""
+    from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+    try:
+        stats = sweep_stale_aiter_locks_if_dead()
+    except Exception as exc:  # noqa: BLE001 - cache hygiene must not hide benchmark results
+        log.warning("integrate_handler: aiter lock sweep failed before %s: %r", reason, exc)
+        return {"errors": 1, "exception": repr(exc)}
+    if stats.get("skipped_live"):
+        log.info(
+            "integrate_handler: aiter lock sweep skipped before %s; a compiler is alive",
+            reason,
+        )
+    elif stats.get("deleted"):
+        log.warning(
+            "integrate_handler: reaped %d orphaned aiter lock(s) across %s before %s",
+            stats.get("deleted"),
+            stats.get("dirs") or [stats.get("dir")],
+            reason,
+        )
+    return stats
+
+
+async def _run_integrate_rebaseline_with_lock_retry(
+    executor: Any,
+    ctx: Any,
+    *,
+    workspace: Path,
+    reason: str,
+) -> dict[str, Any]:
+    """Run one integrate baseline and retry once after a confirmed baton stall."""
+    from ..actions.executors._aiter_jit import find_aiter_baton_wait
+
+    prelaunch_sweep = _sweep_integrate_aiter_locks(reason=reason)
+    first_started_unix = time.time()
+    result = await executor(ctx)
+    if not isinstance(result, dict) or result.get("status") == "succeeded":
+        return result
+
+    evidence = find_aiter_baton_wait(
+        workspace,
+        since_unix=first_started_unix - 1.0,
+    )
+    if evidence is None:
+        return result
+
+    cleanup = _sweep_integrate_aiter_locks(reason=f"{reason} stale-lock retry")
+    result["error_class"] = "stale_jit_lock"
+    result["stale_jit_lock"] = {
+        "evidence": evidence,
+        "prelaunch_sweep": prelaunch_sweep,
+        "post_failure_sweep": cleanup,
+        "retry_attempted": False,
+    }
+
+    # A live compiler may legitimately own the observed lock. When liveness is
+    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
+    # at least one deletion or after confirming the lock disappeared.
+    cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
+    lock_removed = bool(cleanup.get("deleted")) or (
+        cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh")
+    )
+    if not (cleanup_safe and lock_removed):
+        return result
+
+    log.warning(
+        "integrate_handler: classified %s as stale_jit_lock; retrying once after cleanup",
+        reason,
+    )
+    retry_started_unix = time.time()
+    retry_result = await executor(ctx)
+    if not isinstance(retry_result, dict):
+        return retry_result
+    retry_evidence = (
+        find_aiter_baton_wait(
+            workspace,
+            since_unix=retry_started_unix - 1.0,
+        )
+        if retry_result.get("status") != "succeeded"
+        else None
+    )
+    retry_result["stale_jit_lock_retry"] = {
+        "evidence": evidence,
+        "cleanup": cleanup,
+        "retry_attempted": True,
+        "retry_succeeded": retry_result.get("status") == "succeeded",
+    }
+    if retry_evidence is not None:
+        retry_result["error_class"] = "stale_jit_lock"
+        retry_result["stale_jit_lock_retry"]["retry_evidence"] = retry_evidence
+    return retry_result
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -5231,6 +5325,11 @@ async def integrate_handler(
     # stops a double restart; force_full_restart scopes the resume override here.
     from ..actions.executors._multi_node_env import is_multi_node
 
+    # This must run even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
+
     if is_multi_node():
         from ..actions.executors._multi_node_server_lifecycle import (
             ServerRestartFailed,
@@ -5262,7 +5361,12 @@ async def integrate_handler(
             }
 
     try:
-        bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
+        bench_result = await _run_integrate_rebaseline_with_lock_retry(
+            BaselineExecutor(session_dir=session_dir),
+            ctx,
+            workspace=workspace,
+            reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
+        )
     except Exception as exc:  # noqa: BLE001
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
@@ -5403,7 +5507,12 @@ async def integrate_handler(
                 },
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )
-            paired_bench = await BaselineExecutor(session_dir=session_dir)(RunnerContext(task=paired_task, lease=None))
+            paired_bench = await _run_integrate_rebaseline_with_lock_retry(
+                BaselineExecutor(session_dir=session_dir),
+                RunnerContext(task=paired_task, lease=None),
+                workspace=paired_ws,
+                reason=f"integrate {kernel_id or 'anonymous'} paired pristine baseline",
+            )
             if is_valid_measurement(paired_bench):
                 paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
                 paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
