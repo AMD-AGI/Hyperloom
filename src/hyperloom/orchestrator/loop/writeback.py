@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_str_list
 from ..state.optimization_journal import (
     Journal,
     JournalEntry,
@@ -420,36 +420,6 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        if task.kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                result_payload.setdefault(
-                    "workload",
-                    {
-                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
-                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
-                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
-                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
-                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
-                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
-                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
-                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
-                    },
-                )
-                instrument.record_action_operation(
-                    self.session_dir,
-                    action=task.kind,
-                    task_id=task.task_id,
-                    status="failed",
-                    decision="discarded",
-                    result=result_payload,
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("v4 action failure capture failed", exc_info=True)
         any_changed = False
         params = task.params or {}
         if task.kind == "explore" and bool(params.get("geak_fallback")):
@@ -1670,7 +1640,7 @@ class WritebackCollaborator:
         # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
         if domain == "research_scout_specialist":
             try:
-                self._coord._harvest_research_scout(done_payload)
+                await self._coord._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
                     "research-scout harvest failed for task=%s",
@@ -1783,7 +1753,7 @@ class WritebackCollaborator:
                 added,
             )
 
-    def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
+    async def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
         """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
@@ -1835,7 +1805,12 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
-        self._coord._reset_orchestration_conversation()
+        compacted = await self._coord._maybe_checkpoint_orchestration(
+            tick=int(getattr(self.shared_state, "tick", 0) or 0),
+            force=True,
+        )
+        if not compacted:
+            self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,
@@ -1942,8 +1917,6 @@ class WritebackCollaborator:
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
-                    if bv.get("task_id"):
-                        stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
                         stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
                             str(bv.get("effective_extra_server_args") or "")
@@ -1979,7 +1952,10 @@ class WritebackCollaborator:
         # (config_changes_applied={}) do not clear prior explore/env layers.
         _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
         _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
-        _merged_envs = {**_prev_envs, **_new_envs}
+        _merged_envs = dict(_prev_envs)
+        for _key in to_str_list(bv.get("unset_envs") if isinstance(bv, dict) else None):
+            _merged_envs.pop(_key, None)
+        _merged_envs.update(_new_envs)
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
@@ -2050,44 +2026,6 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
-        if task_kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                result_status = str(result.get("status") or "succeeded")
-                kept = task_kind == "framework_agent" and result_status.lower() == "kept"
-                v4_result = dict(result)
-                v4_result.setdefault(
-                    "workload",
-                    {
-                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
-                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
-                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
-                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
-                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
-                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
-                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
-                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
-                    },
-                )
-                instrument.record_action_operation(
-                    self.session_dir,
-                    action=task_kind,
-                    task_id=getattr(task, "task_id", "") if task is not None else "",
-                    status=result_status,
-                    decision="promoted" if kept else "discarded",
-                    result=v4_result,
-                    extras={
-                        "candidate_id": self._framework_candidate_key(result.get("candidate"))
-                        if task_kind == "framework_agent" and isinstance(result.get("candidate"), dict)
-                        else ""
-                    },
-                    phase=str(getattr(self.shared_state, "phase", "") or ""),
-                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                )
-            except Exception:  # noqa: BLE001
-                log.debug("v4 action result capture failed", exc_info=True)
         outcome = _PromoteOutcome()
         handler_name = self._PROMOTE_HANDLERS.get(task_kind)
         if handler_name is not None:
@@ -2574,28 +2512,6 @@ class WritebackCollaborator:
                             "validated": False,
                             "reason": repr(exc),
                         }
-                        try:
-                            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                            geak_result = (
-                                self.shared_state.geak_result
-                                if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                                else {}
-                            )
-                            instrument.record_geak_operation(
-                                self.session_dir,
-                                stage="final_validation_failed",
-                                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                                result={
-                                    **geak_result,
-                                    "failure_reason": "geak_harness_fallback_exception",
-                                    "error": repr(exc),
-                                },
-                                status="failed",
-                                validation_source="geak_same_harness_geak",
-                            )
-                        except Exception:  # noqa: BLE001
-                            log.debug("geak v4 fallback-exception recording failed", exc_info=True)
                     if not bool(fallback_result.get("validated")):
                         geak_result = (
                             dict(self.shared_state.geak_result)
@@ -2664,9 +2580,6 @@ class WritebackCollaborator:
                 changed = True
             # 4. Lift the best winner into current_best / optimization_stack.
             if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
-                best_winner = dict(best_winner)
-                if task is not None:
-                    best_winner["task_id"] = str(task.task_id or "")
                 explore_gap_cid = (
                     str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
                 )
@@ -2726,9 +2639,12 @@ class WritebackCollaborator:
             specialist_task_id = str(result.get("specialist_task_id") or "")
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
-                "task_id": getattr(task, "task_id", "") if task is not None else "",
-                "candidate_extra_server_args": "",
-                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(new_tput),
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
@@ -2849,7 +2765,6 @@ class WritebackCollaborator:
             lift = {
                 "name": f"framework:{cand_id}",
                 "variant_name": cand_id,
-                "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": "",
                 "extra_envs": {},
                 "workspace": result.get("workspace"),
@@ -3282,8 +3197,12 @@ class WritebackCollaborator:
                 return False
             bv = {
                 "name": sid,
-                "candidate_extra_server_args": "",
-                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(tput),
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
@@ -3556,26 +3475,6 @@ class WritebackCollaborator:
                     params=params_ps,
                     idempotency_key="geak-revalidate",
                 )
-                try:
-                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                    instrument.record_geak_operation(
-                        self.session_dir,
-                        stage="rebench_started",
-                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                        result={
-                            **ps,
-                            "rebench": {
-                                "task_id": task.task_id,
-                                "existing": bool(existing),
-                                "mode": "orchestrator_same_harness",
-                                "expected_cfg_hash": expected_cfg_hash,
-                            },
-                        },
-                        status="running",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("geak v4 rebench recording failed", exc_info=True)
                 return {
                     "task_id": task.task_id,
                     "task_state": task.state,
@@ -3647,19 +3546,6 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok":
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="geak_harness_fallback",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result={**ps, "fallback_reason": reason},
-                status="running",
-                validation_source="geak_same_harness_geak",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
         # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
@@ -3714,19 +3600,6 @@ class WritebackCollaborator:
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
                 log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
-                try:
-                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-                    instrument.record_geak_operation(
-                        self.session_dir,
-                        stage="final_validation_failed",
-                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                        result={**ps, "fallback_result": res, "failure_reason": "missing_measured_throughput"},
-                        status="failed",
-                        validation_source="geak_same_harness_geak",
-                    )
-                except Exception:  # noqa: BLE001
-                    log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
             self._promote_geak_from_candidate(
                 ps,
@@ -3746,24 +3619,6 @@ class WritebackCollaborator:
             geak_sp,
             reason,
         )
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_geak_operation(
-                self.session_dir,
-                stage="final_validation_failed",
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                result={
-                    **ps,
-                    "fallback_result": res,
-                    "failure_reason": reason,
-                    "geak_speedup": geak_sp,
-                },
-                status="failed",
-                validation_source="geak_same_harness_geak",
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("geak v4 failed-validation recording failed", exc_info=True)
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _resume_reenter_kernel_if_needed(self) -> None:

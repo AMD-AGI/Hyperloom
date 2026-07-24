@@ -2668,6 +2668,29 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
+    def grid_session_deadline_sec(self, *, reserve_sec: float = 120.0) -> float | None:
+        """``time.monotonic()`` deadline for grid variant loops, or ``None`` when the budget is unbounded.
+
+        Reserves ``reserve_sec`` so the CLOSE phase and report still have room
+        after the last variant. Grid runners pass this as ``session_deadline_sec``
+        so a wall-clock timeout skips the remaining variants instead of draining
+        the whole grid.
+
+        Args:
+            reserve_sec (float): Seconds held back from the raw remaining budget.
+
+        Returns:
+            float | None: A monotonic-clock deadline, or ``None`` when unbounded
+                or already past the reserve.
+        """
+        remaining = self.remaining_minutes()
+        if remaining is None:
+            return None
+        usable = remaining * 60.0 - reserve_sec
+        if usable <= 0.0:
+            return time.monotonic()
+        return time.monotonic() + usable
+
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
 

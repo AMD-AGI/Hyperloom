@@ -1264,6 +1264,99 @@ class TestDedupVllmServerArgs:
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
 
+@pytest.mark.asyncio
+async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    ran: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        ran.append(slot.name)
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("v0"), GridVariant("v1")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=5,
+            session_deadline_sec=time.monotonic() - 1.0,
+        )
+
+    assert ran == []
+    assert [r.status for r in results] == ["skipped", "skipped"]
+    assert all(r.error_class == "session_time_exhausted" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    ran: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        ran.append(slot.name)
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    # Deadline leaves less than one variant_timeout_sec of budget, so no variant
+    # should start and all are skipped (last-variant overrun guard).
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("v0"), GridVariant("v1")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=600,
+            session_deadline_sec=time.monotonic() + 5.0,
+        )
+
+    assert ran == []
+    assert [r.status for r in results] == ["skipped", "skipped"]
+
+
+@pytest.mark.asyncio
+async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    ran: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        ran.append(slot.name)
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("v0"), GridVariant("v1")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=5,
+            session_deadline_sec=None,
+        )
+
+    assert len(ran) == 2
+    assert [r.status for r in results] == ["succeeded", "succeeded"]
+
+
 class TestCompactJsonServerArgs:
     """JSON-valued flags must be space-free to survive Magpie's unquoted
     ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config

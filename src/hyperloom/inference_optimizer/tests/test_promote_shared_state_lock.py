@@ -322,7 +322,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
             "output_throughput": 140.0,
             "specialist_task_id": "spec-1",
             "delta_pct": 40.0,
-            "config_changes_applied": {"FOO": "1"},
+            "extra_server_args_applied": "--kv-cache-dtype fp8",
+            "extra_envs_applied": {"FOO": "1"},
             "workspace": "/w",
         },
         task=_task("integrate_patch", task_id="t1"),
@@ -330,6 +331,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["tput"] == 140.0
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert s.current_best["extra_envs"] == {"FOO": "1"}
     # pending_integrate sentinel cleared after the outcome is observed.
     assert s.pending_integrate == {}
     # Not an audited action: no last_integrate_patch attribute is created.
@@ -595,6 +598,32 @@ async def test_integrate_keep_preserves_prior_explore_envs(session_dir):
     assert s.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER_MOE") == "0", (
         "explore env must survive artifact-only integrate KEEP"
     )
+
+
+def test_lift_applies_unset_envs_before_new_envs(session_dir):
+    coord = _coord(session_dir)
+    coord.shared_state.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "",
+        "extra_envs": {"KEEP": "old", "DROP": "old", "RESTORE": "old"},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {
+            "name": "env-update",
+            "extra_server_args": "",
+            "extra_envs": {"KEEP": "new", "RESTORE": "new"},
+            "unset_envs": ["DROP", "RESTORE"],
+        },
+    )
+
+    assert coord.shared_state.current_best["extra_envs"] == {
+        "KEEP": "new",
+        "RESTORE": "new",
+    }
 
 
 @pytest.mark.asyncio
