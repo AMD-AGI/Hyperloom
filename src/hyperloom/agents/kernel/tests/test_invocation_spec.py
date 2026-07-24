@@ -221,6 +221,25 @@ def test_missing_optional_context_is_fail_soft(tmp_path):
     assert "sequence" not in spec["deployment"]
 
 
+def test_non_finite_sequence_context_omits_request_token_total(tmp_path):
+    spec = invocation_spec.build_invocation_spec(
+        {
+            "name": "non_finite_sequence",
+            "kernel_repo": str(tmp_path),
+            "runtime_args": {
+                "workload": {
+                    "isl": float("nan"),
+                    "osl": 1024,
+                }
+            },
+        }
+    )
+
+    assert "input_tokens" not in spec["deployment"]["sequence"]
+    assert spec["deployment"]["sequence"]["output_tokens"] == 1024
+    assert "request_tokens" not in spec["deployment"]["sequence"]
+
+
 def test_preserves_raw_argument_order_alongside_tensor_projection(tmp_path):
     candidate = _candidate(tmp_path)
     candidate["raw_arg_spec"] = {
@@ -570,6 +589,37 @@ def test_forge_shapes_deduplicate_identical_observations():
     assert len(cases) == 1
     assert cases[0]["kernel_ids"] == ["k001", "k002"]
     assert cases[0]["call_count"] == 30
+
+
+def test_group_cases_treat_malformed_duplicate_call_count_as_zero():
+    candidate = {
+        "kernel_id": "k001",
+        "name": "rms_norm",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": ["k001", "k002"],
+            "rows": [
+                {
+                    "kernel_id": "k001",
+                    "name": "rms_norm",
+                    "call_count": 10,
+                    "input_shapes": [{"shape": "(64,5120) bf16"}],
+                },
+                {
+                    "kernel_id": "k002",
+                    "name": "rms_norm",
+                    "call_count": "not-an-integer",
+                    "input_shapes": [{"shape": "(64,5120) bf16"}],
+                },
+            ],
+        },
+    }
+
+    cases = task_group_shape_cases(candidate)
+
+    assert len(cases) == 1
+    assert cases[0]["call_count"] == 10
 
 
 def test_group_cases_expand_csv_invocation_boundaries():

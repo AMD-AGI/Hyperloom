@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 import shlex
 from pathlib import Path
@@ -516,10 +517,15 @@ def _numeric_context_value(value: Any) -> int | float | None:
     if isinstance(value, bool) or value in (None, ""):
         return None
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
         return value
     try:
         text = str(value).strip()
-        return float(text) if "." in text else int(text)
+        parsed = float(text) if "." in text else int(text)
+        if isinstance(parsed, float) and not math.isfinite(parsed):
+            return None
+        return parsed
     except (TypeError, ValueError):
         return None
 
@@ -593,11 +599,13 @@ def _deployment_context(candidate: dict[str, Any], *, repo_root: str = "") -> di
         value = _numeric_context_value(workload.get(source_key))
         if value is not None:
             sequence[target_key] = value
-    try:
-        if sequence.get("input_tokens") is not None and sequence.get("output_tokens") is not None:
+    input_tokens = sequence.get("input_tokens")
+    output_tokens = sequence.get("output_tokens")
+    if input_tokens is not None and output_tokens is not None:
+        try:
             sequence["request_tokens"] = int(sequence["input_tokens"]) + int(sequence["output_tokens"])
-    except (TypeError, ValueError):
-        pass
+        except (TypeError, ValueError, OverflowError):
+            sequence.pop("request_tokens", None)
 
     model_ref = str(runtime_args.get("model") or candidate.get("model_path") or "").strip()
     local_model_path = _absolute_existing_path(model_ref, base_dir=repo_root)

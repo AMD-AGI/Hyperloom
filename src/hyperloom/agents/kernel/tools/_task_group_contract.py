@@ -256,9 +256,10 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
             if kernel_id and kernel_id not in existing["kernel_ids"]:
                 existing["kernel_ids"].append(kernel_id)
             try:
-                existing["call_count"] += int(row.get("call_count") or 0)
+                additional_call_count = int(row.get("call_count") or 0)
             except (TypeError, ValueError):
-                pass
+                additional_call_count = 0
+            existing["call_count"] += additional_call_count
             continue
 
         case: dict[str, Any] = {
