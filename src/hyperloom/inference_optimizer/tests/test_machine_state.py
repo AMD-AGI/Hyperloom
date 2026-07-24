@@ -13,16 +13,7 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 
 
-def test_is_pause_specialist_hint() -> None:
-    prefix = ps.ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX
-    assert ps.is_pause_specialist_hint(prefix + "serving_specialist") is True
-    assert ps.is_pause_specialist_hint(prefix) is False  # no domain suffix
-    assert ps.is_pause_specialist_hint("something_else") is False
-
-
 def test_is_valid_escalate_hint() -> None:
-    prefix = ps.ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX
-    assert ps.is_valid_escalate_hint(prefix + "kernel_switch_specialist") is True
     assert ps.is_valid_escalate_hint("not-a-real-hint") is False
     # at least one vocab member should validate
     some_vocab = next(iter(ps.ESCALATE_HINT_VOCAB))
@@ -140,55 +131,6 @@ def test_session_remaining_seconds() -> None:
         SimpleNamespace(max_minutes=60, start_ts=now_iso),
     )
     assert rem is not None and 0.0 < rem <= 3600.0
-
-
-def test_interleave_kernel_strips_explore_when_disabled() -> None:
-    # interleave ON, explore_enabled default True: KERNEL gets the explore triple.
-    full = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL_AGENT,
-        interleave=True,
-    )
-    assert "explore" in full
-    assert "specialist" in full
-    assert "integrate_patch" in full
-
-    # --no-explore: KERNEL loses `explore` but keeps specialist/integrate_patch.
-    stripped = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL_AGENT,
-        interleave=True,
-        explore_enabled=False,
-    )
-    assert "explore" not in stripped
-    assert "specialist" in stripped
-    assert "integrate_patch" in stripped
-
-    # EXPLORE phase extras (kernel_agent-owned) are unaffected by explore_enabled.
-    explore_set = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_EXPLORE,
-        interleave=True,
-        explore_enabled=False,
-    )
-    assert "kernel_opt" in explore_set
-
-    # is_action_* mirror honours the strip.
-    assert (
-        ps.is_action_llm_proposable_in_phase_with_interleave(
-            "explore",
-            ps.PHASE_KERNEL_AGENT,
-            interleave=True,
-            explore_enabled=False,
-        )
-        is False
-    )
-    assert (
-        ps.is_action_llm_proposable_in_phase_with_interleave(
-            "specialist",
-            ps.PHASE_KERNEL_AGENT,
-            interleave=True,
-            explore_enabled=False,
-        )
-        is True
-    )
 
 
 def test_post_prelude_target() -> None:

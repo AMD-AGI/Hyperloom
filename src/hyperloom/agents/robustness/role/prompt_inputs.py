@@ -65,6 +65,7 @@ _SCALAR_KEYS = {
     "crash_count",
     "current_action",
     "tick",
+    "macro_cycle",
     "stop_reason",
     "optimization_stack",
     # In-flight kernel-opt visibility lets ``_no_levers_symptom`` short-circuit.
@@ -161,6 +162,7 @@ class SharedStateSnapshot:
     crash_count: int = 0
     current_action: str = ""
     tick: int = 0
+    macro_cycle: int = 0
     stop_reason: str = ""
     optimization_stack_size: int = 0
     explore_started: bool = False
@@ -384,6 +386,7 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
     "crash_count": ("crash_count", lambda head: to_int(head, default=0)),
     "current_action": ("current_action", lambda head: "" if head == "(idle)" else head),
     "tick": ("tick", lambda head: to_int(head, default=0)),
+    "macro_cycle": ("macro_cycle", lambda head: to_int(head, default=0)),
     "stop_reason": ("stop_reason", lambda head: "" if head == "(none)" else head),
     "optimization_stack": ("optimization_stack_size", _count_optimization_stack),
     "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),

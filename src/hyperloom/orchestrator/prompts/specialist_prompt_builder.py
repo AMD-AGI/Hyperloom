@@ -26,6 +26,19 @@ from ..specialists.domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Curated launch-recipe sites the research scout mines for verified serve
+# flags / envs, keyed by (model x hardware x quant x strategy). Overridable
+# via HYPERLOOM_RECIPE_SITES (comma/space separated); values are advisory
+# templates, not fetched by the Coordinator.
+DEFAULT_RECIPE_SITES: tuple[str, ...] = (
+    "https://recipes.vllm.ai/<org>/<model>?hardware=<gpu>",
+    "https://lmsysorg.mintlify.app/cookbook/autoregressive/<family>/<model>",
+)
+
+# Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
+RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
+
+
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
 BASH_KILL_SAFETY_PREAMBLE = (
@@ -436,6 +449,30 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _recipe_sites_source_lines(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the recipe-site research source; the built-in defaults when unset, nothing when disabled via the sentinel."""
+    configured = tuple(s for s in inp.recipe_sites if s)
+    if configured and all(s.strip().lower() in RECIPE_SITES_DISABLED_VALUES for s in configured):
+        return []
+    sites = configured or DEFAULT_RECIPE_SITES
+    if not sites:
+        return []
+    lines = [
+        "4. **Verified launch-recipe sites** — structured per",
+        "   (model x hardware x quant x strategy) recipe pages carrying",
+        "   validated serve flags, env vars, and benchmark numbers. Use",
+        "   ``WebFetch`` on the page matching THIS model / GPU / precision",
+        "   (fall back to ``WebSearch`` if the exact page 404s). Extract only",
+        "   the serve flags, env vars, and reported throughput/accuracy;",
+        "   emit them as ``proposal_set`` variants with the page URL in",
+        "   ``source``. For a near-miss hardware/quant match, still surface it",
+        "   but note the mismatch in ``accuracy_risk``. Sites:",
+    ]
+    lines.extend(f"   - {site}" for site in sites)
+    lines.append("")
+    return lines
+
+
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -462,7 +499,7 @@ def _focus_research_scout_specialist(
         "You are the **research scout** — a read-only collector of",
         "*already-proven* priors. You do NOT benchmark, apply patches, or",
         "decide KEEP/REVERT. Your single deliverable is a prioritised list",
-        "of research hints, each with an explicit source.",
+        "of source-backed findings and executable variants.",
         "",
         *proven_lines,
         "**Three research sources (cover all that are reachable)**",
@@ -481,20 +518,21 @@ def _focus_research_scout_specialist(
         "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
+        *_recipe_sites_source_lines(inp),
         "**Gap computation** — where you find a reference throughput, use",
         "the gap versus our current baseline only to prioritise your hints",
         "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
         "numbers as a structured target: measured competitor baselines are",
         "sourced from InferenceX, never authored by this scout.",
         "",
-        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
-        "``research`` block:",
-        "- ``hints``: list of ``{what, expected_impact, accuracy_risk,",
-        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
-        "  / MLPerf row / reference script path); a hint without a source",
-        "  is dropped.",
-        "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
-        "  ids you actually inspected (feeds exploration-depth tracking).",
+        "**Output protocol** — use only the top-level ``specialist_done`` fields:",
+        "- ``proposal_set``: executable variants using the standard explore",
+        "  schema. Put inspected PRs and references in ``pr_evidence`` or",
+        "  ``source_evidence`` on each proposal.",
+        "- ``new_findings``: list of ``{what, expected_impact, accuracy_risk,",
+        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog /",
+        "  MLPerf row / reference script path).",
+        "- ``residual_questions``: unanswered questions for the next scout round.",
         "",
         "**Iron rule** — read-only. Never write a patch, never launch a",
         "benchmark, never recommend a phase transition. Turn proven priors",
@@ -674,6 +712,9 @@ class SpecialistPromptInputs:
     target_gap_notes: str = ""
     # Already-proven warm-recipe optimizations the research scout should skip.
     already_proven: list[dict[str, str]] = field(default_factory=list)
+    # Curated recipe-site URL templates the research scout may mine for
+    # verified serve flags / envs; empty falls back to the built-in defaults.
+    recipe_sites: tuple[str, ...] = ()
     # Advisory research-hint block; its presence suppresses cold-start fallback.
     research_hints: str = ""
     # Workload context mirrored from SharedState; renders in section 2.
@@ -1640,7 +1681,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the read-only framework source roots and per-domain focus
+    Lists the installed source roots and per-domain focus
     directories, or a ``(none)`` placeholder when neither is supplied.
 
     Args:
@@ -1654,7 +1695,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     if inp.framework_source_roots:
-        rows.append("Framework source roots (read-only):")
+        rows.append("Installed source roots (read-only):")
         for p in inp.framework_source_roots:
             rows.append(f"- {p}")
     if inp.source_hint_directories:
@@ -1816,9 +1857,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
         "  AND no ``patches_written``/``artifacts_written``; in that case",
         "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
-        "- ``new_findings`` is your free-form summary of anything you",
-        "  learned this round — Coordinator funnels it into the KB",
-        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
+        "- ``new_findings`` is a list of learned items. Research scouts must",
+        "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
+        "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",

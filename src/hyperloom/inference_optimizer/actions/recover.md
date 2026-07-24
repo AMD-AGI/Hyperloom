@@ -69,33 +69,14 @@ regression — that path goes through `integrate` REVERT instead.
                   force_gpu_cleanup=False.
                                 |
                                 v
-  mid-probe   --> rocm-smi (same shape)
-                                |
-                                v
-  hard reset  --> only when ALL hold:
-                    * force_gpu_cleanup=True
-                    * HYPERLOOM_RECOVER_ALLOW_GPU_RESET truthy (opt-in;
-                      disabled by default — a gpureset is tenant-affecting)
-                    * the session's own GPUs are derivable from
-                      ROCR_VISIBLE_DEVICES
-                    * mid-probe still shows leaked VRAM
-                  Runs `rocm-smi --gpureset --gpu=<ROCR_VISIBLE_DEVICES>`,
-                  ALWAYS scoped to this session's physical cards — it NEVER
-                  issues an implicit `--gpu=all` full-node reset. When the
-                  env gate is off the step is skipped
-                  (gpureset_skipped_reason="gpureset_disabled"); when the
-                  GPU scope can't be derived it is skipped
-                  ("no_session_gpu_scope"). 30s timeout; captures
-                  stdout/stderr/returncode for the audit log; never raises.
-                                |
-                                v
-  post-probe  --> rocm-smi (skipped when no gpureset attempted)
+  mid-probe   --> rocm-smi (same shape); decides success
 ```
 
-Out of scope (by design — would kill the live optimizer or require
-privileges the sandbox typically lacks):
+Out of scope (by design — would kill the live optimizer, affect other
+tenants, or require privileges the sandbox typically lacks):
 
 * `pkill -f sglang` / `pkill -f vllm` (violates kernel-agent IR-5).
+* Hard GPU reset (`rocm-smi --gpureset`) — tenant-affecting, never issued.
 * Reloading the `amdgpu` kernel module or restarting the pod.
 * Touching `~/.claude/config.json`, Ray, or any other long-lived
   runtime service.
@@ -106,7 +87,6 @@ privileges the sandbox typically lacks):
 state:                "succeeded" | "needs_review"
 reason:               <echoed from params.reason>
 force_gpu_cleanup:    <echoed bool>
-allow_reset_env:      <bool — HYPERLOOM_RECOVER_ALLOW_GPU_RESET resolved>
 killed_pids:
   - pid:    <int>
     cmd:    <str — cmdline at discovery time>
@@ -114,9 +94,6 @@ killed_pids:
     signal: "TERM" | "KILL"
 pre_free_mb_per_gpu:  [{gpu_id, vram_total_mb, vram_used_mb, free_mb}, ...]
 mid_free_mb_per_gpu:  [...]
-post_free_mb_per_gpu: [...]
-gpureset_attempted:   <bool>
-gpureset_result:      {returncode, stdout, stderr, error?, timeout_s?}
 error_class:          <str — only on state=needs_review>
 workspace:            <str — runs/recover/<task_id>/>
 result_path:          <str — workspace/result.json>

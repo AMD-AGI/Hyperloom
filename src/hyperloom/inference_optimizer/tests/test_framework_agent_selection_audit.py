@@ -59,30 +59,32 @@ def test_config_levers_non_dict_and_patch_precedence() -> None:
     assert f({}) == {}
 
 
-def test_config_levers_flatten_envs_and_args() -> None:
+def test_config_levers_preserve_envs_and_args() -> None:
     f = coord_mod._framework_config_levers_from_done
+    extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
             "proposal_set": [
                 {
                     "extra_envs": {"VLLM_FOO": 1, "  ": "skipped"},
-                    "extra_args": "--enable-x --max-num-seqs=256 --tp 4 --bare",
+                    "extra_args": extra_args,
                 }
             ]
         }
     )
-    assert levers["VLLM_FOO"] == "1"
-    assert levers["--max-num-seqs"] == "256"
-    assert levers["--tp"] == "4"
-    assert levers["--enable-x"] == ""  # followed by another flag -> bare
-    assert levers["--bare"] == ""  # trailing bare flag
-    assert "  " not in levers
+    assert levers == {
+        "extra_server_args": extra_args,
+        "extra_envs": {"VLLM_FOO": "1"},
+    }
 
 
 def test_config_levers_args_as_list() -> None:
     f = coord_mod._framework_config_levers_from_done
-    levers = f({"proposal_set": [{"extra_args": ["--flag", "val"]}]})
-    assert levers["--flag"] == "val"
+    levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
+    assert levers == {
+        "extra_server_args": "--flag 'value with space'",
+        "extra_envs": {},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -213,10 +215,11 @@ async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
     coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
+    coord.shared_state.macro_cycle = 2
     cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
     await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
     prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "already_present" for p in prog)
+    assert any(p.get("status") == "already_present" and p.get("cycle") == 2 for p in prog)
     assert seen  # KB writeback fired for already_present
 
 
@@ -299,6 +302,25 @@ def test_ranker_client_from_scorer(coord: Coordinator) -> None:
     assert coord._framework_agent_ranker_client() is fake_client
     # Now cached.
     assert coord._framework_agent_ranker_client() is fake_client
+
+
+def test_ranker_client_reuses_orchestration_backend_client(coord: Coordinator) -> None:
+    """When orchestration exposes an OpenAI-compatible client, the ranker reuses
+    it (default-on without extra credentials)."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+
+    class _FakeChat:
+        pass
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    fake = _FakeClient()
+    coord.backends["orchestration"]._client = fake  # type: ignore[attr-defined]
+    assert coord._framework_agent_ranker_client() is fake
+    # Cached after first resolution.
+    assert coord._framework_agent_ranker_client() is fake
 
 
 def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:
@@ -642,8 +664,9 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
     params = (prop.payload or {}).get("params") or {}
     assert params["framework_agent_authoring"] is True
     assert params["framework_agent_candidate_id"] == "cand-1"
-    assert params["config_changes"]["VLLM_MTP"] == "1"
-    assert params["config_changes"]["--speculative"] == "4"
+    assert params["extra_server_args"] == "--speculative 4"
+    assert params["extra_envs"] == {"VLLM_MTP": "1"}
+    assert "config_changes" not in params
 
 
 @pytest.mark.asyncio
@@ -677,6 +700,7 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
     task = types.SimpleNamespace(
         task_id="ip-1",
         params={
+            "framework_agent_authoring": True,
             "specialist_task_id": "spec-1",
             "framework_agent_candidate_id": "cand-1",
             "framework_batch_id": "batch-1",
@@ -703,7 +727,10 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
     coord.shared_state.framework_agent_specialist_candidate_map = {"spec-9": "cand-from-map"}
     coord.shared_state.framework_agent_batches = [{"batch_id": "latest-batch"}]
     coord.shared_state.framework_agent_phase_progress = []
-    task = types.SimpleNamespace(task_id="ip-9", params={"specialist_task_id": "spec-9"})
+    task = types.SimpleNamespace(
+        task_id="ip-9",
+        params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
+    )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
     coord._record_framework_agent_authored_outcome(task=task, result=result)
     row = coord.shared_state.framework_agent_phase_progress[-1]

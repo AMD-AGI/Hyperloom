@@ -32,6 +32,28 @@ from hyperloom.inference_optimizer.session.paths import db_path_for
 log = logging.getLogger(__name__)
 
 
+def _count_server_boot_failures(session_dir: Path | None) -> int:
+    """Count ``warmup_failed`` variants (server boot failures) from the journal.
+
+    ``crash_count`` only tracks coordinator restarts, so a run whose server
+    repeatedly fails to boot still reports ``crash_count: 0``. Surfacing this
+    keeps the report honest. Fail-soft: returns 0 on any read error.
+    """
+    if session_dir is None:
+        return 0
+    path = Path(session_dir) / "reports" / "optimization_journal.json"
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    entries = blob.get("entries") if isinstance(blob, dict) else None
+    if not isinstance(entries, list):
+        return 0
+    return sum(
+        1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed"
+    )
+
+
 def _safe_call(state: Any, method: str, default: Any) -> Any:
     """Call a zero-arg SharedState helper, returning ``default`` when absent
     or raising.
@@ -408,14 +430,20 @@ def _build_summary_dict(
         dict[str, Any]: The summary payload written to ``final.json``,
         including an optional roofline-comparison block.
     """
+    # The wind-down report is rendered inside closing_phase, before the loop
+    # assigns the terminal stop_reason; closing_phase is only entered on the
+    # wall-clock deadline, so fall back to time_exhausted rather than blank.
+    stop_reason = str(getattr(state, "stop_reason", "") or "").strip()
+    if not stop_reason and getattr(state, "closing_phase", False):
+        stop_reason = "time_exhausted"
     summary: dict[str, Any] = {
         "session_id": state.session_id,
         "model_name": state.model_name,
         "model_path": state.model_path,
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
-        "stop_reason": state.stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(state.stop_reason),
+        "stop_reason": stop_reason,
+        "stop_reason_explanation": _explain_stop_reason(stop_reason),
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
         # Remaining-gaps assessment verdict + history.
@@ -434,6 +462,7 @@ def _build_summary_dict(
         "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
         "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
         "crash_count": state.crash_count,
+        "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
@@ -539,6 +568,9 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("## Run summary")
     lines.append("")
     lines.append(f"- crash_count    : {summary['crash_count']}")
+    boot_fail = summary.get("server_boot_failures") or 0
+    if boot_fail:
+        lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
     lines.append("")
     lines.append("## Event counts")
