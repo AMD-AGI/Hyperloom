@@ -322,7 +322,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
             "output_throughput": 140.0,
             "specialist_task_id": "spec-1",
             "delta_pct": 40.0,
-            "config_changes_applied": {"FOO": "1"},
+            "extra_server_args_applied": "--kv-cache-dtype fp8",
+            "extra_envs_applied": {"FOO": "1"},
             "workspace": "/w",
         },
         task=_task("integrate_patch", task_id="t1"),
@@ -330,6 +331,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["tput"] == 140.0
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert s.current_best["extra_envs"] == {"FOO": "1"}
     # pending_integrate sentinel cleared after the outcome is observed.
     assert s.pending_integrate == {}
     # Not an audited action: no last_integrate_patch attribute is created.

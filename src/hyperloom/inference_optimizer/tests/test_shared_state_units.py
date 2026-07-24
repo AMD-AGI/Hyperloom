@@ -14,6 +14,33 @@ from hyperloom.orchestrator.state.shared_state import (
 )
 
 
+class TestGridSessionDeadline:
+    def test_returns_none_when_budget_unbounded(self):
+        s = SharedState()
+        s.max_minutes = None
+        assert s.grid_session_deadline_sec() is None
+
+    def test_future_deadline_when_ample_budget(self, monkeypatch):
+        import hyperloom.orchestrator.state.shared_state as ss_mod
+
+        s = SharedState()
+        s.max_minutes = 60.0
+        monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 10.0)
+        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 1000.0)
+        # 10 min remaining, 120s reserve -> now + (600 - 120).
+        assert s.grid_session_deadline_sec() == pytest.approx(1000.0 + 480.0)
+
+    def test_deadline_is_now_when_under_reserve(self, monkeypatch):
+        import hyperloom.orchestrator.state.shared_state as ss_mod
+
+        s = SharedState()
+        s.max_minutes = 60.0
+        monkeypatch.setattr(type(s), "remaining_minutes", lambda self, **_: 1.0)
+        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: 500.0)
+        # 60s remaining < 120s reserve -> deadline == now (already exhausted).
+        assert s.grid_session_deadline_sec() == pytest.approx(500.0)
+
+
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):
         s = SharedState()

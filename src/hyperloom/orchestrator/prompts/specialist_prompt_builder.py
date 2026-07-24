@@ -26,6 +26,19 @@ from ..specialists.domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Curated launch-recipe sites the research scout mines for verified serve
+# flags / envs, keyed by (model x hardware x quant x strategy). Overridable
+# via HYPERLOOM_RECIPE_SITES (comma/space separated); values are advisory
+# templates, not fetched by the Coordinator.
+DEFAULT_RECIPE_SITES: tuple[str, ...] = (
+    "https://recipes.vllm.ai/<org>/<model>?hardware=<gpu>",
+    "https://lmsysorg.mintlify.app/cookbook/autoregressive/<family>/<model>",
+)
+
+# Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
+RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
+
+
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
 BASH_KILL_SAFETY_PREAMBLE = (
@@ -436,6 +449,30 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _recipe_sites_source_lines(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the recipe-site research source; the built-in defaults when unset, nothing when disabled via the sentinel."""
+    configured = tuple(s for s in inp.recipe_sites if s)
+    if configured and all(s.strip().lower() in RECIPE_SITES_DISABLED_VALUES for s in configured):
+        return []
+    sites = configured or DEFAULT_RECIPE_SITES
+    if not sites:
+        return []
+    lines = [
+        "4. **Verified launch-recipe sites** — structured per",
+        "   (model x hardware x quant x strategy) recipe pages carrying",
+        "   validated serve flags, env vars, and benchmark numbers. Use",
+        "   ``WebFetch`` on the page matching THIS model / GPU / precision",
+        "   (fall back to ``WebSearch`` if the exact page 404s). Extract only",
+        "   the serve flags, env vars, and reported throughput/accuracy;",
+        "   emit them as ``proposal_set`` variants with the page URL in",
+        "   ``source``. For a near-miss hardware/quant match, still surface it",
+        "   but note the mismatch in ``accuracy_risk``. Sites:",
+    ]
+    lines.extend(f"   - {site}" for site in sites)
+    lines.append("")
+    return lines
+
+
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -481,6 +518,7 @@ def _focus_research_scout_specialist(
         "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
+        *_recipe_sites_source_lines(inp),
         "**Gap computation** — where you find a reference throughput, use",
         "the gap versus our current baseline only to prioritise your hints",
         "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
@@ -674,6 +712,9 @@ class SpecialistPromptInputs:
     target_gap_notes: str = ""
     # Already-proven warm-recipe optimizations the research scout should skip.
     already_proven: list[dict[str, str]] = field(default_factory=list)
+    # Curated recipe-site URL templates the research scout may mine for
+    # verified serve flags / envs; empty falls back to the built-in defaults.
+    recipe_sites: tuple[str, ...] = ()
     # Advisory research-hint block; its presence suppresses cold-start fallback.
     research_hints: str = ""
     # Workload context mirrored from SharedState; renders in section 2.
