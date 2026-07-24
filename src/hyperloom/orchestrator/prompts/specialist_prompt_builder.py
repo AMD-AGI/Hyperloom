@@ -60,6 +60,26 @@ def _is_atom(inp: SpecialistPromptInputs) -> bool:
     return (inp.framework or "").strip().lower() == "atom"
 
 
+def _is_multi_node_run() -> bool:
+    """True when the active deployment spans >= 2 nodes.
+
+    Reads multi-node state (state file / ``INFERENCE_OPTIMIZER_NODES``) so the
+    comm-overlap knob menu is only surfaced for multi-node runs; any failure
+    conservatively reports single-node.
+
+    Returns:
+        True when the run is multi-node, else False.
+    """
+    try:
+        from hyperloom.orchestrator.actions.executors._multi_node_env import (
+            is_multi_node,
+        )
+
+        return bool(is_multi_node())
+    except Exception:
+        return False
+
+
 def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Build the domain-focus block for the serving specialist.
 
@@ -315,7 +335,7 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
             + "single-node mode on atom (IR-8).",
             "- INT4 QuickReduce at TP=2 — overhead dominates the " + "bandwidth savings on small message sizes.",
         ]
-    return [
+    lines = [
         "You target **RCCL / NCCL / QuickReduce / AllReduce** code and tuning.",
         "",
         "**What to read first**",
@@ -333,6 +353,149 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- Tuning NCCL env vars without confirming `rocm-smi --showtopo` shows",
         "  the expected XGMI / PCIe topology.",
     ]
+    # Multi-node only: an exposed cross-node collective is the dominant lever,
+    # so append the comm-overlap knob menu + crash-degradation ladder. Single
+    # node (intra-node TP only) keeps the lighter block above.
+    if not _is_multi_node_run():
+        return lines
+    lines.extend(
+        [
+            "",
+            "**Multi-node communication optimization (general framework)**",
+            "When a multi-node run is communication-bound — an exposed collective",
+            "(TP all-reduce on dense models, EP all-to-all / dispatch on MoE, or a",
+            "PP send/recv bubble) consumes a large share of GPU time while compute",
+            "is a small slice — it is usually a *cross-rank wait* (stragglers /",
+            "imbalance / serialization), not a raw link-bandwidth ceiling. The",
+            "axes below describe model- and vendor-agnostic *mechanisms*, not a",
+            "fixed flag list; spread variants across axes rather than over-",
+            "investing in one.",
+            "",
+            "**Flag sourcing — never assume server-flag names (they drift by",
+            "version).** The mechanisms below are stable, but the exact flag that",
+            "enables each one changes across framework versions (a flag may be",
+            "renamed, become default-on, or require a companion). Before proposing",
+            "ANY server flag: (1) confirm it exists in THIS build — check",
+            "`discovered_flags.<framework>` and/or the server's own `--help` for",
+            "the running version; (2) do not emit a flag you have not seen in that",
+            "build; an unseen/guessed flag wastes a full cluster restart on an",
+            "'unrecognized arguments' abort. Framework env vars (NCCL_*/RCCL_*) and",
+            "collective-library knobs are version-stable and safe to reference",
+            "directly; framework `--server-flags` are NOT. Hardware also matters —",
+            "prefer knobs known-good for the active `--gpu-type` (e.g. mi325x) and",
+            "let quantized-collective / fabric choices follow the chip + topology.",
+            "",
+            "**Step 0 — diagnose before you pick an axis (do NOT guess).**",
+            "The right axis depends on *why* the collective is expensive; read the",
+            "trace first:",
+            "- **Wait-bound** (a collective's duration >> the bytes/​link-BW it",
+            "  moves; the same collective varies a lot rank-to-rank) → it is a",
+            "  cross-rank stall, not bandwidth. Go to Axis 1 (overlap) and/or",
+            "  Axis 3 (rebalance). NCCL channel sweeps will NOT help.",
+            "- **Bandwidth-bound** (collective time tracks message size and the",
+            "  link is saturated; ranks are balanced) → Axis 2 (reduce volume /",
+            "  quantize) and Axis 4 (library/fabric).",
+            "- **Straggler / imbalance** (one rank or expert group consistently",
+            "  slowest) → Axis 3 (rebalance) first; overlap only hides a fraction.",
+            "- **Inter- vs intra-node**: confirm whether the hot links cross nodes",
+            "  (slow fabric) or stay on-box (fast XGMI/NVLink) — it decides whether",
+            "  Axis 4 fabric knobs or an Axis 2 parallelism re-split is worthwhile.",
+            "If prior KEEPs / KB carry a proven comm recipe for THIS topology",
+            "(nodes x gpus_per_node), start from it instead of re-deriving from",
+            "scratch.",
+            "",
+            "**Axis 1 — overlap communication with compute (hide it)**",
+            "Mechanisms (find the enabling flag for THIS build, verify a companion",
+            "is not required, then propose):",
+            "- Micro-batch / dual-batch overlap: one batch's compute covers the",
+            "  other's collective. Often needs a companion (e.g. an EP all-to-all",
+            "  backend must be set, not 'none') — check the build's help/precondition.",
+            "- Overlap scheduler: host scheduling/prep runs concurrently with GPU",
+            "  work. NOTE it is default-on in many recent builds — do not add an",
+            "  'enable' flag unless the build actually exposes one.",
+            "- Multi-stream comm/compute overlap where the model exposes it (often",
+            "  a framework env var rather than a server flag).",
+            "- PP: shrink pipeline bubbles (more micro-batches / interleaved 1F1B).",
+            "",
+            "**Axis 2 — reduce communication volume (send less)**",
+            "- Quantized collectives when message size > ~1MiB: INT8/FP8 quick-",
+            "  reduce (framework/vendor env vars — version-stable), chosen to suit",
+            "  the active gpu-type. Trades a little accuracy headroom for a smaller",
+            "  payload.",
+            "- Cut the collective at the source: DP / sequence-parallel attention",
+            "  removes per-layer TP all-reduce (enable via the build's attention/DP",
+            "  flag — confirm the exact name in help/discovered_flags).",
+            "- Parallelism strategy: keep high-frequency TP inside a node (fast",
+            "  intra-node link) and cross the slow inter-node fabric with PP/DP",
+            "  instead — coordinate a TP/PP/DP/EP re-split with the system/serving",
+            "  specialist rather than tuning collectives blind.",
+            "",
+            "**Axis 3 — rebalance the collective (fix the straggler)**",
+            "- MoE expert load imbalance across the EP group is a common cross-",
+            "  rank-wait cause: adjust the EP / MoE-TP split (build-specific flags —",
+            "  verify names) so the slowest rank shortens.",
+            "- PD-disaggregated runs: tune the prefill:decode node/TP ratio so",
+            "  neither role stalls the other (see the PD section if present).",
+            "- Confirm rank-to-GPU placement matches the physical topology",
+            "  (`rocm-smi --showtopo` / `nvidia-smi topo -m`).",
+            "",
+            "**Axis 4 — tune the collective library (cheap env sweeps)**",
+            "These are NCCL/RCCL env vars (version-stable across framework builds):",
+            "- `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` per XGMI / NVLink / IB",
+            "  topology.",
+            "- `NCCL_PROTO` (Simple / LL / LL128); `RCCL_MSCCL_ENABLE=1` for MSCCL",
+            "  algorithm paths on supported topologies.",
+            "- Inter-node fabric selection (`NCCL_IB_HCA` / `NCCL_IB_GID_INDEX` /",
+            "  `NCCL_SOCKET_IFNAME`) only when the trace shows inter-node links are",
+            "  the bottleneck.",
+            "",
+            "**Order variants by cost (multi-node restarts are expensive).**",
+            "Every structural variant restarts the WHOLE cluster (teardown + re-",
+            "launch of all nodes), so sequence proposals cheap-first:",
+            "  1. Env-only sweeps (Axis 4, and env-flag toggles) — cluster may not",
+            "     need a full rebuild; batch several into the round.",
+            "  2. Server-flag toggles that restart in place (Axis 1 overlap).",
+            "  3. Structural / parallelism re-splits (Axis 2/3 TP/PP/DP/EP,",
+            "     PD ratio) — most expensive, fewest, highest-conviction",
+            "     only. Front-load the highest expected-gain, lowest-crash-risk",
+            "     rung when budget is tight.",
+            "",
+            "**Degradation ladder — a crash is data, not a dead end.**",
+            "Aggressive overlap / quantized-collective mechanisms can crash during",
+            "CUDA/HIP-graph capture or collective init on some stacks. When a",
+            "variant aborts, do NOT abandon the direction — step DOWN to the next-",
+            "safest rung and keep exploring:",
+            "  1. Overlap + quantized collective (most aggressive) → on crash,",
+            "     drop the quantized collective, keep the overlap mechanism.",
+            "  2. Overlap alone → if it still crashes in graph capture, retry with",
+            "     graphs disabled on the capture-sensitive path only.",
+            "  3. Volume-reduction structural change alone (e.g. DP attention).",
+            "  4. Collective-library env sweeps (lowest risk, always safe).",
+            "DISTINGUISH failure classes: an 'unrecognized arguments' / argparse",
+            "abort means the flag is simply NOT in this build — remove it",
+            "PERMANENTLY (do not retry, do not step down for it); pick a different",
+            "mechanism. A runtime crash (graph capture, collective init, OOM) is",
+            "the real ladder case above. A precondition error (a required companion",
+            "flag is missing) means add the companion, not drop the mechanism.",
+            "Record which rung/flag failed and why in the proposal notes so the",
+            "next round skips the known-bad combination rather than re-testing it.",
+            "",
+            "**Multi-node pitfalls**",
+            "- Treating an exposed collective as a pure bandwidth problem and only",
+            "  sweeping NCCL channels — if the root cause is imbalance or",
+            "  serialization, rebalance (Axis 3) or overlap (Axis 1) instead.",
+            "- Stacking several axes into one variant — a crash or a win then",
+            "  cannot be attributed. Vary one axis per variant so KEEP/REVERT is",
+            "  meaningful.",
+            "- Mistaking slow init for a crash: overlap / larger-collective",
+            "  variants can init the distributed group and capture graphs more",
+            "  slowly, so a variant that is still coming up is NOT a failure. Give",
+            "  it a longer readiness window (and, if the fabric is slow, a larger",
+            "  collective watchdog e.g. `NCCL_TIMEOUT`) before declaring an abort,",
+            "  and only benchmark after the health gate passes.",
+        ]
+    )
+    return lines
 
 
 def _focus_compiler_specialist(inp: SpecialistPromptInputs) -> list[str]:

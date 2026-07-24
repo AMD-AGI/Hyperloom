@@ -575,6 +575,66 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _measurement_rank_key(measurement: dict[str, Any]) -> tuple[int, float, float]:
+    """Rank key for choosing among benchmark workspaces.
+
+    A valid measurement outranks any invalid one; ties break on completed
+    requests then output throughput so a sparse retry cannot beat a fuller pass.
+
+    Args:
+        measurement: A measurement dict from :func:`extract_benchmark_measurement`.
+
+    Returns:
+        tuple[int, float, float]: ``(valid, completed_requests, output_throughput)``.
+    """
+
+    def _f(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    valid = 1 if measurement.get("valid_measurement") else 0
+    return valid, _f(measurement.get("completed_requests")), _f(measurement.get("output_throughput"))
+
+
+def _select_best_measurement(
+    candidates: list[Path],
+    *,
+    subprocess_started_unix: float,
+) -> tuple[Path, dict[str, Any] | None, dict[str, Any]]:
+    """Pick the best ``benchmark_*`` workspace among ``candidates``.
+
+    A connection-refused retry appends a newer ``benchmark_*`` next to the first
+    pass, so the naive ``candidates[-1]`` can select a sparse/empty retry over a
+    fuller first pass. Re-parse every candidate and keep the highest-ranked
+    (valid first, then completed requests, then throughput); on an all-invalid
+    tie the newest wins so the failure path still reports the latest attempt.
+
+    Args:
+        candidates: Non-empty, ascending (oldest→newest) list of workspaces.
+        subprocess_started_unix: Earliest launch time so the mtime-gated leak
+            salvage inside :func:`extract_benchmark_measurement` still adopts
+            first-pass leaks.
+
+    Returns:
+        tuple[Path, dict | None, dict]: ``(workspace, report, measurement)``.
+    """
+    best: tuple[tuple[int, float, float, int], Path, dict[str, Any] | None, dict[str, Any]] | None = None
+    for idx, ws in enumerate(candidates):
+        rep = _parse_report(ws)
+        meas = extract_benchmark_measurement(
+            rep,
+            workspace=ws,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        rank = (*_measurement_rank_key(meas), idx)
+        if best is None or rank > best[0]:
+            best = (rank, ws, rep, meas)
+    assert best is not None  # candidates is non-empty by contract
+    return best[1], best[2], best[3]
+
+
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
@@ -1318,6 +1378,34 @@ async def run_grid(
             restart_server_for_round,
         )
 
+        # Preserve this variant's server rank logs on shared wekafs (under the
+        # variant slot) so a mid-benchmark server death survives the next
+        # round's restart, which otherwise overwrites the pod-local /tmp default
+        # before the crash site can be inspected. Opt out with
+        # HYPERLOOM_MN_PRESERVE_SERVER_LOGS=0.
+        #
+        # NOTE: this is forwarded as the RayJob launcher's --log-dir only
+        # (sglang/vllm). The Infera backend does NOT use it: its logs/sampler/
+        # metrics are keyed off the run-level HYPERLOOM_MN_SERVER_LOG_DIR (host-
+        # suffixed, run-scoped) and captured into the session server_logs by
+        # _collect_worker_server_logs on a failed restart. Do NOT repoint that
+        # env per-variant — it also anchors the GPU sampler PID and the post-
+        # benchmark metrics-CSV lookup, so switching it per variant leaks the
+        # sampler and misdirects metrics harvest.
+        _mn_server_log_dir: str | None = None
+        if os.environ.get("HYPERLOOM_MN_PRESERVE_SERVER_LOGS", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            try:
+                _sld = slot / "server_logs"
+                _sld.mkdir(parents=True, exist_ok=True)
+                _mn_server_log_dir = str(_sld)
+            except OSError as _sld_exc:  # noqa: BLE001 - best-effort diagnostics
+                log.warning("grid_runner: could not create per-variant server_logs dir: %r", _sld_exc)
+
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
@@ -1331,6 +1419,7 @@ async def run_grid(
                 unset_env=[str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()],
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
+                server_log_dir=_mn_server_log_dir,
             )
         except ServerRestartFailed as exc:
             log.warning(
@@ -1400,23 +1489,122 @@ async def run_grid(
                     exc,
                 )
 
+        # B-class guard + retry: after a restart the MN server can transiently
+        # refuse connections even though otherwise healthy (e.g. /health flips
+        # 200 but the frontend is briefly unavailable during cuda-graph
+        # capture), invalidating an otherwise-good variant with a spurious
+        # ConnectionRefused. (1) Re-confirm the target is reachable right before
+        # the measured pass; (2) if the measure still hits a connection-rooted
+        # failure, re-gate and re-run the measure ONCE. Both best-effort + gated;
+        # a genuinely dead server (A-class) times out fast and the benchmark
+        # surfaces the real death via the per-variant snapshot.
+        from ._multi_node_env import is_multi_node as _mn_is_mn
+
+        async def _mn_prebench_regate() -> None:
+            """Wait until the MN benchmark target is /health-reachable (best-effort)."""
+            if not _mn_is_mn():
+                return
+            if os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "1").strip().lower() in (
+                "0",
+                "false",
+                "no",
+                "off",
+            ):
+                return
+            try:
+                from ._multi_node_server_lifecycle import _wait_for_server_health_async as _mn_health_wait
+
+                await _mn_health_wait(
+                    timeout_s=int(os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_S", "300") or 300),
+                )
+            except Exception as _regate_exc:  # noqa: BLE001 - best-effort readiness re-gate
+                log.warning(
+                    "grid_runner: health re-gate did not confirm readiness "
+                    "(proceeding; benchmark will surface any real death): %r",
+                    _regate_exc,
+                )
+
+        _measure_kwargs = dict(
+            magpie_python=magpie_python,
+            config_path=cfg_path,
+            output_dir=slot,
+            timeout_sec=variant_timeout_sec,
+            cwd=cwd,
+            result_dir=result_dir,
+            soft_deadline_sec=soft_deadline_sec,
+            preclean=(False if auto_warmup else preclean_before_run),
+            server_already_ready=(server_already_ready or auto_warmup),
+            serving_lease=serving_lease,
+        )
+
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
-        # leak destinations per-variant.
+        # leak destinations per-variant. ``variant_first_started_unix`` keeps the
+        # ORIGINAL start across a connection-refused retry (which resets
+        # ``variant_started_unix``) so first-pass leaks stay inside the salvage
+        # mtime gate.
         variant_started_unix = time.time()
+        variant_first_started_unix = variant_started_unix
+        # Multi-node only: a reused output_root (action resume / re-explore) can
+        # leave a prior run's benchmark_* dirs in this slot. Snapshot them now so
+        # measurement selection + the no-workspace check consider ONLY dirs THIS
+        # round produces; otherwise a stale (possibly higher-tput) prior result
+        # could shadow this round's outcome and be wrongly KEEP'd. A conn-refused
+        # retry appends a NEW dir, which is correctly still eligible. Single-node
+        # keeps the empty set, so its behavior is byte-for-byte unchanged.
+        _preexisting_benchmark_dirs: set[Path] = set(slot.glob("benchmark_*")) if _mn_is_mn() else set()
         try:
-            rc, stdout, stderr = await asyncio.to_thread(
-                _run_magpie,
-                magpie_python=magpie_python,
-                config_path=cfg_path,
-                output_dir=slot,
-                timeout_sec=variant_timeout_sec,
-                cwd=cwd,
-                result_dir=result_dir,
-                soft_deadline_sec=soft_deadline_sec,
-                preclean=(False if auto_warmup else preclean_before_run),
-                server_already_ready=(server_already_ready or auto_warmup),
-                serving_lease=serving_lease,
-            )
+            await _mn_prebench_regate()
+            rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
+            # One connection-rooted retry (multi-node): a server that briefly
+            # refused mid-benchmark despite the pre-gate is re-gated and the
+            # measure re-run once. Opt out with HYPERLOOM_MN_MEASURE_CONN_RETRY=0.
+            if (
+                _mn_is_mn()
+                and rc != 0
+                and _text_has_conn_refused(stderr, stdout)
+                and os.environ.get("HYPERLOOM_MN_MEASURE_CONN_RETRY", "1").strip().lower()
+                not in ("0", "false", "no", "off")
+            ):
+                # Do NOT delete the first pass's outputs: downstream accepts a
+                # valid measurement even with rc != 0 (only tags
+                # magpie_nonzero_after_valid_measurement), so a partially-
+                # completed first pass may already carry a usable result. Parse
+                # it first; only retry when it produced no valid measurement, and
+                # keep the first pass's benchmark_* so a failed retry falls back
+                # to it. The retry appends a newer benchmark_* which the
+                # downstream sorted(...)[-1] then prefers.
+                _first_valid = False
+                _first_cands = [c for c in sorted(slot.glob("benchmark_*")) if c not in _preexisting_benchmark_dirs]
+                if _first_cands:
+                    try:
+                        _first_m = extract_benchmark_measurement(
+                            _parse_report(_first_cands[-1]),
+                            workspace=_first_cands[-1],
+                            subprocess_started_unix=variant_started_unix,
+                        )
+                        _first_valid = bool(_first_m.get("valid_measurement"))
+                    except Exception as _pm_exc:  # noqa: BLE001 - probe must not break the run
+                        log.warning("grid_runner: first-pass validity probe failed (will retry): %r", _pm_exc)
+                if _first_valid:
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s hit connection-refused "
+                        "but the first pass has a valid measurement; keeping it, skipping retry",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                    )
+                else:
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s measured pass hit "
+                        "connection-refused with no valid measurement; re-gating "
+                        "/health and retrying once (first pass preserved)",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                    )
+                    await _mn_prebench_regate()
+                    variant_started_unix = time.time()
+                    rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
             to_candidates = sorted(slot.glob("benchmark_*"))
@@ -1628,14 +1816,16 @@ async def run_grid(
                 break
             continue
 
-        # Locate workspace inside slot.
-        candidates = sorted(slot.glob("benchmark_*"))
+        # Locate workspace inside slot. Exclude any benchmark_* that pre-dated
+        # this round (multi-node reused output_root) so a stale prior result
+        # cannot be selected/KEEP'd; single-node's set is empty (unchanged).
+        candidates = [c for c in sorted(slot.glob("benchmark_*")) if c not in _preexisting_benchmark_dirs]
         # Always-on artifact harvest so each slot keeps its server.log /
         # gpu_metrics / profile relay for Robustness RCA.
         harvest_destination = candidates[-1] if candidates else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
-            subprocess_started_unix=variant_started_unix,
+            subprocess_started_unix=variant_first_started_unix,
         )
         if harvested:
             log.info(
@@ -1678,14 +1868,15 @@ async def run_grid(
             if rc != 0 and not keep_going_on_failure:
                 break
             continue
-        workspace = candidates[-1]
-        report = _parse_report(workspace)
-        report_path = workspace / "benchmark_report.json"
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
-            subprocess_started_unix=variant_started_unix,
+        # Choose the best workspace across all benchmark_* (a conn-refused retry
+        # appends a newer one): valid first, then completed requests / throughput,
+        # so a sparse/empty retry never shadows a fuller first pass. Use the
+        # earliest start time so first-pass leaks stay salvageable.
+        workspace, report, measurement = _select_best_measurement(
+            candidates,
+            subprocess_started_unix=variant_first_started_unix,
         )
+        report_path = workspace / "benchmark_report.json"
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if rc != 0:
             warnings.append("magpie_nonzero_after_valid_measurement")
@@ -1797,6 +1988,124 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
+# Connection-rooted benchmark failure signatures: a healthy MN server that
+# briefly refused connections (B-class timing), distinct from a real crash.
+_CONN_REFUSED_MARKERS = (
+    "Connect call failed",
+    "Connection refused",
+    "ClientConnectorError",
+    "ConnectionRefusedError",
+)
+
+
+def _text_has_conn_refused(*texts: str | None) -> bool:
+    """True when any text carries a connection-refused signature."""
+    for t in texts:
+        if t and any(m in t for m in _CONN_REFUSED_MARKERS):
+            return True
+    return False
+
+
+# Known server-death signatures scanned in the preserved rank logs so a
+# failure snapshot flags the crash class at a glance.
+_SERVER_DEATH_MARKERS = (
+    "Memory access fault",
+    "scheduler died",
+    "Fatal Python error",
+    "Aborted",
+    "HIP error",
+    "CUDA error",
+    "out of memory",
+    "OutOfMemory",
+    "watchdog",
+    "Connection refused",
+)
+# Bounded per-rank-log tail so the snapshot never slurps a multi-GB log.
+_SERVER_LOG_TAIL_BYTES = 16_384
+
+
+# Server rank-log filename globs across launch layouts, so the snapshot also
+# captures PD (``prefill_*``/``decode_*``), router, and infera worker logs — not
+# just the aggregated ``rank_*`` case. See launch_multinode.py (rank/prefill/
+# decode), cli.py (router), and launch_infera_node.py (mn_infera_server_*).
+_SERVER_LOG_GLOBS = (
+    "rank_*.log",
+    "prefill_*.log",
+    "decode_*.log",
+    "router*.log",
+    "mn_infera_server_*.log",
+)
+
+
+def _snapshot_variant_server_logs(slot: Path) -> None:
+    """Fold preserved per-variant server rank-log tails into one snapshot file.
+
+    ``restart_server_for_round`` writes each round's server logs under
+    ``slot/server_logs`` (shared wekafs), so a mid-benchmark server death
+    survives the next round's restart. This reads a bounded tail of each
+    (aggregated ``rank_*``, PD ``prefill_*``/``decode_*``, ``router*``, and
+    infera ``mn_infera_server_*`` layouts) and writes
+    ``slot/server_death_snapshot.txt`` (prefixed with any matched death markers)
+    so a crash is visible without hunting pod-local ``/tmp``. Best-effort; never
+    raises.
+
+    Args:
+        slot (Path): Variant slot directory (contains ``server_logs``).
+    """
+    try:
+        src = slot / "server_logs"
+        seen: set[Path] = set()
+        logs: list[Path] = []
+        if src.is_dir():
+            for _pat in _SERVER_LOG_GLOBS:
+                for _p in src.glob(_pat):
+                    if _p not in seen:
+                        seen.add(_p)
+                        logs.append(_p)
+        run_level_used = False
+        if not logs:
+            # Infera writes per-pod logs to the RUN-level HYPERLOOM_MN_SERVER_LOG_DIR
+            # (host-suffixed mn_infera_server_*.log), not the per-variant slot, so
+            # the slot is empty. Fall back to it so an infera mid-benchmark crash
+            # still produces a snapshot (note: run-scoped, may span variants).
+            run_dir = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
+            if run_dir.startswith("/") and "$" not in run_dir and Path(run_dir).is_dir():
+                for _p in sorted(Path(run_dir).glob("mn_infera_server_*.log")):
+                    if _p not in seen:
+                        seen.add(_p)
+                        logs.append(_p)
+                run_level_used = bool(logs)
+        logs = sorted(logs)
+        if not logs:
+            return
+        sections: list[str] = []
+        hits: set[str] = set()
+        for path in logs:
+            try:
+                with path.open("rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - _SERVER_LOG_TAIL_BYTES))
+                    tail = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            hits.update(m for m in _SERVER_DEATH_MARKERS if m in tail)
+            sections.append(f"===== {path.name} (last {_SERVER_LOG_TAIL_BYTES}B) =====\n{tail}")
+        if not sections:
+            return
+        source_note = (
+            "# source: run-level HYPERLOOM_MN_SERVER_LOG_DIR (run-scoped, may span variants)\n"
+            if run_level_used
+            else ""
+        )
+        header = source_note + (
+            f"death_markers={sorted(hits)}\n\n" if hits else "death_markers=[] (no known crash signature)\n\n"
+        )
+        (slot / "server_death_snapshot.txt").write_text(header + "\n\n".join(sections), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - snapshot is best-effort diagnostics
+        log.warning("_grid_runner: failed to write server_death_snapshot.txt at %s: %s", slot, exc)
+
+
 def _write_variant_abort_marker(
     slot: Path,
     *,
@@ -1839,6 +2148,9 @@ def _write_variant_abort_marker(
             slot,
             exc,
         )
+    # Fold the preserved per-variant server rank logs into a single failure
+    # snapshot so a mid-benchmark server death is captured alongside the reason.
+    _snapshot_variant_server_logs(slot)
 
 
 __all__ = [

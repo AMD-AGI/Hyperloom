@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import shlex
@@ -799,7 +800,7 @@ def _build_kill_single_entrypoint(pid_file: str) -> str:
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
         f"{kill_sh}__MN_KILL_EOF__\n"
         'chmod +x "$WORK_DIR/kill_server.sh"; '
-        f'"$WORK_DIR/kill_server.sh" {pid_file!s}'
+        f'"$WORK_DIR/kill_server.sh" {shlex.quote(str(pid_file))}'
     )
 
 
@@ -865,7 +866,9 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
         f'python3 "$WORK_DIR/kill_multinode.py" '
-        f"--pid-dir {pid_dir!s} --grace-sec {grace_sec}"
+        # quote pid_dir (shares the task output_dir root with launch): a space
+        # or shell metacharacter would otherwise split argv / inject.
+        f"--pid-dir {shlex.quote(str(pid_dir))} --grace-sec {grace_sec}"
     )
 
 
@@ -903,11 +906,140 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
     return {}
 
 
+# Rendezvous / discovery / control-plane env prefixes a per-variant override or
+# unset must never touch: mutating them breaks multi-node bring-up. E.g. unset
+# LWS_WORKER_INDEX makes every Infera pod start as rank 0; overriding RAY_ADDRESS
+# can point the RayJob driver at the wrong cluster. Variants may only control
+# tuning env (NCCL_/RCCL_/MORI_/SGLANG_* ...). Enforced on the control side
+# (_variant_env_control_spec) so BOTH the RayJob and Infera paths inherit it.
+_PROTECTED_CONTROL_ENV_PREFIXES = ("LWS_", "RAY_", "RAYJOB_", "KUBERNETES_", "NATS_", "INFERA_", "POD_")
+
+
+def _is_protected_control_env_key(key: str) -> bool:
+    """True when ``key`` is a rendezvous/discovery/control-plane var (variant-off-limits)."""
+    return any(key.startswith(p) for p in _PROTECTED_CONTROL_ENV_PREFIXES)
+
+
+def _variant_env_control_spec() -> tuple[dict[str, str], list[str], dict[str, str]]:
+    """Resolve safe per-variant env overrides and effective unsets.
+
+    Resolution follows the documented variant contract: inherited prefix env,
+    then ``unset_envs``, then explicit ``extra_envs`` (which win on collision).
+    The effective unset list excludes keys explicitly re-set by the variant and
+    is forwarded separately because Ray ``runtime_env.env_vars`` can set but
+    cannot remove variables inherited from the pod/raylet.
+
+    Rendezvous/discovery/control-plane keys (see
+    ``_PROTECTED_CONTROL_ENV_PREFIXES``) are warn+dropped from BOTH the set and
+    unset channels so a tuning variant cannot break multi-node bring-up (e.g.
+    unset ``LWS_WORKER_INDEX`` or override ``RAY_ADDRESS``).
+
+    Returns:
+        tuple[dict[str, str], list[str], dict[str, str]]: Final forwarded env,
+        sorted effective unset keys, and filtered explicit overrides.
+    """
+    from ._internal.env_safety import filter_forward_env, is_forward_env_key_allowed
+    from .commands.infera import _FORWARD_ENV_PREFIXES
+
+    forwarded = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
+    unset_keys: list[str] = []
+    raw_unset = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if raw_unset:
+        try:
+            parsed_unset = json.loads(raw_unset)
+            if isinstance(parsed_unset, list):
+                for raw_key in parsed_unset:
+                    key = str(raw_key).strip()
+                    if not key or key in unset_keys:
+                        continue
+                    if _is_protected_control_env_key(key):
+                        warn(f"dropping protected control-plane unset env key {key!r} (variant may not unset it)")
+                    elif is_forward_env_key_allowed(key):
+                        unset_keys.append(key)
+                    else:
+                        warn(f"dropping disallowed multi-node unset env key {key!r}")
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+    for key in unset_keys:
+        forwarded.pop(key, None)
+
+    explicit: dict[str, str] = {}
+    raw_extra = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if raw_extra:
+        try:
+            parsed_extra = json.loads(raw_extra)
+            if isinstance(parsed_extra, dict):
+                safe_extra: dict[str, str] = {}
+                for k, v in parsed_extra.items():
+                    key = str(k)
+                    if _is_protected_control_env_key(key):
+                        warn(f"dropping protected control-plane override env key {key!r} (variant may not set it)")
+                        continue
+                    safe_extra[key] = str(v)
+                explicit = filter_forward_env(safe_extra, warn_on_drop=True)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+    forwarded.update(explicit)
+    forwarded = filter_forward_env(forwarded, warn_on_drop=True)
+    effective_unsets = sorted(key for key in unset_keys if key not in explicit)
+    return forwarded, effective_unsets, explicit
+
+
+def _rayjob_forward_env_spec() -> tuple[dict[str, str], list[str]]:
+    """Collect RayJob runtime env plus inherited keys to remove on each rank.
+
+    Returns:
+        tuple[dict[str, str], list[str]]: Filtered runtime env and effective
+        unset keys.
+    """
+    forwarded, effective_unsets, _explicit = _variant_env_control_spec()
+    return forwarded, effective_unsets
+
+
+def _rayjob_forward_env_vars() -> dict[str, str]:
+    """Collect per-variant tuning env for the RayJob launch runtime_env.
+
+    Returns:
+        dict[str, str]: The filtered env-var map (possibly empty).
+    """
+    forwarded, _effective_unsets = _rayjob_forward_env_spec()
+    return forwarded
+
+
+def _variant_env_fingerprint(
+    forwarded: dict[str, str] | None = None,
+    effective_unsets: list[str] | None = None,
+) -> str:
+    """Return a non-reversible fingerprint of effective variant env controls.
+
+    The digest includes both set/override values and normalized unset intent so
+    an unset-only ablation cannot collide with a no-env variant. Only the digest
+    is persisted; raw env values never enter the multi-node state file.
+
+    Returns:
+        str: SHA-256 hex digest of canonical ``{"set": ..., "unset": ...}``.
+    """
+    if forwarded is None or effective_unsets is None:
+        forwarded, effective_unsets = _rayjob_forward_env_spec()
+    payload = json.dumps(
+        {"set": forwarded, "unset": sorted(effective_unsets)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _rayjob_env_fingerprint() -> str:
+    """Backward-compatible alias for the shared variant env fingerprint."""
+    return _variant_env_fingerprint()
+
+
 def _build_multinode_launch_entrypoint(
     args: argparse.Namespace,
     nnodes: int,
     pid_dir: str,
     log_dir: str,
+    unset_env: list[str] | None = None,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py.
 
@@ -919,6 +1051,7 @@ def _build_multinode_launch_entrypoint(
         nnodes (int): Number of nodes (ranks) to launch.
         pid_dir (str): Directory for per-rank PID files.
         log_dir (str): Directory for per-rank logs.
+        unset_env: Inherited pod/raylet env keys removed on every rank.
 
     Returns:
         str: The composed Ray Dashboard entrypoint shell command.
@@ -948,6 +1081,7 @@ def _build_multinode_launch_entrypoint(
             profiler_dir = str(_profiler_path)
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
+    unset_arg = f"--unset-env-json {shlex.quote(json.dumps(sorted(unset_env or [])))} "
     # Expert-parallel size; ep <= 1 emits no flag.
     try:
         ep_val = int(getattr(args, "ep", 1) or 1)
@@ -991,8 +1125,12 @@ def _build_multinode_launch_entrypoint(
         f"--framework {shlex.quote(str(args.framework))} "
         f"--model {shlex.quote(str(args.model))} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
-        f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
-        f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
+        # quote pid/log dirs: they can carry a task output_dir with spaces or
+        # shell metacharacters, which would otherwise split the argv or open a
+        # command-injection surface in the heredoc-embedded launch command.
+        f"--pid-dir {shlex.quote(str(pid_dir))} --log-dir {shlex.quote(str(log_dir))} "
+        f"{unset_arg}{ep_arg}{profiler_arg}{pd_args}{wait_flag} "
+        f"--extra-args {shlex.quote(str(extra_args))}"
     )
 
 
@@ -1543,6 +1681,32 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     return rc
 
 
+def _resolve_multinode_log_dir(args_log_file: str | None, state: dict[str, Any]) -> tuple[str, bool]:
+    """Resolve the multi-node per-rank log dir and whether it is a one-time override.
+
+    A per-variant ``--log-file`` (grid explore ``slot/server_logs``) is a
+    ONE-TIME override for this launch only. It must NOT be persisted as
+    ``last_server_log_dir``: a later baseline/profile restart that passes no
+    ``--log-file`` would otherwise reuse the variant slot, and the launcher's
+    ``: > rank_*.log`` truncation would clobber that variant's captured logs and
+    cross-attribute phases. The grid re-supplies ``--log-file`` on every call,
+    so a redelivery/resume of the same variant restart still gets the right dir
+    without persisting it here.
+
+    Args:
+        args_log_file: The explicit ``--log-file`` (per-variant slot) or ``None``.
+        state: The multi-node state dict (read for the persisted fallback).
+
+    Returns:
+        tuple[str, bool]: ``(log_dir, is_one_time_override)``.
+    """
+    override = str(args_log_file or "").strip()
+    if override:
+        return override, True
+    fallback = state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
+    return str(fallback), False
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1589,13 +1753,20 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         pid_dir = (
             args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         )
-        log_dir = (
-            args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
-        )
+        log_dir, _log_dir_one_time = _resolve_multinode_log_dir(args.log_file, state)
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
+        _fwd_env, _unset_env = _rayjob_forward_env_spec()
+        _cur_env_fp = _variant_env_fingerprint(_fwd_env, _unset_env)
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
-        launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
+        launch_ep = _build_multinode_launch_entrypoint(
+            args,
+            nnodes,
+            pid_dir,
+            log_dir,
+            unset_env=_unset_env,
+        )
+        _runtime_env = {"env_vars": _fwd_env} if _fwd_env else None
 
         # Resume fast path: if the prior launch had identical
         # framework/model/tp/ep/pd_mode and is still RUNNING, skip KILL+LAUNCH
@@ -1611,7 +1782,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         # Normalize live args to match the stored (normalized) extra_args so
         # whitespace differences don't miss the resume fast path. extra_args must
         # be compared: it carries every variant flag, and ignoring it would
-        # resume sglang with the previous variant's args.
+        # resume sglang with the previous variant's args. The env fingerprint is
+        # also compared: an env-only variant (same args, different NCCL/RCCL
+        # tuning) must force a KILL+LAUNCH, not silently reuse the old server.
         prev_match = bool(prev_sub) and (
             str(state.get("last_restart_framework") or "") == str(args.framework)
             and str(state.get("last_restart_model") or "") == str(args.model)
@@ -1621,6 +1794,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             == (getattr(args, "pd_mode", "") or "colocated").lower()
             and _normalize_extra_args(state.get("last_restart_extra_args"))
             == _normalize_extra_args(getattr(args, "extra_args", ""))
+            and str(state.get("last_restart_env_fingerprint") or "") == _cur_env_fp
         )
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -1657,14 +1831,25 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # Phase B: launch new (skipped when resuming a RUNNING launch).
             # Driver returns once every rank spawned its launcher.
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep)
+                # Forward prompt-provided tuning env (NCCL/RCCL sweeps etc.) to
+                # the rank actors via runtime_env; without this the RayJob path
+                # silently ignores env-only variants (actors inherit only their
+                # node env). Omit an empty payload so normal rounds are unchanged.
+                if _fwd_env:
+                    info(f"launch forwarding {len(_fwd_env)} tuning env var(s) via runtime_env: {sorted(_fwd_env)}")
+                launch_sub = ray.submit_job(launch_ep, runtime_env=_runtime_env)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the
             # (potentially long) _short_poll, so a poll-timeout retry can hit the
             # resume fast path instead of restarting the bootstrap from zero.
             state["last_server_pid_dir"] = pid_dir
-            state["last_server_log_dir"] = log_dir
+            # Persist the log dir as the session default ONLY when it was the
+            # fallback, not a per-variant one-time --log-file override (see
+            # _resolve_multinode_log_dir): persisting the variant slot would make
+            # a later baseline/profile restart reuse it and truncate its logs.
+            if not _log_dir_one_time:
+                state["last_server_log_dir"] = log_dir
             if kill_sub:
                 state["last_kill_submission_id"] = kill_sub
             state["last_restart_submission_id"] = launch_sub
@@ -1674,6 +1859,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
             state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "colocated").lower()
             state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+            # Persist the forwarded-env fingerprint so a later env-only variant
+            # (same args) is detected as different and does not resume this run.
+            state["last_restart_env_fingerprint"] = _cur_env_fp
             _save_state(state)
 
             def _fetch_launch():
@@ -1763,7 +1951,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     return 1
 
         state["last_server_pid_dir"] = pid_dir
-        state["last_server_log_dir"] = log_dir
+        # One-time per-variant --log-file override is not persisted as the
+        # session default (see _resolve_multinode_log_dir).
+        if not _log_dir_one_time:
+            state["last_server_log_dir"] = log_dir
         state["last_kill_submission_id"] = kill_sub
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework

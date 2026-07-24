@@ -468,6 +468,289 @@ def test_subprocess_env_idempotent_if_already_first(monkeypatch):
     assert env["PATH"].count("/opt/venv/bin") == 1
 
 
+def test_rayjob_unset_is_applied_to_rank_subprocess_env(monkeypatch):
+    """A RayJob rank must remove inherited pod env requested by unset_envs."""
+    lm = _load_script_module("lm_test_env_unset", "launch_multinode.py")
+    monkeypatch.setenv("NCCL_PROTO", "Simple")
+    monkeypatch.setenv("RCCL_MSCCL_ENABLE", "1")
+
+    env = lm._subprocess_env(["NCCL_PROTO"])
+
+    assert "NCCL_PROTO" not in env
+    assert env["RCCL_MSCCL_ENABLE"] == "1"
+
+
+def test_rayjob_env_fingerprint_includes_unset_without_leaking_values(monkeypatch):
+    """Unset-only variants must not collide, and fingerprints must hide values."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    baseline = mn_cli._variant_env_fingerprint()
+
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO"]))
+    unset_only = mn_cli._variant_env_fingerprint()
+    assert unset_only != baseline
+
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"NCCL_PROTO": "LL", "CUSTOM_TOKEN": "sensitive-value"}),
+    )
+    with_override = mn_cli._variant_env_fingerprint()
+    assert with_override != unset_only
+    assert "sensitive-value" not in with_override
+    assert len(with_override) == 64
+
+
+def test_rayjob_env_spec_applies_unset_before_explicit_override(monkeypatch):
+    """An explicit variant value wins when the same inherited key is unset."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setenv("NCCL_PROTO", "Simple")
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO", "NCCL_DEBUG"]))
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"NCCL_PROTO": "LL"}))
+
+    forwarded, effective_unsets = mn_cli._rayjob_forward_env_spec()
+
+    assert forwarded["NCCL_PROTO"] == "LL"
+    assert effective_unsets == ["NCCL_DEBUG"]
+
+
+def test_rayjob_launch_entrypoint_forwards_unset_json():
+    """The controller must carry effective unsets into launch_multinode."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=16,
+        no_wait_health=False,
+        extra_args="",
+        ep=1,
+        pd_mode="colocated",
+    )
+    entrypoint = mn_cli._build_multinode_launch_entrypoint(
+        args,
+        nnodes=2,
+        pid_dir="/tmp/pids",
+        log_dir="/tmp/logs",
+        unset_env=["NCCL_PROTO"],
+    )
+
+    assert "--unset-env-json" in entrypoint
+    assert json.dumps(["NCCL_PROTO"]) in entrypoint
+
+
+@pytest.mark.asyncio
+async def test_restart_server_transient_failure_still_reclaims(monkeypatch):
+    """Operational restart failures still use the reclaim-kill-retry path."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+    monkeypatch.setattr(mnsl, "is_multi_node", lambda: True)
+    monkeypatch.setattr(
+        mnsl,
+        "_resolve_round_args",
+        lambda *a, **k: ("sglang", "/models/m", 8, 1),
+    )
+    monkeypatch.setattr(mnsl, "_resolve_pd_args", lambda *a, **k: {"pd_mode": "aggregated"})
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.multi_node._internal.external_state.external_service_url",
+        lambda: "",
+    )
+
+    calls = {"n": 0}
+
+    def _restart_twice(_ns):
+        calls["n"] += 1
+        return mn_cli.EXIT_TRANSIENT if calls["n"] == 1 else mn_cli.EXIT_OK
+
+    monkeypatch.setattr(mnsl, "_merge_sglang_defaults", lambda args: args)
+    monkeypatch.setattr(mn_cli, "cmd_restart_server", _restart_twice)
+    monkeypatch.setattr(mn_cli, "kill_inference_for_kernel_agent_best_effort", lambda: None)
+
+    async def _noop_health(**_kwargs):
+        return None
+
+    monkeypatch.setattr(mnsl, "_wait_for_workers_ready_async", _noop_health)
+    monkeypatch.setattr(mnsl, "_wait_for_server_health_async", _noop_health)
+
+    await mnsl.restart_server_for_round(extra_server_args="")
+
+    assert calls["n"] == 2
+
+
+def test_capability_preflight_deepep_backend_blocks(monkeypatch):
+    """Explicit --moe-a2a-backend deepep on a deep_ep-less image fails fast."""
+    import importlib.util as _ilu
+
+    lm = _load_script_module("lm_test_cap_deepep", "launch_multinode.py")
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    reason = lm._missing_capability_reason("sglang", ["--moe-a2a-backend", "deepep"])
+    assert reason is not None and "deep_ep" in reason
+
+
+def test_capability_preflight_tbo_with_non_deepep_backend_allowed(monkeypatch):
+    """TBO + a non-deepep backend (mori) must NOT be blocked (kills cluster)."""
+    import importlib.util as _ilu
+
+    lm = _load_script_module("lm_test_cap_tbo_mori", "launch_multinode.py")
+    # deep_ep absent, but the run does not need it — mori uses MoriEPDispatcher.
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    assert lm._missing_capability_reason(
+        "sglang", ["--enable-two-batch-overlap", "--moe-a2a-backend", "mori"]
+    ) is None
+    # Bare non-deepep backend is also fine.
+    assert lm._missing_capability_reason("sglang", ["--moe-a2a-backend", "mooncake"]) is None
+
+
+def test_capability_preflight_tbo_default_backend_resolution(monkeypatch):
+    """TBO without an explicit backend defers to the build's default backend."""
+    lm = _load_script_module("lm_test_cap_tbo_default", "launch_multinode.py")
+    import importlib.util as _ilu
+
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    # Default resolves to deepep → block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: "deepep")
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is not None
+
+    # Default resolves to mori → do not block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: "mori")
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is None
+
+    # Default unknown (parser unavailable) → best-effort, do not block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: None)
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is None
+
+
+def _install_fake_sglang_serverargs(monkeypatch, *, default_backend="deepep"):
+    """Fake sglang graph: launch_server has no `parser`; ServerArgs.add_cli_args works."""
+    sglang_mod = types.ModuleType("sglang")
+    launch_mod = types.ModuleType("sglang.launch_server")  # deliberately no `parser`
+    srt_mod = types.ModuleType("sglang.srt")
+    server_args_mod = types.ModuleType("sglang.srt.server_args")
+
+    class _FakeServerArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--tp", type=int, default=1)
+            parser.add_argument("--moe-a2a-backend", default=default_backend)
+            return parser
+
+    server_args_mod.ServerArgs = _FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
+    monkeypatch.setitem(sys.modules, "sglang.launch_server", launch_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args_mod)
+
+
+def test_sglang_cli_parser_falls_back_to_serverargs(monkeypatch):
+    """When launch_server exposes no `parser`, fall back to ServerArgs.add_cli_args."""
+    lm = _load_script_module("lm_test_parser_fallback", "launch_multinode.py")
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="deepep")
+
+    parser = lm._sglang_cli_parser()
+    assert parser is not None
+    assert "--moe-a2a-backend" in parser._option_string_actions
+    # Unknown-flag preflight now works via the fallback parser (no longer a no-op).
+    assert lm._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+    # TBO default-backend resolution reads the fallback parser's default.
+    assert lm._resolve_default_moe_a2a_backend("sglang") == "deepep"
+
+
+def test_sglang_cli_parser_fail_open_when_absent(monkeypatch):
+    """No importable sglang → parser None, preflight stays fail-open (never blocks)."""
+    lm = _load_script_module("lm_test_parser_absent", "launch_multinode.py")
+    for _m in ("sglang", "sglang.launch_server", "sglang.srt", "sglang.srt.server_args"):
+        monkeypatch.setitem(sys.modules, _m, None)  # force ImportError on import
+    assert lm._sglang_cli_parser() is None
+    assert lm._unsupported_extra_arg_flags("sglang", ["--anything"]) == []
+    assert lm._resolve_default_moe_a2a_backend("sglang") is None
+
+
+def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
+    """A variant may not set/unset rendezvous/discovery/control-plane env."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    # Clear any prefix-matched tuning env so assertions are deterministic.
+    for _k in list(os.environ):
+        if _k.startswith(("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")):
+            monkeypatch.delenv(_k, raising=False)
+
+    # Variant tries to override RAY/RAYJOB control vars + the system-owned POD_IP
+    # topology var + a trusted operational HYPERLOOM_MN value + a legit tuning knob.
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps(
+            {
+                "RAY_ADDRESS": "evil:6379",
+                "RAYJOB_DIST_INIT_PORT": "1",
+                "POD_IP": "10.0.0.8",
+                "HYPERLOOM_MN_SERVER_LOG_DIR": "/shared/logs",
+                "NCCL_PROTO": "LL",
+            }
+        ),
+    )
+    # Variant tries to unset LWS_WORKER_INDEX (would make every pod rank 0).
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_UNSET_FWD_ENV",
+        json.dumps(["LWS_WORKER_INDEX", "NCCL_DEBUG"]),
+    )
+
+    forwarded, effective_unsets, explicit = mn_cli._variant_env_control_spec()
+
+    # Protected control-plane keys are dropped from both set and unset.
+    assert "RAY_ADDRESS" not in forwarded
+    assert "RAY_ADDRESS" not in explicit
+    assert "RAYJOB_DIST_INIT_PORT" not in forwarded
+    assert "RAYJOB_DIST_INIT_PORT" not in explicit
+    assert "LWS_WORKER_INDEX" not in effective_unsets
+    # POD_ is system-owned topology (recovered from pid1); a variant must NOT be
+    # able to override it or PD rendezvous / advertise-host / log attribution break.
+    assert "POD_IP" not in forwarded
+    assert "POD_IP" not in explicit
+    # HYPERLOOM_MN_ operational values remain allowed.
+    assert forwarded.get("HYPERLOOM_MN_SERVER_LOG_DIR") == "/shared/logs"
+    # Legit tuning env still flows through both channels.
+    assert forwarded.get("NCCL_PROTO") == "LL"
+    assert "NCCL_DEBUG" in effective_unsets
+
+
+def test_extra_arg_value_last_wins(monkeypatch):
+    """Duplicate --moe-a2a-backend resolves last-wins (parity with infera)."""
+    lm = _load_script_module("lm_test_extra_arg_lastwins", "launch_multinode.py")
+    assert lm._extra_arg_value(
+        ["--moe-a2a-backend", "deepep", "--moe-a2a-backend", "mori"], "--moe-a2a-backend"
+    ) == "mori"
+    assert lm._extra_arg_value(["--moe-a2a-backend=deepep", "--moe-a2a-backend=nixl"], "--moe-a2a-backend") == "nixl"
+    assert lm._extra_arg_value(["--other", "x"], "--moe-a2a-backend") is None
+
+
+def test_resolve_multinode_log_dir_one_time_override_not_persisted():
+    """A per-variant --log-file is a one-time override, never the persisted default."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    # Explicit per-variant slot → returned for this launch, flagged one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir("/slot/v3/server_logs", {})
+    assert log_dir == "/slot/v3/server_logs"
+    assert one_time is True
+
+    # No override + stored default → reuse default, not one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir(
+        None, {"last_server_log_dir": "/persist/logs"}
+    )
+    assert log_dir == "/persist/logs"
+    assert one_time is False
+
+    # No override + no stored default → tmp fallback, not one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir("", {})
+    assert log_dir.endswith("multi_node_logs")
+    assert one_time is False
+
+
 def test_detach_framework_launch_starts_sleep(tmp_path):
     lm = _load_script_module("lm_test_detach_sleep", "launch_multinode.py")
     log_f = tmp_path / "r0.log"
@@ -1472,6 +1755,44 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
     assert f"launch_server.sh sglang {evil}" not in ep
 
 
+def test_restart_entrypoint_shlex_quotes_extra_args(monkeypatch):
+    """Single-node extra args preserve argv boundaries without shell injection."""
+    import shlex
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    raw = '--foo "value with spaces" --bar "1; touch /tmp/pwned"'
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=8,
+        no_wait_health=False,
+        extra_args=raw,
+    )
+
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+
+    # Values are re-quoted as single argv tokens; the original unsafe shell
+    # fragment is not embedded verbatim.
+    assert shlex.quote("value with spaces") in ep
+    assert shlex.quote("1; touch /tmp/pwned") in ep
+    assert raw not in ep
+
+
+def test_kill_single_entrypoint_quotes_pid_file(monkeypatch):
+    """A custom single-node pid path cannot split argv or inject shell syntax."""
+    import shlex
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    pid_file = "/tmp/pid dir/x; touch /tmp/pwned"
+
+    ep = mn_cli._build_kill_single_entrypoint(pid_file)
+
+    assert shlex.quote(pid_file) in ep
+    assert f"kill_server.sh {pid_file}" not in ep
 def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
     """A shell-metacharacter extra_args must not inject a second command into
     the restart entrypoint; the `;` stays inside a quoted argv token."""
@@ -1554,8 +1875,6 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
             nnodes=1,
             extra_args="--model-path /evil",
         )
-
-
 def test_multinode_op_args_shlex_quotes_malicious_value():
     """The Infera SSH op_args builder path (bench) must also shlex-quote."""
     import shlex

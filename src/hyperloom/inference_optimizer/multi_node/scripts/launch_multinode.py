@@ -350,14 +350,18 @@ def _probe_mec_firmware_lt_177() -> bool:
     return False
 
 
-def _subprocess_env() -> dict[str, str]:
+def _subprocess_env(unset_env: list[str] | None = None) -> dict[str, str]:
     """Build the framework launcher subprocess env.
 
     Puts ``/opt/venv/bin`` first on PATH (framework venv) and inherits
     ``os.environ`` (keeps injected API keys / SGLANG_* / VLLM_* tunings).
     Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
     and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
-    caller-set values.
+    caller-set values. Finally removes explicitly unset inherited keys so a
+    variant can ablate pod/raylet defaults.
+
+    Args:
+        unset_env: Inherited environment keys to remove before server spawn.
 
     Returns:
         dict[str, str]: The environment mapping for the launcher subprocess.
@@ -379,6 +383,8 @@ def _subprocess_env() -> dict[str, str]:
     parts = cur_path.split(":") if cur_path else []
     if venv_bin not in parts:
         env["PATH"] = f"{venv_bin}:{cur_path}" if cur_path else venv_bin
+    for key in unset_env or []:
+        env.pop(str(key), None)
     return env
 
 
@@ -468,6 +474,7 @@ def _spawn_remote(
     pid_dir: str,
     log_dir: str,
     extra_args: list[str],
+    unset_env: list[str] | None = None,
     torch_profiler_dir: str = "",
     ep: int = 1,
     pd_role: str = "",
@@ -495,6 +502,7 @@ def _spawn_remote(
         pid_dir: Directory the PID file is written to.
         log_dir: Directory the log file is written to.
         extra_args: Extra args appended verbatim to the launcher.
+        unset_env: Inherited pod/raylet env keys removed before server spawn.
         torch_profiler_dir: Optional shared dir exported as
             ``SGLANG_TORCH_PROFILER_DIR``.
         ep: Expert-parallel size.
@@ -523,7 +531,7 @@ def _spawn_remote(
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
-    sub_env = _subprocess_env()
+    sub_env = _subprocess_env(unset_env)
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared
     # dir when a reused server skips this launch.
     tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
@@ -630,9 +638,175 @@ _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "HSA_STATUS_ERROR",
     "abort()",
     "Segmentation fault",
+    # argparse rejections (unsupported / malformed server flags): the server
+    # exits in seconds but the lingering nohup wrapper PID hides it, so without
+    # these the driver waits the full health timeout. Fail fast instead.
+    "error: unrecognized arguments",
+    "error: the following arguments are required",
+    "error: argument ",
+    "error: invalid choice",
 )
 # How far back from EOF we scan (covers a full traceback, bounded for cost).
 _FATAL_SCAN_TAIL_BYTES = 256 * 1024
+
+
+def _sglang_cli_parser():
+    """Return an argparse parser exposing this build's sglang server CLI flags.
+
+    Tries the legacy ``sglang.launch_server.parser`` export first, then falls
+    back to ``ServerArgs.add_cli_args`` (current sglang releases). Returns
+    ``None`` when neither path is available so callers can fail open.
+    """
+    try:
+        from sglang.launch_server import parser as _legacy_parser
+
+        if getattr(_legacy_parser, "_option_string_actions", None):
+            return _legacy_parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    try:
+        import argparse
+
+        from sglang.srt.server_args import ServerArgs
+
+        parser = argparse.ArgumentParser(add_help=False)
+        ServerArgs.add_cli_args(parser)
+        if getattr(parser, "_option_string_actions", None):
+            return parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    return None
+
+
+def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[str]:
+    """Return ``--`` flags in ``extra_args`` not accepted by this server build.
+
+    Best-effort preflight run on the head node (where the framework is
+    installed): introspects the framework's argparse help so an unsupported
+    flag fails in seconds here, before the expensive cluster kill + launch.
+    Flag names vary across framework versions, so this validates against the
+    ACTUAL build rather than any hard-coded list. Returns ``[]`` when the check
+    cannot run (missing parser, unknown framework, import error) so a preflight
+    infra problem never blocks a launch.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+        extra_args: Tokenized extra server args (e.g. ``["--flag", "val"]``).
+
+    Returns:
+        list[str]: Flag tokens not registered on the build's parser, or ``[]``.
+    """
+    flags = [t for t in extra_args if t.startswith("--")]
+    if not flags:
+        return []
+    if framework != "sglang":
+        return []
+    # Exact option-string set from the actual parser (legacy export or the
+    # ServerArgs fallback). Matching flag tokens by argparse registration (not a
+    # help-text substring) avoids false negatives where a short flag like
+    # ``--tp`` is a substring of an unrelated option (``--tp-size``) and slips
+    # through the preflight.
+    parser = _sglang_cli_parser()
+    known = set(getattr(parser, "_option_string_actions", {}).keys()) if parser is not None else set()
+    if not known:
+        return []
+    return [f for f in flags if f.split("=", 1)[0] not in known]
+
+
+def _extra_arg_value(extra_args: list[str], flag: str) -> str | None:
+    """Return the value for ``flag`` in ``extra_args`` (space- or ``=``-separated).
+
+    Args:
+        extra_args: Tokenized extra server args.
+        flag: The option string to look up (e.g. ``--moe-a2a-backend``).
+
+    Returns:
+        str | None: The following token / ``=``-value, or ``None`` if absent.
+    """
+    value: str | None = None
+    for i, tok in enumerate(extra_args):
+        # Last-wins (argparse semantics; matches launch_infera_node): a later
+        # duplicate --moe-a2a-backend overrides an earlier one, so both backends
+        # classify the same effective value.
+        if tok == flag and i + 1 < len(extra_args):
+            value = extra_args[i + 1]
+        elif tok.startswith(flag + "="):
+            value = tok.split("=", 1)[1]
+    return value
+
+
+def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
+    """Best-effort default ``--moe-a2a-backend`` for the installed build.
+
+    Two-batch overlap does not name a dispatcher; the build's own
+    ``--moe-a2a-backend`` default decides it. Read that default from the
+    framework's argparse registration (not a hard-coded version assumption) so
+    a TBO run with no explicit backend can be classified. Returns ``None`` when
+    it cannot be resolved (unknown framework / no parser / no default), in which
+    case the caller must NOT block the launch.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+
+    Returns:
+        str | None: The lowercased default backend, or ``None`` when unknown.
+    """
+    if framework != "sglang":
+        return None
+    try:
+        parser = _sglang_cli_parser()
+        if parser is None:
+            return None
+        act = getattr(parser, "_option_string_actions", {}).get("--moe-a2a-backend")
+        default = getattr(act, "default", None) if act is not None else None
+        if default is not None:
+            return str(default).strip().lower()
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return None
+    return None
+
+
+def _missing_capability_reason(framework: str, extra_args: list[str]) -> str | None:
+    """Return a reason string if a requested flag needs an absent runtime backend.
+
+    Head-node capability preflight (complements the argparse-name preflight):
+    some server flags are *accepted* by argparse but route work through an
+    optional backend package that only import-errors deep in model init. The
+    DeepEP dispatcher (`deep_ep`) is the case handled here: on stacks without a
+    ROCm DeepEP build it is absent and the server dies in MoE init.
+
+    DeepEP is required ONLY when the *effective* MoE a2a backend is ``deepep``.
+    ``--enable-two-batch-overlap`` alone does NOT imply DeepEP: SGLang selects
+    the TBO dispatcher from ``--moe-a2a-backend`` (deepep / mori / mooncake /
+    nixl), so ``--enable-two-batch-overlap --moe-a2a-backend mori`` is valid on
+    a ROCm image without ``deep_ep``. Resolve the effective backend — explicit
+    flag wins; a TBO run with no explicit backend falls back to the build's
+    parser default — and only fail fast when it is positively ``deepep``. This
+    preflight runs AFTER the old server is torn down, so a false positive would
+    leave a non-serving cluster; when in doubt, do not block.
+
+    Args:
+        framework: Active server framework (used to resolve the default backend).
+        extra_args: Tokenized extra server args.
+
+    Returns:
+        str | None: A human-readable reason when a required backend package is
+        missing, else ``None``.
+    """
+    try:
+        import importlib.util
+
+        backend = (_extra_arg_value(extra_args, "--moe-a2a-backend") or "").strip().lower()
+        if not backend and "--enable-two-batch-overlap" in extra_args:
+            backend = _resolve_default_moe_a2a_backend(framework) or ""
+        if backend == "deepep" and importlib.util.find_spec("deep_ep") is None:
+            return (
+                "requires the DeepEP a2a backend, but the `deep_ep` package is "
+                "not installed in this image (--moe-a2a-backend deepep)"
+            )
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return None
+    return None
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
@@ -780,6 +954,11 @@ def main() -> int:
     p.add_argument("--pid-dir", required=True)
     p.add_argument("--log-dir", required=True)
     p.add_argument(
+        "--unset-env-json",
+        default="[]",
+        help="JSON list of inherited pod/raylet env keys removed before each rank launches",
+    )
+    p.add_argument(
         "--dist-init-port",
         type=int,
         default=int(os.environ.get("RAYJOB_DIST_INIT_PORT") or _DEFAULT_DIST_INIT_PORT),
@@ -859,6 +1038,21 @@ def main() -> int:
         )
         return 2
 
+    try:
+        parsed_unset = json.loads(args.unset_env_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        _log(f"ERROR --unset-env-json is not valid JSON: {exc}")
+        return 2
+    if not isinstance(parsed_unset, list):
+        _log("ERROR --unset-env-json must decode to a list")
+        return 2
+    unset_env = list(dict.fromkeys(str(key).strip() for key in parsed_unset if str(key).strip()))
+    # Keep driver-side fallbacks (e.g. NCCL_IB_HCA) consistent with the rank
+    # subprocess environment. Explicit overrides were removed from this list by
+    # the controller before submission.
+    for key in unset_env:
+        os.environ.pop(key, None)
+
     # Validate PD args; populate defaults.
     pd_mode = (args.pd_mode or "colocated").lower()
     if pd_mode == "disaggregated":
@@ -888,6 +1082,29 @@ def main() -> int:
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return 2
+
+    # Preflight: reject flags this framework build does not accept, before the
+    # expensive cluster kill + launch (an unsupported flag would otherwise die
+    # in argparse ~seconds in but stall the driver until the health timeout).
+    unsupported = _unsupported_extra_arg_flags(args.framework, extra_args)
+    if unsupported:
+        _log(
+            f"ERROR unsupported server flags for {args.framework} build: "
+            f"{unsupported} — not accepted by this version's argparse; "
+            f"failing fast before cluster launch (flag names vary by version)."
+        )
+        return 2
+
+    # Capability preflight: a flag may be argparse-valid but need an optional
+    # backend package (e.g. DeepEP) that only import-errors deep in model init.
+    # Skip the variant fast here instead of after a full cluster restart.
+    cap_reason = _missing_capability_reason(args.framework, extra_args)
+    if cap_reason:
+        _log(
+            f"ERROR server flags {extra_args} {cap_reason}; failing fast before "
+            f"cluster launch (add the backend to the image to enable)."
+        )
         return 2
 
     _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
@@ -931,6 +1148,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
                 pd_role="prefill",
@@ -964,6 +1182,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
                 pd_role="decode",
@@ -995,6 +1214,7 @@ def main() -> int:
                 pid_dir=args.pid_dir,
                 log_dir=args.log_dir,
                 extra_args=extra_args,
+                unset_env=unset_env,
                 torch_profiler_dir=args.torch_profiler_dir,
                 ep=int(args.ep or 1),
             )

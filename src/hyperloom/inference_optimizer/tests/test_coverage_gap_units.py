@@ -403,10 +403,13 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert inf._collect_forward_env()["MORI_FOO"] == "1"
 
     calls: list[tuple[str, str]] = []
+    interpreters: list[str] = []
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setenv("HYPERLOOM_MN_POD_PYTHON", "/custom/venv/bin/python")
 
     def _run(state, ip, script, python, launch_args, **kw):
         calls.append((ip, launch_args))
+        interpreters.append(python)
         if ip == "10.0.0.2":
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=kw["timeout"])
         return _Completed(returncode=1 if ip == "10.0.0.3" else 0, stdout='noise {"status":"ok"}\n', stderr="bad")
@@ -429,6 +432,7 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [r["podIP"] for r in results] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
     assert results[1]["rc"] == 124
     assert calls[0] == ("10.0.0.1", "--model /m")
+    assert interpreters == ["/custom/venv/bin/python"] * 3
 
 
 def _restart_args(**overrides) -> argparse.Namespace:
@@ -899,6 +903,10 @@ def test_rayjob_create_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    _env_fp = inf._mn_cli._variant_env_fingerprint()
+
     # No prior launch recorded -> never a match.
     assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
 
@@ -909,6 +917,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "--foo 1",
+        "last_restart_env_fingerprint": _env_fp,
     }
     agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
     assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
@@ -932,6 +941,7 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
         "last_restart_pd_decode_nodes": 1,
         "prefill_pod_ips": ["10.0.0.1"],
         "decode_pod_ips": ["10.0.0.2"],
+        "last_restart_env_fingerprint": _env_fp,
     }
     pd_args = argparse.Namespace(
         model="/m",
@@ -985,6 +995,8 @@ def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     state = {
         "backend": "infera",
         "pd_mode": "aggregated",
@@ -996,6 +1008,7 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
         "last_restart_ep": 8,
         "last_restart_pd_mode": "aggregated",
         "last_restart_extra_args": "",
+        "last_restart_env_fingerprint": inf._mn_cli._variant_env_fingerprint(),
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)

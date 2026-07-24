@@ -109,6 +109,143 @@ def _denied_extra_args(raw: str) -> list[str]:
     return out
 
 
+def _sglang_cli_parser():
+    """Return an argparse parser exposing this build's sglang server CLI flags.
+
+    Mirror of ``launch_multinode._sglang_cli_parser``. Tries the legacy
+    ``sglang.launch_server.parser`` export first, then falls back to
+    ``ServerArgs.add_cli_args`` (current sglang releases, the API infera itself
+    uses). Returns ``None`` when neither path is available so callers fail open.
+    """
+    try:
+        from sglang.launch_server import parser as _legacy_parser
+
+        if getattr(_legacy_parser, "_option_string_actions", None):
+            return _legacy_parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    try:
+        import argparse
+
+        from sglang.srt.server_args import ServerArgs
+
+        parser = argparse.ArgumentParser(add_help=False)
+        ServerArgs.add_cli_args(parser)
+        if getattr(parser, "_option_string_actions", None):
+            return parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    return None
+
+
+def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[str]:
+    """Return ``--`` flags not registered on the installed server build's parser.
+
+    Node-side mirror of ``launch_multinode._unsupported_extra_arg_flags`` so the
+    Infera path also fails fast on an unknown server flag instead of dying in
+    argparse seconds into a full (re)launch and stalling until the health
+    timeout. Best-effort: returns ``[]`` when the parser cannot be introspected
+    (missing/unknown framework, import error) so it never blocks spuriously.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+        extra_args: Tokenized extra server args.
+
+    Returns:
+        list[str]: Flag tokens not registered on the build's parser, or ``[]``.
+    """
+    flags = [t for t in extra_args if t.startswith("--")]
+    if not flags:
+        return []
+    if framework != "sglang":
+        return []
+    parser = _sglang_cli_parser()
+    known = set(getattr(parser, "_option_string_actions", {}).keys()) if parser is not None else set()
+    if not known:
+        return []
+    return [f for f in flags if f.split("=", 1)[0] not in known]
+
+
+def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
+    """Best-effort default ``--moe-a2a-backend`` for the installed build.
+
+    Two-batch overlap does not name a dispatcher; the build's own
+    ``--moe-a2a-backend`` default decides it. Read that default from sglang's
+    argparse registration so a TBO run with no explicit backend can be
+    classified without a hard-coded version assumption. Returns ``None`` when it
+    cannot be resolved, in which case the caller must NOT block the launch.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+
+    Returns:
+        str | None: The lowercased default backend, or ``None`` when unknown.
+    """
+    if framework != "sglang":
+        return None
+    try:
+        parser = _sglang_cli_parser()
+        if parser is None:
+            return None
+        act = getattr(parser, "_option_string_actions", {}).get("--moe-a2a-backend")
+        default = getattr(act, "default", None) if act is not None else None
+        if default is not None:
+            return str(default).strip().lower()
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return None
+    return None
+
+
+def _missing_capability_reason(framework: str, raw: str) -> str | None:
+    """Return a reason if extra-args need an optional backend package that is absent.
+
+    Node-side capability preflight (SSH/infera path): a flag may be argparse-valid
+    but route work through an optional backend that only import-errors deep in
+    model init. The DeepEP dispatcher (`deep_ep`) is the case handled here.
+
+    DeepEP is required ONLY when the *effective* MoE a2a backend is ``deepep``.
+    ``--enable-two-batch-overlap`` alone does NOT imply DeepEP: SGLang selects
+    the TBO dispatcher from ``--moe-a2a-backend`` (deepep / mori / mooncake /
+    nixl), so ``--enable-two-batch-overlap --moe-a2a-backend mori`` is valid on
+    a ROCm image without ``deep_ep``. Resolve the effective backend (explicit
+    flag wins; TBO with no explicit backend falls back to the build default) and
+    only fail fast when it is positively ``deepep``. This preflight runs AFTER
+    the pod's prior server is killed, so a false positive would leave a
+    non-serving pod; when in doubt, do not block.
+
+    Args:
+        framework: Active server framework (used to resolve the default backend).
+        raw: Whitespace-separated server flags.
+
+    Returns:
+        str | None: A reason when a required backend package is missing, else None.
+    """
+    try:
+        tokens = shlex.split((raw or "").strip())
+    except ValueError:
+        return None
+    try:
+        import importlib.util
+
+        backend = ""
+        for i, tok in enumerate(tokens):
+            if tok == "--moe-a2a-backend" and i + 1 < len(tokens):
+                backend = tokens[i + 1]
+            elif tok.startswith("--moe-a2a-backend="):
+                backend = tok.split("=", 1)[1]
+        backend = backend.strip().lower()
+        if not backend and "--enable-two-batch-overlap" in tokens:
+            backend = _resolve_default_moe_a2a_backend(framework) or ""
+        if backend == "deepep" and importlib.util.find_spec("deep_ep") is None:
+            return (
+                "requires the DeepEP a2a backend, but the `deep_ep` package is "
+                "not installed on this node (--moe-a2a-backend deepep)"
+            )
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return None
+    return None
+
+
 def _log(msg: str) -> None:
     """Write a timestamped launcher log line to stderr.
 
@@ -188,6 +325,46 @@ def _recover_container_env() -> dict[str, str]:
     if venv_bin not in parts:
         env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}".rstrip(":")
     return env
+
+
+def _apply_forward_env_controls(env: dict[str, str]) -> dict[str, str]:
+    """Apply variant unsets then explicit overrides to recovered pod env.
+
+    The SSH launcher must recover PID1 variables first for LWS/Kubernetes
+    discovery. That recovery also restores base NCCL/RCCL/SGLANG values, so
+    variant controls are carried as JSON payloads and applied afterwards.
+
+    Args:
+        env: Environment after :func:`_recover_container_env`.
+
+    Returns:
+        dict[str, str]: Environment with controls consumed and applied.
+    """
+    out = dict(env)
+    raw_unset = out.pop("HYPERLOOM_MN_UNSET_FWD_ENV", "")
+    if raw_unset:
+        try:
+            parsed_unset = json.loads(raw_unset)
+            if isinstance(parsed_unset, list):
+                for raw_key in parsed_unset:
+                    key = str(raw_key).strip()
+                    if key:
+                        out.pop(key, None)
+        except (ValueError, TypeError):
+            _log("WARN invalid HYPERLOOM_MN_UNSET_FWD_ENV JSON; ignoring")
+
+    raw_extra = out.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", "")
+    if raw_extra:
+        try:
+            parsed_extra = json.loads(raw_extra)
+            if isinstance(parsed_extra, dict):
+                for raw_key, raw_value in parsed_extra.items():
+                    key = str(raw_key).strip()
+                    if key:
+                        out[key] = str(raw_value)
+        except (ValueError, TypeError):
+            _log("WARN invalid HYPERLOOM_MN_EXTRA_FWD_ENV JSON; ignoring")
+    return out
 
 
 def _resolve_pod_ip(env: dict[str, str]) -> str:
@@ -835,7 +1012,7 @@ def main() -> int:
     p.add_argument("--kill-only", action="store_true", help="kill the prior server via PID file and exit (frees GPU)")
     args = p.parse_args()
 
-    env = _recover_container_env()
+    env = _apply_forward_env_controls(_recover_container_env())
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:
@@ -859,6 +1036,45 @@ def main() -> int:
         _samp_csv = str(Path(_samp_dir) / f"gpu_metrics_{_samp_host}.csv")
         _samp_pid_file = str(Path(_samp_dir) / f"gpu_sampler_{_samp_host}.pid")
 
+    # Validate launch args BEFORE killing the prior server, so a rejected
+    # variant leaves the running server intact instead of a torn-down,
+    # non-serving pod. Skipped for --kill-only (it needs no model/flags). Order
+    # matters: none of these checks need the server killed.
+    if not args.kill_only:
+        if not args.model or args.tp <= 0:
+            _log("ERROR --model and --tp are required unless --kill-only")
+            return 2
+
+        denied = _denied_extra_args(args.extra_args)
+        if denied:
+            _log(f"ERROR denied server flags in --extra-args: {denied}")
+            return 2
+
+        # Preflight: reject flags this framework build's argparse does not accept
+        # (parity with the RayJob path).
+        try:
+            _extra_tokens = shlex.split(args.extra_args or "")
+        except ValueError:
+            _extra_tokens = (args.extra_args or "").split()
+        unsupported = _unsupported_extra_arg_flags(args.framework, _extra_tokens)
+        if unsupported:
+            _log(
+                f"ERROR unsupported server flags for {args.framework} build: "
+                f"{unsupported}; failing fast before kill + (re)launch (flag names vary by version)."
+            )
+            return 2
+
+        # Capability preflight: a flag may be argparse-valid but need an optional
+        # backend package (e.g. DeepEP) absent on this node. Reject before the
+        # kill so a bad variant does not leave the pod without a server.
+        cap_reason = _missing_capability_reason(args.framework, args.extra_args)
+        if cap_reason:
+            _log(
+                f"ERROR server flags [{args.extra_args}] {cap_reason}; failing fast "
+                f"before kill + (re)launch (add the backend to the image to enable)."
+            )
+            return 2
+
     try:
         _kill_prior(pid_file)
         if _samp_pid_file:
@@ -875,15 +1091,6 @@ def main() -> int:
             )
         print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
         return 0
-
-    if not args.model or args.tp <= 0:
-        _log("ERROR --model and --tp are required unless --kill-only")
-        return 2
-
-    denied = _denied_extra_args(args.extra_args)
-    if denied:
-        _log(f"ERROR denied server flags in --extra-args: {denied}")
-        return 2
 
     _log(
         f"framework={args.framework} model={args.model} tp={args.tp} "

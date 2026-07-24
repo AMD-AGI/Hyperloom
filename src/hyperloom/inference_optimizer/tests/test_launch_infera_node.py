@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 
@@ -152,3 +155,186 @@ def test_build_sglang_cmd_no_dp_size_without_dp_attention():
     )()
     cmd = mod._build_sglang_cmd(ns, node_rank=0, leader="10.0.0.1", advertise_host="10.0.0.2")
     assert "--dp-size" not in cmd
+
+
+def test_forward_controls_apply_after_recovered_pid1_env(monkeypatch):
+    """Infera must apply unset then explicit overrides after PID1 recovery."""
+    mod = _load_module()
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_UNSET_FWD_ENV",
+        json.dumps(["NCCL_DEBUG", "NCCL_PROTO"]),
+    )
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"NCCL_PROTO": "LL"}),
+    )
+    recovered = {
+        "NCCL_DEBUG": "INFO",
+        "NCCL_PROTO": "Simple",
+        "RCCL_MSCCL_ENABLE": "1",
+    }
+
+    forwarded = infera._collect_forward_env()
+    assert json.loads(forwarded["HYPERLOOM_MN_UNSET_FWD_ENV"]) == ["NCCL_DEBUG"]
+    assert json.loads(forwarded["HYPERLOOM_MN_EXTRA_FWD_ENV"]) == {"NCCL_PROTO": "LL"}
+    recovered["HYPERLOOM_MN_UNSET_FWD_ENV"] = forwarded["HYPERLOOM_MN_UNSET_FWD_ENV"]
+    recovered["HYPERLOOM_MN_EXTRA_FWD_ENV"] = forwarded["HYPERLOOM_MN_EXTRA_FWD_ENV"]
+
+    env = mod._apply_forward_env_controls(recovered)
+
+    assert "NCCL_DEBUG" not in env
+    assert env["NCCL_PROTO"] == "LL"
+    assert env["RCCL_MSCCL_ENABLE"] == "1"
+    assert "HYPERLOOM_MN_UNSET_FWD_ENV" not in env
+    assert "HYPERLOOM_MN_EXTRA_FWD_ENV" not in env
+
+
+def test_infera_resume_identity_includes_variant_env(monkeypatch):
+    """An env-only Infera variant must not resume a server with stale env."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        "last_restart_env_fingerprint": mn_cli._variant_env_fingerprint(),
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is True
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"NCCL_PROTO": "LL"}))
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV")
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO"]))
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_infera_old_state_without_fingerprint_never_resumes(monkeypatch):
+    """H1: a pre-fingerprint state must force a relaunch, not resume stale env."""
+    from hyperloom.inference_optimizer.multi_node.commands import infera
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
+    # Old state: identical served config but NO last_restart_env_fingerprint.
+    state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+        # no last_restart_env_fingerprint
+    }
+    args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    # Even a no-env baseline must NOT resume onto the (possibly stale-env) server.
+    assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_infera_validation_runs_before_kill(monkeypatch):
+    """M-1: a rejected variant must NOT tear down the prior server first."""
+    mod = _load_module()
+    killed = {"v": False}
+    monkeypatch.setattr(mod, "_kill_prior", lambda pid_file: killed.__setitem__("v", True))
+    monkeypatch.setattr(mod, "_recover_container_env", lambda: {"LWS_WORKER_INDEX": "0"})
+    monkeypatch.setattr(mod, "_resolve_pod_ip", lambda env: "10.0.0.1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "launch_infera_node.py",
+            "--framework",
+            "sglang",
+            "--model",
+            "/m",
+            "--tp",
+            "8",
+            # --tokenizer is on the pod-side denylist → rejected.
+            "--extra-args",
+            "--tokenizer /x",
+        ],
+    )
+
+    assert mod.main() == 2
+    assert killed["v"] is False  # rejected BEFORE _kill_prior tore down the server
+
+
+def _install_fake_sglang_serverargs(monkeypatch, *, default_backend="deepep"):
+    """Fake sglang graph: launch_server has no `parser`; ServerArgs.add_cli_args works."""
+    import types
+
+    sglang_mod = types.ModuleType("sglang")
+    launch_mod = types.ModuleType("sglang.launch_server")  # deliberately no `parser`
+    srt_mod = types.ModuleType("sglang.srt")
+    server_args_mod = types.ModuleType("sglang.srt.server_args")
+
+    class _FakeServerArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--tp", type=int, default=1)
+            parser.add_argument("--moe-a2a-backend", default=default_backend)
+            return parser
+
+    server_args_mod.ServerArgs = _FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
+    monkeypatch.setitem(sys.modules, "sglang.launch_server", launch_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args_mod)
+
+
+def test_infera_sglang_parser_falls_back_to_serverargs(monkeypatch):
+    """Infera preflight uses ServerArgs.add_cli_args when launch_server has no parser."""
+    mod = _load_module()
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="mori")
+
+    parser = mod._sglang_cli_parser()
+    assert parser is not None and "--moe-a2a-backend" in parser._option_string_actions
+    assert mod._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+    assert mod._resolve_default_moe_a2a_backend("sglang") == "mori"
+
+
+def test_infera_unsupported_flag_preflight(monkeypatch):
+    """Infera fails fast on an argparse-unknown server flag (parity with RayJob)."""
+    mod = _load_module()
+    # No sglang parser in the test env → best-effort returns [] (never blocks).
+    assert mod._unsupported_extra_arg_flags("sglang", ["--definitely-unknown-flag"]) == []
+    # With a stub parser exposing a known option set, unknown flags are reported.
+    monkeypatch.setattr(
+        mod,
+        "_unsupported_extra_arg_flags",
+        lambda fw, toks: [t for t in toks if t.startswith("--") and t != "--tp"],
+    )
+    assert mod._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+
+
+def test_infera_capability_preflight_only_blocks_effective_deepep(monkeypatch):
+    """Infera preflight: only an effective deepep backend requires deep_ep."""
+    mod = _load_module()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+
+    # Explicit deepep on a deep_ep-less node → block.
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend deepep") is not None
+    # =-form deepep → block too.
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend=deepep") is not None
+
+    # TBO + non-deepep backend must NOT be blocked (would leave a dead pod).
+    assert mod._missing_capability_reason(
+        "sglang", "--enable-two-batch-overlap --moe-a2a-backend mori"
+    ) is None
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend nixl") is None
+
+    # TBO with no explicit backend defers to the resolved build default.
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: "deepep")
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is not None
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: "mori")
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is None
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: None)
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is None

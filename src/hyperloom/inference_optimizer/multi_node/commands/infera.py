@@ -435,10 +435,11 @@ def _collect_forward_env() -> dict[str, str]:
     Returns:
         dict[str, str]: Prefix-matched tuning vars, the translated torch
         profiler dir, the shared-FS server-log dir, an optional AITER_REBUILD
-        signal, and any explicit per-variant overrides (which win on key
-        collisions).
+        signal, explicit per-variant overrides, and control payloads that apply
+        unsets/overrides after the pod recovers its PID1 environment.
     """
-    fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
+    variant_fwd, effective_unsets, explicit_overrides = _mn_cli._variant_env_control_spec()
+    fwd = dict(variant_fwd)
     # Multi-node torch profiler: the infera SSH path (unlike the RayJob path in
     # launch_multinode.py) never pins SGLANG_TORCH_PROFILER_DIR, so sglang writes
     # traces to pod-local /tmp where the sandbox cannot read them -> roofline's
@@ -449,27 +450,6 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
-    if unset_fwd:
-        try:
-            parsed_unset = json.loads(unset_fwd)
-            if isinstance(parsed_unset, list):
-                for key in parsed_unset:
-                    fwd.pop(str(key), None)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
-    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV
-    # as a JSON object; forwarded verbatim regardless of prefix and take
-    # precedence over prefix-matched values for the same key.
-    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    if extra_fwd:
-        try:
-            parsed = json.loads(extra_fwd)
-            if isinstance(parsed, dict):
-                for k, v in parsed.items():
-                    fwd[str(k)] = str(v)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
     # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the
     # SSH-launched sglang on the pod (where those vars are undefined) writes
     # traces to an absolute shared-FS path, not an unresolved literal.
@@ -492,6 +472,13 @@ def _collect_forward_env() -> dict[str, str]:
     aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
+    # launch_infera_node first recovers PID1 env (needed for LWS/discovery),
+    # then consumes these controls so variant unsets and explicit overrides win
+    # over any NCCL/RCCL/SGLANG values injected into the base pod.
+    if effective_unsets:
+        fwd["HYPERLOOM_MN_UNSET_FWD_ENV"] = json.dumps(effective_unsets)
+    if explicit_overrides:
+        fwd["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(explicit_overrides, sort_keys=True)
     return filter_forward_env(fwd, warn_on_drop=True)
 
 
@@ -524,6 +511,11 @@ def _infera_fanout_launch(
     """
     script = _mn_cli._read_pod_script("launch_infera_node.py")
     forward_env = _collect_forward_env()
+    # Run the launcher (including argparse/DeepEP preflight) with the same
+    # framework Python used by the eventual server child. Plain SSH ``python3``
+    # can resolve to a system interpreter whose site-packages differ from
+    # /opt/venv, causing false "deep_ep missing" rejects.
+    pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
@@ -539,7 +531,7 @@ def _infera_fanout_launch(
                 state,
                 ip,
                 script,
-                "python3",
+                pod_python,
                 launch_args,
                 timeout=poll_timeout,
                 env=forward_env,
@@ -655,6 +647,16 @@ def _infera_restart_config_matches(
     """
     if not state.get("last_restart_framework"):
         return False
+    current_env_fp = _mn_cli._variant_env_fingerprint()
+    stored_env_fp = str(state.get("last_restart_env_fingerprint") or "")
+    # Strict equality (mirrors the RayJob path). Old state files (pre-fingerprint)
+    # store an empty string, and a real fingerprint is a non-empty SHA-256 hex, so
+    # they never match — forcing ONE fresh relaunch that writes the fingerprint
+    # rather than risking a resume onto a server still carrying the prior
+    # variant's tuning env (a baseline after an env-only variant would otherwise
+    # benchmark stale env). The extra relaunch only costs the first post-upgrade
+    # round; every round after has a stored fingerprint.
+    env_match = stored_env_fp == current_env_fp
     base_match = (
         str(state.get("last_restart_framework") or "") == framework
         and str(state.get("last_restart_model") or "") == str(args.model)
@@ -663,6 +665,7 @@ def _infera_restart_config_matches(
         and str(state.get("last_restart_pd_mode") or "aggregated") == pd_mode
         and _mn_cli._normalize_extra_args(state.get("last_restart_extra_args"))
         == _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
+        and env_match
     )
     if not base_match:
         return False
@@ -906,12 +909,27 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         )
         all_results["worker"] = results
 
+    print(
+        json.dumps(
+            {"backend": "infera", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
+            indent=2,
+        )
+    )
+    if rc_total != 0:
+        info("infera restart: at least one launcher failed; see results")
+        return 1
+
+    # Persist successful launch identity only after every pod spawned OK. A
+    # preflight/launch failure leaves the prior server alive; writing new
+    # last_restart_* here would make the resume fast-path treat stale config as
+    # current on the next identical request.
     state["last_restart_framework"] = framework
     state["last_restart_model"] = args.model
     state["last_restart_tp"] = int(args.tp)
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
+    state["last_restart_env_fingerprint"] = _mn_cli._variant_env_fingerprint()
     if pd_mode == "disaggregated":
         # Persist inferred PD topology so resume fast-path and KB keys match launch.
         state["pd_prefill_nodes"] = pd_prefill_nodes
@@ -926,15 +944,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
     _mn_cli._save_state(state)
-    print(
-        json.dumps(
-            {"backend": "infera", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
-            indent=2,
-        )
-    )
-    if rc_total != 0:
-        info("infera restart: at least one launcher failed; see results")
-        return 1
     info("infera servers launched; benchmark via $service_url (frontend :8000)")
     return 0
 

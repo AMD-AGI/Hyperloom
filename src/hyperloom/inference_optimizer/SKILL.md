@@ -858,6 +858,28 @@ and ROCm/TileLang envs (`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`,
 (`SGLANG_ENABLE_SPEC_V2` / `--speculative-*`) is model-specific — only
 where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 
+For **multi-node / communication-bound** runs (a single exposed
+collective such as an `ncclDevKernel`/RCCL all-reduce dominates GPU time
+while compute is a small slice), compute/cache knobs above cannot move
+the run — the bottleneck is a cross-rank wait, usually EP/TP load
+imbalance. The `comm_specialist` owns this direction. Candidate
+*mechanisms* (not a fixed flag list): hide the collective (micro-batch /
+dual-batch overlap, overlap scheduler, multi-stream overlap); shrink /
+rebalance it (DP / sequence-parallel attention, EP / MoE-TP re-partition,
+quantized quick-reduce); and collective-library env sweeps
+(`NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS`, `NCCL_PROTO`,
+`RCCL_MSCCL_ENABLE` — these env vars are version-stable). **Do not
+hard-code framework server-flag names**: they drift across framework
+versions (renamed, default-on, or companion-required), so the specialist
+must source the exact flag from the running build's `--help` /
+`discovered_flags` and confirm it is accepted before proposing — an
+unknown flag wastes a full cluster restart on an `unrecognized arguments`
+abort. Aggressive overlap / quantized-collective mechanisms can also crash
+during graph capture on some stacks — a runtime crash means step down the
+specialist's degradation ladder (not abandon the direction), whereas an
+`unrecognized arguments` abort means the flag is not in this build (drop it
+permanently and pick another mechanism).
+
 ### Per-Run Asset Override (advanced)
 
 To override shipped configs without editing them, materialize a per-run asset

@@ -283,6 +283,77 @@ map to actions — **follow them**:
 * **`## System-Level Optimizations`** → `explore` variants; the text
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
+### Multi-node optimization directions (nodes >= 2 only)
+
+Single-node routing (per-kernel / serving / compiler above) still applies,
+but a multi-node deployment opens a whole class of levers that do NOT exist
+single-node. When `nodes >= 2`, do NOT stop at compute/serving knobs — they
+often cannot move a multi-node run whose time is spent crossing ranks.
+Deliberately spread `explore` rounds across the directions below and route
+each to the specialist that owns it, so the decision layer covers the
+multi-node search space instead of re-testing single-node knobs. (On
+single-node runs skip this section entirely — none of it applies.)
+
+* **Communication / collectives** (a collective — TP all-reduce, MoE
+  all-to-all/dispatch, or a PP send/recv bubble — dominates GPU time while
+  compute is a small slice) → `comm_specialist`, filling a wide `explore`
+  grid across these *mechanisms*: overlap comm with compute; reduce volume
+  (quantized quick-reduce, DP/sequence-parallel attention); collective-lib
+  env sweeps (`NCCL_*_NCHANNELS`, `NCCL_PROTO`, `RCCL_MSCCL_ENABLE` — these
+  env vars are version-stable). Do NOT hard-code framework server-flag names
+  here: they drift across framework versions (renamed / default-on /
+  companion-required), so the specialist must source the exact flag from the
+  build's `--help` / `discovered_flags` and confirm it is accepted before
+  proposing. Collective kernels are NOT rewritable source, so never route a
+  comm-bound trace into KERNEL_AGENT — comm work lives in EXPLORE +
+  `comm_specialist`.
+* **Parallelism strategy** (TP/PP/DP/EP degree + placement) →
+  `system_specialist` / `explore`: keep high-frequency TP inside a node
+  (fast intra-node link) and cross the slow inter-node fabric with PP/DP;
+  re-split TP/PP/DP/EP to the node topology.
+* **Load balancing** (cross-rank stragglers) → `comm_specialist` /
+  `serving_specialist`: MoE expert balance (EP / MoE-TP split), and — for
+  PD-disaggregated runs — the prefill:decode node/TP ratio.
+* **PD disaggregation & KV transfer** (separate prefill/decode nodes) →
+  `serving_specialist` / `system_specialist`: KV-transfer backend / RDMA-IB
+  selection, bootstrap/transfer stalls, per-role batch budgets.
+* **Placement / topology** → `system_specialist`: rank-to-GPU mapping and
+  NIC/NUMA affinity aligned to `rocm-smi --showtopo` / `nvidia-smi topo -m`.
+
+**Running the multi-node search (applies to all directions above):**
+
+* **Diagnose before you pick a direction.** Read the trace to classify the
+  bottleneck first — is the collective *wait-bound* (cross-rank stall →
+  overlap / rebalance), *bandwidth-bound* (link saturated → reduce volume /
+  library), or a *straggler / imbalance* (one rank/expert slowest →
+  rebalance)? and does the hot traffic cross nodes (slow fabric) or stay
+  on-box? Routing to the wrong direction (e.g. NCCL channel sweeps on a
+  wait-bound trace) burns the multi-node budget for nothing.
+* **Order variants by cost — multi-node restarts are expensive.** Each
+  structural variant tears down and relaunches the WHOLE cluster. Sequence
+  cheap-first: env-only sweeps (batchable) → in-place server-flag toggles →
+  structural / parallelism re-splits (TP/PP/DP/EP, PD ratio) last and
+  fewest. Front-load the highest expected-gain, lowest-crash-risk knob when
+  budget is tight; vary one direction per variant so KEEP/REVERT stays
+  attributable.
+* **Validate server flags against the build, not memory.** Framework
+  server-flag names drift across versions; confirm any proposed flag exists
+  in the running build (`discovered_flags` / `--help`) before spending a
+  cluster restart. An 'unrecognized arguments' abort means the flag is not in
+  this build — drop it permanently and pick another mechanism; a
+  precondition error means a companion flag is missing (add it). Env vars
+  (NCCL_*/RCCL_*, vendor quant) are version-stable and safe to set directly.
+* **Do not confuse slow init with a crash.** Overlap / larger-collective
+  variants can initialize the distributed group and capture graphs more
+  slowly; give them a longer readiness window (and health re-gate + measure
+  retry) before ruling a variant dead, and benchmark only after the health
+  gate passes.
+* **Reuse topology-proven recipes.** Prefer comm/parallelism configs already
+  KEPT for this exact topology (nodes x gpus_per_node) from KB / prior
+  KEEPs as the starting point instead of re-deriving from scratch.
+* **A crash is data, not a dead end.** When a multi-node variant crashed in a
+  prior round, do not drop the direction — request the next-safest rung of
+  the specialist's degradation ladder and keep exploring.
 
 ### Choosing specialist domain by bottleneck
 

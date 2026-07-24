@@ -899,6 +899,82 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
 
 
+@pytest.mark.asyncio
+async def test_run_grid_multi_node_ignores_stale_prior_benchmark_dir(tmp_path, monkeypatch):
+    """MN reused output_root: a stale prior benchmark_* must NOT shadow this round.
+
+    Reproduces the KEEP-selection bug: a prior run left a high-throughput
+    benchmark_* in the slot; this round produces a fresh (lower-tput) one. The
+    result must reflect the fresh dir, never the stale one.
+    """
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+    # Keep the MN path lightweight + deterministic.
+    monkeypatch.setenv("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "0")
+    monkeypatch.setenv("HYPERLOOM_MN_MEASURE_CONN_RETRY", "0")
+
+    async def fake_restart_server_for_round(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._multi_node_server_lifecycle.restart_server_for_round",
+        fake_restart_server_for_round,
+    )
+
+    output_root = tmp_path / "out"
+    slot = output_root / "variant_00_stale_probe"
+    # Stale prior-run result (higher tput) already in the slot.
+    stale_ws = slot / "benchmark_sglang_20250101_000000"
+    stale_ws.mkdir(parents=True)
+    (stale_ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/path/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 9999.0 / 256,
+                    "output_throughput": 9999.0,
+                    "total_token_throughput": 9999.0 * 2,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
+                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2800.0},
+                },
+            }
+        )
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        run_slot = Path(cmd[out_idx + 1])
+        _fake_workspace(run_slot, tput=800.0)  # fresh, lower-tput this round
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("stale_probe")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+        )
+
+    assert len(results) == 1
+    chosen = str(results[0].workspace or "")
+    assert "benchmark_sglang_20260513_001122" in chosen  # fresh dir selected
+    assert "20250101" not in chosen  # stale prior dir excluded
+
+
 # Framework-aware help-text probe (atom + multi-framework cache)
 
 
@@ -1238,3 +1314,87 @@ class TestCompactJsonServerArgs:
     def test_empty_is_noop(self):
         assert _grid_runner.compact_json_server_args("", "vllm") == ""
         assert _grid_runner.compact_json_server_args(None, "vllm") == ""
+
+
+# Section: connection-retry best-workspace selection (M1)
+
+
+def _write_benchmark_report(ws: Path, *, output_throughput, completed_requests) -> None:
+    """Materialize a benchmark_* workspace with a benchmark_report.json."""
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "throughput": {
+                    "output_throughput": output_throughput,
+                    "completed_requests": completed_requests,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_select_best_measurement_prefers_fuller_first_pass_over_sparse_retry(tmp_path):
+    """A newer but sparse retry must not shadow a fuller valid first pass."""
+    first = tmp_path / "benchmark_20260101_000000"
+    _write_benchmark_report(first, output_throughput=1000.0, completed_requests=500)
+    retry = tmp_path / "benchmark_20260101_000100"  # newer (sorts last)
+    _write_benchmark_report(retry, output_throughput=10.0, completed_requests=3)
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == first
+    assert meas.get("valid_measurement") is True
+    assert float(meas.get("output_throughput")) == 1000.0
+
+
+def test_select_best_measurement_picks_valid_retry_when_first_invalid(tmp_path):
+    """When the first pass has no valid measurement, a valid retry is chosen."""
+    first = tmp_path / "benchmark_20260101_000000"
+    first.mkdir()  # no benchmark_report.json → invalid
+    retry = tmp_path / "benchmark_20260101_000100"
+    _write_benchmark_report(retry, output_throughput=42.0, completed_requests=8)
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == retry
+    assert meas.get("valid_measurement") is True
+
+
+def test_select_best_measurement_all_invalid_returns_newest(tmp_path):
+    """All-invalid tie falls back to the newest workspace for error reporting."""
+    old = tmp_path / "benchmark_20260101_000000"
+    old.mkdir()
+    new = tmp_path / "benchmark_20260101_000100"
+    new.mkdir()
+    candidates = sorted(tmp_path.glob("benchmark_*"))
+
+    ws, _report, meas = gr._select_best_measurement(candidates, subprocess_started_unix=0.0)
+
+    assert ws == new
+    assert not meas.get("valid_measurement")
+
+
+def test_snapshot_falls_back_to_run_level_infera_logs(tmp_path, monkeypatch):
+    """Infera: empty per-variant slot → snapshot reads run-level server logs."""
+    slot = tmp_path / "slot"
+    (slot / "server_logs").mkdir(parents=True)  # exists but empty (infera case)
+    run_dir = tmp_path / "run_logs"
+    run_dir.mkdir()
+    (run_dir / "mn_infera_server_10.0.0.1_r0.log").write_text(
+        "loading weights...\nMemory access fault by GPU node-2\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(run_dir))
+
+    gr._snapshot_variant_server_logs(slot)
+
+    snap = slot / "server_death_snapshot.txt"
+    assert snap.is_file()
+    body = snap.read_text(encoding="utf-8")
+    assert "run-level HYPERLOOM_MN_SERVER_LOG_DIR" in body
+    assert "Memory access fault" in body
+    assert "mn_infera_server_10.0.0.1_r0.log" in body
