@@ -744,12 +744,22 @@ def _collect_optimized_kernels(
                     "ts": inv.get("ts"),
                 }
             )
-    # Cross-reference state.kernel_opt_attempts (covers on-disk verification rotated away).
-    ko_attempts = state.get("kernel_opt_attempts") or {}
+    # Cross-reference the stable task ledger (covers ordinal reuse and rotated
+    # on-disk verification), falling back to legacy per-ordinal state.
+    ko_attempts = (
+        state.get("kernel_opt_task_attempts")
+        or state.get("kernel_opt_attempts")
+        or {}
+    )
     if isinstance(ko_attempts, dict):
-        for kid, ent in ko_attempts.items():
+        for ledger_id, ent in ko_attempts.items():
             if not isinstance(ent, dict):
                 continue
+            kid = str(
+                ent.get("current_kernel_id")
+                or ent.get("kernel_id")
+                or ledger_id
+            )
             entry = by_kid.setdefault(
                 kid,
                 {

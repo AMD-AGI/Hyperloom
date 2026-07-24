@@ -144,6 +144,186 @@ def test_restore_from_detached_head_preserves_dirty():
         print("PASS test_restore_from_detached_head_preserves_dirty")
 
 
+def test_export_from_best_commit_ignores_unvalidated_worktree(tmp_path):
+    env = _make_repo(tmp_path)
+    repo = env["repo"]
+    kernel = env["kernel_agent"]
+    env["other"].write_text("committed_v1\n")
+    base_commit = _git(repo, "rev-parse", "HEAD")
+
+    kernel.write_text("KERNEL_VALIDATED_BEST\n")
+    _commit_all(repo, "iter1: validated best")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+
+    kernel.write_text("KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE\n")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    forge_submit._export_best_artifacts(
+        repo,
+        base_commit,
+        str(kernel),
+        str(kernel),
+        out,
+        best_commit=best_commit,
+    )
+
+    exported = out / "optimized_versions" / "v1_forge.py"
+    patch = (out / "optimized_versions" / "forge.patch").read_text()
+    assert exported.read_text() == "KERNEL_VALIDATED_BEST\n"
+    assert "KERNEL_VALIDATED_BEST" in patch
+    assert "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE" not in patch
+
+
+def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
+    env = _make_repo(tmp_path)
+    repo = env["repo"]
+    kernel = env["kernel_agent"]
+    env["other"].write_text("committed_v1\n")
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    kernel.write_text("KERNEL_VALIDATED_BEST\n")
+    _commit_all(repo, "iter1: validated best")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    shapes = {
+        "validation": [
+            {"CASE_ID": "case_001"},
+            {"CASE_ID": "case_002"},
+        ]
+    }
+    checkpoint = {
+        "schema_version": 1,
+        "experiment_id": "hyperloom",
+        "state": "best_committed",
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "baseline_ms": 1.0,
+        "best_ms": 0.8,
+        "validation_passed": True,
+        "case_coverage": shapes["validation"],
+    }
+
+    recovered = forge_submit._validated_forge_checkpoint(
+        checkpoint,
+        workspace=repo,
+        base_commit=base_commit,
+        shapes=shapes,
+    )
+
+    assert recovered is not None
+    assert recovered["best_commit"] == best_commit
+    assert recovered["improved"] is True
+    checkpoint["case_coverage"] = [{"CASE_ID": "case_001"}]
+    assert (
+        forge_submit._validated_forge_checkpoint(
+            checkpoint,
+            workspace=repo,
+            base_commit=base_commit,
+            shapes=shapes,
+        )
+        is None
+    )
+
+
+def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
+    env = _make_repo(tmp_path)
+    repo = env["repo"]
+    kernel = env["kernel_agent"]
+    env["other"].write_text("committed_v1\n")
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    kernel.write_text("KERNEL_VALIDATED_BEST\n")
+    _commit_all(repo, "iter1: validated best")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    kernel.write_text("KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE\n")
+
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('allclose: True')\n")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# optimize\n")
+    output_dir = tmp_path / "forge-output"
+    checkpoint = {
+        "schema_version": 1,
+        "experiment_id": "hyperloom",
+        "state": "best_committed",
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "baseline_ms": 1.0,
+        "best_ms": 0.8,
+        "improved": True,
+        "validation_passed": True,
+        "case_coverage": [],
+    }
+    assert (
+        forge_submit._validated_forge_checkpoint(
+            checkpoint,
+            workspace=repo,
+            base_commit=base_commit,
+            shapes={
+                "primary": {},
+                "minimal": {},
+                "validation": [],
+            },
+        )
+        is not None
+    )
+
+    monkeypatch.setattr(forge_submit, "_needs_inplace", lambda _repo: False)
+    monkeypatch.setattr(
+        forge_submit,
+        "_prepare_worktree",
+        lambda *_args, **_kwargs: (repo, str(kernel), base_commit),
+    )
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(
+        forge_submit,
+        "_autogen_forge_driver",
+        lambda *_args, **_kwargs: str(driver),
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_resolve_gpu_target",
+        lambda _candidate: "gfx942",
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_run_loop_via_cli",
+        lambda **_kwargs: forge_submit.ForgeLoopOutcome(
+            baseline_ms=1.0,
+            best_ms=0.8,
+            improved=True,
+            output="timed out",
+            error=RuntimeError("timeout"),
+            timed_out=True,
+            checkpoint=checkpoint,
+        ),
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_remove_worktree",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = forge_submit.submit(
+        source_file=str(kernel),
+        prompt_file=prompt,
+        output_dir=output_dir,
+        source_type="triton",
+        candidate={"operation": "unsupported_op"},
+        timeout_s=60,
+        kernel_repo=repo,
+    )
+
+    assert result["returncode"] == 0, result.get("stderr_tail")
+    assert result["timed_out"] is True
+    assert result["salvaged"] is True
+    assert result["best_commit"] == best_commit
+    exported = output_dir / "optimized_versions" / "v1_forge.py"
+    assert exported.read_text() == "KERNEL_VALIDATED_BEST\n"
+    assert (
+        "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE"
+        not in (output_dir / "optimized_versions" / "forge.patch").read_text()
+    )
+
+
 def test_default_branch_resolves_main():
     with tempfile.TemporaryDirectory() as td:
         env = _make_repo(Path(td))
