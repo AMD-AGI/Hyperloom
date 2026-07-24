@@ -1,1 +1,1 @@
-rocm-docs-core==1.31.0
+rocm-docs-core @ git+https://github.com/ROCm/rocm-docs-core.git@develop
