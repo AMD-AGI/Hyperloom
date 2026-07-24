@@ -941,9 +941,9 @@ async def run_grid(
     decision).
 
     ``session_deadline_sec`` is a ``time.monotonic()`` deadline for the whole
-    session budget; when the clock passes it, every remaining variant is marked
-    ``skipped`` instead of run, so a wall-clock timeout stops the grid mid-way
-    rather than draining all variants first.
+    session budget; a variant is skipped once the remaining budget cannot fit
+    another ``variant_timeout_sec`` worst-case run, so a wall-clock timeout stops
+    the grid mid-way and the last variant never overruns the close window.
     """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -999,15 +999,22 @@ async def run_grid(
 
     for i, variant in enumerate(grid):
         # Session-budget stop: skip the remaining variants once the wall-clock
-        # deadline has passed so a timeout halts the grid instead of draining it.
-        if session_deadline_sec is not None and time.monotonic() >= session_deadline_sec:
-            log.warning(
-                "grid_runner: session deadline reached; skipping %d remaining variant(s)",
-                len(grid) - i,
-            )
-            for skipped_variant in grid[i:]:
-                results.append(_session_deadline_skip_result(skipped_variant))
-            break
+        # deadline is reached or the remaining budget cannot fit another
+        # variant's worst-case runtime, so a timeout halts the grid instead of
+        # draining it (and the last variant cannot overrun the close window).
+        if session_deadline_sec is not None:
+            remaining_sec = session_deadline_sec - time.monotonic()
+            if remaining_sec < float(variant_timeout_sec):
+                log.warning(
+                    "grid_runner: session budget exhausted (%.0fs left < variant cap %ds); "
+                    "skipping %d remaining variant(s)",
+                    max(0.0, remaining_sec),
+                    variant_timeout_sec,
+                    len(grid) - i,
+                )
+                for skipped_variant in grid[i:]:
+                    results.append(_session_deadline_skip_result(skipped_variant))
+                break
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         # Capability fast-fail: drop a variant whose env flag the build cannot
         # honour before booting a doomed server, still recording the failure so

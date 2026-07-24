@@ -1008,9 +1008,9 @@ class ExploreExecutor:
         session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
         try:
             for idx, gv in enumerate(runnable):
-                if session_deadline_sec is not None and time.monotonic() >= session_deadline_sec:
+                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < float(timeout_sec):
                     log.warning(
-                        "explore: session deadline reached; stopping after %d/%d variant(s)",
+                        "explore: session budget cannot fit another variant; stopping after %d/%d variant(s)",
                         idx,
                         len(runnable),
                     )
