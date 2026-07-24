@@ -35,6 +35,9 @@ DEFAULT_RECIPE_SITES: tuple[str, ...] = (
     "https://lmsysorg.mintlify.app/cookbook/autoregressive/<family>/<model>",
 )
 
+# Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
+RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
+
 
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
@@ -447,8 +450,11 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _recipe_sites_source_lines(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the recipe-site research source; empty when no sites configured."""
-    sites = tuple(inp.recipe_sites) or DEFAULT_RECIPE_SITES
+    """Render the recipe-site research source; the built-in defaults when unset, nothing when disabled via the sentinel."""
+    configured = tuple(s for s in inp.recipe_sites if s)
+    if configured and all(s.strip().lower() in RECIPE_SITES_DISABLED_VALUES for s in configured):
+        return []
+    sites = configured or DEFAULT_RECIPE_SITES
     if not sites:
         return []
     lines = [
