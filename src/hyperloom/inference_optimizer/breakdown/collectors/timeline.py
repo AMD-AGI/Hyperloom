@@ -159,11 +159,20 @@ def collect_phase_timeline(
             )
 
     # Kernel opt attempts (per-kernel history -> flatten to per-attempt rows)
-    kernel_opt = state.get("kernel_opt_attempts") or {}
+    kernel_opt = (
+        state.get("kernel_opt_task_attempts")
+        or state.get("kernel_opt_attempts")
+        or {}
+    )
     if isinstance(kernel_opt, dict):
-        for kid, ent in kernel_opt.items():
+        for ledger_id, ent in kernel_opt.items():
             if not isinstance(ent, dict):
                 continue
+            kid = str(
+                ent.get("current_kernel_id")
+                or ent.get("kernel_id")
+                or ledger_id
+            )
             for h in ent.get("history") or []:
                 if not isinstance(h, dict):
                     continue

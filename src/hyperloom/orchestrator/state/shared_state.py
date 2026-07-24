@@ -221,7 +221,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 2
+LATEST_STATE_SCHEMA_VERSION: int = 3
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -642,6 +642,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
     kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
+    # Authoritative optimization history keyed by stable operator identity.
+    # ``kernel_opt_attempts`` remains the current ordinal compatibility index.
+    kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
+    # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
+    # Their lifecycle is independent of trace-local kernel ordinals.
+    pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Cross-round params/backends/sweep aggregation (cap 10); legacy rows folded into the unified winners_history on resume.
     params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
@@ -879,6 +885,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         filtered = {k: v for k, v in raw.items() if k in known}
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
+        if not isinstance(filtered.get("kernel_opt_attempts"), dict):
+            filtered["kernel_opt_attempts"] = {}
+        if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
+            filtered["kernel_opt_task_attempts"] = {}
+        if not isinstance(filtered.get("pending_kernel_integrations"), dict):
+            filtered["pending_kernel_integrations"] = {}
+        if incoming_version < 3:
+            for ledger_id, entry in filtered["kernel_opt_attempts"].items():
+                if not isinstance(entry, dict):
+                    continue
+                task_key = str(entry.get("task_group_key") or "").strip()
+                if not task_key:
+                    source = str(entry.get("last_source_file") or "")
+                    task_key = json.dumps(
+                        {
+                            "version": 1,
+                            "kind": "legacy-kernel",
+                            "kernel_id": str(ledger_id),
+                            "source_file": source,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                migrated = dict(entry)
+                migrated.setdefault("current_kernel_id", str(ledger_id))
+                migrated.setdefault("stable_task_key", task_key)
+                filtered["kernel_opt_task_attempts"].setdefault(
+                    task_key,
+                    migrated,
+                )
+            migration_events.append(
+                "migrated kernel optimization attempts to stable task identities"
+            )
         # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
@@ -1713,6 +1752,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         return _m.integrate_attempt_count_for_kernel(self, kernel_id)
 
+    def integrate_attempt_count_for_integration(
+        self,
+        integration_id: str,
+    ) -> int:
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.integrate_attempt_count_for_integration(
+            self,
+            integration_id,
+        )
+
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
@@ -1730,6 +1781,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         return _m.pending_keep_kernel_ids(self)
+
+    def pending_kernel_integration_records(self) -> list[dict[str, Any]]:
+        """Return immutable pending KEEP snapshots in integration priority order."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.pending_kernel_integration_records(self)
 
     @property
     def has_keep_pending_integrate(self) -> bool:

@@ -1455,27 +1455,63 @@ def kernel_work_pending(state: Any) -> bool:
         pass
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
-    integrated: set[str] = set()
+    integrated_entries: list[dict[str, Any]] = []
+    integrated_sources: set[str] = set()
     for entry in getattr(state, "optimization_stack", None) or []:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("action") or "") == "integrate":
-            kid = str(entry.get("kernel_id") or "")
-            if kid:
-                integrated.add(kid)
+            integrated_entries.append(entry)
+            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
+            if source_file:
+                integrated_sources.add(source_file)
 
-    attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    attempts = (
+        getattr(state, "kernel_opt_task_attempts", None)
+        or getattr(state, "kernel_opt_attempts", None)
+        or {}
+    )
     if not isinstance(attempts, dict):
         return False
-    for kid, attempt in attempts.items():
-        kernel_id = str(kid or "")
-        if kernel_id in rejected or kernel_id in integrated:
-            continue
+    for ledger_id, attempt in attempts.items():
         if not isinstance(attempt, dict):
+            continue
+        kernel_id = str(
+            attempt.get("current_kernel_id")
+            or attempt.get("kernel_id")
+            or ledger_id
+        )
+        source_file = str(attempt.get("last_source_file") or "")
+        task_group_key = str(attempt.get("task_group_key") or "")
+        integrated = False
+        for integrated_entry in integrated_entries:
+            integrated_key = str(integrated_entry.get("task_group_key") or "")
+            if task_group_key and integrated_key:
+                integrated = task_group_key == integrated_key
+            else:
+                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
+                    continue
+                integrated_source = str(
+                    integrated_entry.get("target_file")
+                    or integrated_entry.get("source_file")
+                    or ""
+                )
+                integrated = (
+                    not source_file
+                    or not integrated_source
+                    or source_file == integrated_source
+                )
+            if integrated:
+                break
+        if integrated:
+            continue
+        if source_file and source_file in integrated_sources:
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
         rejected_reason = str(attempt.get("rejected_reason") or "").strip()
+        if kernel_id in rejected and (not task_group_key or rejected_reason):
+            continue
         if decision == "KEEP":
             return True
         if decision == "REVERT" or rejected_reason:

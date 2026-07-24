@@ -269,7 +269,10 @@ class WritebackCollaborator:
                         break
         entry = {
             "action": "integrate",
+            "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
+            "task_group_key": result.get("task_group_key"),
+            "identity_route": result.get("identity_route"),
             "patch_path": result.get("patch_path"),
             "target_file": result.get("target_file"),
             "backup_manifest": backup_manifest,
@@ -284,9 +287,19 @@ class WritebackCollaborator:
         integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
         if integrate_gap_cid:
             entry["gap_canonical_id"] = integrate_gap_cid
-        key = (entry["kernel_id"], entry["patch_path"], entry["target_file"])
+        key = (
+            entry.get("integration_id"),
+            entry["kernel_id"],
+            entry["patch_path"],
+            entry["target_file"],
+        )
         existing = {
-            (item.get("kernel_id"), item.get("patch_path"), item.get("target_file"))
+            (
+                item.get("integration_id"),
+                item.get("kernel_id"),
+                item.get("patch_path"),
+                item.get("target_file"),
+            )
             for item in self.shared_state.optimization_stack
             if isinstance(item, dict) and item.get("action") == "integrate"
         }
@@ -304,6 +317,7 @@ class WritebackCollaborator:
         self.shared_state.current_best = {
             "action": "integrate",
             "tput": float(new_tput),
+            "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
             "extra_server_args": extra_args,
             "optimization_stack": list(self.shared_state.optimization_stack),
@@ -1152,13 +1166,18 @@ class WritebackCollaborator:
             joined with its E2E integrate verdict where available.
         """
         ss = self.shared_state
-        opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
+        opt_attempts = (
+            getattr(ss, "kernel_opt_task_attempts", {})
+            or getattr(ss, "kernel_opt_attempts", {})
+            or {}
+        )
         integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
         if not isinstance(opt_attempts, dict):
             return []
 
         # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
         integ_by_kid: dict[str, dict[str, Any]] = {}
+        integ_by_task: dict[str, dict[str, Any]] = {}
         if isinstance(integ_attempts, dict):
             for entry in integ_attempts.values():
                 if not isinstance(entry, dict):
@@ -1166,9 +1185,12 @@ class WritebackCollaborator:
                 kid = str(entry.get("kernel_id") or "")
                 if kid:
                     integ_by_kid[kid] = entry
+                task_group_key = str(entry.get("task_group_key") or "")
+                if task_group_key:
+                    integ_by_task[task_group_key] = entry
 
         out: list[dict[str, Any]] = []
-        for kid, e in opt_attempts.items():
+        for ledger_id, e in opt_attempts.items():
             if not isinstance(e, dict):
                 continue
             if str(e.get("last_decision", "")).upper() != "KEEP":
@@ -1177,7 +1199,17 @@ class WritebackCollaborator:
                 micro = float(e.get("last_micro_speedup") or 0.0)
             except (TypeError, ValueError):
                 micro = 0.0
-            integ = integ_by_kid.get(str(kid))
+            kid = str(
+                e.get("current_kernel_id")
+                or e.get("kernel_id")
+                or ledger_id
+            )
+            task_group_key = str(e.get("task_group_key") or "")
+            integ = (
+                integ_by_task.get(task_group_key)
+                if task_group_key
+                else integ_by_kid.get(kid)
+            )
             e2e_gain = 0.0
             e2e_tput = 0.0
             e2e_decision = ""
@@ -1200,7 +1232,7 @@ class WritebackCollaborator:
                         break
             out.append(
                 {
-                    "kernel_id": str(kid),
+                    "kernel_id": kid,
                     "source_file": str(e.get("last_source_file") or ""),
                     "artifact_path": str(e.get("last_artifact_path") or ""),
                     "micro_speedup": micro,
