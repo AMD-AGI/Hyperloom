@@ -2258,7 +2258,11 @@ def _merge_tunableop_untuned_files(base_path: Path) -> int:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            log.debug(
+                "shape capture: failed to remove temporary TunableOp file %s",
+                tmp_path,
+                exc_info=True,
+            )
         return 0
     return len(rows)
 
@@ -2505,7 +2509,11 @@ async def _capture_vllm_tunableop_shapes(
         try:
             untuned_base.unlink(missing_ok=True)
         except OSError:
-            pass
+            log.debug(
+                "shape capture: failed to remove incomplete TunableOp recording %s",
+                untuned_base,
+                exc_info=True,
+            )
         benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
         detail = f": {benchmark_error}" if benchmark_error else ""
         return {

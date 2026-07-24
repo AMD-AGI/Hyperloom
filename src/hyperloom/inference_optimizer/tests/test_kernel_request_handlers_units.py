@@ -1256,6 +1256,95 @@ class TestRunGemmTuningHandler:
         )
         assert "PYTORCH_TUNABLEOP_ENABLED" in task.params["unset_envs"]
 
+    def test_vllm_block_fp8_profile_capture_without_trace_is_explicit_failure(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+
+        baseline_config = tmp_path / "baseline.yaml"
+        baseline_config.write_text("benchmark:\n  framework: vllm\n")
+        state = SharedState(
+            framework="vllm",
+            model_path="/models/qwen",
+            baseline_config_path=str(baseline_config),
+        )
+
+        class FakeBaselineExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __call__(self, ctx):
+                return {"status": "succeeded"}
+
+        monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
+
+        result = asyncio.run(
+            krh._capture_vllm_tunableop_shapes(
+                state=state,
+                session_dir=tmp_path,
+                payload={
+                    "task_id": "capture",
+                    "_shape_capture_mode": "block_fp8_profile",
+                },
+                workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
+            )
+        )
+
+        assert result["status"] == "failed"
+        assert result["decision"] == "REVERT"
+        assert result["error_class"] == "shape_capture_failed"
+        assert result["capture_mode"] == "block_fp8_profile"
+        assert result["shape_count"] == 0
+
+    def test_multi_node_vllm_block_fp8_preserves_existing_no_capture_behavior(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+        monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+
+        assert (
+            krh._vllm_block_fp8_profile_capture_required(
+                framework="vllm",
+                precision="fp8",
+                quant_type="blockscale",
+                shapes_json="",
+                tunableop_input="",
+                dry_run=False,
+            )
+            is False
+        )
+
+    def test_shape_capture_kill_switch_disables_dense_and_block_fp8(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_GEMM_SHAPE_CAPTURE", "0")
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
+        )
+
+        assert (
+            krh._vllm_dense_shape_capture_required(
+                framework="vllm",
+                model_path=str(model),
+                shapes_json="",
+                tunableop_input="",
+                dry_run=False,
+            )
+            is False
+        )
+        assert (
+            krh._vllm_block_fp8_profile_capture_required(
+                framework="vllm",
+                precision="fp8",
+                quant_type="blockscale",
+                shapes_json="",
+                tunableop_input="",
+                dry_run=False,
+            )
+            is False
+        )
+
     @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
     def test_shape_capture_rejects_unsafe_explicit_port(self, port):
         with pytest.raises(ValueError):
@@ -1504,6 +1593,54 @@ class TestRunGemmTuningHandler:
         assert len(capture_calls) == 1
         assert captured_input["tunableop_input"] == str(tmp_path / "tunableop_untuned.csv")
         assert result["status"] == "ok"
+
+    def test_vllm_dense_capture_failure_stops_before_forge(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "forge_gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
+        )
+        SharedState(
+            precision="bf16",
+            framework="vllm",
+            model_path=str(model),
+            gpu_type="mi300x",
+        ).save(tmp_path)
+
+        async def fake_capture(**kwargs):
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "error_class": "shape_capture_failed",
+                "error": "no complete workload recording",
+            }
+
+        async def fail_run(*args, **kwargs):
+            raise AssertionError("Forge must not run after shape capture fails")
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", fake_capture)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fail_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {"task_id": "capture-failed"},
+                session_dir=tmp_path,
+            )
+        )
+
+        assert result["status"] == "failed"
+        assert result["decision"] == "REVERT"
+        assert result["error_class"] == "shape_capture_failed"
+        assert result["backend"] == "forge"
+        assert result["engine"] == "forge"
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
         root = tmp_path / "kernel-agent"
