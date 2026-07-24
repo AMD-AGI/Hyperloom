@@ -7,6 +7,7 @@ trajectory-reviewer auto-enqueue helpers used across multiple phases."""
 from __future__ import annotations
 import logging as _logging
 import os
+import re
 from typing import Any
 from ..state.task_registry import Task
 from .base import PhaseHandler
@@ -74,6 +75,9 @@ class InternalTasksPhase(PhaseHandler):
                     proven.append({"name": name, "source": source})
         if proven:
             params["already_proven"] = proven
+        recipe_sites = [s.strip() for s in re.split(r"[,\s]+", os.environ.get("HYPERLOOM_RECIPE_SITES", "")) if s.strip()]
+        if recipe_sites:
+            params["recipe_sites"] = recipe_sites
         rounds = getattr(self.shared_state, "specialist_rounds", None) or []
         if isinstance(rounds, list):
             for row in reversed(rounds):

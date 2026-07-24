@@ -8,12 +8,36 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
+    DEFAULT_RECIPE_SITES,
     SpecialistPromptInputs,
     build_specialist_prompts,
+    _recipe_sites_source_lines,
     _render_measured_impact,
     _format_version_note,
 )
 from hyperloom.orchestrator.specialists.domains import get_domain
+
+
+class TestRecipeSitesSourceLines:
+    @staticmethod
+    def _inp(sites: tuple[str, ...]) -> SpecialistPromptInputs:
+        return SpecialistPromptInputs(task_id="t", domain=get_domain("research_scout_specialist"), recipe_sites=sites)
+
+    def test_unset_renders_default_sites(self):
+        lines = _recipe_sites_source_lines(self._inp(()))
+        assert lines, "unset recipe_sites must fall back to the built-in defaults"
+        joined = "\n".join(lines)
+        assert all(site in joined for site in DEFAULT_RECIPE_SITES)
+
+    def test_custom_sites_replace_defaults(self):
+        lines = _recipe_sites_source_lines(self._inp(("https://example.com/r",)))
+        joined = "\n".join(lines)
+        assert "https://example.com/r" in joined
+        assert DEFAULT_RECIPE_SITES[0] not in joined
+
+    @pytest.mark.parametrize("sentinel", ["none", "off", "disable", "DISABLED", " none "])
+    def test_disable_sentinel_renders_nothing(self, sentinel):
+        assert _recipe_sites_source_lines(self._inp((sentinel,))) == []
 
 
 _DOMAIN_KEYS = (
