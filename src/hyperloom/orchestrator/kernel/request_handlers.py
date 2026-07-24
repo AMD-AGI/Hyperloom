@@ -2117,6 +2117,8 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
         "block_scale",
         "a8w8_blockscale",
         "fp8_blockscale",
+        "bpreshuffle",
+        "a8w8_bpreshuffle",
     }
 
 
