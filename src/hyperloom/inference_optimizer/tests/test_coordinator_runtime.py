@@ -894,6 +894,56 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
         await c.stop()
 
 
+def _eval_failed_result() -> dict:
+    return {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": "ERROR: run_eval failed with exit code 1",
+        "baseline_eval_failed": True,
+        "baseline_eval_failure_kind": "eval_runtime_failure",
+        "baseline_eval_accuracy_floor": 0.2,
+        "baseline_eval_evidence": "run_eval failed with exit code 1",
+        "baseline_eval_contract_fingerprint": "abc123",
+        "materialized_config": "/runs/baseline/materialized.yaml",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(
+    session_dir, monkeypatch
+):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
+        assert c.shared_state.baseline_failure_streak == 3
+        assert c.shared_state.stop_reason in ("", None)
+        assert c.shared_state.enablement_origin == "eval"
+        assert c.shared_state.enablement_pending is True
+        assert c.shared_state.enablement_accuracy_floor == 0.2
+        assert c.shared_state.enablement_probe_config_path == "/runs/baseline/materialized.yaml"
+        assert c.shared_state.enablement_eval_contract_fingerprint == "abc123"
+        assert c.shared_state.enablement_baseline_eval_kind == "eval_runtime_failure"
+        assert c.shared_state.enablement_launch_log
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(session_dir, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
