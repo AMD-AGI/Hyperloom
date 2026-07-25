@@ -118,3 +118,75 @@ def test_gpu_vram_used_mb_failure_returns_none(monkeypatch):
 
     monkeypatch.setattr(ab.subprocess, "run", _raise)
     assert ab._gpu_vram_used_mb("0") is None
+
+
+# Leaked VLLM::EngineCore reap: vLLM's engine worker escapes killpg (fresh session),
+# so teardown must reap it by name — POSIX-only, self-match-safe, never fatal.
+
+
+def test_reap_vllm_orphans_skips_non_posix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(ab.os, "name", "nt")
+    ab._reap_vllm_orphans()
+    assert calls == []  # no POSIX pkill on non-POSIX hosts
+
+
+def test_reap_vllm_orphans_targets_enginecore_and_worker(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    ab._reap_vllm_orphans()
+    pats = [c[-1] for c in cmds if c[:3] == ["pkill", "-9", "-f"]]
+    assert any("EngineCore" in p for p in pats)
+    assert any("Worker" in p for p in pats)
+    # bracket trick: pattern must not contain a bare 'VLLM::' (would match pkill's own argv)
+    for p in pats:
+        assert p.startswith("[V]") and "VLLM::" not in p
+
+
+def test_reap_vllm_orphans_swallows_errors(monkeypatch):
+    def _raise(*a, **k):
+        raise OSError("no pkill")
+
+    monkeypatch.setattr(ab.subprocess, "run", _raise)
+    monkeypatch.setattr(ab.os, "name", "posix")
+    ab._reap_vllm_orphans()  # must not raise
+
+
+def test_reap_vllm_orphans_opt_out(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setenv("APPLY_BENCH_NO_ORPHAN_REAP", "1")
+    ab._reap_vllm_orphans()
+    assert cmds == []
+
+
+def test_kill_servers_reaps_orphans_for_vllm(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    ab._kill_servers(None, "vllm")  # gpu=None => no VRAM-drain probe
+    assert any(c[:3] == ["pkill", "-9", "-f"] and "EngineCore" in c[-1] for c in cmds)
+
+
+def test_kill_servers_skips_orphan_reap_for_sglang(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    ab._kill_servers(None, "sglang")
+    assert not any("EngineCore" in c[-1] for c in cmds)
+
+
+def test_wait_vram_drain_returns_when_below_threshold(monkeypatch):
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: 1000.0)
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    assert ab._wait_vram_drain("0", threshold_mb=20000.0, timeout_s=5.0) == 1000.0
+
+
+def test_wait_vram_drain_none_when_no_rocm_smi(monkeypatch):
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: None)
+    assert ab._wait_vram_drain("0") is None
