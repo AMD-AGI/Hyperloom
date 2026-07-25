@@ -95,6 +95,23 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert "RUNNABILITY" in params["notes"]
     assert "git apply --check" in params["notes"]
     assert "GLM-5" in params["notes"]
+    # Boot-origin: no eval carriers.
+    assert "enablement_origin" not in params
+
+
+def test_build_params_threads_eval_origin_carriers(monkeypatch):
+    _stub_enumerate(monkeypatch, [])
+    fake = _fake_self()
+    fake.shared_state.enablement_origin = "eval"
+    fake.shared_state.enablement_accuracy_floor = 0.3
+    fake.shared_state.enablement_probe_config_path = "/runs/baseline/materialized.yaml"
+    fake.shared_state.enablement_eval_contract_fingerprint = "abc123"
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    assert params["enablement_origin"] == "eval"
+    assert params["enablement_accuracy_floor"] == 0.3
+    assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
+    assert params["enablement_eval_contract_fingerprint"] == "abc123"
 
 
 _TRANSFORMERS_UNRECOGNIZED_LOG = (

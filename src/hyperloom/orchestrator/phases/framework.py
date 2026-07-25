@@ -117,6 +117,27 @@ def _maybe_build_runtime_candidate(
         return None
 
 
+def _enablement_carrier_params(state: Any) -> dict[str, Any]:
+    """eval-origin trigger context threaded to specialist/integrate/build tasks.
+
+    Empty for boot-origin enablement so the boot path is unchanged.
+    """
+    origin = str(getattr(state, "enablement_origin", "") or "")
+    if not origin:
+        return {}
+    out: dict[str, Any] = {
+        "enablement_origin": origin,
+        "enablement_accuracy_floor": float(getattr(state, "enablement_accuracy_floor", 0.0) or 0.0),
+    }
+    cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
+    if cfg:
+        out["enablement_probe_config_path"] = cfg
+    fp = str(getattr(state, "enablement_eval_contract_fingerprint", "") or "")
+    if fp:
+        out["enablement_eval_contract_fingerprint"] = fp
+    return out
+
+
 def _maybe_build_localization_candidate(
     capability_gap: Any,
     *,
@@ -1208,6 +1229,8 @@ class FrameworkPhase(PhaseHandler):
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
+            # eval-origin trigger context (empty for boot-origin enablement).
+            **_enablement_carrier_params(state),
         }
         if runtime_candidate is not None:
             params_out["runtime_candidate"] = runtime_candidate
@@ -4484,8 +4507,13 @@ class FrameworkPhase(PhaseHandler):
             "enablement_before_signature": before_sig,
             "source": "coordinator_internal",
             **self._framework_gpu_params(),
+            **_enablement_carrier_params(state),
         }
-        cfg = str(getattr(state, "baseline_config_path", "") or "")
+        # Prefer the eval-origin probe config so the re-run keeps the original
+        # workload/eval contract; fall back to the promoted baseline config.
+        cfg = str(getattr(state, "enablement_probe_config_path", "") or "") or str(
+            getattr(state, "baseline_config_path", "") or ""
+        )
         if cfg:
             params["config_path"] = cfg
         idem = f"build_launch_probe:{build_task_id}"

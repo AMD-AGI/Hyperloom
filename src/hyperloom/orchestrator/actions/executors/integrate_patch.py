@@ -2194,7 +2194,8 @@ class IntegratePatchExecutor:
         probe_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
-        floor = enablement_accuracy_floor()
+        _param_floor = params.get("enablement_accuracy_floor")
+        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else enablement_accuracy_floor()
         correctness_ok: bool | None
         if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
             correctness_ok = float(enablement_accuracy) > floor
