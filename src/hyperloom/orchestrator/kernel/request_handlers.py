@@ -1748,13 +1748,38 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _resolve_forge_shapes(state, session_dir: Path) -> str:
+def _profile_shapes_are_fresh(state: Any) -> bool:
+    """Return whether the latest profile matches the active workload/config."""
+    if (
+        str(getattr(state, "last_profile_status", "") or "").strip().lower()
+        != "succeeded"
+    ):
+        return False
+    recorded = getattr(state, "last_profile_workload", None)
+    if not isinstance(recorded, dict) or not recorded:
+        return False
+    expected = state.profile_workload_context()
+    return recorded == expected
+
+
+def _resolve_forge_shapes(
+    state,
+    session_dir: Path,
+    *,
+    require_fresh_profile: bool = False,
+) -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
     Only passes files that match this schema; incompatible formats are
     silently skipped so forge falls back to config.json shape derivation.
     """
+    if require_fresh_profile and not _profile_shapes_are_fresh(state):
+        log.info(
+            "Forge GEMM shapes: latest TraceLens profile does not match the "
+            "active workload/config; ignoring its shape artifacts"
+        )
+        return ""
     last_trace = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(last_trace, dict):
         return ""
@@ -1785,99 +1810,16 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
-    # Final fallback: extract real GEMM shapes from kernel_candidates.json
-    # produced by TraceLens deterministic route. Scans ALL traces in the session
-    # (union) to capture both peak prefill shapes (large M from baseline trace)
-    # and steady-state decode shapes (smaller M from post-opt trace).
-    extracted = _extract_gemm_shapes_from_all_traces(session_dir)
+    # Final fallback: extract the GEMM shapes observed by the latest TraceLens
+    # analysis. Older traces can describe a backend that is no longer active.
+    extracted = _extract_gemm_shapes_from_candidates(
+        str(last_trace.get("candidates_path") or ""),
+        session_dir,
+    )
     if extracted:
         return extracted
 
     return ""
-
-
-def _extract_gemm_shapes_from_all_traces(session_dir: Path) -> str:
-    """Extract M,N,K from ALL kernel_candidates.json in the session (union).
-
-    Scans all TraceLens analysis runs to collect the full range of GEMM shapes
-    observed across baseline and post-optimization profiles. This ensures the
-    tuner covers both peak prefill shapes (large M) and decode shapes (small M).
-    """
-    import json as _json
-    import re as _re
-
-    kernel_agent_dir = session_dir / "kernel-agent" / "runs"
-    if not kernel_agent_dir.is_dir():
-        return ""
-
-    all_shapes: list[dict[str, int]] = []
-    seen: set[tuple[int, int, int]] = set()
-
-    for cand_file in sorted(kernel_agent_dir.rglob("kernel_candidates.json")):
-        _parse_candidates_file(cand_file, seen, all_shapes)
-
-    if not all_shapes:
-        return ""
-
-    out_path = session_dir / "kernel-agent" / "traced_gemm_shapes_union.json"
-    try:
-        out_path.write_text(_json.dumps(all_shapes, indent=2), encoding="utf-8")
-    except OSError:
-        return ""
-
-    log.info(
-        "extracted %d unique GEMM shapes from %s trace(s) -> %s",
-        len(all_shapes),
-        sum(1 for _ in kernel_agent_dir.rglob("kernel_candidates.json")),
-        out_path,
-    )
-    return str(out_path)
-
-
-def _parse_candidates_file(
-    cand_file: Path,
-    seen: set,
-    shapes: list,
-) -> None:
-    """Parse one kernel_candidates.json and append new GEMM shapes."""
-    import json as _json
-    import re as _re
-
-    try:
-        data = _json.loads(cand_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-
-    hot_kernels = data.get("hot_kernels", [])
-    if not isinstance(hot_kernels, list):
-        return
-
-    for kernel in hot_kernels:
-        name = str(kernel.get("name", ""))
-        if "gemm" not in name.lower():
-            continue
-        input_shapes = kernel.get("input_shapes", [])
-        if not isinstance(input_shapes, list):
-            continue
-        for entry in input_shapes:
-            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
-            if not shape_str:
-                continue
-            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
-            if len(parts) < 2:
-                continue
-            dim_pattern = _re.compile(r"\((\d+),(\d+)\)")
-            m0 = dim_pattern.match(parts[0])
-            m1 = dim_pattern.match(parts[1])
-            if not m0 or not m1:
-                continue
-            M = int(m0.group(1))
-            K = int(m0.group(2))
-            N = int(m1.group(1))
-            key = (M, N, K)
-            if key not in seen:
-                seen.add(key)
-                shapes.append({"M": M, "N": N, "K": K})
 
 
 def _extract_gemm_shapes_from_candidates(
@@ -1960,11 +1902,24 @@ def _extract_gemm_shapes_from_candidates(
 _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
     "auto": "a8w8_blockscale_untuned_gemm.csv",
     "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "block_scale": "a8w8_blockscale_untuned_gemm.csv",
+    "a8w8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "fp8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
     "per_token": "a8w8_untuned_gemm.csv",
     "per_tensor": "a8w8_untuned_gemm.csv",
+    "a8w8": "a8w8_untuned_gemm.csv",
+    "w8a8": "a8w8_untuned_gemm.csv",
+    "w8a8_fp8": "a8w8_untuned_gemm.csv",
+    "fp8_w8a8": "a8w8_untuned_gemm.csv",
     "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "a8w8_bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "a8w8_blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "blockscale+bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
     "fp4": "a4w4_blockscale_untuned_gemm.csv",
     "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4_blockscale": "a4w4_blockscale_untuned_gemm.csv",
 }
 
 
@@ -2058,10 +2013,11 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
-    - ``bpreshuffle`` when the checkpoint uses block-quantized weights AND the
-      target GPU is gfx950 (MI355X) AND framework is sglang -- sglang/aiter
-      automatically upgrades blockscale to the bpreshuffle kernel on CDNA4.
-      vLLM does NOT use bpreshuffle (it reads AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
+    - ``blockscale_bpreshuffle`` when the checkpoint uses block-quantized
+      weights AND the target GPU is gfx950 (MI355X) AND framework is sglang --
+      sglang/aiter automatically upgrades blockscale to the bpreshuffle kernel
+      on CDNA4. vLLM does NOT use this path (it reads
+      AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
     - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
       on vllm, or when GPU type is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
@@ -2141,12 +2097,13 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
 
 
 def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str, model_path: str = "") -> str:
-    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+    """Find an aiter untuned-GEMM CSV in a specialist worktree.
 
-    Dense fp8/fp4 forge tuners skip themselves unless real GEMM shapes are
-    supplied. Specialist runs write these to
+    Specialist runs may materialize or modify these files under
     ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv``; this
     resolver picks the newest non-empty CSV matching the resolved quant type.
+    Because an unchanged checkout can also contain static upstream rows, this is
+    a fallback behind explicit benchmark input and the latest runtime profile.
 
     When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
     the model are rejected so forge derives per-model shapes from ``config.json``.
@@ -2157,12 +2114,13 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
 
     fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
     if fname is None:
-        if precision == "fp8":
-            fname = "a8w8_blockscale_untuned_gemm.csv"
-        elif precision in ("fp4", "mxfp4"):
-            fname = "a4w4_blockscale_untuned_gemm.csv"
-        else:
-            return ""
+        log.warning(
+            "Forge GEMM shapes: unknown quant_type=%r for precision=%r; "
+            "not guessing an untuned CSV",
+            quant_type,
+            precision,
+        )
+        return ""
 
     from hyperloom.inference_optimizer.session.session_paths import runs_root
 
@@ -2289,8 +2247,6 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
         "block_scale",
         "a8w8_blockscale",
         "fp8_blockscale",
-        "bpreshuffle",
-        "a8w8_bpreshuffle",
     }
 
 
@@ -2361,12 +2317,29 @@ def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
     return (m, n, k) if min(m, n, k) > 0 else None
 
 
-def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+def _extract_vllm_block_fp8_profile_shapes(
+    trace_input: Path,
+    *,
+    output_dir: Path | None = None,
+) -> tuple[str, int]:
     """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
     import gzip
 
+    def _is_capture_sidecar(path: Path) -> bool:
+        return "capture_traces" in path.parts
+
     shapes: set[tuple[int, int, int]] = set()
-    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    if trace_input.is_file():
+        trace_paths = [] if _is_capture_sidecar(trace_input) else [trace_input]
+    elif trace_input.is_dir():
+        trace_paths = [
+            path
+            for path in sorted(trace_input.rglob("*.json"))
+            + sorted(trace_input.rglob("*.json.gz"))
+            if not _is_capture_sidecar(path)
+        ]
+    else:
+        return "", 0
     for path in trace_paths:
         try:
             if path.name.endswith(".gz"):
@@ -2385,13 +2358,69 @@ def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]
                 shapes.add(shape)
     if not shapes:
         return "", 0
-    out = capture_dir / "forge_shapes.json"
+    destination = output_dir or (
+        trace_input if trace_input.is_dir() else trace_input.parent
+    )
+    out = destination / "forge_shapes.json"
     payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
     try:
+        destination.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         return "", 0
     return str(out), len(payload)
+
+
+def _reuse_vllm_block_fp8_roofline_shapes(
+    state: Any,
+    *,
+    workspace: Path,
+    current_workload: dict[str, Any] | None = None,
+) -> HandlerResult | None:
+    """Reuse block-FP8 runtime shapes from the latest matching Roofline trace."""
+    source_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    if not source_trace:
+        return None
+    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline profile is not "
+            "successful; running a dedicated profile"
+        )
+        return None
+    profile_workload = getattr(state, "last_profile_workload", None)
+    expected_workload = current_workload or state.profile_workload_context()
+    recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
+    if recorded_workload != expected_workload:
+        mismatches = sorted(
+            key
+            for key in set(recorded_workload) | set(expected_workload)
+            if recorded_workload.get(key) != expected_workload.get(key)
+        )
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
+            "running a dedicated profile",
+            ", ".join(mismatches) or "missing profile workload metadata",
+        )
+        return None
+    shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+        Path(source_trace),
+        output_dir=workspace,
+    )
+    if shape_count == 0:
+        return None
+    log.info(
+        "vLLM block-FP8 shape capture: reusing %d shape(s) from Roofline trace %s",
+        shape_count,
+        source_trace,
+    )
+    return {
+        "status": "ok",
+        "shapes_json": shapes_json,
+        "shape_capture_workspace": str(workspace),
+        "shape_count": shape_count,
+        "capture_mode": "roofline_profile_reuse",
+        "source_profile_trace": source_trace,
+    }
 
 
 def _vllm_dense_shape_capture_required(
@@ -2824,19 +2853,29 @@ async def _run_forge_gemm_tuning(
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available (normalize inline JSON to a real file).
+    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
+    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
+    # Forge's config-derived fallback. A specialist checkout is not sufficient
+    # evidence that its static CSV came from the active benchmark. vLLM instead
+    # requires native TunableOp rows or a workload-matched block-FP8 profile.
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    if not shapes_json:
-        shapes_json = _resolve_forge_shapes(state, session_dir)
-
-    # Dense fp8/fp4 tuners need real GEMM shapes; without a shapes JSON fall back
-    # to the aiter untuned-GEMM CSVs the specialist phase recorded.
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
         # Guard against inline content / stale paths.
         untuned_csv = ""
-    if not untuned_csv and not shapes_json:
-        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
+    if not shapes_json and not untuned_csv and framework != "vllm":
+        shapes_json = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+        )
+        if not shapes_json:
+            untuned_csv = _resolve_forge_untuned_csv(
+                session_dir,
+                precision,
+                quant_type,
+                model_path,
+            )
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(
@@ -2854,6 +2893,16 @@ async def _run_forge_gemm_tuning(
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
     )
+    if block_fp8_profile_capture:
+        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
+            state,
+            workspace=workspace,
+            current_workload=state.profile_workload_context(payload),
+        )
+        if shape_capture is not None:
+            shapes_json = str(shape_capture["shapes_json"])
+            untuned_csv = ""
+            block_fp8_profile_capture = False
     tunableop_capture = _vllm_dense_shape_capture_required(
         framework=framework,
         model_path=model_path,
@@ -2957,6 +3006,7 @@ async def _run_forge_gemm_tuning(
                 "shapes_json": shapes_json,
                 "shape_count": shape_capture.get("shape_count"),
                 "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+                "source_profile_trace": shape_capture.get("source_profile_trace"),
             },
         )
 

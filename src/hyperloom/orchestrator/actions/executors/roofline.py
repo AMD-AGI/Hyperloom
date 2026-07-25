@@ -440,6 +440,9 @@ class RooflineExecutor:
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
         self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
+        self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
+            ctx.task.params or {}
+        )
 
         # ---- trace_analyze -------------------------------------------------
         # Pin the snapshot's arm explicitly so the ceiling precision never relies

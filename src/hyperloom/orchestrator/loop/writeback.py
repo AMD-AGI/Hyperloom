@@ -2241,8 +2241,10 @@ class WritebackCollaborator:
         profile_status = str(result.get("status") or "")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             self.shared_state.last_profile_status = "failed"
+            self.shared_state.last_profile_workload = {}
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+                self.shared_state.last_profile_args = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
@@ -2252,6 +2254,9 @@ class WritebackCollaborator:
             if task is not None:
                 profile_args = str((task.params or {}).get("base_extra_args") or "")
             self.shared_state.last_profile_args = profile_args
+            self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
+                (task.params or {}) if task is not None else {}
+            )
             # New trace invalidates the stale trace_analyze cache.
             self.shared_state.last_trace_analyze = {}
             changed = True
@@ -2272,14 +2277,18 @@ class WritebackCollaborator:
             and cur_best > 0
             and (tput - cur_best) / cur_best * 100.0 >= 1.0
         ):
-            self.shared_state.current_best = {
-                "action": "profile",
-                "tput": float(tput),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
-                "workspace": result.get("workspace"),
-            }
+            promoted = dict(cb) if isinstance(cb, dict) else {}
+            promoted.update(
+                {
+                    "action": "profile",
+                    "tput": float(tput),
+                    "ttft_mean_ms": result.get("ttft_mean_ms"),
+                    "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    "tpot_mean_ms": result.get("tpot_mean_ms"),
+                    "workspace": result.get("workspace"),
+                }
+            )
+            self.shared_state.current_best = promoted
             if self.shared_state.baseline_tput > 0:
                 self.shared_state.cumulative_gain = (
                     (float(tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0

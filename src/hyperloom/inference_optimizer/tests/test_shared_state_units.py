@@ -41,6 +41,65 @@ class TestGridSessionDeadline:
         assert s.grid_session_deadline_sec() == pytest.approx(500.0)
 
 
+class TestProfileWorkloadContext:
+    def test_normalizes_state_and_payload_overrides(self):
+        state = SharedState(
+            framework="VLLM",
+            precision="FP8",
+            model_path="/models/old",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=512,
+            max_model_len=4096,
+        )
+
+        assert state.profile_workload_context(
+            {
+                "framework": " SGLang ",
+                "model_path": "/models/new",
+                "tp": "2",
+                "conc": "128",
+            }
+        ) == {
+            "framework": "sglang",
+            "precision": "fp8",
+            "model_path": "/models/new",
+            "tp": 2,
+            "conc": 128,
+            "isl": 1024,
+            "osl": 512,
+            "max_model_len": 4096,
+        }
+
+    def test_last_profile_workload_round_trips(self, tmp_path):
+        state = SharedState()
+        state.last_profile_workload = {"framework": "vllm", "conc": 64}
+        state.save(tmp_path)
+
+        assert SharedState.load_or_init(tmp_path).last_profile_workload == {
+            "framework": "vllm",
+            "conc": 64,
+        }
+
+    def test_profile_workload_context_tracks_serving_config(self):
+        state = SharedState(
+            framework="vllm",
+            precision="fp8",
+            current_best={
+                "engine": "forge",
+                "extra_server_args": " --attention-backend AITER ",
+                "extra_envs": {"B": 2, "A": 1},
+            },
+        )
+
+        assert state.profile_workload_context()["serving_config"] == {
+            "engine": "forge",
+            "extra_server_args": "--attention-backend AITER",
+            "extra_envs": {"A": "1", "B": "2"},
+        }
+
+
 class TestPolicyDenialAndPruned:
     def test_add_pruned_family_is_idempotent(self):
         s = SharedState()
