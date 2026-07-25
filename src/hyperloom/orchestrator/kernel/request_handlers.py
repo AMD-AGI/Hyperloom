@@ -1781,7 +1781,88 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
+    # Final fallback: extract real GEMM shapes from kernel_candidates.json
+    # produced by TraceLens deterministic route.
+    extracted = _extract_gemm_shapes_from_candidates(candidates_path_str, session_dir)
+    if extracted:
+        return extracted
+
     return ""
+
+
+def _extract_gemm_shapes_from_candidates(
+    candidates_path_str: str, session_dir: Path
+) -> str:
+    """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
+
+    Parses the TraceLens shape format "(M,K) fp8<br>(N,K) fp8<br>..." to derive
+    the actual GEMM dimensions observed during serving. Writes a forge-compatible
+    shapes JSON beside the candidates file and returns its path.
+    """
+    import json as _json
+    import re as _re
+
+    if not candidates_path_str:
+        return ""
+    cand_file = Path(candidates_path_str)
+    if not cand_file.is_file():
+        return ""
+
+    try:
+        data = _json.loads(cand_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+
+    hot_kernels = data.get("hot_kernels", [])
+    if not isinstance(hot_kernels, list):
+        return ""
+
+    shapes: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    for kernel in hot_kernels:
+        name = str(kernel.get("name", ""))
+        if "gemm" not in name.lower():
+            continue
+        input_shapes = kernel.get("input_shapes", [])
+        if not isinstance(input_shapes, list):
+            continue
+        for entry in input_shapes:
+            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
+            if not shape_str:
+                continue
+            # Parse "(M,K) dtype<br>(N,K) dtype<br>..." — first two tensors give M,N,K
+            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+            if len(parts) < 2:
+                continue
+            dim_pattern = _re.compile(r"\((\d+),(\d+)\)")
+            m0 = dim_pattern.match(parts[0])
+            m1 = dim_pattern.match(parts[1])
+            if not m0 or not m1:
+                continue
+            M = int(m0.group(1))
+            K = int(m0.group(2))
+            N = int(m1.group(1))
+            key = (M, N, K)
+            if key not in seen:
+                seen.add(key)
+                shapes.append({"M": M, "N": N, "K": K})
+
+    if not shapes:
+        return ""
+
+    out_path = cand_file.parent / "traced_gemm_shapes.json"
+    try:
+        out_path.write_text(_json.dumps(shapes, indent=2), encoding="utf-8")
+    except OSError:
+        return ""
+
+    log.info(
+        "extracted %d unique GEMM shapes from kernel_candidates.json -> %s",
+        len(shapes),
+        out_path,
+    )
+    return str(out_path)
 
 
 # Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the
