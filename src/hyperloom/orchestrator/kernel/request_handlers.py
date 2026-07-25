@@ -1599,7 +1599,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         quant_type = str(payload.get("quant_type") or "auto").strip()
         if precision == "fp8" and quant_type.lower() == "auto":
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1640,7 +1641,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
         model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-        quant_type = _resolve_fp8_quant_type(model_path)
+        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path, gpu_type)
     return precision, quant_type
 
 
@@ -1986,14 +1988,21 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "") -> str:
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
+    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                return "blockscale"
+                is_blockscale = True
+                break
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                return "blockscale"
+                is_blockscale = True
+                break
+    if is_blockscale:
+        if _is_gfx950(gpu_type):
+            return "bpreshuffle"
+        return "blockscale"
     return "per_token"
 
 
