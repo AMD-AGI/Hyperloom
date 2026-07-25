@@ -21,7 +21,12 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
-from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
+from ._accuracy_gate import (
+    accuracy_keep_block,
+    accuracy_passed,
+    enablement_accuracy_floor,
+    parse_eval_results,
+)
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import (
@@ -56,9 +61,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800
-# Minimal-correctness floor for the enablement runnable gate: accuracy strictly
-# above this counts as "not garbage".
-ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
 
@@ -2192,9 +2194,10 @@ class IntegratePatchExecutor:
         probe_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
+        floor = enablement_accuracy_floor()
         correctness_ok: bool | None
         if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
-            correctness_ok = float(enablement_accuracy) > ENABLEMENT_ACCURACY_FLOOR
+            correctness_ok = float(enablement_accuracy) > floor
         elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
             correctness_ok = False
         else:

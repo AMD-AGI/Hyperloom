@@ -407,6 +407,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot: a cuda-graph capture failure asks the next baseline to retry with
     # cuda-graph capture disabled. Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Eval-origin enablement carriers: set when the first baseline runs but its
+    # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
+    # and re-run the same eval contract. Empty for boot-origin enablement.
+    enablement_origin: str = ""
+    enablement_accuracy_floor: float = 0.0
+    enablement_probe_config_path: str = ""
+    enablement_eval_contract_fingerprint: str = ""
+    enablement_baseline_eval_evidence: str = ""
+    enablement_baseline_eval_kind: str = ""
+    enablement_observed_accuracy: float = 0.0
+    enablement_observed_task: str = ""
+    enablement_observed_metric: str = ""
+    enablement_pending: bool = False
     # Enablement path (framework-agent) state.
     # ``enablement_launch_log``: captured launch/traceback text when baseline
     #   cannot launch.
