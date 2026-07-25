@@ -30,6 +30,7 @@ import hashlib
 import os
 import re
 import subprocess  # nosec B404 - best-effort, guarded provenance probes only.
+from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -149,23 +150,21 @@ def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> d
 
 
 def _probe_pkg_version(component: str) -> str:
-    """Best-effort installed-package version/commit for a stack component."""
+    """Best-effort installed-package version for a stack component.
+
+    Uses ``importlib.metadata`` (reads the installed distribution's metadata)
+    instead of importing the package: ``import vllm``/``import aiter`` are heavy
+    (seconds; may touch the GPU/driver or trigger JIT module loads), and this
+    runs on the session-manifest build path. Env vars (e.g. ``VLLM_VERSION``,
+    ``AITER_COMMIT``) still take priority in ``detect_stack_fingerprint``.
+    """
+    dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "aiter"}.get(component)
+    if not dist:
+        return ""
     try:
-        if component == "sglang":
-            import sglang as _mod  # type: ignore
-
-            return str(getattr(_mod, "__version__", "")).strip()
-        if component == "vllm":
-            import vllm as _mod  # type: ignore
-
-            return str(getattr(_mod, "__version__", "")).strip()
-        if component == "aiter":
-            import aiter as _mod  # type: ignore
-
-            return str(getattr(_mod, "__commit__", None) or getattr(_mod, "__version__", "")).strip()
+        return (_im.version(dist) or "").strip()
     except Exception:  # noqa: BLE001 — a missing package is normal.
         return ""
-    return ""
 
 
 def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
