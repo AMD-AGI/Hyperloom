@@ -190,3 +190,14 @@ def test_wait_vram_drain_returns_when_below_threshold(monkeypatch):
 def test_wait_vram_drain_none_when_no_rocm_smi(monkeypatch):
     monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: None)
     assert ab._wait_vram_drain("0") is None
+
+
+def test_wait_vram_drain_warns_on_timeout(monkeypatch, tmp_path):
+    # Timeout without draining must NOT be silent — the next arm would launch on
+    # an occupied GPU (the contamination this guard exists to prevent).
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: 50000.0)
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    logged = []
+    monkeypatch.setattr(ab, "_log", lambda out_dir, msg: logged.append(msg))
+    ab._wait_vram_drain("0", out_dir=tmp_path, threshold_mb=20000.0, timeout_s=0.0)
+    assert any("did not drain" in m for m in logged)

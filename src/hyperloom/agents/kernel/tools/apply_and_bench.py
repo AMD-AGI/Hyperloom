@@ -365,6 +365,15 @@ def _wait_vram_drain(
             _log(out_dir, f"waiting for VRAM to drain: {used:.0f} MiB used > {threshold_mb:.0f} MiB")
         time.sleep(3)
         used = _gpu_vram_used_mb(gpu)
+    # Surface a timeout-without-drain: the next arm launches on a GPU still
+    # holding VRAM (a leaked/renamed worker the reap missed) — exactly the
+    # contamination this guard exists to prevent, so it must not be silent.
+    if used is not None and used > threshold_mb and out_dir is not None:
+        _log(
+            out_dir,
+            f"WARNING: VRAM did not drain below {threshold_mb:.0f} MiB within "
+            f"{timeout_s:.0f}s ({used:.0f} MiB still used); next arm may be contaminated",
+        )
     return used
 
 
