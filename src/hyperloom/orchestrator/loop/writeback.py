@@ -42,6 +42,14 @@ from ..policy.gate import (
 )
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors._accuracy_gate import (
+    BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
+    BASELINE_EVAL_FAILED_KEY,
+    BASELINE_EVAL_FAILURE_KIND_KEY,
+    BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+)
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -354,7 +362,13 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return False
-        if task_kind in ("baseline", "profile"):
+        if task_kind == "baseline":
+            # A baseline whose accuracy eval failed measured throughput but must
+            # not anchor; route it to _handle_unpromotable_result for enablement.
+            if bool(result.get("baseline_eval_failed")):
+                return False
+            return is_valid_measurement(result)
+        if task_kind == "profile":
             return is_valid_measurement(result)
         if task_kind == "sweep":
             return result.get("status") == "succeeded"
@@ -418,6 +432,38 @@ class WritebackCollaborator:
                 task_id=task.task_id,
                 delta_pct=result.get("delta_pct"),
             )
+
+    def _persist_eval_failure(self, result_payload: dict[str, Any]) -> None:
+        """Persist an eval-rooted baseline failure so enablement can re-run it.
+
+        Records origin, floor, probe config, contract fingerprint, evidence,
+        kind and observed accuracy, and seeds ``enablement_launch_log`` so the
+        FRAMEWORK pump dispatches even when the failure carries no boot log.
+        """
+        state = self.shared_state
+        state.enablement_origin = "eval"
+        state.enablement_pending = True
+        floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
+        if floor is not None:
+            state.enablement_accuracy_floor = float(floor)
+        cfg = result_payload.get("materialized_config")
+        if isinstance(cfg, str) and cfg:
+            state.enablement_probe_config_path = cfg
+        fp = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
+        if isinstance(fp, str) and fp:
+            state.enablement_eval_contract_fingerprint = fp
+        kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
+        if isinstance(kind, str) and kind:
+            state.enablement_baseline_eval_kind = kind
+        observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
+        if observed is not None:
+            state.enablement_observed_accuracy = float(observed)
+        state.enablement_observed_task = str(result_payload.get("accuracy_task") or "")
+        state.enablement_observed_metric = str(result_payload.get("accuracy_metric") or "")
+        evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
+        if evidence:
+            state.enablement_baseline_eval_evidence = evidence[:4000]
+            state.enablement_launch_log = evidence
 
     async def _handle_unpromotable_result(
         self,
@@ -559,6 +605,15 @@ class WritebackCollaborator:
                 or getattr(self.shared_state, "enablement_dispatched", False)
                 or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
             )
+            eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
+            from ..actions.executors._multi_node_env import is_multi_node  # noqa: PLC0415
+
+            # Single-node eval-pending failure: throughput measured fine and the
+            # eval is expected to re-run under enablement, so do not spend the
+            # baseline_failed budget yet. Multi-node keeps the strict backstop.
+            eval_pending_suppress = eval_failed and not is_multi_node()
+            if eval_failed:
+                self._persist_eval_failure(result_payload)
             if err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -566,7 +621,7 @@ class WritebackCollaborator:
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
-                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged:
+                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged and not eval_pending_suppress:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -575,6 +630,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not enablement_engaged
+                and not eval_pending_suppress
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
@@ -599,6 +655,7 @@ class WritebackCollaborator:
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
                 "error_class": err_class,
+                "baseline_eval_failed": eval_failed,
             }
             any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
@@ -2205,6 +2262,9 @@ class WritebackCollaborator:
                 self.shared_state.baseline_tput = float(tput)
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
+            # A genuine anchor clears any lingering eval-failure trigger state.
+            self.shared_state.enablement_origin = ""
+            self.shared_state.enablement_pending = False
             changed = True
         acc = result.get("accuracy")
         if isinstance(acc, (int, float)):
