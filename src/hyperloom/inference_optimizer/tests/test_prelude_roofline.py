@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # Minimal SharedState + TaskRegistry doubles.
@@ -28,9 +29,26 @@ class _BareState:
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     kernel_optimizer: str = "native"
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    last_profile_args: str = ""
+    last_profile_status: str = ""
+    last_profile_workload: dict[str, Any] = field(default_factory=dict)
+    framework: str = "sglang"
+    precision: str = "fp8"
+    model_path: str = "/models/qwen"
+    tp: int = 1
+    conc: int = 64
+    isl: int = 1024
+    osl: int = 1024
+    max_model_len: int = 4096
 
     def save(self, _session_dir: Path | None) -> None:
         pass
+
+    def profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return SharedState.profile_workload_context(self, overrides)
 
 
 class _StubTaskRegistry:
@@ -197,7 +215,7 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
-    assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry_g0"
+    assert coord.sub.tasks_run[0].params["reason"].startswith("kernel_entry_g0_")
     assert coord.shared_state.last_roofline_tput == 120.0
 
 
@@ -205,11 +223,58 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_profile_status = "succeeded"
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.profile_workload_context()
+    )
     coord.sub = _StubSub(coord.shared_state)
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
 
     await coord._maybe_reprofile_for_kernel()
 
+    assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_workload_changed_at_same_tput(
+    coord: Coordinator,
+):
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.conc = 64
+    coord.shared_state.last_profile_status = "succeeded"
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.profile_workload_context()
+    )
+    coord.shared_state.conc = 128
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.shared_state.last_profile_workload["conc"] == 128
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
+    coord: Coordinator,
+):
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_profile_args = "--attention-backend triton"
+    coord.shared_state.current_best = {
+        "extra_server_args": "--attention-backend aiter",
+        "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
+    }
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert '"SGLANG_FP8_BLOCKSCALE_CK_MAX_M":"256"' in (
+        coord.shared_state.last_profile_args
+    )
+
+    coord.sub = _StubSub(coord.shared_state)
+    await coord._maybe_reprofile_for_kernel()
     assert coord.sub.tasks_run == []
 
 

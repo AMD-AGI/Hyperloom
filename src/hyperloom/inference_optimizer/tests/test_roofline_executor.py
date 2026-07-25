@@ -112,6 +112,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert state.last_profile_trace == "/tmp/trace.gz"
     assert state.last_profile_status == "succeeded"
     assert state.last_profile_args == "--mem-fraction-static=0.92"
+    assert state.last_profile_workload == state.profile_workload_context(ctx.task.params)
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
     assert cached["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"

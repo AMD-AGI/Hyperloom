@@ -505,6 +505,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_profile_trace: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
+    # Workload context captured with ``last_profile_trace``; strict matching
+    # prevents consumers from reusing runtime shapes after workload changes.
+    last_profile_workload: dict[str, Any] = field(default_factory=dict)
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
@@ -797,6 +800,57 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
+
+    def profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the normalized workload identity for a profile trace."""
+        params = overrides if isinstance(overrides, dict) else {}
+        context: dict[str, Any] = {}
+        for name in ("framework", "precision", "model_path"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, "")
+            normalized = str(value or "").strip()
+            if name in ("framework", "precision"):
+                normalized = normalized.lower()
+            context[name] = normalized
+        for name in ("tp", "conc", "isl", "osl", "max_model_len"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, 0)
+            try:
+                context[name] = int(value or 0)
+            except (TypeError, ValueError):
+                context[name] = 0
+        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        raw_envs = current_best.get("extra_envs") or {}
+        extra_envs = (
+            {
+                str(key): str(value)
+                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
+                if str(key).strip()
+            }
+            if isinstance(raw_envs, dict)
+            else {}
+        )
+        serving_config = {
+            "engine": str(current_best.get("engine") or "").strip().lower(),
+            "extra_server_args": str(
+                current_best.get("extra_server_args") or ""
+            ).strip(),
+            "extra_envs": extra_envs,
+        }
+        if any(
+            (
+                serving_config["engine"],
+                serving_config["extra_server_args"],
+                extra_envs,
+            )
+        ):
+            context["serving_config"] = serving_config
+        return context
 
     # Persistence
     @classmethod

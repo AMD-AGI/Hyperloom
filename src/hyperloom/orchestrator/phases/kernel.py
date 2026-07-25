@@ -6,6 +6,7 @@ GEMM-tuning keep/promote, and watermark-roofline gating."""
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import logging as _logging
 import os
@@ -38,25 +39,145 @@ log = _logging.getLogger(__name__)
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
+    def _current_profile_config_signature(self) -> str:
+        """Return a stable identity for the optimized serving configuration."""
+        current_best = getattr(self.shared_state, "current_best", None) or {}
+        if not isinstance(current_best, dict) or not current_best:
+            return ""
+        raw_envs = current_best.get("extra_envs") or {}
+        envs = (
+            {
+                str(key): str(value)
+                for key, value in raw_envs.items()
+                if str(key).strip()
+            }
+            if isinstance(raw_envs, dict)
+            else {}
+        )
+        payload = {
+            "engine": str(current_best.get("engine") or "").strip().lower(),
+            "extra_server_args": str(
+                current_best.get("extra_server_args") or ""
+            ).strip(),
+            "extra_envs": envs,
+        }
+        if not any((payload["engine"], payload["extra_server_args"], envs)):
+            return ""
+        return "hyperloom-profile-config:" + json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _profile_config_changed(self, signature: str) -> bool:
+        """Whether the latest trace predates the current backend/config."""
+        if not signature:
+            return False
+        previous = str(
+            getattr(self.shared_state, "last_profile_args", "") or ""
+        ).strip()
+        if previous == signature:
+            return False
+        # Backward compatibility for traces recorded before signatures included
+        # env/backend identity: plain args are sufficient only when there are no
+        # additional envs or engine marker in the current signature.
+        current_best = getattr(self.shared_state, "current_best", None) or {}
+        raw_envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
+        engine = (
+            str(current_best.get("engine") or "").strip()
+            if isinstance(current_best, dict)
+            else ""
+        )
+        args = (
+            str(current_best.get("extra_server_args") or "").strip()
+            if isinstance(current_best, dict)
+            else ""
+        )
+        return bool(raw_envs or engine or previous != args)
+
+    def _profile_workload_changed(self) -> bool:
+        """Whether the latest trace predates the active serving workload."""
+        status = str(
+            getattr(self.shared_state, "last_profile_status", "") or ""
+        ).strip().lower()
+        if status and status != "succeeded":
+            return True
+        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        expected = self.shared_state.profile_workload_context()
+        if not isinstance(recorded, dict) or not recorded:
+            return bool(
+                getattr(self.shared_state, "last_profile_trace", "")
+                or getattr(self.shared_state, "last_trace_analyze", None)
+                or getattr(self.shared_state, "roofline_snapshots", None)
+            )
+        return recorded != expected
+
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
+        profile_signature = self._current_profile_config_signature()
+        config_changed = self._profile_config_changed(profile_signature)
+        workload_changed = self._profile_workload_changed()
         if cur <= 0:
             return
         # With a measured trace, reprofile only on a material change.
-        if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
+        if (
+            before > 0
+            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
+            and not config_changed
+            and not workload_changed
+        ):
             return
+        snapshots_before = len(
+            getattr(self.shared_state, "roofline_snapshots", None) or []
+        )
+        snapshot_id_before = int(
+            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
+        )
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        profile_identity = json.dumps(
+            {
+                "config": profile_signature,
+                "target_tput": round(float(cur), 6),
+                "workload": self.shared_state.profile_workload_context(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        profile_fingerprint = hashlib.sha256(
+            profile_identity.encode("utf-8")
+        ).hexdigest()[:12]
         try:
-            await self.sub.run_task(await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}"))
+            await self.sub.run_task(
+                await self._enqueue_internal_analysis_task(
+                    reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+                )
+            )
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
-        if after > 0 and after != before:
+        snapshots_after = len(
+            getattr(self.shared_state, "roofline_snapshots", None) or []
+        )
+        snapshot_id_after = int(
+            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
+        )
+        snapshot_landed = (
+            after != before
+            or snapshots_after != snapshots_before
+            or snapshot_id_after != snapshot_id_before
+        )
+        if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
+            if profile_signature:
+                self.shared_state.last_profile_args = profile_signature
+            self.shared_state.last_profile_status = "succeeded"
+            self.shared_state.last_profile_workload = (
+                self.shared_state.profile_workload_context()
+            )
             self.shared_state.save(self.session_dir)
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
@@ -1067,46 +1188,209 @@ class KernelPhase(PhaseHandler):
     ) -> str | None:
         """Merge a GEMM candidate CSV with the runtime config.
 
-        aiter's runtime config (in /tmp/aiter_configs/) is the merged superset of
-        all model_configs/*.csv. The candidate CSV only has the shapes the tuner
-        improved. Using it alone as the env override drops all other shapes' tuned
-        entries, causing regression.
+        aiter's complete config is the merged superset of its top-level table and
+        all matching ``model_configs/*.csv`` tables. The candidate CSV only has
+        the shapes the tuner improved. Using it alone as the env override drops
+        all other shapes' tuned entries, causing regression.
 
-        This method reads the current runtime config, overlays the candidate's
-        improved shapes (keyed by M,N,K), and writes a merged file that the E2E
-        validation server can use without losing existing tuning.
+        Prefer the live ``/tmp/aiter_configs`` table when it exists. That cache is
+        normally removed with the serving process, so fall back to rebuilding the
+        same table from the installed aiter package. Overlay the candidate by the
+        untuned schema's dispatch keys and write one self-contained CSV for E2E.
 
         Returns the merged file path, or None if merging fails.
         """
+        import importlib.util
+        import re
+
         import pandas as pd
 
         candidate_path = Path(candidate_csv_path)
         if not candidate_path.is_file():
             return None
 
-        # Find the runtime config that sglang merged at startup.
-        env_var_to_filename = {
+        env_var_to_tuned_name = {
             "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A4W4_BLOCKSCALE": "a4w4_blockscale_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
             "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
         }
-        runtime_filename = env_var_to_filename.get(env_var)
+        runtime_filename = env_var_to_tuned_name.get(env_var)
         if not runtime_filename:
             return None
+        tuned_stem = Path(runtime_filename).stem
+        untuned_stem = (
+            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
+            if re.search(r"(?:_)?tuned$", tuned_stem)
+            else tuned_stem.replace("tuned", "untuned")
+        )
 
-        runtime_path = Path("/tmp/aiter_configs") / runtime_filename
-        if not runtime_path.is_file():
-            return None
+        config_dirs: list[Path] = []
+        explicit_root = os.environ.get("AITER_ROOT_DIR", "").strip()
+        if explicit_root:
+            root = Path(explicit_root)
+            config_dirs.extend((root / "aiter" / "configs", root / "configs"))
+        try:
+            spec = importlib.util.find_spec("aiter")
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None and spec.origin:
+            config_dirs.append(Path(spec.origin).resolve().parent / "configs")
+        config_dirs.append(Path("/sgl-workspace/aiter/aiter/configs"))
+        config_dirs.extend(
+            sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs"))
+        )
+
+        seen_dirs: set[str] = set()
+        unique_config_dirs: list[Path] = []
+        for config_dir in config_dirs:
+            key = str(config_dir)
+            if key not in seen_dirs and config_dir.is_dir():
+                seen_dirs.add(key)
+                unique_config_dirs.append(config_dir)
 
         try:
-            runtime_df = pd.read_csv(runtime_path)
             candidate_df = pd.read_csv(candidate_path)
+            runtime_cache_dir = Path(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
+                    "/tmp/aiter_configs",
+                )
+            )
+            runtime_path = runtime_cache_dir / runtime_filename
+            source_paths: list[Path] = []
+            source_config_dir: Path | None = None
+            if runtime_path.is_file():
+                source_paths = [runtime_path]
+            else:
+                for config_dir in unique_config_dirs:
+                    base_path = config_dir / runtime_filename
+                    model_paths = sorted(
+                        path
+                        for path in (config_dir / "model_configs").glob(
+                            f"*{tuned_stem}*.csv"
+                        )
+                        if path.is_file() and "untuned" not in path.name
+                    )
+                    paths = ([base_path] if base_path.is_file() else []) + model_paths
+                    if paths:
+                        source_paths = paths
+                        source_config_dir = config_dir
+                        break
+            if not source_paths:
+                log.warning(
+                    "forge gemm E2E: no complete aiter config found for %s; "
+                    "candidate-only validation would be unsafe",
+                    env_var,
+                )
+                return None
+            if source_config_dir is None:
+                source_config_dir = next(
+                    (
+                        config_dir
+                        for config_dir in unique_config_dirs
+                        if (config_dir / f"{untuned_stem}.csv").is_file()
+                    ),
+                    None,
+                )
 
-            key_cols = ["M", "N", "K"]
-            if "gfx" in runtime_df.columns and "gfx" in candidate_df.columns:
-                key_cols = ["gfx", "cu_num", "M", "N", "K"]
+            source_frames = [pd.read_csv(path) for path in source_paths]
+            all_columns = list(source_frames[0].columns)
+            for frame in [*source_frames[1:], candidate_df]:
+                for column in frame.columns:
+                    if column not in all_columns:
+                        insert_at = (
+                            all_columns.index("tflops")
+                            if "tflops" in all_columns
+                            else len(all_columns)
+                        )
+                        all_columns.insert(insert_at, column)
+            fill_defaults = {"xbf16": 0, "run_1stage": 0, "ksplit": 0}
+            normalized_frames = []
+            for frame in source_frames:
+                normalized = frame.copy()
+                for column in all_columns:
+                    if column not in normalized.columns:
+                        normalized[column] = fill_defaults.get(column, 0)
+                normalized_frames.append(normalized[all_columns])
+            for column in all_columns:
+                if column not in candidate_df.columns:
+                    candidate_df[column] = fill_defaults.get(column, 0)
+            candidate_df = candidate_df[all_columns]
+            runtime_df = pd.concat(normalized_frames, ignore_index=True)
+
+            key_cols: list[str] = []
+            if source_config_dir is not None:
+                untuned_path = source_config_dir / f"{untuned_stem}.csv"
+                if untuned_path.is_file():
+                    untuned_columns = list(pd.read_csv(untuned_path, nrows=0).columns)
+                    key_cols.extend(
+                        column
+                        for column in untuned_columns
+                        if column in runtime_df.columns and column in candidate_df.columns
+                    )
+            if not key_cols:
+                key_cols.extend(
+                    column
+                    for column in ("M", "N", "K")
+                    if column in runtime_df.columns and column in candidate_df.columns
+                )
+            for column in ("gfx", "cu_num", "_tag"):
+                if (
+                    column in runtime_df.columns
+                    and column in candidate_df.columns
+                    and column not in key_cols
+                ):
+                    key_cols.append(column)
+            if not key_cols:
+                log.warning(
+                    "forge gemm E2E: cannot derive dispatch keys for %s",
+                    env_var,
+                )
+                return None
+
+            def _deduplicate_dispatch_rows(frame, label: str):
+                duplicate_mask = frame.duplicated(subset=key_cols, keep=False)
+                if not duplicate_mask.any():
+                    return frame
+                if "us" not in frame.columns:
+                    log.warning(
+                        "forge gemm E2E: %s has duplicate dispatch keys for %s "
+                        "but no 'us' column to select the fastest row",
+                        label,
+                        env_var,
+                    )
+                    return None
+                rank_column = "__hyperloom_dispatch_us"
+                ranked = frame.copy()
+                ranked[rank_column] = pd.to_numeric(
+                    ranked["us"],
+                    errors="coerce",
+                )
+                deduplicated = (
+                    ranked.sort_values(
+                        rank_column,
+                        kind="stable",
+                        na_position="last",
+                    )
+                    .drop_duplicates(subset=key_cols, keep="first")
+                    .drop(columns=[rank_column])
+                )
+                log.info(
+                    "forge gemm E2E: removed %d duplicate %s row(s) for %s",
+                    len(frame) - len(deduplicated),
+                    label,
+                    env_var,
+                )
+                return deduplicated
+
+            runtime_df = _deduplicate_dispatch_rows(runtime_df, "runtime config")
+            candidate_df = _deduplicate_dispatch_rows(candidate_df, "candidate")
+            if runtime_df is None or candidate_df is None:
+                return None
 
             # Drop rows from runtime that the candidate improves, then concat.
             candidate_keys = candidate_df[key_cols].drop_duplicates()
@@ -1123,15 +1407,17 @@ class KernelPhase(PhaseHandler):
             merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
             merged_df.to_csv(merged_path, index=False)
             log.info(
-                "forge gemm E2E: merged %d candidate rows into %d runtime rows -> %d total (%s)",
+                "forge gemm E2E: merged %d candidate rows into %d rows from %d "
+                "aiter config file(s) -> %d total (%s)",
                 len(candidate_df),
                 len(runtime_df),
+                len(source_paths),
                 len(merged_df),
                 merged_path,
             )
             return str(merged_path)
         except Exception as exc:  # noqa: BLE001
-            log.warning("forge gemm E2E: merge failed (%s), using candidate as-is", exc)
+            log.warning("forge gemm E2E: merge failed (%s); rejecting candidate", exc)
             return None
 
     def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
@@ -1413,16 +1699,29 @@ class KernelPhase(PhaseHandler):
                 continue
             if t.get("status") != "ok":
                 continue
-            if int(t.get("improved_shapes") or 0) <= 0:
+            if not bool(t.get("candidate")) and int(t.get("improved_shapes") or 0) <= 0:
                 continue
             env_var = str(t.get("env_var") or "").strip()
             env_value = str(t.get("env_value") or "").strip()
+            raw_envs = t.get("env_vars") or {}
+            envs = (
+                {
+                    str(key): str(value)
+                    for key, value in raw_envs.items()
+                    if str(key).strip() and str(value).strip()
+                }
+                if isinstance(raw_envs, dict)
+                else {}
+            )
             if env_var and env_value:
+                envs.setdefault(env_var, env_value)
+            if envs:
                 candidates.append(
                     {
                         "tuner": t.get("tuner") or "unknown",
                         "env_var": env_var,
                         "env_value": env_value,
+                        "envs": envs,
                         "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
                     }
                 )
@@ -1436,6 +1735,7 @@ class KernelPhase(PhaseHandler):
                         "tuner": "ck_blockscale_backend_switch",
                         "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
                         "env_value": "256",
+                        "envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
                         "micro_speedup": 1.0,
                     }
                 )
@@ -1467,10 +1767,41 @@ class KernelPhase(PhaseHandler):
             # the candidate keep their existing tuned entries. Without this, the
             # E2E validation would run with ONLY the candidate's shapes tuned,
             # causing regression on all other shapes that lose their config.
-            merged_path = self._merge_gemm_candidate_with_runtime(
-                cand["env_var"], cand["env_value"]
-            )
-            env = {cand["env_var"]: merged_path or cand["env_value"]}
+            env = dict(cand["envs"])
+            merge_failure_reason = ""
+            merge_failure_env = ""
+            for env_var, env_value in list(env.items()):
+                if not env_var.startswith("AITER_CONFIG"):
+                    continue
+                if not Path(env_value).is_file():
+                    merge_failure_reason = "candidate_artifact_missing"
+                    merge_failure_env = env_var
+                    break
+                merged_path = self._merge_gemm_candidate_with_runtime(
+                    env_var,
+                    env_value,
+                )
+                if merged_path:
+                    env[env_var] = merged_path
+                else:
+                    merge_failure_reason = "complete_aiter_config_unavailable"
+                    merge_failure_env = env_var
+                    break
+            if merge_failure_reason:
+                log.error(
+                    "forge gemm E2E: refusing aiter candidate for %s (%s: %s)",
+                    tuner_name,
+                    merge_failure_env,
+                    merge_failure_reason,
+                )
+                reverted.append(
+                    {
+                        **cand,
+                        "reason": merge_failure_reason,
+                        "failed_env_var": merge_failure_env,
+                    }
+                )
+                continue
             extra_server_args = (
                 "--moe-runner-backend aiter"
                 if tuner_name == "fmoe_ck"
@@ -1526,12 +1857,22 @@ class KernelPhase(PhaseHandler):
             if decision == "KEEP" and new_tput > running_tput:
                 stacked_envs.update(env)
                 running_tput = new_tput
-                kept.append({**cand, "tput": new_tput, "gain_pct": gain_pct})
+                kept.append(
+                    {
+                        **cand,
+                        "envs": dict(env),
+                        "tput": new_tput,
+                        "gain_pct": gain_pct,
+                    }
+                )
 
                 entry = {
                     "action": "gemm_tuning",
                     "variant_name": f"forge_{tuner_name}",
-                    "tuned_file": cand["env_value"],
+                    "tuned_file": (
+                        env.get(cand["env_var"])
+                        or next(iter(env.values()), "")
+                    ),
                     "gain_pct": gain_pct,
                     "tput": new_tput,
                     "workspace": result.get("workspace"),
