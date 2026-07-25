@@ -1757,6 +1757,19 @@ class WritebackCollaborator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
+        if bool((task.params or {}).get("enablement")) and isinstance(
+            done_payload.get("needs_targeted_build"), dict
+        ):
+            try:
+                await self._maybe_enqueue_specialist_requested_build(
+                    task_id=str(task.task_id or ""),
+                    payload=done_payload,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "specialist build request failed for task=%s",
+                    task.task_id,
+                )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(
@@ -3210,6 +3223,10 @@ class WritebackCollaborator:
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
         await self._resume_recover_pending_integrate(report)
+        # (1b) In-flight targeted build: an off-loop compile cannot survive a
+        # coordinator restart, so kill the orphan group, GC its attempt dir,
+        # sweep its jit locks, fail the row, and clear the sentinel.
+        await self._resume_recover_pending_targeted_build(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
@@ -3367,6 +3384,13 @@ class WritebackCollaborator:
         from ..actions.executors.integrate_patch import _git_apply_reverse
 
         summary: dict[str, Any] = {"reversed": [], "failed": []}
+        # Discard a half-provisioned attempt venv so a crash mid-provision
+        # cannot leak a multi-GB dir. Independent of the patch rollback below.
+        attempt_venv_root = str(pending.get("attempt_venv_root") or "").strip()
+        if attempt_venv_root:
+            gc_root = str(Path(attempt_venv_root).parent)
+            if self._gc_attempt_runtime(gc_root):
+                summary["attempt_runtime_gc"] = gc_root
         root = str(pending.get("framework_source_root") or "").strip()
         patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
         if not root or not patches:
@@ -3383,6 +3407,23 @@ class WritebackCollaborator:
             else:
                 summary["failed"].append({"patch": patch, "error": err})
         return summary
+
+    @staticmethod
+    def _gc_attempt_runtime(attempt_dir: str) -> bool:
+        """Remove an attempt-runtime dir (best-effort).
+
+        Returns True when a directory was present and removal was attempted.
+        """
+        import shutil
+
+        path = Path(str(attempt_dir or "").strip())
+        if not attempt_dir or not path.exists():
+            return False
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            return True
+        except Exception:  # noqa: BLE001 — GC is best-effort
+            return False
 
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
         """Recover a crashed integrate_patch window from the sentinel (Gap C).
@@ -3434,6 +3475,69 @@ class WritebackCollaborator:
             else:
                 report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
         state.pending_integrate = {}
+
+    async def _resume_recover_pending_targeted_build(self, report: dict[str, Any]) -> None:
+        """Reclaim an off-loop build that was in flight when the coordinator died.
+
+        A detached compile cannot be re-adopted across a restart: kill its
+        recorded process group, rmtree the attempt dir, sweep its per-attempt
+        aiter JIT locks (a killed compile leaves a pid-less lock that wedges
+        every later build of that module), mark the row failed with a
+        ``timeout`` failure_class for the framework channel, and clear the
+        sentinel. Best-effort throughout.
+        """
+        import shutil
+        import signal
+
+        from ..framework.targeted_build import kill_build_pgroup
+
+        state = self.shared_state
+        pending = getattr(state, "pending_targeted_build", {}) or {}
+        if not (isinstance(pending, dict) and pending):
+            return
+        task_id = str(pending.get("task_id") or "")
+        summary: dict[str, Any] = {"kind": "reclaimed_pending_targeted_build", "task_id": task_id}
+
+        try:
+            pgid = int(pending.get("pgid") or 0)
+        except (TypeError, ValueError):
+            pgid = 0
+        if pgid > 0:
+            kill_build_pgroup(pgid, sig=signal.SIGKILL)
+            summary["killed_pgid"] = pgid
+
+        attempt_root = str(pending.get("attempt_root") or "").strip()
+        if attempt_root and Path(attempt_root).exists():
+            shutil.rmtree(attempt_root, ignore_errors=True)
+            summary["removed_attempt_root"] = attempt_root
+
+        jit_dir = str(pending.get("aiter_jit_dir") or "").strip()
+        if jit_dir:
+            try:
+                from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+                sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
+                summary["swept_jit_dir"] = jit_dir
+            except Exception:  # noqa: BLE001 — sweep is best-effort
+                log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
+
+        state.enablement_last_build_failure = {
+            "failure_class": "timeout",
+            "failure_summary": "targeted build interrupted by coordinator restart",
+        }
+        if task_id:
+            try:
+                task = await self.tasks.get(task_id)
+                if getattr(task, "state", "") == "running":
+                    await self.tasks.transition(
+                        task_id, "failed", evidence={"failure_class": "resume_interrupted"}
+                    )
+                    summary["failed_row"] = True
+            except Exception:  # noqa: BLE001 — reclaim backstop still applies
+                log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
+
+        state.pending_targeted_build = {}
+        report["fixes"].append(summary)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
         """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).

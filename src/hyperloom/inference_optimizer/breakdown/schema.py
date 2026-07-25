@@ -2034,6 +2034,105 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementStackActionSummary(TypedDict, total=False):
+    """One attempt-runtime stack action considered/applied.
+
+    Attributes:
+        kind: Stack-action kind (``runtime_candidate`` / ...).
+        framework: Target framework.
+        capability: Missing capability being repaired.
+        acquisition_method: ``wheel`` / ``editable_ref`` / ...
+        repo_url: Origin git URL (source acquisition), or "".
+        ref: Pinned ref (source acquisition), or "".
+        index_url: Pip index (wheel acquisition), or "".
+        reason: Human-readable justification.
+    """
+
+    kind: str
+    framework: str
+    capability: str
+    acquisition_method: str
+    repo_url: str
+    ref: str
+    index_url: str
+    reason: str
+
+
+class EnablementAttemptRuntime(TypedDict, total=False):
+    """One provisioned attempt runtime (promoted or discarded).
+
+    Attributes:
+        venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
+        bin_path: Attempt bin dir prepended to the materialized-YAML PATH.
+        python_path: Attempt interpreter.
+        installed_versions: Package -> version installed into the attempt venv.
+        promoted: True when this runtime was KEPT (survives rearm).
+    """
+
+    venv_root: str
+    bin_path: str
+    python_path: str
+    installed_versions: dict[str, str]
+    promoted: bool
+
+
+class TargetedBuildAttemptSummary(TypedDict, total=False):
+    """One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
+
+    Attributes:
+        component: ``aiter`` / ``sgl_kernel`` / ``vllm_source`` / ``framework_ext``.
+        ref: Git ref / tag used for the build.
+        gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
+        max_jobs: Parallelism cap passed to the compile.
+        ok: Whether the build + verify passed.
+        failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
+        failure_summary: Human-readable reason (agent decision input).
+        installed_versions: torch/ref/sha/arch recorded after a successful build;
+            includes ``source_pr_url`` when a discovered PR ref drove the build.
+        built_artifacts: Verified artifact paths (up to 8).
+        build_log_path: Path to the compile log inside the attempt dir.
+        attempt_root: Attempt directory anchoring the build.
+    """
+
+    component: str
+    ref: str
+    gpu_arch: str
+    max_jobs: int
+    ok: bool
+    failure_class: str
+    failure_summary: str
+    installed_versions: dict[str, str]
+    built_artifacts: list[str]
+    build_log_path: str
+    attempt_root: str
+
+
+class EnablementBreakdown(TypedDict, total=False):
+    """Enablement attempt-runtime observability section.
+
+    Empty {} on sessions that never provisioned an attempt runtime, so the
+    dashboard hides the block.
+
+    Attributes:
+        stack_actions: Candidate stack actions considered this session.
+        active_runtime: The currently-promoted attempt runtime, or {} when none.
+        attempt_runtimes: Retained attempt-runtime records (capped).
+        failure_kind: Last classified enablement failure kind.
+        build_attempts: Targeted-build attempt history (newest last).
+        last_build_failure: ``{failure_class, failure_summary}`` from the most
+            recent failed build attempt (framework-channel decision input).
+        build_attempt_count: Total number of targeted-build rows attempted.
+    """
+
+    stack_actions: list[EnablementStackActionSummary]
+    active_runtime: EnablementAttemptRuntime
+    attempt_runtimes: list[EnablementAttemptRuntime]
+    failure_kind: str
+    build_attempts: list[TargetedBuildAttemptSummary]
+    last_build_failure: dict[str, str]
+    build_attempt_count: int
+
+
 # ---------------------------------------------------------------------------
 # Session Breakdown v4 canonical author-time schema
 # ---------------------------------------------------------------------------
@@ -2378,6 +2477,8 @@ class SessionBreakdown(TypedDict, total=False):
     kernel_journey: KernelJourney
     # Authoritative external-tool versions keyed by tool name; {} when absent.
     versions: dict[str, KernelToolMetadata]
+    # Enablement attempt-runtime observability; {} → dashboard hides the block.
+    enablement: EnablementBreakdown
 
     warnings: list[str]
     source_files: SourceFiles
@@ -2405,6 +2506,9 @@ __all__ = [
     "DecisionTraceEntry",
     "DetectedKernel",
     "DiscoveredHotKernel",
+    "EnablementAttemptRuntime",
+    "EnablementBreakdown",
+    "EnablementStackActionSummary",
     "ExecutorClass",
     "KernelBackendAttempt",
     "KernelDiscoveryRun",

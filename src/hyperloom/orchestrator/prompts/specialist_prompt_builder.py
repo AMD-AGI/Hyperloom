@@ -640,39 +640,32 @@ def _focus_static_recon_specialist(
 def _focus_enablement_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
-    """Build the enablement-specialist focus by delegating to ``build_mandate``.
+    """Stable enablement-specialist identity blurb.
 
-    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
-    renders the mandate's ``task_description`` verbatim from
-    ``framework_agent.enablement_ops.build_mandate``.
+    The per-task mandate (failure context + the ladder book) is rendered
+    separately into the user prompt by ``_section_enablement_playbook`` so this
+    system-prompt block stays constant across dispatches (cacheable).
 
     Args:
-        inp: Assembled prompt inputs for the current dispatch.
+        inp: Assembled prompt inputs for the current dispatch (unused; the
+            identity is task-independent).
 
     Returns:
-        Prompt lines rendered from the enablement mandate.
+        Prompt lines for the enablement-specialist identity.
     """
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import build_mandate
-
-    model = str((inp.gap_evidence or {}).get("model") or "").strip()
-    req = EnablementRequest(
-        framework=(inp.framework or "").strip().lower(),
-        model=model or "(target model)",
-        repo_url="",
-        launch_log=inp.gap_symptom or "",
-        gpu_type=(inp.gpu_type or "").strip().lower(),
-    )
-    mandate = build_mandate(req)
-    lines = [
-        "You are the **enablement specialist** — an AUTHORING sub-agent whose",
-        "single deliverable is a bridging patch that makes a currently",
-        "non-runnable (model, backend) combo *boot and pass a minimal",
-        "inference*. The gate is RUNNABILITY, not throughput.",
+    return [
+        "You are the **enablement specialist** — an AUTHORING sub-agent for a",
+        "currently non-runnable (model, backend) combo. The gate is RUNNABILITY",
+        "(the server boots and passes a minimal inference), not throughput.",
         "",
+        "Your deliverable is the smallest **runnable delta** that advances the",
+        "boot — which may be a serve flag, an in-tree source patch, an",
+        "attempt-scoped runtime, or a ``needs_targeted_build`` request. Do NOT",
+        "stop at a token registration / two-line alias when the diagnosis says the",
+        "architecture is genuinely new: advancing one boot step counts, and a",
+        "compiled or from-source need should be requested, not faked. Follow the",
+        "ENABLEMENT PLAYBOOK in the task context for the tiered methodology.",
     ]
-    lines.extend(mandate.task_description.splitlines())
-    return lines
 
 
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
@@ -1958,6 +1951,38 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+# Section 1b — Enablement playbook (per-task; enablement specialist only)
+def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the per-task enablement mandate + ladder book into the user prompt.
+
+    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
+    renders the mandate's ``task_description`` (which embeds the ladder book) from
+    ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
+    the cached system prompt stays task-independent.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        list[str]: The enablement-playbook section lines.
+    """
+    from hyperloom.agents.framework.enablement import EnablementRequest
+    from hyperloom.agents.framework.enablement_ops import build_mandate
+
+    model = str((inp.gap_evidence or {}).get("model") or "").strip()
+    req = EnablementRequest(
+        framework=(inp.framework or "").strip().lower(),
+        model=model or "(target model)",
+        repo_url="",
+        launch_log=inp.gap_symptom or "",
+        gpu_type=(inp.gpu_type or "").strip().lower(),
+    )
+    mandate = build_mandate(req)
+    rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
+    rows.extend(mandate.task_description.splitlines())
+    return rows
+
+
 # Top-level assembler
 def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
     """§1a — PD-disaggregation context (omitted unless pd_mode==disaggregated).
@@ -2035,21 +2060,36 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_output_protocol(inp),
         _section_iron_rules(inp),
     ]
-    user_sections = [
-        _section_hardware(inp),
-        _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
-        _section_execution_budget(inp),  # omitted when no budget
-        _section_gap(inp),
-        _section_kb_subgraph(inp),
-        _section_roofline_evidence(inp),
-        _section_recipe(inp),
-        _section_lessons(inp),
-        _section_pitfalls(inp),
-        _section_kg_recommended(inp),  # KG graph-recommended knobs
-        _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
-        _section_pr_feed(inp),
-        _section_source_hint(inp),
-    ]
+    if inp.domain.key == "enablement_specialist":
+        # Pre-baseline enablement: the perf context (roofline / recipe / lessons /
+        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot even
+        # boot. Carry only the failure, the tiered playbook, and the tools to
+        # discover + navigate a fix.
+        user_sections = [
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),  # § 1a (omitted unless disaggregated)
+            _section_execution_budget(inp),  # omitted when no budget
+            _section_gap(inp),
+            _section_enablement_playbook(inp),  # § 1b (mandate + ladder book)
+            _section_pr_feed(inp),
+            _section_source_hint(inp),
+        ]
+    else:
+        user_sections = [
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
+            _section_execution_budget(inp),  # omitted when no budget
+            _section_gap(inp),
+            _section_kb_subgraph(inp),
+            _section_roofline_evidence(inp),
+            _section_recipe(inp),
+            _section_lessons(inp),
+            _section_pitfalls(inp),
+            _section_kg_recommended(inp),  # KG graph-recommended knobs
+            _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
+            _section_pr_feed(inp),
+            _section_source_hint(inp),
+        ]
     if inp.notes:
         user_sections.append(
             [

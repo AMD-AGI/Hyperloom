@@ -418,6 +418,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
     enablement_succeeded: bool = False
+    # Watchdog bookkeeping for the in-flight enablement round: the dispatched
+    #   specialist task id and the tick it was dispatched on. If a round ends
+    #   without ever calling ``_maybe_rearm_enablement`` (e.g. the deliverable
+    #   was approved-but-empty and routed to plain baseline retries, or any other
+    #   path that never produces an integrate result), ``enablement_dispatched``
+    #   would stay stuck True forever and the run could never reach
+    #   ``enablement_stalled``. The watchdog in ``_maybe_enqueue_enablement_specialist``
+    #   uses these to detect a silently-finished round and count it as a stall.
+    enablement_inflight_task_id: str = ""
+    enablement_dispatch_tick: int = -1
+    # Task id of the most recently completed enablement specialist round. Captured
+    #   at rearm so the async dispatch chokepoint can read that round's
+    #   ``specialist_done.json`` for a ``needs_targeted_build`` request and enqueue
+    #   an off-loop build (see ``_maybe_enqueue_specialist_requested_build``).
+    #   Cleared once consumed. Optional; defaults via from_dict, no schema bump.
+    enablement_last_specialist_task_id: str = ""
     # Ordered, deduped patch paths from prior enablement rounds that made forward
     #   progress; re-applied as a base before the next round's patch so serial
     #   gaps stack. See ``_maybe_rearm_enablement``.
@@ -432,6 +448,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Attempt-scoped runtime acquisition state. All optional; NOT in
+    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
+    # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
+    # ``enablement_active_runtime``: the currently-promoted attempt FrameworkRuntime dict.
+    # ``enablement_attempt_runtimes``: retained attempt-runtime records (capped).
+    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm.
+    # ``enablement_localization_manifest``: localization records.
+    enablement_stack_actions: list = field(default_factory=list)
+    enablement_active_runtime: dict = field(default_factory=dict)
+    enablement_attempt_runtimes: list = field(default_factory=list)
+    enablement_kept_stack_action: dict = field(default_factory=dict)
+    enablement_localization_manifest: list = field(default_factory=list)
+    # Off-loop targeted-build state. All optional; NOT in fact_layer_keys and
+    # do NOT bump schema_version (default via from_dict).
+    # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
+    #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
+    # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
+    # ``enablement_last_build_failure``: failure_class + failure_summary.
+    # ``enablement_build_novelty``: compact repeat-vs-novel ledger.
+    # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
+    pending_targeted_build: dict = field(default_factory=dict)
+    enablement_build_manifest: list = field(default_factory=list)
+    enablement_last_build_failure: dict = field(default_factory=dict)
+    enablement_build_novelty: list = field(default_factory=list)
+    enablement_candidate_refs: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
