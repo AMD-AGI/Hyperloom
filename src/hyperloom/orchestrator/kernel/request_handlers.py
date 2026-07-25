@@ -1786,12 +1786,98 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
             return str(p)
 
     # Final fallback: extract real GEMM shapes from kernel_candidates.json
-    # produced by TraceLens deterministic route.
-    extracted = _extract_gemm_shapes_from_candidates(candidates_path_str, session_dir)
+    # produced by TraceLens deterministic route. Scans ALL traces in the session
+    # (union) to capture both peak prefill shapes (large M from baseline trace)
+    # and steady-state decode shapes (smaller M from post-opt trace).
+    extracted = _extract_gemm_shapes_from_all_traces(session_dir)
     if extracted:
         return extracted
 
     return ""
+
+
+def _extract_gemm_shapes_from_all_traces(session_dir: Path) -> str:
+    """Extract M,N,K from ALL kernel_candidates.json in the session (union).
+
+    Scans all TraceLens analysis runs to collect the full range of GEMM shapes
+    observed across baseline and post-optimization profiles. This ensures the
+    tuner covers both peak prefill shapes (large M) and decode shapes (small M).
+    """
+    import json as _json
+    import re as _re
+
+    kernel_agent_dir = session_dir / "kernel-agent" / "runs"
+    if not kernel_agent_dir.is_dir():
+        return ""
+
+    all_shapes: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    for cand_file in sorted(kernel_agent_dir.rglob("kernel_candidates.json")):
+        _parse_candidates_file(cand_file, seen, all_shapes)
+
+    if not all_shapes:
+        return ""
+
+    out_path = session_dir / "kernel-agent" / "traced_gemm_shapes_union.json"
+    try:
+        out_path.write_text(_json.dumps(all_shapes, indent=2), encoding="utf-8")
+    except OSError:
+        return ""
+
+    log.info(
+        "extracted %d unique GEMM shapes from %s trace(s) -> %s",
+        len(all_shapes),
+        sum(1 for _ in kernel_agent_dir.rglob("kernel_candidates.json")),
+        out_path,
+    )
+    return str(out_path)
+
+
+def _parse_candidates_file(
+    cand_file: Path,
+    seen: set,
+    shapes: list,
+) -> None:
+    """Parse one kernel_candidates.json and append new GEMM shapes."""
+    import json as _json
+    import re as _re
+
+    try:
+        data = _json.loads(cand_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+
+    hot_kernels = data.get("hot_kernels", [])
+    if not isinstance(hot_kernels, list):
+        return
+
+    for kernel in hot_kernels:
+        name = str(kernel.get("name", ""))
+        if "gemm" not in name.lower():
+            continue
+        input_shapes = kernel.get("input_shapes", [])
+        if not isinstance(input_shapes, list):
+            continue
+        for entry in input_shapes:
+            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
+            if not shape_str:
+                continue
+            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+            if len(parts) < 2:
+                continue
+            dim_pattern = _re.compile(r"\((\d+),(\d+)\)")
+            m0 = dim_pattern.match(parts[0])
+            m1 = dim_pattern.match(parts[1])
+            if not m0 or not m1:
+                continue
+            M = int(m0.group(1))
+            K = int(m0.group(2))
+            N = int(m1.group(1))
+            key = (M, N, K)
+            if key not in seen:
+                seen.add(key)
+                shapes.append({"M": M, "N": N, "K": K})
 
 
 def _extract_gemm_shapes_from_candidates(

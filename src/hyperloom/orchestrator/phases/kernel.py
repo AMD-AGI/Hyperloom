@@ -1062,6 +1062,78 @@ class KernelPhase(PhaseHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _merge_gemm_candidate_with_runtime(
+        self, env_var: str, candidate_csv_path: str
+    ) -> str | None:
+        """Merge a GEMM candidate CSV with the runtime config.
+
+        aiter's runtime config (in /tmp/aiter_configs/) is the merged superset of
+        all model_configs/*.csv. The candidate CSV only has the shapes the tuner
+        improved. Using it alone as the env override drops all other shapes' tuned
+        entries, causing regression.
+
+        This method reads the current runtime config, overlays the candidate's
+        improved shapes (keyed by M,N,K), and writes a merged file that the E2E
+        validation server can use without losing existing tuning.
+
+        Returns the merged file path, or None if merging fails.
+        """
+        import pandas as pd
+
+        candidate_path = Path(candidate_csv_path)
+        if not candidate_path.is_file():
+            return None
+
+        # Find the runtime config that sglang merged at startup.
+        env_var_to_filename = {
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
+            "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
+        }
+        runtime_filename = env_var_to_filename.get(env_var)
+        if not runtime_filename:
+            return None
+
+        runtime_path = Path("/tmp/aiter_configs") / runtime_filename
+        if not runtime_path.is_file():
+            return None
+
+        try:
+            runtime_df = pd.read_csv(runtime_path)
+            candidate_df = pd.read_csv(candidate_path)
+
+            key_cols = ["M", "N", "K"]
+            if "gfx" in runtime_df.columns and "gfx" in candidate_df.columns:
+                key_cols = ["gfx", "cu_num", "M", "N", "K"]
+
+            # Drop rows from runtime that the candidate improves, then concat.
+            candidate_keys = candidate_df[key_cols].drop_duplicates()
+            merged = runtime_df.merge(
+                candidate_keys, on=key_cols, how="left", indicator=True
+            )
+            kept_from_runtime = merged[merged["_merge"] == "left_only"].drop(
+                columns=["_merge"]
+            )
+            merged_df = pd.concat(
+                [kept_from_runtime, candidate_df], ignore_index=True
+            )
+
+            merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
+            merged_df.to_csv(merged_path, index=False)
+            log.info(
+                "forge gemm E2E: merged %d candidate rows into %d runtime rows -> %d total (%s)",
+                len(candidate_df),
+                len(runtime_df),
+                len(merged_df),
+                merged_path,
+            )
+            return str(merged_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("forge gemm E2E: merge failed (%s), using candidate as-is", exc)
+            return None
+
     def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
         """Whether the fp8 block-scale CK backend switch should be E2E-validated.
 
@@ -1391,7 +1463,14 @@ class KernelPhase(PhaseHandler):
 
         for cand in candidates:
             tuner_name = cand["tuner"]
-            env = {cand["env_var"]: cand["env_value"]}
+            # Merge candidate CSV with the runtime config so that shapes NOT in
+            # the candidate keep their existing tuned entries. Without this, the
+            # E2E validation would run with ONLY the candidate's shapes tuned,
+            # causing regression on all other shapes that lose their config.
+            merged_path = self._merge_gemm_candidate_with_runtime(
+                cand["env_var"], cand["env_value"]
+            )
+            env = {cand["env_var"]: merged_path or cand["env_value"]}
             extra_server_args = (
                 "--moe-runner-backend aiter"
                 if tuner_name == "fmoe_ck"
