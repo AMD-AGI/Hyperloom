@@ -33,6 +33,24 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
+    """Copy eval-origin trigger context from specialist params to the integrate task."""
+    origin = str(src.get("enablement_origin") or "")
+    if not origin:
+        return
+    dst["enablement_origin"] = origin
+    dst["enablement_accuracy_floor"] = float(src.get("enablement_accuracy_floor") or 0.0)
+    fp = str(src.get("enablement_eval_contract_fingerprint") or "")
+    if fp:
+        dst["enablement_eval_contract_fingerprint"] = fp
+    cfg = str(src.get("enablement_probe_config_path") or "")
+    if cfg:
+        dst["enablement_probe_config_path"] = cfg
+        # Bench the candidate against the original workload/eval contract rather
+        # than the shipped default config.
+        dst.setdefault("config_path", cfg)
+
+
 class ExplorePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -1471,6 +1489,7 @@ class ExplorePhase(PhaseHandler):
             # integrate_patch applies the runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
+                _forward_enablement_carriers(spec_params, integrate_params)
                 probe = str(spec_params.get("launch_probe") or "").strip()
                 if probe:
                     integrate_params["launch_probe"] = probe
@@ -1631,6 +1650,7 @@ class ExplorePhase(PhaseHandler):
         # framework.py::_maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
+            _forward_enablement_carriers(spec_params, integrate_params)
             probe = str(spec_params.get("launch_probe") or "").strip()
             if probe:
                 integrate_params["launch_probe"] = probe
