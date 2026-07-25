@@ -12,16 +12,41 @@ kernel-agent.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import env_bool, env_float
 
 
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
+
+# Enablement-on-eval-fail switch and shared accuracy floor. The floor is used by
+# BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two
+# never diverge.
+ENABLEMENT_ON_EVAL_FAIL_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL"
+ENABLEMENT_ACCURACY_FLOOR_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR"
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.0
+
+# Result-dict keys stamped by the baseline executor on an eval-rooted failure and
+# read by writeback promotion/persistence.
+BASELINE_EVAL_FAILED_KEY = "baseline_eval_failed"
+BASELINE_EVAL_FAILURE_KIND_KEY = "baseline_eval_failure_kind"
+BASELINE_EVAL_OBSERVED_ACCURACY_KEY = "baseline_eval_observed_accuracy"
+BASELINE_EVAL_ACCURACY_FLOOR_KEY = "baseline_eval_accuracy_floor"
+BASELINE_EVAL_EVIDENCE_KEY = "baseline_eval_evidence"
+BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
+
+# Distinct eval-failure kinds.
+EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
+EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
+EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 
 # stop_reason recorded when the baseline could not produce an accuracy result
 # even though the accuracy test was expected to run. A broken baseline accuracy
@@ -70,6 +95,89 @@ def require_framework_accuracy_default() -> bool:
     """
     v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def enablement_on_eval_fail_enabled() -> bool:
+    """Whether a baseline eval failure routes into enablement (default on)."""
+    return env_bool(ENABLEMENT_ON_EVAL_FAIL_ENV, True)
+
+
+def enablement_accuracy_floor() -> float:
+    """Shared accuracy floor for the eval trigger and the enablement KEEP gate.
+
+    Reads the env override, accepting only finite values in ``[0, 1]``; anything
+    else is logged and falls back to the default.
+    """
+    raw = os.environ.get(ENABLEMENT_ACCURACY_FLOOR_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    val = env_float(ENABLEMENT_ACCURACY_FLOOR_ENV, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+    if not math.isfinite(val) or val < 0.0 or val > 1.0:
+        log.warning(
+            "%s=%r is not a finite value in [0,1]; using default %.3f",
+            ENABLEMENT_ACCURACY_FLOOR_ENV,
+            raw,
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+        )
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    return val
+
+
+def _finite_score(score: Any) -> float | None:
+    """Return ``score`` as a finite float, or ``None`` when unusable."""
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    val = float(score)
+    return val if math.isfinite(val) else None
+
+
+def accuracy_meets_floor(score: Any, floor: float) -> bool:
+    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
+    val = _finite_score(score)
+    if val is None or val <= 0.0:
+        return False
+    return val >= floor
+
+
+def classify_accuracy_failure(score: Any, floor: float) -> str | None:
+    """Classify an accuracy verdict; ``None`` means it passes the floor.
+
+    Missing / non-numeric / non-finite scores are ``accuracy_unavailable``;
+    finite scores that are non-positive or below the floor are
+    ``accuracy_below_floor``.
+    """
+    val = _finite_score(score)
+    if val is None:
+        return EVAL_KIND_ACCURACY_UNAVAILABLE
+    if val <= 0.0 or val < floor:
+        return EVAL_KIND_ACCURACY_BELOW_FLOOR
+    return None
+
+
+def eval_contract_fingerprint(
+    *,
+    config_path: str | Path | None,
+    framework: str | None,
+    model: str | None,
+    task: str | None,
+    metric: str | None,
+) -> str:
+    """Short stable digest of the eval contract (workload + eval definition).
+
+    Hashes the materialized config bytes when available plus the framework,
+    model, task and metric so a later enablement re-run can detect contract
+    drift. Never raises; unreadable inputs contribute their string form.
+    """
+    parts = [str(framework or ""), str(model or ""), str(task or ""), str(metric or "")]
+    cfg = ""
+    if config_path:
+        p = Path(config_path)
+        try:
+            cfg = p.read_bytes().hex() if p.is_file() else str(config_path)
+        except OSError:
+            cfg = str(config_path)
+    parts.append(cfg)
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def accuracy_keep_block(
@@ -382,8 +490,23 @@ def accuracy_passed(
 __all__ = [
     "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
+    "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
+    "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
+    "BASELINE_EVAL_EVIDENCE_KEY",
+    "BASELINE_EVAL_FAILED_KEY",
+    "BASELINE_EVAL_FAILURE_KIND_KEY",
+    "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
+    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "EVAL_KIND_ACCURACY_BELOW_FLOOR",
+    "EVAL_KIND_ACCURACY_UNAVAILABLE",
+    "EVAL_KIND_RUNTIME_FAILURE",
     "accuracy_keep_block",
+    "accuracy_meets_floor",
     "accuracy_passed",
+    "classify_accuracy_failure",
+    "enablement_accuracy_floor",
+    "enablement_on_eval_fail_enabled",
+    "eval_contract_fingerprint",
     "is_high_accuracy_risk",
     "parse_eval_results",
     "request_baseline_accuracy_stop",
