@@ -1256,6 +1256,40 @@ class TestRunGemmTuningHandler:
         )
         assert "PYTORCH_TUNABLEOP_ENABLED" in task.params["unset_envs"]
 
+    def test_vllm_block_fp8_profile_excludes_capture_sidecars(self, tmp_path):
+        import gzip
+
+        trace_root = tmp_path / "profile"
+        main_trace = trace_root / "torch_trace" / "main.trace.json.gz"
+        capture_trace = trace_root / "capture_traces" / "graph_capture.trace.json.gz"
+        main_trace.parent.mkdir(parents=True)
+        capture_trace.parent.mkdir(parents=True)
+
+        def write_trace(path, *, m, n, k):
+            with gzip.open(path, "wt", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "traceEvents": [
+                            {
+                                "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                                "args": {"Input Dims": [[m, k], [n, k]]},
+                            }
+                        ]
+                    },
+                    stream,
+                )
+
+        write_trace(main_trace, m=4149, n=34816, k=5120)
+        write_trace(capture_trace, m=256, n=34816, k=5120)
+
+        shapes_json, shape_count = krh._extract_vllm_block_fp8_profile_shapes(trace_root)
+
+        assert shape_count == 1
+        assert json.loads(Path(shapes_json).read_text()) == [
+            {"K": 5120, "M": 4149, "N": 34816}
+        ]
+        assert krh._extract_vllm_block_fp8_profile_shapes(capture_trace) == ("", 0)
+
     def test_vllm_block_fp8_profile_capture_without_trace_is_explicit_failure(
         self,
         tmp_path,
@@ -1642,6 +1676,179 @@ class TestRunGemmTuningHandler:
         assert result["backend"] == "forge"
         assert result["engine"] == "forge"
 
+    def test_vllm_block_fp8_reuses_roofline_trace_without_recapture(self, tmp_path, monkeypatch):
+        import gzip
+
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "forge_gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["Qwen3ForCausalLM"],
+                    "hidden_size": 5120,
+                    "intermediate_size": 17408,
+                    "quantization_config": {
+                        "quant_method": "fp8",
+                        "weight_block_size": [128, 128],
+                    },
+                }
+            )
+        )
+        roofline_trace = tmp_path / "roofline.trace.json.gz"
+        with gzip.open(roofline_trace, "wt", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {
+                                "Input Dims": [
+                                    [4149, 5120],
+                                    [34816, 5120],
+                                    [33, 40],
+                                    [272, 40],
+                                ]
+                            },
+                        }
+                    ]
+                },
+                stream,
+            )
+        SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path=str(model),
+            gpu_type="mi325x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(roofline_trace),
+            last_profile_status="succeeded",
+            last_profile_workload={
+                "framework": "vllm",
+                "precision": "fp8",
+                "model_path": str(model),
+                "tp": 1,
+                "conc": 64,
+                "isl": 1024,
+                "osl": 1024,
+                "max_model_len": 4096,
+            },
+        ).save(tmp_path)
+        captured_input: dict = {}
+
+        async def fail_capture(**kwargs):
+            raise AssertionError("valid Roofline shapes must bypass a second profile capture")
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured_input.update(json.loads(input_path.read_text()))
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "no_improvement",
+                        "tuners_run": [{"tuner_name": "a8w8_blockscale"}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", fail_capture)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {"task_id": "reuse-roofline"},
+                session_dir=tmp_path,
+            )
+        )
+
+        assert captured_input["framework"] == "vllm-aiter"
+        shapes_path = Path(captured_input["shapes_json"])
+        assert json.loads(shapes_path.read_text()) == [
+            {"K": 5120, "M": 4149, "N": 34816}
+        ]
+        assert captured_input["untuned_csv"] == ""
+        assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
+        assert result["shape_capture"]["source_profile_trace"] == str(roofline_trace)
+        assert result["status"] == "ok"
+
+    @pytest.mark.parametrize(
+        ("field", "profile_value"),
+        [
+            ("model_path", "/models/old-qwen"),
+            ("tp", 2),
+            ("conc", 32),
+            ("isl", 512),
+            ("osl", 512),
+            ("max_model_len", 2048),
+        ],
+    )
+    def test_vllm_block_fp8_rejects_roofline_trace_after_workload_change(
+        self,
+        tmp_path,
+        field,
+        profile_value,
+    ):
+        roofline_trace = tmp_path / "roofline.trace.json"
+        roofline_trace.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
+                        }
+                    ]
+                }
+            )
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(roofline_trace),
+            last_profile_status="succeeded",
+        )
+        state.last_profile_workload = {
+            "framework": "vllm",
+            "precision": "fp8",
+            "model_path": "/models/qwen",
+            "tp": 1,
+            "conc": 64,
+            "isl": 1024,
+            "osl": 1024,
+            "max_model_len": 4096,
+        }
+        state.last_profile_workload[field] = profile_value
+
+        assert (
+            krh._reuse_vllm_block_fp8_roofline_shapes(
+                state,
+                workspace=tmp_path / "gemm",
+            )
+            is None
+        )
+
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
         root = tmp_path / "kernel-agent"
         tool = root / "tools" / "forge_gemm_tuning.py"
@@ -1665,6 +1872,10 @@ class TestRunGemmTuningHandler:
                 }
             )
         )
+        unrelated_trace = tmp_path / "roofline.trace.json"
+        unrelated_trace.write_text(
+            json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]})
+        )
         SharedState(
             precision="fp8",
             framework="vllm",
@@ -1674,6 +1885,7 @@ class TestRunGemmTuningHandler:
             conc=64,
             isl=1024,
             osl=1024,
+            last_profile_trace=str(unrelated_trace),
         ).save(tmp_path)
         shapes_path = tmp_path / "profile_shapes.json"
         shapes_path.write_text(json.dumps([{"M": 4149, "N": 34816, "K": 5120}]))

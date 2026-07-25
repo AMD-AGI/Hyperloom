@@ -2252,6 +2252,9 @@ class WritebackCollaborator:
             if task is not None:
                 profile_args = str((task.params or {}).get("base_extra_args") or "")
             self.shared_state.last_profile_args = profile_args
+            self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
+                (task.params or {}) if task is not None else {}
+            )
             # New trace invalidates the stale trace_analyze cache.
             self.shared_state.last_trace_analyze = {}
             changed = True

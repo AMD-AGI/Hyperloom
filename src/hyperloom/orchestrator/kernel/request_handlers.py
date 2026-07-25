@@ -2124,12 +2124,28 @@ def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
     return (m, n, k) if min(m, n, k) > 0 else None
 
 
-def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+def _extract_vllm_block_fp8_profile_shapes(
+    trace_input: Path,
+    *,
+    output_dir: Path | None = None,
+) -> tuple[str, int]:
     """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
     import gzip
 
+    def _is_capture_sidecar(path: Path) -> bool:
+        return "capture_traces" in path.parts
+
     shapes: set[tuple[int, int, int]] = set()
-    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    if trace_input.is_file():
+        trace_paths = [] if _is_capture_sidecar(trace_input) else [trace_input]
+    elif trace_input.is_dir():
+        trace_paths = [
+            path
+            for path in sorted(trace_input.rglob("*.json")) + sorted(trace_input.rglob("*.json.gz"))
+            if not _is_capture_sidecar(path)
+        ]
+    else:
+        return "", 0
     for path in trace_paths:
         try:
             if path.name.endswith(".gz"):
@@ -2148,13 +2164,67 @@ def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]
                 shapes.add(shape)
     if not shapes:
         return "", 0
-    out = capture_dir / "forge_shapes.json"
+    destination = output_dir or (trace_input if trace_input.is_dir() else trace_input.parent)
+    out = destination / "forge_shapes.json"
     payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
     try:
+        destination.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         return "", 0
     return str(out), len(payload)
+
+
+def _reuse_vllm_block_fp8_roofline_shapes(
+    state: Any,
+    *,
+    workspace: Path,
+    current_workload: dict[str, Any] | None = None,
+) -> HandlerResult | None:
+    """Reuse block-FP8 runtime shapes from the latest Roofline profile trace."""
+    source_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    if not source_trace:
+        return None
+    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
+            "running a dedicated profile"
+        )
+        return None
+    profile_workload = getattr(state, "last_profile_workload", None)
+    expected_workload = current_workload or state.profile_workload_context()
+    recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
+    if recorded_workload != expected_workload:
+        mismatches = sorted(
+            key
+            for key in set(recorded_workload) | set(expected_workload)
+            if recorded_workload.get(key) != expected_workload.get(key)
+        )
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
+            "running a dedicated profile",
+            ", ".join(mismatches) or "missing profile workload metadata",
+        )
+        return None
+    shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+        Path(source_trace),
+        output_dir=workspace,
+    )
+    if shape_count == 0:
+        return None
+    log.info(
+        "vLLM block-FP8 shape capture: reusing %d shape(s) from Roofline trace %s",
+        shape_count,
+        source_trace,
+    )
+    return {
+        "status": "ok",
+        "shapes_json": shapes_json,
+        "shape_capture_workspace": str(workspace),
+        "shape_count": shape_count,
+        "capture_mode": "roofline_profile_reuse",
+        "source_profile_trace": source_trace,
+    }
 
 
 def _vllm_dense_shape_capture_required(
@@ -2617,6 +2687,16 @@ async def _run_forge_gemm_tuning(
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
     )
+    if block_fp8_profile_capture:
+        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
+            state,
+            workspace=workspace,
+            current_workload=state.profile_workload_context(payload),
+        )
+        if shape_capture is not None:
+            shapes_json = str(shape_capture["shapes_json"])
+            untuned_csv = ""
+            block_fp8_profile_capture = False
     tunableop_capture = _vllm_dense_shape_capture_required(
         framework=framework,
         model_path=model_path,
@@ -2720,6 +2800,7 @@ async def _run_forge_gemm_tuning(
                 "shapes_json": shapes_json,
                 "shape_count": shape_capture.get("shape_count"),
                 "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+                "source_profile_trace": shape_capture.get("source_profile_trace"),
             },
         )
 

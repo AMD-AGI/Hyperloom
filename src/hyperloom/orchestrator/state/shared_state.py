@@ -505,6 +505,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_profile_trace: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
+    # Workload context captured with ``last_profile_trace``; strict matching
+    # prevents consumers from reusing runtime shapes after workload changes.
+    last_profile_workload: dict[str, Any] = field(default_factory=dict)
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
@@ -797,6 +800,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
+
+    def profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the normalized workload identity for a profile trace."""
+        params = overrides if isinstance(overrides, dict) else {}
+        context: dict[str, Any] = {}
+        for name in ("framework", "precision", "model_path"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, "")
+            normalized = str(value or "").strip()
+            if name in ("framework", "precision"):
+                normalized = normalized.lower()
+            context[name] = normalized
+        for name in ("tp", "conc", "isl", "osl", "max_model_len"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, 0)
+            try:
+                context[name] = int(value or 0)
+            except (TypeError, ValueError):
+                context[name] = 0
+        return context
 
     # Persistence
     @classmethod

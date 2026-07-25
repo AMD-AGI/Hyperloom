@@ -180,12 +180,35 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
             "main_trace_path": "/tmp/trace.json.gz",
             "output_throughput": 150.0,
         },
-        task=_task("profile", params={"base_extra_args": "--mem-fraction-static=0.9"}),
+        task=_task(
+            "profile",
+            params={
+                "base_extra_args": "--mem-fraction-static=0.9",
+                "framework": "vllm",
+                "precision": "fp8",
+                "model_path": "/models/qwen",
+                "tp": 1,
+                "conc": 64,
+                "isl": 1024,
+                "osl": 1024,
+                "max_model_len": 4096,
+            },
+        ),
     )
 
     assert s.last_profile_trace == "/tmp/trace.json.gz"
     assert s.last_profile_status == "succeeded"
     assert s.last_profile_args == "--mem-fraction-static=0.9"
+    assert s.last_profile_workload == {
+        "framework": "vllm",
+        "precision": "fp8",
+        "model_path": "/models/qwen",
+        "tp": 1,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "max_model_len": 4096,
+    }
     # +1% rule met (150 vs 100): current_best re-lifted to profile.
     assert s.current_best["action"] == "profile"
     assert s.current_best["tput"] == 150.0

@@ -568,6 +568,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
+        "last_profile_workload",
         # warm-recipe replay one-shot guard + outcome; LLM cannot edit.
         "warm_replay_attempted",
         "warm_replay_outcome",
