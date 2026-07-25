@@ -84,6 +84,59 @@ def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
     assert prs[0] == GitHubPr(number=1, title="a", html_url="u1")
 
 
+def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
+    """Operator-provided PRIMUS_CORTEX_PR_API may already include /v1."""
+    seen: dict[str, str] = {}
+    body = json.dumps({"items": [{"number": 1, "title": "a", "html_url": "u1"}]}).encode("utf-8")
+
+    def handler(req):
+        seen["url"] = req.get_full_url()
+        return _FakeResp(200, body)
+
+    _install_urlopen(monkeypatch, handler)
+    pc.list_perf_prs(
+        "https://github.com/sgl-project/sglang.git",
+        base_url="https://global.primus-safe.amd.com/pr-monitor/v1",
+        limit=1,
+    )
+    assert "/v1/v1/" not in seen["url"]
+    assert seen["url"].startswith("https://global.primus-safe.amd.com/pr-monitor/v1/repos/")
+
+
+def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
+    """Search results may wrap PR fields under summary with match metadata."""
+    body = json.dumps(
+        [
+            {
+                "summary": {
+                    "repo_name": "ROCm/vllm",
+                    "number": 1057,
+                    "title": "Use AITER Backend for Dsv4",
+                    "state": "closed",
+                    "is_merged": True,
+                },
+                "matched_field": "title",
+                "snippet": "Use AITER Backend for Dsv4",
+            }
+        ]
+    ).encode("utf-8")
+    _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
+    prs = pc.search_perf_prs_via_primus_search(
+        "https://github.com/ROCm/vllm.git",
+        base_url="http://x",
+        query="dsv4",
+        state="all",
+        limit=5,
+    )
+    assert prs == [
+        GitHubPr(
+            number=1057,
+            title="Use AITER Backend for Dsv4",
+            html_url="https://github.com/ROCm/vllm/pull/1057",
+        )
+    ]
+
+
 def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
     """HTTPError from urlopen propagates as PrimusCortexError."""
 

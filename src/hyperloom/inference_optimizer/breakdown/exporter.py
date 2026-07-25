@@ -286,6 +286,11 @@ def build(
         final = merged_final
     else:
         final = final_collector
+    # Enablement attempt-runtime observability; {} → dashboard hides the block.
+    enablement = _pick(
+        "enablement",
+        _safe_collect("enablement", lambda: collectors.collect_enablement(sd, state, warnings), warnings, default={}),
+    )
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
     # and the kernel lanes; union + dedupe instead of fragment-wins.
@@ -582,6 +587,8 @@ def build(
         # Authoritative external-tool versions, one object per tool keyed by
         # tool name. Each carries ``{tool, root_dir, commit, version}``.
         "versions": versions,
+        # Enablement attempt-runtime observability; {} → hidden.
+        "enablement": enablement,
         "warnings": warnings,
         "source_files": source_files,
     }

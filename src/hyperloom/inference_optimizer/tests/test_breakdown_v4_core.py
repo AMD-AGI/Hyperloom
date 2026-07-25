@@ -8,6 +8,10 @@ from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import (
+    _deep_merge,
+    _kb_writes_summary,
+    _kernel_outcome,
+    _merge_lists,
     assemble_parts,
     assemble_v4_parts,
 )
@@ -1309,3 +1313,91 @@ def test_v4_compat_major_fields_project_only_from_canonical(tmp_path):
     assert out["conc_sweep_summary"]["comparison"][0]["conc"] == 16
     assert out["langfuse"]["enabled"] is True
     assert out["langfuse"]["counts"]["generations_sent"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _merge_lists / _deep_merge — nested-id keyed merge vs. append semantics
+# ---------------------------------------------------------------------------
+
+
+def test_merge_lists_merges_entries_sharing_a_nested_id():
+    """Two entries with the same ``attempt_id`` are deep-merged, not duplicated."""
+    current = [{"attempt_id": "a1", "status": "running", "tags": ["x"]}]
+    update = [{"attempt_id": "a1", "status": "done", "tags": ["y"]}]
+    merged = _merge_lists(current, update)
+    assert len(merged) == 1
+    assert merged[0]["status"] == "done"
+    # nested list under a keyed entry is itself merged (append of new scalar).
+    assert merged[0]["tags"] == ["x", "y"]
+
+
+def test_merge_lists_appends_new_keyed_and_dedupes_scalars():
+    """A new nested id appends; duplicate scalars are not re-appended."""
+    current = [{"subject_id": "s1", "name": "one"}, "scalar"]
+    update = [
+        {"subject_id": "s2", "name": "two"},  # new id -> append
+        {"subject_id": "s1", "name": "one-updated"},  # existing id -> merge
+        "scalar",  # duplicate scalar -> dropped
+        "fresh",  # new scalar -> appended
+    ]
+    merged = _merge_lists(current, update)
+    ids = [e["subject_id"] for e in merged if isinstance(e, dict)]
+    assert ids == ["s1", "s2"]
+    s1 = next(e for e in merged if isinstance(e, dict) and e["subject_id"] == "s1")
+    assert s1["name"] == "one-updated"
+    scalars = [e for e in merged if not isinstance(e, dict)]
+    assert scalars == ["scalar", "fresh"]
+
+
+def test_merge_lists_appends_unkeyed_dict_when_novel():
+    """A dict with no nested id and not already present is appended verbatim."""
+    current = [{"foo": 1}]
+    update = [{"foo": 1}, {"bar": 2}]  # first is a dup, second is novel
+    merged = _merge_lists(current, update)
+    assert merged == [{"foo": 1}, {"bar": 2}]
+
+
+def test_deep_merge_recurses_dicts_and_merges_nested_lists():
+    """Nested dicts recurse; nested keyed lists route through _merge_lists."""
+    current = {"a": {"b": 1}, "items": [{"gate_id": "g1", "v": 1}]}
+    update = {"a": {"c": 2}, "items": [{"gate_id": "g1", "v": 2}], "d": 3}
+    merged = _deep_merge(current, update)
+    assert merged["a"] == {"b": 1, "c": 2}
+    assert merged["d"] == 3
+    assert merged["items"] == [{"gate_id": "g1", "v": 2}]
+
+
+# ---------------------------------------------------------------------------
+# _kernel_outcome — coarse per-kernel lifecycle label
+# ---------------------------------------------------------------------------
+
+
+def test_kernel_outcome_dispatched_vs_skipped_vs_discovered():
+    assert _kernel_outcome({"dispatched": True}, [], {}) == "dispatched"
+    assert _kernel_outcome({"dispatched": False}, [], {}) == "skipped"
+    assert _kernel_outcome({}, [], {}) == "discovered"
+
+
+def test_kernel_outcome_attempted_and_terminal_decisions():
+    assert _kernel_outcome({}, [{"backend": "geak"}], {}) == "attempted"
+    assert _kernel_outcome({}, [], {"decision": "REVERT"}) == "reverted"
+    e2e_keep = {"decision": "KEEP", "validated": True, "integrated": True}
+    assert _kernel_outcome({}, [], e2e_keep) == "adopted"
+
+
+# ---------------------------------------------------------------------------
+# _kb_writes_summary — verdict tally, skipping malformed rows
+# ---------------------------------------------------------------------------
+
+
+def test_kb_writes_summary_skips_non_dict_and_empty_verdict():
+    rows = [
+        {"verdict": "approve"},
+        {"verdict": "approve"},
+        {"verdict": ""},  # empty -> skipped
+        "not-a-dict",  # non-dict -> skipped
+        {"verdict": "reject"},
+    ]
+    summary = _kb_writes_summary(rows)
+    assert summary["total"] == 3
+    assert summary["by_verdict"] == {"APPROVE": 2, "REJECT": 1}

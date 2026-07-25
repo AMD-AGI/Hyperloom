@@ -158,6 +158,30 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_enqueues_build_request(coord):
+    task = _StubTask(task_id="build-spec", params={"enablement": True})
+    coord.tasks.register(task)
+    coord._maybe_enqueue_specialist_requested_build = AsyncMock()
+    payload = _done_payload(empty=True)
+    payload["needs_targeted_build"] = {
+        "component": "aiter",
+        "capability": "deepseek_v4_decode",
+        "ref": "v0.1.15.post2",
+    }
+
+    await coord._record_specialist_result(
+        task=task,
+        done_payload=payload,
+        source=f"{SPECIALIST_FROM_AGENT_PREFIX}build-spec",
+    )
+
+    coord._maybe_enqueue_specialist_requested_build.assert_awaited_once_with(
+        task_id="build-spec",
+        payload=payload,
+    )
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_empty_proposal_set(coord):
     """Empty proposal_set: ledger row stays (empty=True)."""
     task = _StubTask(task_id="task-empty-1", params={})
