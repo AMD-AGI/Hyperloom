@@ -1284,6 +1284,8 @@ class IntegratePatchExecutor:
         applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
         applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
         config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
+        extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
+        extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
         setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
         return await self._stage_gate(
@@ -1300,6 +1302,8 @@ class IntegratePatchExecutor:
             applied=applied,
             applied_artifacts=applied_artifacts,
             config_changes_applied=config_changes_applied,
+            extra_server_args_applied=extra_server_args_applied,
+            extra_envs_applied=extra_envs_applied,
             setup_result=setup_result,
         )
 
@@ -1749,6 +1753,8 @@ class IntegratePatchExecutor:
                 ctx._ip_applied = []  # type: ignore[attr-defined]
                 ctx._ip_applied_artifacts = []  # type: ignore[attr-defined]
                 ctx._ip_config_changes_applied = {}  # type: ignore[attr-defined]
+                ctx._ip_extra_server_args_applied = ""  # type: ignore[attr-defined]
+                ctx._ip_extra_envs_applied = {}  # type: ignore[attr-defined]
                 ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
                 return None
             _no_patches: dict[str, Any] = {
@@ -2004,6 +2010,8 @@ class IntegratePatchExecutor:
         ctx._ip_applied = applied  # type: ignore[attr-defined]
         ctx._ip_applied_artifacts = applied_artifacts  # type: ignore[attr-defined]
         ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
         ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
         return None
 
@@ -2023,6 +2031,8 @@ class IntegratePatchExecutor:
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
         config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
         setup_result: dict[str, Any],
     ) -> dict[str, Any]:
         """Bench + enablement/perf KEEP/REVERT gate.
@@ -2098,6 +2108,8 @@ class IntegratePatchExecutor:
                 applied=applied,
                 applied_artifacts=applied_artifacts,
                 config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
                 setup_result=setup_result,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
@@ -2117,6 +2129,8 @@ class IntegratePatchExecutor:
             applied=applied,
             applied_artifacts=applied_artifacts,
             config_changes_applied=config_changes_applied,
+            extra_server_args_applied=extra_server_args_applied,
+            extra_envs_applied=extra_envs_applied,
             bench_result=bench_result,
             gate_evidence=gate_evidence,
             ctx=ctx,
@@ -2136,6 +2150,8 @@ class IntegratePatchExecutor:
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
         config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
         setup_result: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
@@ -2394,6 +2410,8 @@ class IntegratePatchExecutor:
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
         config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
         ctx: Any,
@@ -2920,16 +2938,12 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        # Split config_changes into server args (--flags) and env vars so that
-        # --prefixed flags reach EXTRA_{FW}_ARGS instead of being silently dropped,
-        # then merge the rescued flags with the explicit extra_server_args from the
-        # proposal. Env vars are layered on top of the live base_extra_envs.
-        _cc_args, _cc_envs = split_config_changes(config_changes_applied)
-        _variant_envs = dict(params.get("base_extra_envs") or {})
-        _variant_envs.update(_cc_envs)
+        _base_envs = dict(params.get("base_extra_envs") or {})
+        _variant_envs = dict(_base_envs)
+        _variant_envs.update(extra_envs_applied)
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
-            extra_server_args=merge_server_args(extra_server_args_applied, _cc_args),
+            extra_server_args=extra_server_args_applied,
             extra_envs=_variant_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
@@ -3121,12 +3135,10 @@ class IntegratePatchExecutor:
             args_mode=str(params.get("base_args_mode") or "append"),
             out_name="integrate_patch.rebench.yaml",
         )
-        _cc_args_rb, _cc_envs_rb = split_config_changes(config_changes_applied)
-        _variant_envs_rb = {**dict(params.get("base_extra_envs") or {}), **_cc_envs_rb}
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
-            extra_server_args=merge_server_args(extra_server_args_applied, _cc_args_rb),
-            extra_envs=_variant_envs_rb,
+            extra_server_args=extra_server_args_applied,
+            extra_envs={**dict(params.get("base_extra_envs") or {}), **extra_envs_applied},
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),

@@ -726,7 +726,9 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
     assert params.get("enablement") is True
-    assert params.get("config_changes") == {}
+    assert params.get("extra_server_args") == ""
+    assert params.get("extra_envs") == {}
+    assert "config_changes" not in params
 
 
 @pytest.mark.asyncio
