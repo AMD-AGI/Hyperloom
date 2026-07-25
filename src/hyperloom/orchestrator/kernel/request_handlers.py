@@ -1594,12 +1594,15 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
+    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
         if precision == "fp8" and quant_type.lower() == "auto":
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1627,7 +1630,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         else:
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
             gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path, gpu_type)
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1640,7 +1643,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
         model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-        quant_type = _resolve_fp8_quant_type(model_path)
+        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
 
 
@@ -1962,17 +1966,18 @@ def _model_hidden_size(model_path: str) -> int | None:
     return None
 
 
-def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "") -> str:
+def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str = "") -> str:
     """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
     - ``bpreshuffle`` when the checkpoint uses block-quantized weights AND the
-      target GPU is gfx950 (MI355X) -- aiter automatically upgrades blockscale
-      to the bpreshuffle kernel on CDNA4 for better memory access patterns.
-    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942
-      (MI300X/MI325X) or when GPU type is unknown.
+      target GPU is gfx950 (MI355X) AND framework is sglang -- sglang/aiter
+      automatically upgrades blockscale to the bpreshuffle kernel on CDNA4.
+      vLLM does NOT use bpreshuffle (it reads AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
+    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
+      on vllm, or when GPU type is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
       ``--quantization fp8`` (the a8w8 per-token path).
     - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
@@ -1986,14 +1991,21 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "") -> str:
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
+    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                return "blockscale"
+                is_blockscale = True
+                break
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                return "blockscale"
+                is_blockscale = True
+                break
+    if is_blockscale:
+        if _is_gfx950(gpu_type) and framework.lower() in ("sglang", ""):
+            return "bpreshuffle"
+        return "blockscale"
     return "per_token"
 
 
