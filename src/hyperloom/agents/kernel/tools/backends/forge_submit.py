@@ -2014,6 +2014,8 @@ def _run_loop_via_cli(
     forge_log: Path,
     timeout_s: int,
     deadline_unix: float = 0.0,
+    e2e_pct: float | None = None,
+    operator_name: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2097,6 +2099,12 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
+    # Forward the kernel's E2E time share so forge-loop's baseline profile can
+    # project a per-kernel end-to-end optimization potential.
+    if e2e_pct is not None:
+        cmd += ["--e2e-pct", str(e2e_pct)]
+    if operator_name:
+        cmd += ["--operator-name", operator_name]
 
     loop_exc = None
     out = ""
@@ -2476,6 +2484,16 @@ def submit(
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
+        # Forward the kernel's E2E time share (trace GPU%) so forge-loop's
+        # baseline profile can project this kernel's end-to-end optimization
+        # potential. Absent/invalid -> leave the projection unavailable.
+        e2e_pct: float | None
+        try:
+            _raw_pct = candidate.get("gpu_pct")
+            e2e_pct = float(_raw_pct) if _raw_pct is not None else None
+        except (TypeError, ValueError):
+            e2e_pct = None
+
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
@@ -2499,6 +2517,8 @@ def submit(
                 time.time() + 1.0,
                 started + timeout_s,
             ),
+            e2e_pct=e2e_pct,
+            operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
         )
         recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,
