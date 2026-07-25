@@ -59,30 +59,32 @@ def test_config_levers_non_dict_and_patch_precedence() -> None:
     assert f({}) == {}
 
 
-def test_config_levers_flatten_envs_and_args() -> None:
+def test_config_levers_preserve_envs_and_args() -> None:
     f = coord_mod._framework_config_levers_from_done
+    extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
             "proposal_set": [
                 {
                     "extra_envs": {"VLLM_FOO": 1, "  ": "skipped"},
-                    "extra_args": "--enable-x --max-num-seqs=256 --tp 4 --bare",
+                    "extra_args": extra_args,
                 }
             ]
         }
     )
-    assert levers["VLLM_FOO"] == "1"
-    assert levers["--max-num-seqs"] == "256"
-    assert levers["--tp"] == "4"
-    assert levers["--enable-x"] == ""  # followed by another flag -> bare
-    assert levers["--bare"] == ""  # trailing bare flag
-    assert "  " not in levers
+    assert levers == {
+        "extra_server_args": extra_args,
+        "extra_envs": {"VLLM_FOO": "1"},
+    }
 
 
 def test_config_levers_args_as_list() -> None:
     f = coord_mod._framework_config_levers_from_done
-    levers = f({"proposal_set": [{"extra_args": ["--flag", "val"]}]})
-    assert levers["--flag"] == "val"
+    levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
+    assert levers == {
+        "extra_server_args": "--flag 'value with space'",
+        "extra_envs": {},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -213,10 +215,11 @@ async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
     coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
+    coord.shared_state.macro_cycle = 2
     cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
     await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
     prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "already_present" for p in prog)
+    assert any(p.get("status") == "already_present" and p.get("cycle") == 2 for p in prog)
     assert seen  # KB writeback fired for already_present
 
 
@@ -299,6 +302,25 @@ def test_ranker_client_from_scorer(coord: Coordinator) -> None:
     assert coord._framework_agent_ranker_client() is fake_client
     # Now cached.
     assert coord._framework_agent_ranker_client() is fake_client
+
+
+def test_ranker_client_reuses_orchestration_backend_client(coord: Coordinator) -> None:
+    """When orchestration exposes an OpenAI-compatible client, the ranker reuses
+    it (default-on without extra credentials)."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+
+    class _FakeChat:
+        pass
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    fake = _FakeClient()
+    coord.backends["orchestration"]._client = fake  # type: ignore[attr-defined]
+    assert coord._framework_agent_ranker_client() is fake
+    # Cached after first resolution.
+    assert coord._framework_agent_ranker_client() is fake
 
 
 def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:
@@ -642,8 +664,9 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
     params = (prop.payload or {}).get("params") or {}
     assert params["framework_agent_authoring"] is True
     assert params["framework_agent_candidate_id"] == "cand-1"
-    assert params["config_changes"]["VLLM_MTP"] == "1"
-    assert params["config_changes"]["--speculative"] == "4"
+    assert params["extra_server_args"] == "--speculative 4"
+    assert params["extra_envs"] == {"VLLM_MTP": "1"}
+    assert "config_changes" not in params
 
 
 @pytest.mark.asyncio
@@ -651,6 +674,79 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
     await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    assert not coord.state.pending_proposals
+
+
+def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        task_id=task_id,
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "cand-e",
+            "framework_batch_id": "batch-e",
+            "enablement": True,
+            "enablement_before_signature": {"kind": "unregistered_arch"},
+            "enablement_setup_commands": ["pip install -U vllm==0.21.0"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
+    """Regression: a config-lever ENABLEMENT deliverable must carry the
+    ``enablement`` marker + setup commands into integrate_patch, otherwise the
+    integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement``
+    no-ops — leaving ``enablement_dispatched`` stuck and the run spinning until
+    wall-clock instead of firing ``enablement_stalled``.
+    """
+    done = {
+        "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
+        # NEW setup command proposed by the specialist in this deliverable.
+        "setup_commands": ["pip install -U aiter"],
+    }
+    before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == before + 1
+    prop = next(iter(coord.state.pending_proposals.values()))
+    params = (prop.payload or {}).get("params") or {}
+    assert params.get("enablement") is True
+    assert params["enablement_before_signature"] == {"kind": "unregistered_arch"}
+    # Base setup (from spec_params) + new setup (from done_payload), deduped/merged.
+    assert params["enablement_setup_commands"] == ["pip install -U vllm==0.21.0", "pip install -U aiter"]
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
+    """An enablement deliverable with NO config levers (setup-only stack upgrade)
+    must still reach integrate_patch so the stall accounting can advance."""
+    done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
+    before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == before + 1
+    prop = next(iter(coord.state.pending_proposals.values()))
+    params = (prop.payload or {}).get("params") or {}
+    assert params.get("enablement") is True
+    assert params.get("extra_server_args") == ""
+    assert params.get("extra_envs") == {}
+    assert "config_changes" not in params
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) -> None:
+    done = {
+        "proposal_set": [{"name": "build-aiter"}],
+        "needs_targeted_build": {
+            "component": "aiter",
+            "capability": "deepseek_v4_decode",
+            "ref": "v0.1.15.post2",
+        },
+    }
+
+    await coord._maybe_autosubmit_framework_config(
+        task=_enablement_authoring_task(),
+        done_payload=done,
+    )
+
     assert not coord.state.pending_proposals
 
 
@@ -677,6 +773,7 @@ def test_record_authored_outcome_kept_rolls_batch_stat(coord: Coordinator) -> No
     task = types.SimpleNamespace(
         task_id="ip-1",
         params={
+            "framework_agent_authoring": True,
             "specialist_task_id": "spec-1",
             "framework_agent_candidate_id": "cand-1",
             "framework_batch_id": "batch-1",
@@ -703,7 +800,10 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
     coord.shared_state.framework_agent_specialist_candidate_map = {"spec-9": "cand-from-map"}
     coord.shared_state.framework_agent_batches = [{"batch_id": "latest-batch"}]
     coord.shared_state.framework_agent_phase_progress = []
-    task = types.SimpleNamespace(task_id="ip-9", params={"specialist_task_id": "spec-9"})
+    task = types.SimpleNamespace(
+        task_id="ip-9",
+        params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
+    )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
     coord._record_framework_agent_authored_outcome(task=task, result=result)
     row = coord.shared_state.framework_agent_phase_progress[-1]

@@ -433,6 +433,9 @@ class ProposalsCollaborator:
                 )
         cb = self.shared_state.current_best or {}
         cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
+        # Cumulative env base for stack-aware actions; without it explore stacks
+        # args but not envs and current_best.extra_envs collapses to the last delta.
+        cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb, dict) else {}
 
         def _list_control(value: Any) -> list[str]:
             if isinstance(value, str):
@@ -471,6 +474,8 @@ class ProposalsCollaborator:
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
+            if cb_envs:
+                params.setdefault("base_extra_envs", dict(cb_envs))
             if cb_remove_args:
                 params.setdefault("base_remove_args", cb_remove_args)
             if cb_unset_envs:

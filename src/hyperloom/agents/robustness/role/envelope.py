@@ -148,7 +148,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "lifecycle",
         # specialist sub-agent ledger.
         "specialist_rounds",
-        "specialist_domain_empty_streak",
         # per-kb_anchor coverage counters.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
@@ -187,6 +186,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
         "kernel_opt_attempts",
+        "kernel_opt_task_attempts",
+        "pending_kernel_integrations",
         # kept in lock-step with upstream
         # policy.CORE_STATE_FIELDS (see tests/test_role_contract.py).
         "closing_phase",

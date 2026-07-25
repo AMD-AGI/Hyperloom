@@ -17,7 +17,6 @@ from typing import Any
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    KERNEL_AGENT_OWNED_ACTIONS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 
@@ -170,86 +169,13 @@ def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
     return tuple(sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
-# EXPLORE interleave adds KERNEL_AGENT_OWNED_ACTIONS so kernel REQUESTs pass R1.
-_INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_AGENT_OWNED_ACTIONS
-
-# KERNEL interleave adds the explore-side proposable triple.
-_INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
-    {
-        "explore",
-        "specialist",
-        "integrate_patch",
-    }
-)
-
-
-def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled.
-
-    Interleave lets specialists in EXPLORE trigger KERNEL-class actions (and
-    KERNEL reach back to explore/specialist/integrate_patch) without waiting for
-    the phase machine. It remains disabled by policy so the chain stays strict
-    and monotonic.
-
-    Returns:
-        bool: Always ``False``.
-    """
-    return False
-
-
-def llm_proposable_actions_for_with_interleave(
-    phase: str,
-    *,
-    interleave: bool | None = None,
-    explore_enabled: bool = True,
-) -> frozenset[str]:
-    """Return the active LLM-proposable set for ``phase`` (when interleave on, EXPLORE adds kernel_agent-owned names, KERNEL adds the explore triple).
-
-    When ``explore_enabled`` is False (``--no-explore``), the ``explore``
-    grid-runner is stripped from the KERNEL interleave extras so the
-    interleave grey channel cannot reintroduce explore work into a run that
-    disabled the EXPLORE phase. ``specialist`` / ``integrate_patch`` stay
-    available because KERNEL legitimately uses them (specialist research +
-    patch integration).
-
-    Args:
-        phase (str): Phase name; stripped and upper-cased before lookup.
-        interleave (bool | None): Force interleave on/off; ``None`` resolves it
-            from :func:`is_phase_interleave_enabled`.
-        explore_enabled (bool): When False (``--no-explore``), strip ``explore``
-            from the KERNEL interleave extras.
-
-    Returns:
-        frozenset[str]: The active LLM-proposable action set for ``phase``.
-    """
-    key = (phase or "").strip().upper()
-    base = PHASE_LLM_PROPOSABLE_ACTIONS.get(key, frozenset())
-    if interleave is None:
-        interleave = is_phase_interleave_enabled()
-    if not interleave:
-        return base
-    if key == PHASE_EXPLORE:
-        return base | _INTERLEAVE_EXPLORE_EXTRAS
-    if key == PHASE_KERNEL_AGENT:
-        kernel_extras = _INTERLEAVE_KERNEL_EXTRAS
-        if not explore_enabled:
-            kernel_extras = kernel_extras - {"explore"}
-        return base | kernel_extras
-    return base
-
-
 def render_phase_proposable_bullets(
     *,
-    interleave: bool,
-    explore_enabled: bool = True,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
     """Render per-phase LLM-proposable action bullets (shared by the prompt builders).
 
     Args:
-        interleave (bool): Whether phase interleave is enabled.
-        explore_enabled (bool): When False, strip ``explore`` from the KERNEL
-            interleave extras (only consulted when ``interleave`` is True).
         disabled_suffix (dict[str, str] | None): Optional ``phase -> flag`` map;
             a present flag annotates that phase as ``(DISABLED: <flag> — phase
             skipped)``.
@@ -260,45 +186,13 @@ def render_phase_proposable_bullets(
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
-        proposable = sorted(
-            llm_proposable_actions_for_with_interleave(phase, interleave=interleave, explore_enabled=explore_enabled)
-        )
+        proposable = llm_proposable_actions_for(phase)
         flag = suffix.get(phase)
         if flag:
             out.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
         else:
             out.append(f"- **{phase}**: {', '.join(proposable)}")
     return out
-
-
-def is_action_llm_proposable_in_phase_with_interleave(
-    action_name: str,
-    phase: str,
-    *,
-    interleave: bool | None = None,
-    explore_enabled: bool = True,
-) -> bool:
-    """Mirror of :func:`is_action_llm_proposable_in_phase` honoring the
-    interleave flag (and the ``--no-explore`` KERNEL grey-channel strip).
-
-    Args:
-        action_name (str): Candidate action name; stripped before comparison.
-        phase (str): Phase name; stripped and upper-cased before lookup.
-        interleave (bool | None): Force interleave on/off; ``None`` resolves it
-            from :func:`is_phase_interleave_enabled`.
-        explore_enabled (bool): When False, strip ``explore`` from the KERNEL
-            interleave extras.
-
-    Returns:
-        bool: True when ``action_name`` is in the active interleave-aware
-        proposable set for ``phase``.
-    """
-    proposable = llm_proposable_actions_for_with_interleave(
-        phase,
-        interleave=interleave,
-        explore_enabled=explore_enabled,
-    )
-    return (action_name or "").strip() in proposable
 
 
 # phase_exit_reasons vocab
@@ -477,12 +371,6 @@ DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 # Fires when remaining wall-clock < HOURS_REMAINING OR EXPLORE budget fraction < BUDGET_PCT.
 DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
-
-# When EXPLORE↔KERNEL interleave is on, kernel work runs inside EXPLORE, so the
-# time gate collapses to a small CLOSE-buffer and the phase-budget fraction gate
-# is disabled. Both are overridable via explicit caller thresholds.
-DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE: float = 1.0
-DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE: float = 0.0
 
 # FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
 DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
@@ -698,7 +586,6 @@ ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
-ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
 # ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
 # from EXPLORE it advances to KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
@@ -717,40 +604,16 @@ ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
 
 
-# True when a hint string is structurally a pause-specialist directive.
-def is_pause_specialist_hint(hint: str) -> bool:
-    """Return True when ``hint`` is a ``pause_specialist_<domain>`` directive.
-
-    Recognizes the structural shape only: the hint must start with
-    :data:`ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX` and carry a non-empty
-    suffix (the domain key). Whether that suffix is a valid domain is
-    validated by the Coordinator handler, not here, so this module stays
-    pure.
-
-    Args:
-        hint (str): Candidate escalate hint string; stripped before check.
-
-    Returns:
-        bool: True when the hint has the pause-specialist prefix plus a
-        non-empty domain suffix.
-    """
-    h = (hint or "").strip()
-    return h.startswith(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) and len(h) > len(
-        ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
-    )
-
-
 def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab + ``pause_specialist_<domain>``).
+    """Return True for any hint Coordinator should act on (closed vocab).
 
     Args:
         hint (str): Candidate escalate hint string; stripped before comparison.
 
     Returns:
-        bool: True when ``hint`` is in :data:`ESCALATE_HINT_VOCAB` or is a
-        structural ``pause_specialist_<domain>`` directive.
+        bool: True when ``hint`` is in :data:`ESCALATE_HINT_VOCAB`.
     """
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB or is_pause_specialist_hint(hint)
+    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def apply_escalate_budget_bump(
@@ -1204,12 +1067,6 @@ def should_force_exit_explore(
     Fires when session remaining ≤ hours_threshold*3600 OR phase remaining
     pct ≤ budget_pct_threshold; ``evidence`` records which fired.
 
-    Fix B (interleave-aware IR-6): when EXPLORE↔KERNEL interleave is enabled
-    and the caller is using the default thresholds, narrow them to a
-    CLOSE-buffer (the "reserve 3h for a separate KERNEL_AGENT phase" rationale no
-    longer applies because kernel work runs inside EXPLORE). Explicit
-    non-default thresholds from the caller always win.
-
     Args:
         state (Any): Frozen SharedState view.
         hours_remaining_threshold (float): Session-hours-remaining gate;
@@ -1224,15 +1081,9 @@ def should_force_exit_explore(
         tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
         force-exit fires, and the evidence map recording which gate(s) fired.
     """
-    if is_phase_interleave_enabled():
-        if float(hours_remaining_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING:
-            hours_remaining_threshold = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE
-        if float(budget_pct_threshold) == DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT:
-            budget_pct_threshold = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE
     evidence: dict[str, Any] = {
         "hours_remaining_threshold": float(hours_remaining_threshold),
         "budget_pct_threshold": float(budget_pct_threshold),
-        "interleave_aware_ir6": bool(is_phase_interleave_enabled()),
     }
     fired = False
     fired_reasons: list[str] = []
@@ -1274,6 +1125,33 @@ def should_force_exit_explore(
 
 
 # plateau pure functions
+def _current_macro_cycle(state: Any) -> int:
+    """Return the current macro-cycle index."""
+    try:
+        return int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_cycle(row: dict[str, Any]) -> int:
+    """Return a row cycle, treating legacy unstamped rows as cycle zero."""
+    try:
+        return int(row.get("cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
+    """Filter durable ledger rows to the current macro-cycle."""
+    if not isinstance(rows, list):
+        return []
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    if not any("cycle" in row for row in dict_rows):
+        return dict_rows
+    cycle = _current_macro_cycle(state)
+    return [row for row in dict_rows if _row_cycle(row) == cycle]
+
+
 def compute_plateau_explore(
     state: Any,
     *,
@@ -1308,9 +1186,7 @@ def compute_plateau_explore(
     explore_search = getattr(state, "explore_search", None) or {}
     if not isinstance(explore_search, dict):
         explore_search = {}
-    winners_history = explore_search.get("winners_history") or []
-    if not isinstance(winners_history, list):
-        winners_history = []
+    winners_history = _rows_for_current_cycle(explore_search.get("winners_history") or [], state)
     recent_winners = list(winners_history[-lookback:])
     recent_keep_gain = 0.0
     for w in recent_winners:
@@ -1322,9 +1198,7 @@ def compute_plateau_explore(
         except (TypeError, ValueError):
             continue
 
-    specialist_rounds = getattr(state, "specialist_rounds", None) or []
-    if not isinstance(specialist_rounds, list):
-        specialist_rounds = []
+    specialist_rounds = _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
 
     def _round_is_empty(row: Any) -> bool:
         """Return True when a specialist-round summary produced no work.
@@ -1413,12 +1287,20 @@ def compute_plateau_kernel(
 
     # Flatten the integrate attempt log into a time-ordered list, take the
     # last ``lookback`` rows.
+    has_cycle = any(
+        isinstance(attempt, dict) and "cycle" in attempt
+        for entry in integ_attempts.values()
+        if isinstance(entry, dict)
+        for attempt in (entry.get("attempts") or [])
+    )
     flat: list[tuple[str, str, float]] = []  # (decision, ts, gain_pct)
     for ent in integ_attempts.values():
         if not isinstance(ent, dict):
             continue
         for a in ent.get("attempts") or []:
             if not isinstance(a, dict):
+                continue
+            if has_cycle and _row_cycle(a) != _current_macro_cycle(state):
                 continue
             decision = str(a.get("decision") or "").upper().strip()
             if not decision:
@@ -1573,27 +1455,68 @@ def kernel_work_pending(state: Any) -> bool:
         pass
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
-    integrated: set[str] = set()
+    integrated_entries: list[dict[str, Any]] = []
+    integrated_sources: set[str] = set()
     for entry in getattr(state, "optimization_stack", None) or []:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("action") or "") == "integrate":
-            kid = str(entry.get("kernel_id") or "")
-            if kid:
-                integrated.add(kid)
+            integrated_entries.append(entry)
+            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
+            if source_file:
+                integrated_sources.add(source_file)
 
-    attempts = getattr(state, "kernel_opt_attempts", None) or {}
+    attempts = (
+        getattr(state, "kernel_opt_task_attempts", None)
+        or getattr(state, "kernel_opt_attempts", None)
+        or {}
+    )
     if not isinstance(attempts, dict):
         return False
-    for kid, attempt in attempts.items():
-        kernel_id = str(kid or "")
-        if kernel_id in rejected or kernel_id in integrated:
-            continue
+    for ledger_id, attempt in attempts.items():
         if not isinstance(attempt, dict):
+            continue
+        kernel_id = str(
+            attempt.get("current_kernel_id")
+            or attempt.get("kernel_id")
+            or ledger_id
+        )
+        source_file = str(attempt.get("last_source_file") or "")
+        task_group_key = str(attempt.get("task_group_key") or "")
+        integrated = False
+        for integrated_entry in integrated_entries:
+            integrated_key = str(integrated_entry.get("task_group_key") or "")
+            if task_group_key and integrated_key:
+                integrated = task_group_key == integrated_key
+            else:
+                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
+                    continue
+                integrated_source = str(
+                    integrated_entry.get("target_file")
+                    or integrated_entry.get("source_file")
+                    or ""
+                )
+                integrated = (
+                    not source_file
+                    or not integrated_source
+                    or source_file == integrated_source
+                )
+            if integrated:
+                break
+        if integrated:
+            continue
+        if source_file and source_file in integrated_sources:
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
         rejected_reason = str(attempt.get("rejected_reason") or "").strip()
+        integration_status = str(
+            attempt.get("integration_status") or ""
+        ).strip().lower()
+        if integration_status in {"integrated", "rejected"}:
+            continue
+        if kernel_id in rejected and (not task_group_key or rejected_reason):
+            continue
         if decision == "KEEP":
             return True
         if decision == "REVERT" or rejected_reason:
@@ -1926,7 +1849,7 @@ def compute_plateau_framework_agent(
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
         plateau fired, and the supporting evidence map.
     """
-    batches = getattr(state, "framework_agent_batches", None) or []
+    batches = _rows_for_current_cycle(getattr(state, "framework_agent_batches", None) or [], state)
     lookback_int = int(lookback or 0)
     base_evidence = {
         "lookback": lookback_int,
@@ -1935,7 +1858,7 @@ def compute_plateau_framework_agent(
     }
     if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
         return False, base_evidence
-    progress = getattr(state, "framework_agent_phase_progress", None) or []
+    progress = _rows_for_current_cycle(getattr(state, "framework_agent_phase_progress", None) or [], state)
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):
@@ -2530,6 +2453,39 @@ def record_phase_transition(
     state.phase = row["to_phase"]
     state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        transition_id = (
+            f"phase:{int(getattr(state, 'macro_cycle', 0) or 0)}:"
+            f"tick:{int(getattr(state, 'tick', 0) or 0)}:"
+            f"event:{len(history)}:"
+            f"{row.get('from_phase') or 'START'}:{row.get('to_phase') or ''}:"
+            f"{now_unix:.9f}"
+        )
+        instrument.record_phase_transition(
+            getattr(state, "_session_dir", None),
+            transition_id=transition_id,
+            from_phase=str(row.get("from_phase") or ""),
+            phase=str(row.get("to_phase") or ""),
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            tick=int(getattr(state, "tick", 0) or 0),
+            event_sequence=len(history),
+            ts=str(row.get("ts") or ""),
+        )
+        instrument.record_trace_event(
+            getattr(state, "_session_dir", None),
+            trace_event_id=f"trace:{transition_id}",
+            kind="phase_transition",
+            from_phase=str(row.get("from_phase") or ""),
+            phase=str(row.get("to_phase") or ""),
+            reason=str(row.get("reason") or ""),
+            ts=str(row.get("ts") or ""),
+        )
+    except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
+        pass
     return row
 
 
@@ -2596,9 +2552,7 @@ def record_lifecycle_event(
 
 __all__ = [
     "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
-    "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT_INTERLEAVE",
     "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING",
-    "DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING_INTERLEAVE",
     "DEFAULT_PHASE_BUDGET_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
@@ -2610,7 +2564,6 @@ __all__ = [
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "ESCALATE_HINT_EXTEND_EXPLORE_BUDGET",
     "ESCALATE_HINT_EXTEND_KERNEL_BUDGET",
-    "ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX",
     "ESCALATE_HINT_SKIP_TO_CLOSE",
     "ESCALATE_HINT_SKIP_TO_KERNEL",
     "ESCALATE_HINT_SKIP_TO_SWEEP",
@@ -2661,11 +2614,7 @@ __all__ = [
     "exit_terminal_prelude",
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
-    "is_action_llm_proposable_in_phase_with_interleave",
-    "is_phase_interleave_enabled",
     "llm_proposable_actions_for",
-    "llm_proposable_actions_for_with_interleave",
-    "is_pause_specialist_hint",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",

@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
 :class: hl-lightbox-trigger
 ```
 
@@ -68,11 +68,11 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL Phase -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
-`cycle_reloop` back to `FRAMEWORK_PR` / `EXPLORE` for another pass while
+`cycle_reloop` back to `FRAMEWORK_AGENT` / `EXPLORE` for another pass while
 budget and leverage remain, regardless of whether the session is shorter than
 24 hours. The 24-hour threshold now only selects long-run budget accounting:
 short bounded runs keep charge-back phase budgeting, while long / unbounded
@@ -99,9 +99,9 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_PR
+## FRAMEWORK_AGENT
 
-When enabled, the `FRAMEWORK_PR` phase (framework-PR enablement) is managed
+When enabled, the `FRAMEWORK_AGENT` phase (framework enablement) is managed
 by the Coordinator. It covers discovery/ranking/audit through `fa phase-discover`,
 plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
 default), enablement repair, and Critic review of each candidate — discovery is
@@ -111,12 +111,90 @@ For each candidate:
 
 1. The framework-agent returns candidate metadata and diff information,
 2. The Critic reviews the candidate before apply,
-3. The framework PR executor applies, benchmarks, and either keeps or
+3. The framework-agent executor applies, benchmarks, and either keeps or
    reverts the candidate,
 4. Progress is recorded in `SharedState` and later surfaced in
    `session_breakdown.json`.
 
 The LLM doesn't own a separate framework role in the current runtime.
+
+### Enablement escalation ladder
+
+When a `(model, backend)` combination cannot launch, enablement repairs it
+along two axes. **Diagnosis (once):** work out which capability layer is
+missing — read the failure signature, the model's `config.json` architecture,
+the framework's supported-architecture registry and installed version, and
+upstream (whether the capability already exists and in which version/PR). That
+picks the entry rung. **Climb (as needed):** start at the lowest plausible rung
+and go up only when the current rung cannot make it boot; after each cleared
+boot failure, re-diagnose the new (deeper) failure and pick a rung again
+(serial enablement — progress is stacked). A model whose architecture is
+already supported but merely un-wired needs only the cheap top rungs; a
+genuinely-new architecture climbs higher.
+
+The full rendered methodology (the advisory "ladder book") is the canonical
+text, built by `build_enablement_ladder_book` in
+`hyperloom.agents.framework.enablement_ops` and injected into the enablement
+authoring specialist's prompt. The rungs, in increasing complexity:
+
+0. **Rung 0 — diagnose / capability-gap localization.** Read-only:
+   classify the failure, read `config.json`, check the supported-arch registry
+   and version, and look up upstream. Output: the missing layer and the entry
+   rung.
+1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
+   only a serve flag / env / tokenizer-mode / trivial registration alias is
+   missing. No new code or dependencies.
+2. **Rung 2 — in-tree source patch.** A unified diff against the installed
+   source tree: register the arch, a small forward/config/tokenizer bridge, or
+   backport a merged PR. Pure Python, no compile.
+3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
+   wheel, an editable checkout at a ref, or a local source tree) into an
+   isolated per-attempt venv. That venv is activated only through the
+   per-variant YAML benchmark envs; the Coordinator never mutates its own
+   process environment to point at an attempt runtime.
+4. **Rung 4 — source localization.** Localize a merged-PR or vendored
+   closure into the source tree. A change that touches compiled or
+   build-backend files cannot be satisfied by a plain source edit, so it
+   defers to Rung 5.
+5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
+   (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
+   coordinator tick loop on a dedicated single-slot build lane: each build
+   is spawned detached and reaped across later ticks against a wall-clock
+   budget, so a long compile never blocks the loop. Auto-escalation into
+   Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
+   environment variable (see
+   [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+
+### Runnable gate (earned KEEP)
+
+A verified build does not KEEP on artifact verification alone. After a
+build's artifacts verify, the Coordinator runs a launch probe: it boots the
+actual model with the built runtime through the same runnable-decision gate
+the authored-patch lane uses. Only a runtime that actually launches — and
+passes minimal correctness — earns KEEP. Otherwise the build reverts, or, if
+the boot advanced past the original failure to a new or deeper gap, the loop
+advances to the next round to repair that gap.
+
+### Discovery-driven build refs
+
+Candidate PR refs discovered by the framework-agent feed directly into the
+build: a PR reference becomes a checkout of that PR's head, not just a
+released-tag autoselect. This makes support that exists only in an
+unreleased PR or branch reachable. When a discovered PR ref drives the
+build, the source PR URL is recorded as build provenance in the session
+breakdown's `installed_versions` map (`source_pr_url`); see the
+[`enablement` section](../reference/session-breakdown.md#enablement--targeted-build--attempt-runtime-summary).
+
+### Novelty and crash safety
+
+- **Novelty-ledger stall gate.** Repeated identical build attempts — same
+  component, ref, GPU arch, and build command — are treated as a stall and
+  revert. A novel attempt, or a time-based failure such as a timeout,
+  advances instead, so the loop keeps making forward progress rather than
+  looping on an identical failing build.
+- **Crash / resume.** An in-flight build is tracked by a durable sentinel,
+  so a crash or resume reclaims the running build or cleans up the orphaned
+  one rather than leaking it.
 
 ## EXPLORE
 
@@ -138,9 +216,9 @@ for archived reporting only. New sessions write the merged
 After each KEEP, the runtime revalidates the full stack end to end so
 the reported cumulative gain is not just a sum of per-round deltas.
 
-## KERNEL Phase
+## KERNEL_AGENT
 
-The `KERNEL Phase` is the bridge to kernel-agent work. Orchestration may
+The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration may
 send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
@@ -230,7 +308,7 @@ stateless per tick.
 The loop adapts through facts, not through retired score tables:
 
 - `SharedState` carries current best, stack entries, phase history,
-  action attempts, kernel attempts, framework PR progress, and warnings.
+  action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
 - Robustness watches stalls, crashes, config-only loops, specialist

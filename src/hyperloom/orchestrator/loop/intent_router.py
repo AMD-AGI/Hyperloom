@@ -319,6 +319,21 @@ class IntentRouter:
                 pending,
                 reasoning,
             )
+        elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
+            # A Critic-rejected ENABLEMENT integrate_patch never reaches the
+            # executor, so the normal integrate-result rearm never fires. Without
+            # this, enablement_dispatched stays stuck True and the run cannot
+            # advance the stall streak toward enablement_stalled. Treat the
+            # rejection as a no-progress round.
+            try:
+                self._coord._maybe_rearm_enablement(
+                    {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
+                )
+            except Exception:  # noqa: BLE001 — accounting must never wedge the loop
+                log.exception(
+                    "enablement rearm on critic-reject failed for task=%s",
+                    sid_candidate,
+                )
         elif verdict == "needs_review":
             await self._coord._maybe_reauthor_from_critic_feedback(
                 pending,
@@ -866,12 +881,10 @@ class IntentRouter:
         from ..phases.machine_state import (
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
             ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_EXPLORE,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_pause_specialist_hint,
             is_valid_escalate_hint,
         )
 
@@ -914,17 +927,6 @@ class IntentRouter:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
                 self.shared_state.phase_budget_pct,
                 phase=PHASE_KERNEL_AGENT,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        # pause_specialist_<domain>: bump the per-domain empty-streak.
-        if is_pause_specialist_hint(hint):
-            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) :]
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=True,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts

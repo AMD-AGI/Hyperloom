@@ -1180,6 +1180,50 @@ def _fill_integrate_defaults_from_state(
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
 
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_records = state.pending_kernel_integration_records()
+    pending_record = next(
+        (
+            record
+            for record in pending_records
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is None and resolved.get("kernel_id"):
+        requested_kernel_id = str(resolved.get("kernel_id") or "")
+        requested_task_key = str(resolved.get("task_group_key") or "")
+        pending_record = next(
+            (
+                record
+                for record in pending_records
+                if str(record.get("kernel_id") or "") == requested_kernel_id
+                and (
+                    not requested_task_key
+                    or str(record.get("task_group_key") or "")
+                    == requested_task_key
+                )
+            ),
+            None,
+        )
+    if pending_record is not None:
+        resolved.setdefault(
+            "integration_id",
+            str(pending_record.get("integration_id") or ""),
+        )
+        resolved.setdefault(
+            "kernel_id",
+            str(pending_record.get("kernel_id") or ""),
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
         bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if bt > 0:
@@ -1195,6 +1239,13 @@ def _fill_integrate_defaults_from_state(
         cb_args = current_best.get("extra_server_args") or ""
         if cb_args:
             resolved["extra_server_args"] = cb_args
+
+    kernel_id = str(resolved.get("kernel_id") or "")
+    if kernel_id and not resolved.get("task_group_key"):
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        task_group_key = str(attempt.get("task_group_key") or "")
+        if task_group_key:
+            resolved["task_group_key"] = task_group_key
 
     return resolved
 
@@ -1229,6 +1280,47 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     kernel_id = str(resolved.get("kernel_id") or "")
     state = SharedState.load_or_init(session_dir)
     last_kernel = state.last_kernel_opt or {}
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_record = next(
+        (
+            record
+            for record in state.pending_kernel_integration_records()
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is not None:
+        kernel_id = str(pending_record.get("kernel_id") or kernel_id)
+        resolved["kernel_id"] = kernel_id
+        resolved["integration_id"] = str(
+            pending_record.get("integration_id") or integration_id
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+        _fill_integrate_snapshot_from_bundle(
+            resolved,
+            pending_record.get("artifact_bundle"),
+        )
+        if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
+            resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
+        if not resolved.get("patch_path"):
+            resolved["patch_path"] = str(
+                pending_record.get("deploy_patch_path")
+                or pending_record.get("artifact_path")
+                or ""
+            )
+        if not resolved.get("kernel_repo") and pending_record.get(
+            "deploy_repo_root"
+        ):
+            resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
+        if not resolved.get("source_file") and pending_record.get("source_file"):
+            resolved["source_file"] = str(pending_record["source_file"])
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch + snapshot dir so the whole
@@ -1564,6 +1656,23 @@ def _forge_gemm_tune_available() -> bool:
         return False
 
 
+def _resolve_aiter_root_for_forge() -> str:
+    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
+    if explicit:
+        return explicit
+    try:
+        spec = importlib.util.find_spec("aiter_meta")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = getattr(spec, "submodule_search_locations", None) or []
+    for location in locations:
+        root = Path(location)
+        if (root / "csrc").is_dir():
+            return str(root)
+    return ""
+
+
 def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """Resolve the actual runtime precision and quant_type for forge tuning.
 
@@ -1580,6 +1689,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
+        if precision == "fp8" and quant_type.lower() == "auto":
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1617,6 +1729,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if not precision:
         precision = "bf16"
     quant_type = str(payload.get("quant_type") or "auto").strip()
+    if precision == "fp8" and quant_type.lower() == "auto":
+        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path)
     return precision, quant_type
 
 
@@ -2017,6 +2132,500 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+_VLLM_BLOCK_FP8_TRACE_OPS = (
+    "w8a8_triton_block_scaled_mm",
+    "rocm_aiter_gemm_a8w8_blockscale",
+    "rocm_aiter_triton_gemm_a8w8_blockscale",
+)
+
+
+def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
+    """Return whether vLLM runs the block-scaled FP8 linear kernel path."""
+    return precision == "fp8" and quant_type.strip().lower() in {
+        "blockscale",
+        "block_scale",
+        "a8w8_blockscale",
+        "fp8_blockscale",
+    }
+
+
+def _forge_framework_for_vllm(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    tunableop_input: str,
+) -> str:
+    """Route block-FP8 vLLM to Forge's AITER dense tuner family."""
+    if framework == "vllm" and not tunableop_input and _is_vllm_block_fp8(precision, quant_type):
+        return "vllm-aiter"
+    return framework
+
+
+def _vllm_block_fp8_profile_capture_required(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
+    if (
+        framework != "vllm"
+        or not _is_vllm_block_fp8(precision, quant_type)
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    return not is_multi_node()
+
+
+def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
+    """Extract one (M, N, K) tuple from a profiled block-FP8 linear event."""
+    if not isinstance(event, dict):
+        return None
+    name = str(event.get("name") or "").lower()
+    if not any(marker in name for marker in _VLLM_BLOCK_FP8_TRACE_OPS):
+        return None
+    args = event.get("args")
+    if not isinstance(args, dict):
+        return None
+    dims = args.get("Input Dims") or args.get("Input dims") or args.get("input_shapes")
+    if not isinstance(dims, list) or len(dims) < 2:
+        return None
+    a_dims, b_dims = dims[0], dims[1]
+    if not isinstance(a_dims, list) or not isinstance(b_dims, list) or len(a_dims) < 2 or len(b_dims) < 2:
+        return None
+    try:
+        m = int(a_dims[-2])
+        k = int(a_dims[-1])
+        if int(b_dims[-1]) == k:
+            n = int(b_dims[-2])
+        elif int(b_dims[-2]) == k:
+            n = int(b_dims[-1])
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return (m, n, k) if min(m, n, k) > 0 else None
+
+
+def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+    """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
+    import gzip
+
+    shapes: set[tuple[int, int, int]] = set()
+    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    for path in trace_paths:
+        try:
+            if path.name.endswith(".gz"):
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as stream:
+                    data = json.load(stream)
+            else:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            continue
+        events = data.get("traceEvents") if isinstance(data, dict) else None
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            shape = _trace_event_block_fp8_shape(event)
+            if shape is not None:
+                shapes.add(shape)
+    if not shapes:
+        return "", 0
+    out = capture_dir / "forge_shapes.json"
+    payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
+    try:
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return "", 0
+    return str(out), len(payload)
+
+
+def _vllm_dense_shape_capture_required(
+    *,
+    framework: str,
+    model_path: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether Forge needs an automatic TunableOp recording pass."""
+    if (
+        framework != "vllm"
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        return False
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path)
+    if not summary or bool(summary.get("is_moe")):
+        return False
+    try:
+        hidden_size = int(summary.get("hidden_size") or 0)
+        intermediate_size = int(summary.get("intermediate_size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return hidden_size > 0 and intermediate_size > 0
+
+
+def _pick_shape_capture_port() -> int:
+    """Pick a free local port distinct from the production serving port."""
+    import socket
+
+    for _ in range(5):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port != 8888:
+            return port
+    return 18888
+
+
+def _resolve_shape_capture_port(value: Any) -> int:
+    """Resolve an isolated capture port and reject the production port."""
+    if value in (None, ""):
+        return _pick_shape_capture_port()
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid shape_capture_port: {value!r}") from exc
+    if port <= 0 or port > 65535 or port == 8888:
+        raise ValueError(f"shape_capture_port must be 1..65535 and not 8888: {port}")
+    return port
+
+
+def _is_tunableop_untuned_row(line: str) -> bool:
+    """Recognize a native PyTorch TunableOp offline-input row."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+        return False
+    fields = [field.strip() for field in stripped.split(",")]
+    if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
+        return False
+    dimensions = [int(value) for value in re.findall(r"\d+", fields[1])]
+    return sum(value > 0 for value in dimensions) >= 3
+
+
+def _merge_tunableop_untuned_files(base_path: Path) -> int:
+    """Merge per-device TunableOp recordings into one deterministic input."""
+    rows: list[str] = []
+    seen: set[str] = set()
+    pattern = f"{base_path.stem}*{base_path.suffix}"
+    for path in sorted(base_path.parent.glob(pattern)):
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            row = line.strip()
+            if _is_tunableop_untuned_row(row) and row not in seen:
+                seen.add(row)
+                rows.append(row)
+    if not rows:
+        return 0
+
+    tmp_path = base_path.with_suffix(f"{base_path.suffix}.tmp")
+    try:
+        tmp_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        os.replace(tmp_path, base_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            log.debug(
+                "shape capture: failed to remove temporary TunableOp file %s",
+                tmp_path,
+                exc_info=True,
+            )
+        return 0
+    return len(rows)
+
+
+async def _capture_vllm_tunableop_shapes(
+    *,
+    state: Any,
+    session_dir: Path,
+    payload: dict,
+    workspace: Path,
+) -> HandlerResult:
+    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
+    from ..actions.executors.baseline import BaselineExecutor
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    untuned_base = capture_dir / "tunableop_untuned.csv"
+    results_base = capture_dir / "tunableop_results.csv"
+    profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
+
+    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
+    if not config_path or not Path(config_path).is_file():
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    if profile_mode:
+        try:
+            import yaml
+
+            capture_config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            benchmark_config = capture_config.setdefault("benchmark", {})
+            profiler_config = benchmark_config.setdefault("profiler", {})
+            torch_profiler_config = profiler_config.setdefault("torch_profiler", {})
+            torch_profiler_config["enabled"] = True
+            profile_config_path = capture_dir / "block_fp8_profile_config.yaml"
+            profile_config_path.write_text(
+                yaml.safe_dump(capture_config, sort_keys=False),
+                encoding="utf-8",
+            )
+            config_path = str(profile_config_path)
+        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_failed",
+                "error": f"vLLM block-FP8 profile config failed: {exc}",
+                "shape_capture_workspace": str(capture_dir),
+            }
+
+    current_best = getattr(state, "current_best", None)
+    current_best = current_best if isinstance(current_best, dict) else {}
+    inherited_envs = dict(current_best.get("extra_envs") or {})
+    inherited_envs.update(dict(payload.get("extra_envs") or {}))
+    capture_envs = {
+        str(key): str(value)
+        for key, value in inherited_envs.items()
+        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+    }
+    try:
+        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": str(exc),
+            "shape_capture_workspace": str(capture_dir),
+        }
+    capture_envs.update(
+        {
+            "PORT": str(capture_port),
+            "RUN_EVAL": "false",
+        }
+    )
+    if profile_mode:
+        capture_envs.update(
+            {
+                "VLLM_ROCM_USE_AITER": "1",
+                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            }
+        )
+    else:
+        capture_envs.update(
+            {
+                "HL_TUNABLEOP_MODE": "",
+                "HL_TUNABLEOP_FILE": "",
+                "HL_TUNABLEOP_VERBOSE": "",
+                "PYTORCH_TUNABLEOP_ENABLED": "1",
+                "PYTORCH_TUNABLEOP_TUNING": "0",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
+                "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
+            }
+        )
+    for env_name, state_name in (
+        ("TP", "tp"),
+        ("CONC", "conc"),
+        ("ISL", "isl"),
+        ("OSL", "osl"),
+        ("MAX_MODEL_LEN", "max_model_len"),
+    ):
+        value = payload.get(state_name)
+        if value in (None, ""):
+            value = capture_envs.get(env_name)
+        if value in (None, ""):
+            value = getattr(state, state_name, 0)
+        try:
+            resolved = int(value or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+        if resolved > 0:
+            capture_envs[env_name] = str(resolved)
+
+    try:
+        timeout_sec = int(
+            payload.get("shape_capture_timeout_sec")
+            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
+            or 1800
+        )
+    except (TypeError, ValueError):
+        timeout_sec = 1800
+    timeout_sec = max(60, timeout_sec)
+
+    task_id = f"{str(payload.get('task_id') or workspace.name)}-shape-capture"
+    extra_server_args = (
+        str(payload.get("extra_server_args") or "")
+        if "extra_server_args" in payload
+        else str(current_best.get("extra_server_args") or "")
+    )
+    if profile_mode:
+        if "profiler-config.delay_iterations" not in extra_server_args:
+            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
+        if "torch_profiler_record_shapes" not in extra_server_args:
+            extra_server_args = (
+                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
+            ).strip()
+    inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
+    if isinstance(inherited_unset, str):
+        capture_unset_envs = [inherited_unset]
+    else:
+        capture_unset_envs = [str(key) for key in inherited_unset]
+    capture_unset_envs.extend(
+        [
+            "HL_TUNABLEOP_MODE",
+            "HL_TUNABLEOP_FILE",
+            "HL_TUNABLEOP_VERBOSE",
+            "PYTORCH_TUNABLEOP_ENABLED",
+            "PYTORCH_TUNABLEOP_TUNING",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+            "PYTORCH_TUNABLEOP_FILENAME",
+        ]
+    )
+    inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
+    if isinstance(inherited_remove, str):
+        capture_remove_args = [inherited_remove]
+    else:
+        capture_remove_args = [str(arg) for arg in inherited_remove]
+    capture_remove_args.append("--port")
+    task = Task(
+        task_id=task_id,
+        kind="gemm_shape_capture",
+        state="running",
+        params={
+            "config_path": config_path,
+            "output_dir": str(capture_dir),
+            "timeout_sec": timeout_sec,
+            "framework": "vllm",
+            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+            "extra_server_args": extra_server_args,
+            "extra_envs": capture_envs,
+            "remove_args": capture_remove_args,
+            "unset_envs": capture_unset_envs,
+            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+            "disable_run_eval": True,
+            "baseline_double_run": False,
+        },
+        idempotency_key=f"{task_id}-run",
+    )
+    ctx = RunnerContext(task=task, lease=None)
+    import copy
+
+    capture_state = copy.copy(state)
+    capture_state.baseline_eager_fallback = False
+    ctx.extra = {
+        "shared_state": capture_state,
+        "session_dir": session_dir,
+        "workspace": capture_dir,
+    }
+
+    try:
+        benchmark_result = await BaselineExecutor(
+            session_dir=session_dir,
+            shared_state=capture_state,
+        )(ctx)
+    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture raised {exc!r}",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    if not isinstance(benchmark_result, dict):
+        benchmark_result = {}
+    if profile_mode:
+        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        if benchmark_result.get("status") == "succeeded" and shape_count > 0:
+            return {
+                "status": "ok",
+                "shapes_json": shapes_json,
+                "shape_capture_workspace": str(capture_dir),
+                "shape_count": shape_count,
+                "capture_mode": "block_fp8_profile",
+            }
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM block-FP8 profile capture produced no structured GEMM shapes{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": shape_count,
+            "capture_mode": "block_fp8_profile",
+        }
+
+    row_count = _merge_tunableop_untuned_files(untuned_base)
+    if benchmark_result.get("status") != "succeeded" or row_count == 0:
+        try:
+            untuned_base.unlink(missing_ok=True)
+        except OSError:
+            log.debug(
+                "shape capture: failed to remove incomplete TunableOp recording %s",
+                untuned_base,
+                exc_info=True,
+            )
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture produced no complete workload recording{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": row_count,
+        }
+
+    return {
+        "status": "ok",
+        "tunableop_input": str(untuned_base),
+        "shape_capture_workspace": str(capture_dir),
+        "shape_count": row_count,
+    }
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -2084,11 +2693,61 @@ async def _run_forge_gemm_tuning(
     if not untuned_csv and not shapes_json:
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
+    tunableop_input = str(payload.get("tunableop_input") or "").strip()
+    forge_framework = _forge_framework_for_vllm(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        tunableop_input=tunableop_input,
+    )
+    shape_capture: HandlerResult | None = None
+    block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    )
+    tunableop_capture = _vllm_dense_shape_capture_required(
+        framework=framework,
+        model_path=model_path,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    ) and not block_fp8_profile_capture
+    if block_fp8_profile_capture or tunableop_capture:
+        capture_payload = dict(payload)
+        if block_fp8_profile_capture:
+            capture_payload["_shape_capture_mode"] = "block_fp8_profile"
+        shape_capture = await _capture_vllm_tunableop_shapes(
+            state=state,
+            session_dir=session_dir,
+            payload=capture_payload,
+            workspace=workspace,
+        )
+        if shape_capture.get("status") != "ok":
+            shape_capture.setdefault("backend", "forge")
+            shape_capture.setdefault("engine", "forge")
+            shape_capture.setdefault("workspace", str(workspace))
+            shape_capture.setdefault("precision", precision)
+            shape_capture.setdefault("framework", framework)
+            shape_capture.setdefault("model_path", model_path)
+            return shape_capture
+        tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
+        captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
+        if captured_shapes:
+            shapes_json = captured_shapes
+            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
+            # profile capture is workload-matched and must supersede any stale
+            # specialist CSV resolved before the capture pass.
+            untuned_csv = ""
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
         "model_path": model_path,
-        "framework": framework,
+        "framework": forge_framework,
         "precision": precision,
         "quant_type": quant_type,
         "gpu_type": gpu_type,
@@ -2103,7 +2762,7 @@ async def _run_forge_gemm_tuning(
         "tokens": tokens,
         "untuned_csv": untuned_csv,
         "shapes_json": shapes_json,
-        "tunableop_input": str(payload.get("tunableop_input") or ""),
+        "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
@@ -2117,6 +2776,9 @@ async def _run_forge_gemm_tuning(
         "--input-json",
         str(input_json),
     ]
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
 
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
@@ -2138,7 +2800,20 @@ async def _run_forge_gemm_tuning(
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
+    result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
+    if shape_capture is not None:
+        result.setdefault(
+            "shape_capture",
+            {
+                "status": "ok",
+                "workspace": shape_capture.get("shape_capture_workspace"),
+                "tunableop_input": tunableop_input,
+                "shapes_json": shapes_json,
+                "shape_count": shape_capture.get("shape_count"),
+                "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+            },
+        )
 
     # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
     # result.json and derive a top-level skip_reason.
@@ -2244,6 +2919,7 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
+        "env": {"E2E_METRIC": "output"},
     }
     if geak_config:
         input_payload["config"] = geak_config
@@ -2269,6 +2945,8 @@ async def _run_geak_gemm_tuning(
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
     cmd = [
+        "env",
+        "E2E_METRIC=output",
         "python3",
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",
@@ -2316,12 +2994,33 @@ async def run_gemm_tuning_handler(
     """
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 start recording failed", exc_info=True)
 
     if backend == "forge":
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
     else:
         result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    result.setdefault("task_id", payload.get("task_id"))
+    result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+            result=result,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 result recording failed", exc_info=True)
     return result
 
 
@@ -3017,6 +3716,14 @@ async def run_optimization_handler(
                 single_payload.get("kernel_id"),
                 candidates,
             )
+            # Preserve the selected candidate itself: it may carry a task_group
+            # that does not exist on the raw hot-kernel row reloaded by the
+            # kernel_optimization subprocess.
+            single_payload["candidate"] = candidates[0]
+            single_payload.setdefault(
+                "source_file",
+                candidates[0].get("source_file"),
+            )
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
             canon = _resolve_candidate_id(
@@ -3038,7 +3745,15 @@ async def run_optimization_handler(
                     ),
                 }
         single_payload["_single_kernel"] = True
-        return await _run_optimization_single(single_payload, session_dir=session_dir)
+        result = await _run_optimization_single(
+            single_payload,
+            session_dir=session_dir,
+        )
+        return _stamp_task_group_result(
+            result,
+            candidates[0] if candidates else None,
+            fallback_kernel_id=str(single_payload.get("kernel_id") or ""),
+        )
     return await _run_optimization_batch(
         payload,
         candidates,
@@ -3420,6 +4135,7 @@ def _batch_kernel_candidates(
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
+    attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
         _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
@@ -3444,6 +4160,7 @@ def _batch_kernel_candidates(
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
             attempts_by_kid = dict(state.kernel_opt_attempts or {})
+            attempts_by_task = dict(state.kernel_opt_task_attempts or {})
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
             log.exception(
@@ -3451,7 +4168,26 @@ def _batch_kernel_candidates(
                 session_dir,
             )
 
-    def _is_live(kid: str, current_source: str = "") -> bool:
+    def _entry_allows_dispatch(
+        entry: dict[str, Any],
+        current_source: str,
+    ) -> bool:
+        """Apply retry and terminal-state rules to one persisted task ledger."""
+        if str(entry.get("last_decision") or "").upper() in {"KEEP", "REVERT"}:
+            return False
+        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
+        if current_source:
+            per_source = entry.get("attempts_per_source")
+            if isinstance(per_source, dict):
+                src_attempts = int(per_source.get(current_source, 0))
+                return src_attempts < attempt_cap
+        return int(entry.get("attempts", 0)) < attempt_cap
+
+    def _is_live(
+        kid: str,
+        current_source: str = "",
+        current_task_group_key: str = "",
+    ) -> bool:
         """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (per-source counting).
 
         Args:
@@ -3461,18 +4197,29 @@ def _batch_kernel_candidates(
         Returns:
             ``True`` when the kernel is batch-eligible, else ``False``.
         """
-        if kid in rejected_kernel_ids:
-            return False
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
-        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
-        if current_source:
-            per_source = entry.get("attempts_per_source")
-            if isinstance(per_source, dict):
-                src_attempts = int(per_source.get(current_source, 0))
-                return src_attempts < attempt_cap
-        if int(entry.get("attempts", 0)) >= attempt_cap:
+        recorded_group_key = str(entry.get("task_group_key") or "")
+        if (
+            current_task_group_key
+            and recorded_group_key
+            and recorded_group_key != current_task_group_key
+        ):
+            return True
+        recorded_source = str(entry.get("last_source_file") or "")
+        same_source = (
+            not current_source
+            or not recorded_source
+            or recorded_source == current_source
+        )
+        if (
+            kid in rejected_kernel_ids
+            and same_source
+            and not (current_task_group_key and not recorded_group_key)
+        ):
+            return False
+        if not _entry_allows_dispatch(entry, current_source):
             return False
         return True
 
@@ -3495,33 +4242,122 @@ def _batch_kernel_candidates(
             continue
         # Mark all members so the legacy loop never re-picks them.
         grouped_kernel_ids.update(member_ids)
-        # Only reusable_native members survive; fall back to the next live one
-        # when the primary is rejected, else skip the group.
+        group_id = str(group.get("task_group_id") or "")
+        group_key = str(group.get("task_group_key") or "")
+        group_key_aliases = {
+            group_key,
+            *[
+                str(alias)
+                for alias in (group.get("legacy_task_group_keys") or [])
+                if str(alias)
+            ],
+        }
+        group_key_aliases.discard("")
         primary = str(group.get("primary_kernel_id") or "")
-        primary_cand = kernel_by_id.get(primary)
-        primary_live = (
-            primary_cand is not None
-            and primary_cand.get("reusable_native_kernel") is True
-            and bool(primary_cand.get("source_file"))
-            and _is_live(primary, str(primary_cand.get("source_file") or ""))
+        if any(member_id in in_flight for member_id in member_ids):
+            for member_id in member_ids:
+                skipped.setdefault(member_id, "group_in_flight")
+            continue
+
+        # Once the merged task has a ledger entry, retry or retire that task as
+        # one unit. Never rotate to an untouched sibling shape.
+        recorded_ledger = next(
+            (
+                (ledger_id, entry)
+                for ledger_id, entry in {
+                    **attempts_by_kid,
+                    **attempts_by_task,
+                }.items()
+                if isinstance(entry, dict)
+                and (
+                    (
+                        group_key
+                        and (
+                            str(entry.get("stable_task_key") or "")
+                            == group_key
+                            or str(entry.get("task_group_key") or "")
+                            == group_key
+                            or str(entry.get("stable_task_key") or "")
+                            in group_key_aliases
+                            or str(entry.get("task_group_key") or "")
+                            in group_key_aliases
+                        )
+                    )
+                    or (
+                        not group_key
+                        and ledger_id in member_ids
+                        and group_id
+                        and str(entry.get("task_group_id") or "") == group_id
+                    )
+                )
+            ),
+            None,
         )
-        if not primary_live:
-            primary_cand = next(
+        if recorded_ledger is not None:
+            _recorded_member_id, recorded_entry = recorded_ledger
+            recorded_candidate = kernel_by_id.get(primary) or next(
                 (
-                    kernel_by_id[m]
-                    for m in member_ids
-                    if m in kernel_by_id
-                    and kernel_by_id[m].get("reusable_native_kernel") is True
-                    and kernel_by_id[m].get("source_file")
-                    and _is_live(m, str(kernel_by_id[m].get("source_file") or ""))
+                    kernel_by_id[member_id]
+                    for member_id in member_ids
+                    if member_id in kernel_by_id
+                    and kernel_by_id[member_id].get("reusable_native_kernel")
+                    is True
+                    and kernel_by_id[member_id].get("source_file")
                 ),
                 None,
             )
-            if primary_cand is None:
-                # Every reusable member exhausted -> nothing to dispatch.
-                for m in member_ids:
-                    skipped.setdefault(m, "group_exhausted")
+            recorded_live = (
+                recorded_candidate is not None
+                and recorded_candidate.get("reusable_native_kernel") is True
+                and bool(recorded_candidate.get("source_file"))
+                and _entry_allows_dispatch(
+                    recorded_entry,
+                    str(recorded_candidate.get("source_file") or ""),
+                )
+            )
+            if not recorded_live:
+                for member_id in member_ids:
+                    skipped.setdefault(member_id, "group_task_complete")
                 continue
+            primary_cand = recorded_candidate
+        else:
+            primary_cand = None
+
+        # Only reusable_native members survive; fall back to the next live one
+        # when the primary is rejected, else skip the group.
+        if primary_cand is None:
+            primary_cand = kernel_by_id.get(primary)
+            primary_live = (
+                primary_cand is not None
+                and primary_cand.get("reusable_native_kernel") is True
+                and bool(primary_cand.get("source_file"))
+                and _is_live(
+                    primary,
+                    str(primary_cand.get("source_file") or ""),
+                    group_key,
+                )
+            )
+            if not primary_live:
+                primary_cand = next(
+                    (
+                        kernel_by_id[m]
+                        for m in member_ids
+                        if m in kernel_by_id
+                        and kernel_by_id[m].get("reusable_native_kernel") is True
+                        and kernel_by_id[m].get("source_file")
+                        and _is_live(
+                            m,
+                            str(kernel_by_id[m].get("source_file") or ""),
+                            group_key,
+                        )
+                    ),
+                    None,
+                )
+                if primary_cand is None:
+                    # Every reusable member exhausted -> nothing to dispatch.
+                    for m in member_ids:
+                        skipped.setdefault(m, "group_exhausted")
+                    continue
         if not primary_cand.get("source_file"):
             continue
         try:
@@ -3713,6 +4549,60 @@ async def _run_backend_ladder(
     return best, attempts
 
 
+def _stamp_task_group_result(
+    result: HandlerResult,
+    candidate: dict[str, Any] | None,
+    *,
+    fallback_kernel_id: str = "",
+) -> HandlerResult:
+    """Attach task-group identity to every single or batched result path."""
+    if not isinstance(result, dict) or not isinstance(candidate, dict):
+        return result
+    task_group = candidate.get("task_group")
+    if not isinstance(task_group, dict):
+        return result
+
+    stamped = dict(result)
+    stamped.setdefault("task_group_id", str(task_group.get("task_group_id") or ""))
+    stamped.setdefault("task_group_key", str(task_group.get("task_group_key") or ""))
+    stamped.setdefault(
+        "identity_route",
+        str(task_group.get("identity_route") or ""),
+    )
+    stamped.setdefault(
+        "operator_identity",
+        dict(task_group.get("operator_identity") or {}),
+    )
+    stamped.setdefault(
+        "legacy_task_group_keys",
+        [
+            str(item)
+            for item in (task_group.get("legacy_task_group_keys") or [])
+            if str(item)
+        ],
+    )
+    stamped.setdefault(
+        "task_group_kernel_ids",
+        [str(item) for item in (task_group.get("kernel_ids") or []) if str(item)],
+    )
+    stamped.setdefault(
+        "task_group_primary_kernel_id",
+        str(task_group.get("primary_kernel_id") or candidate.get("kernel_id") or fallback_kernel_id),
+    )
+    shape_cases = task_group.get("shape_cases")
+    if isinstance(shape_cases, list):
+        stamped.setdefault("task_group_shape_case_count", len(shape_cases))
+        stamped.setdefault(
+            "task_group_shape_case_ids",
+            [
+                str(case.get("case_id") or "")
+                for case in shape_cases
+                if isinstance(case, dict) and str(case.get("case_id") or "")
+            ],
+        )
+    return stamped
+
+
 async def _run_kernel_backend_sequence(
     base_payload: dict,
     candidate: dict[str, Any],
@@ -3756,6 +4646,11 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
+    best = _stamp_task_group_result(
+        best,
+        candidate,
+        fallback_kernel_id=kernel_id,
+    )
     # Preserve source_file so the streaming callback can group by file.
     if not best.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
@@ -3846,6 +4741,11 @@ async def _run_optimization_batch(
         # KEEPs on one file (defensive; the sequence already preserves it).
         if isinstance(result, dict) and not result.get("source_file") and cand_src:
             result["source_file"] = cand_src
+        result = _stamp_task_group_result(
+            result,
+            candidate,
+            fallback_kernel_id=cand_kid,
+        )
         if record_partial is not None:
             try:
                 record_partial(result)
@@ -3873,6 +4773,12 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_result(session_dir, result=out)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 batch-result recording failed", exc_info=True)
     return out
 
 
@@ -3954,6 +4860,38 @@ async def _run_optimization_single(
         "--workspace-path",
         workspace_path,
     ]
+    candidate_payload = payload.get("candidate")
+    if isinstance(candidate_payload, dict):
+        task_group = candidate_payload.get("task_group")
+        group_id = (
+            str(task_group.get("task_group_id") or "")
+            if isinstance(task_group, dict)
+            else ""
+        )
+        identity = group_id or str(candidate_payload.get("kernel_id") or kernel_id)
+        safe_identity = re.sub(r"[^A-Za-z0-9._-]+", "_", identity).strip("._-") or "candidate"
+        candidate_json_path = (
+            Path(workspace_path)
+            / "kernel-agent"
+            / "runs"
+            / str(payload.get("session_id") or session_dir.name)
+            / "inputs"
+            / f"candidate_{safe_identity}.json"
+        )
+        try:
+            candidate_json_path.parent.mkdir(parents=True, exist_ok=True)
+            candidate_json_path.write_text(
+                json.dumps(candidate_payload, indent=2, sort_keys=True, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            cmd += ["--candidate-json", str(candidate_json_path)]
+        except OSError as exc:
+            log.warning(
+                "could not persist grouped candidate input %s: %s",
+                candidate_json_path,
+                exc,
+            )
     backends_arg = _backends_cli_arg(payload.get("backends"))
     if backends_arg:
         cmd += ["--backends", backends_arg]
@@ -4006,6 +4944,29 @@ async def _run_optimization_single(
         await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_start(
+            session_dir,
+            payload={
+                "kernel_id": str(kernel_id),
+                "backend": backends_arg,
+                "source_file": payload.get("source_file"),
+            },
+        )
+        instrument.record_kernel_dispatch(
+            session_dir,
+            kernel_id=str(kernel_id),
+            dispatched=True,
+            backends=[value for value in backends_arg.split(",") if value],
+            task_group=(payload.get("candidate") or {}).get("task_group")
+            if isinstance(payload.get("candidate"), dict)
+            else None,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 start recording failed", exc_info=True)
+
+    try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
@@ -4035,12 +4996,28 @@ async def _run_optimization_single(
             and not result.get("attempts")
         ):
             result["backend"] = dispatched_backend
+        result = _stamp_task_group_result(
+            result,
+            candidate_payload if isinstance(candidate_payload, dict) else None,
+            fallback_kernel_id=str(kernel_id),
+        )
     # Full-trace: mine each forge attempt's stdout for token usage and append an
     # ``llm_calls.jsonl`` row. Best-effort; no-op without a usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
     # Full-trace: record each forge attempt's key-step timeline as a forge_steps
     # audit. Best-effort; no-op without a step marker.
     _trace_kernel_attempt_steps(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_backend_result(
+            session_dir,
+            result,
+            route_strategy="kernel_agent_forge",
+        )
+        instrument.record_native_kernel_run_result(session_dir, result=result)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 result recording failed", exc_info=True)
     return result
 
 
@@ -4298,6 +5275,100 @@ def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     return ""
 
 
+def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
+    """Best-effort orphaned-lock sweep immediately before an integrate boot."""
+    from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+    try:
+        stats = sweep_stale_aiter_locks_if_dead()
+    except Exception as exc:  # noqa: BLE001 - cache hygiene must not hide benchmark results
+        log.warning("integrate_handler: aiter lock sweep failed before %s: %r", reason, exc)
+        return {"errors": 1, "exception": repr(exc)}
+    if stats.get("skipped_live"):
+        log.info(
+            "integrate_handler: aiter lock sweep skipped before %s; a compiler is alive",
+            reason,
+        )
+    elif stats.get("deleted"):
+        log.warning(
+            "integrate_handler: reaped %d orphaned aiter lock(s) across %s before %s",
+            stats.get("deleted"),
+            stats.get("dirs") or [stats.get("dir")],
+            reason,
+        )
+    return stats
+
+
+async def _run_integrate_rebaseline_with_lock_retry(
+    executor: Any,
+    ctx: Any,
+    *,
+    workspace: Path,
+    reason: str,
+) -> dict[str, Any]:
+    """Run one integrate baseline and retry once after a confirmed baton stall."""
+    from ..actions.executors._aiter_jit import find_aiter_baton_wait
+
+    prelaunch_sweep = _sweep_integrate_aiter_locks(reason=reason)
+    first_started_unix = time.time()
+    result = await executor(ctx)
+    if not isinstance(result, dict) or result.get("status") == "succeeded":
+        return result
+
+    evidence = find_aiter_baton_wait(
+        workspace,
+        since_unix=first_started_unix - 1.0,
+    )
+    if evidence is None:
+        return result
+
+    cleanup = _sweep_integrate_aiter_locks(reason=f"{reason} stale-lock retry")
+    result["error_class"] = "stale_jit_lock"
+    result["stale_jit_lock"] = {
+        "evidence": evidence,
+        "prelaunch_sweep": prelaunch_sweep,
+        "post_failure_sweep": cleanup,
+        "retry_attempted": False,
+    }
+
+    # A live compiler may legitimately own the observed lock. When liveness is
+    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
+    # at least one deletion or after confirming the lock disappeared.
+    cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
+    lock_removed = bool(cleanup.get("deleted")) or (
+        cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh")
+    )
+    if not (cleanup_safe and lock_removed):
+        return result
+
+    log.warning(
+        "integrate_handler: classified %s as stale_jit_lock; retrying once after cleanup",
+        reason,
+    )
+    retry_started_unix = time.time()
+    retry_result = await executor(ctx)
+    if not isinstance(retry_result, dict):
+        return retry_result
+    retry_evidence = (
+        find_aiter_baton_wait(
+            workspace,
+            since_unix=retry_started_unix - 1.0,
+        )
+        if retry_result.get("status") != "succeeded"
+        else None
+    )
+    retry_result["stale_jit_lock_retry"] = {
+        "evidence": evidence,
+        "cleanup": cleanup,
+        "retry_attempted": True,
+        "retry_succeeded": retry_result.get("status") == "succeeded",
+    }
+    if retry_evidence is not None:
+        retry_result["error_class"] = "stale_jit_lock"
+        retry_result["stale_jit_lock_retry"]["retry_evidence"] = retry_evidence
+    return retry_result
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -4442,6 +5513,11 @@ async def integrate_handler(
     # stops a double restart; force_full_restart scopes the resume override here.
     from ..actions.executors._multi_node_env import is_multi_node
 
+    # This must run even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
+
     if is_multi_node():
         from ..actions.executors._multi_node_server_lifecycle import (
             ServerRestartFailed,
@@ -4473,7 +5549,12 @@ async def integrate_handler(
             }
 
     try:
-        bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
+        bench_result = await _run_integrate_rebaseline_with_lock_retry(
+            BaselineExecutor(session_dir=session_dir),
+            ctx,
+            workspace=workspace,
+            reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
+        )
     except Exception as exc:  # noqa: BLE001
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
@@ -4614,7 +5695,12 @@ async def integrate_handler(
                 },
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )
-            paired_bench = await BaselineExecutor(session_dir=session_dir)(RunnerContext(task=paired_task, lease=None))
+            paired_bench = await _run_integrate_rebaseline_with_lock_retry(
+                BaselineExecutor(session_dir=session_dir),
+                RunnerContext(task=paired_task, lease=None),
+                workspace=paired_ws,
+                reason=f"integrate {kernel_id or 'anonymous'} paired pristine baseline",
+            )
             if is_valid_measurement(paired_bench):
                 paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
                 paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
@@ -4689,6 +5775,9 @@ async def integrate_handler(
         "apply_result": apply_result,
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
+        "task_group_key": str(payload.get("task_group_key") or ""),
+        "identity_route": str(payload.get("identity_route") or ""),
+        "integration_id": str(payload.get("integration_id") or ""),
     }
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"
@@ -4702,6 +5791,24 @@ async def integrate_handler(
         result["paired_ab"] = paired_ab
         if paired_ab.get("confirmed") is False:
             result["decision_reason"] = "paired_ab_disconfirmed"
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_e2e(
+            session_dir,
+            kernel_id=str(kernel_id or ""),
+            integrated=decision == "KEEP",
+            e2e_gain_pct=gain_pct,
+            validated=True if decision == "KEEP" else False,
+            decision=decision,
+            patch_path=str(patch_path or "") or None,
+            target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
+            extra_server_args=extra_args,
+            result=result,
+            validation_tier="integrate_e2e",
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("kernel integrate v4 result recording failed", exc_info=True)
     return result
 
 

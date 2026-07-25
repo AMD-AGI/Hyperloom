@@ -32,14 +32,37 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _wait_for_cmdline_marker(pid: int, marker: str, timeout: float = 5.0) -> None:
+    """Block until ``/proc/<pid>/cmdline`` contains ``marker``.
+
+    ``subprocess.Popen`` returns as soon as the child is forked, but the reaper
+    matches on ``/proc/<pid>/cmdline`` which stays empty until the child has
+    finished ``exec``-ing the interpreter. Polling here removes that race so the
+    reaper deterministically sees a server-looking cmdline.
+    """
+    deadline = time.time() + timeout
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    while time.time() < deadline:
+        try:
+            raw = proc_cmdline.read_bytes()
+        except OSError:
+            raw = b""
+        if marker.encode() in raw:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"pid {pid} cmdline never contained {marker!r}")
+
+
 def _spawn_marker_process(marker: str) -> subprocess.Popen:
     """Spawn a long-lived child whose argv contains ``marker`` (cmdline match)."""
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, "-c", f"import time,sys; _={marker!r}; time.sleep(120)"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _wait_for_cmdline_marker(proc.pid, marker)
+    return proc
 
 
 def _write_pidfile(session_dir: Path, tag: str, pid: int) -> Path:

@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(mn_state_sentinel))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
@@ -133,6 +132,49 @@ def git_commit_all(path: Path, message: str) -> None:
         capture_output=True,
         env=env,
     )
+
+
+class _BuildFakeCoordinator:
+    """Minimal coordinator surface for off-loop targeted-build tests.
+
+    Wires a real ``TaskRegistry`` + ``ResourceLockManager`` + ``SharedState``
+    against a temp SQLite DB so the build pump/reaper can run without a full
+    Coordinator.
+    """
+
+    def __init__(self, session_dir: Path, db) -> None:
+        from hyperloom.orchestrator.bus.resource_lock import (
+            ResourceLockManager,
+            SqliteLeaseBackend,
+        )
+        from hyperloom.orchestrator.state.shared_state import SharedState
+        from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+        self.session_dir = session_dir
+        self.tasks = TaskRegistry(db)
+        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
+        self.shared_state = SharedState()
+
+
+@pytest.fixture
+def build_coord(tmp_path):
+    """Fake coordinator backed by a temp DB for targeted-build lifecycle tests."""
+    from hyperloom.orchestrator.bus.storage import SqliteConnection
+    from hyperloom.orchestrator.bus.storage.schema import ensure_schema
+
+    db = SqliteConnection(tmp_path / "coordinator.db")
+    ensure_schema(db.raw)
+    fc = _BuildFakeCoordinator(tmp_path, db)
+    yield fc
+    db.close()
+
+
+@pytest.fixture
+def build_lifecycle(build_coord):
+    """``BuildLifecycleCollaborator`` bound to the ``build_coord`` fixture."""
+    from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
+
+    return BuildLifecycleCollaborator(build_coord)
 
 
 def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:

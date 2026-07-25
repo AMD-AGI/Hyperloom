@@ -561,7 +561,10 @@ async def test_options_includes_system_prompt_and_max_turns():
     )
     with pytest.raises(NoIntentEmitted):
         await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    assert captured["options_kwargs"]["max_turns"] == 3
+    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode:
+    # Claude Code counts its own messages as turns, so a literal max_turns=3
+    # would trip before the model can emit an intent.
+    assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
     # Output instructions appended to prompt

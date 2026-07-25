@@ -55,9 +55,8 @@ Per-phase orientation:
   the phase hint.
 - **CLOSE**: typical proposals are `report`, `session_breakdown`.
 
-Note: phase interleave is disabled by policy. EXPLORE and KERNEL keep strict
-per-phase action contracts; the phase contract block in §5 reflects the active
-proposable set.
+Note: EXPLORE and KERNEL keep strict per-phase action contracts; the phase
+contract block in §5 reflects the active proposable set.
 
 A patch that mutates kernel source mid-EXPLORE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is

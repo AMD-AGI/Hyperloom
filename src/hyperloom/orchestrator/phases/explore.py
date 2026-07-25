@@ -5,6 +5,7 @@
 tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations
+from hashlib import sha1
 import logging as _logging
 import os
 import time
@@ -190,6 +191,68 @@ class ExplorePhase(PhaseHandler):
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
         return "\n".join(lines)
 
+    def _cycle_directive_fallback(self) -> str:
+        """Render a deterministic cycle focus from ``_plan_cycle_focus``.
+
+        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
+        """
+        try:
+            planned = self._plan_cycle_focus()
+        except Exception:  # noqa: BLE001 — fallback must never raise
+            return ""
+        focus = str(planned.get("focus") or "").strip()
+        if not focus:
+            return ""
+        parts = [f"focus={focus}"]
+        rationale = str(planned.get("rationale") or "").strip()
+        if rationale:
+            parts.append(rationale)
+        bottleneck = str(planned.get("bottleneck_at_start") or "").strip()
+        if bottleneck:
+            parts.append(f"bottleneck={bottleneck}")
+        saturated = planned.get("saturated_at_start") or []
+        if saturated:
+            parts.append(f"deprioritize saturated={list(saturated)}")
+        return "; ".join(parts)
+
+    def _reseed_orch_prompt_for_cycle(self) -> bool:
+        """Rebuild the orchestration system prompt for the new macro-cycle.
+
+        Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
+        records the directive in the ``cycle_directive_history`` ring. Skips a
+        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        """
+        if getattr(self, "_orch_prompt_is_user_supplied", False):
+            return False
+        rebuild = getattr(self, "_rebuild_orch_prompt", None)
+        if rebuild is None:
+            return False
+        state = self.shared_state
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
+        source = "llm"
+        if not directive:
+            directive = self._cycle_directive_fallback()
+            source = "deterministic"
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        overrides = getattr(self, "system_prompt_overrides", None)
+        if not isinstance(overrides, dict):
+            return False
+        overrides["orchestration"] = new_prompt
+        history = list(getattr(state, "cycle_directive_history", []) or [])
+        history.append(
+            {
+                "cycle": cycle,
+                "directive": directive,
+                "source": source,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        state.cycle_directive_history = history[-10:]
+        return True
+
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
@@ -223,20 +286,11 @@ class ExplorePhase(PhaseHandler):
             state.gain_at_cycle_start = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
         except (TypeError, ValueError):
             state.gain_at_cycle_start = 0.0
-        # Reset per-cycle counters (fresh plateau/dispatch budget for the cycle).
+        # Reset per-cycle counters.
         try:
-            state.reset_specialist_dispatched()
-            state.reset_explore_plateau_proxy()
+            state.reset_per_cycle_plateau_state()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK for the new cycle; preserved batches/progress rows
-        # keep already-tested PRs skipped.
-        state.framework_agent_phase_done = False
-        state.framework_agent_discover_failures = 0
-        # Reset the config-exploration guard so each macro-cycle re-runs the lane.
-        state.framework_config_lane_state = ""
-        state.framework_config_lane_round = 0
-        state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
         # consecutive-no-keep plateau gate ignores the prior cycle's trailing
         # no-KEEP streak.
@@ -262,10 +316,6 @@ class ExplorePhase(PhaseHandler):
                 )
         except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
             log.exception("Coordinator: framework_agent cycle_boundary marker append failed")
-        # Clear the per-cycle SWEEP completion markers so the next cycle's SWEEP
-        # runs a fresh sweep instead of exiting on a stale status.
-        state.last_sweep = {}
-        state.last_conc_sweep = {}
         try:
             self._record_cycle_strategy_for_current_cycle()
         except Exception:  # noqa: BLE001 — focus is advisory only
@@ -306,7 +356,8 @@ class ExplorePhase(PhaseHandler):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory and reset.
+        # 1) Compact the cycle's conversation into durable memory, re-focus the
+        # orchestration prompt for the new cycle, then reset.
         try:
             compacted = await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
@@ -314,6 +365,10 @@ class ExplorePhase(PhaseHandler):
                 force=True,
             )
             summary["memory_compacted"] = bool(compacted)
+            try:
+                summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
+            except Exception:  # noqa: BLE001 — reseed is best-effort
+                log.exception("cycle soft-restart: orchestration prompt reseed failed")
             # Reset unconditionally so a no-op checkpoint still reseeds next turn.
             self._reset_orchestration_conversation()
             summary["conversation_reset"] = True
@@ -513,12 +568,14 @@ class ExplorePhase(PhaseHandler):
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        for idx, hint in enumerate(hints):
+        for hint in hints:
             what = str(hint.get("what") or "").strip()
-            if not what:
+            source = str(hint.get("source") or "").strip()
+            if not what or not source:
                 continue
             tags = hint.get("domain_tags") or []
-            cid = f"gap.research_hint.{idx}"
+            key = f"{what.lower()}::{source.lower()}"
+            cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
             try:
                 self.shared_state.upsert_gap(
                     {
@@ -1507,8 +1564,25 @@ class ExplorePhase(PhaseHandler):
         patches = done_payload.get("patches_written") or []
         if isinstance(patches, list) and patches:
             return
-        config_changes = _framework_config_levers_from_done(done_payload)
-        if not config_changes:
+        config_levers = _framework_config_levers_from_done(done_payload)
+        is_enablement = bool(spec_params.get("enablement"))
+        build_request = done_payload.get("needs_targeted_build")
+        if (
+            is_enablement
+            and isinstance(build_request, dict)
+            and build_request
+            and not config_levers
+            and not done_payload.get("setup_commands")
+            and not done_payload.get("artifacts_written")
+        ):
+            return
+        # Normally route only when there are config levers to test. For an
+        # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
+        # integrate_patch owns the enablement stall accounting, so an enablement
+        # round must reach it to bump ``enablement_stall_streak`` / clear
+        # ``enablement_dispatched`` and eventually fire ``enablement_stalled``.
+        # Non-enablement config deliverables keep the strict "levers required" gate.
+        if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()
         if not sid:
@@ -1537,7 +1611,8 @@ class ExplorePhase(PhaseHandler):
             "specialist_task_id": sid,
             "provenance": "specialist",
             "patch_name": patch_name,
-            "config_changes": dict(config_changes),
+            "extra_server_args": str(config_levers.get("extra_server_args") or ""),
+            "extra_envs": dict(config_levers.get("extra_envs") or {}),
         }
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
@@ -1547,6 +1622,39 @@ class ExplorePhase(PhaseHandler):
             integrate_params["framework_agent_candidate_id"] = fa_cand
         if fa_batch:
             integrate_params["framework_batch_id"] = fa_batch
+        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
+        # config-lever-only enablement deliverable MUST still flow the enablement
+        # marker + setup_commands into integrate_patch, otherwise the result never
+        # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
+        # ``enablement_dispatched`` stays stuck ``True`` forever — the run then
+        # cannot reach ``enablement_stalled`` and spins until wall-clock. See
+        # framework.py::_maybe_rearm_enablement.
+        if bool(spec_params.get("enablement")):
+            integrate_params["enablement"] = True
+            probe = str(spec_params.get("launch_probe") or "").strip()
+            if probe:
+                integrate_params["launch_probe"] = probe
+            before_sig = spec_params.get("enablement_before_signature")
+            if isinstance(before_sig, dict):
+                integrate_params["enablement_before_signature"] = before_sig
+            base_patches = spec_params.get("enablement_base_patches")
+            if isinstance(base_patches, list) and base_patches:
+                integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+            # Merge the stacked base setup commands with any NEW setup_commands the
+            # specialist just proposed in this deliverable (e.g. a stack upgrade),
+            # so a config-lever-only enablement round actually replays the install
+            # step before booting instead of silently dropping it.
+            merged_setup: list[str] = []
+            for c in spec_params.get("enablement_setup_commands") or []:
+                sc = str(c)
+                if sc and sc not in merged_setup:
+                    merged_setup.append(sc)
+            for c in done_payload.get("setup_commands") or []:
+                sc = str(c)
+                if sc and sc not in merged_setup:
+                    merged_setup.append(sc)
+            if merged_setup:
+                integrate_params["enablement_setup_commands"] = merged_setup
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",
@@ -1576,13 +1684,15 @@ class ExplorePhase(PhaseHandler):
                 "specialist_task_id": sid,
                 "proposal_msg_id": msg.msg_id,
                 "candidate_id": fa_cand,
-                "config_changes": dict(config_changes),
+                "extra_server_args": integrate_params["extra_server_args"],
+                "extra_envs": dict(integrate_params["extra_envs"]),
             },
         )
         log.info(
-            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s keys=%s",
+            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
             fa_cand or sid,
-            sorted(config_changes.keys()),
+            integrate_params["extra_server_args"],
+            sorted(integrate_params["extra_envs"]),
         )
         try:
             self.shared_state.save(self.session_dir)

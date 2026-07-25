@@ -32,20 +32,23 @@ class PrimusCortexError(RuntimeError):
 
 
 def _normalise_base_url(base_url: str) -> str:
-    """Trim trailing slash on the configured base URL.
+    """Trim trailing slash and optional API-version suffix on the base URL.
 
     Args:
         base_url (str): The configured primus_cortex base URL.
 
     Returns:
-        str: The base URL with any trailing slash removed.
+        str: The service root URL with any trailing slash or trailing ``/v1`` removed.
 
     Raises:
         PrimusCortexError: If ``base_url`` is empty.
     """
     if not base_url:
         raise PrimusCortexError("primus_cortex.base_url is empty")
-    return base_url.rstrip("/")
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base
 
 
 def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) -> str:
@@ -155,13 +158,23 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
     """
     if not isinstance(item, dict):
         raise PrimusCortexError(f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}")
+    # ``/v1/search/prs`` returns match records shaped as
+    # ``{"summary": {...pr fields...}, "matched_field": ..., "snippet": ...}``.
+    # Normalise them to the same payload shape as the list endpoint.
+    summary = item.get("summary")
+    if isinstance(summary, dict):
+        item = summary
     number = item.get("number")
     if not isinstance(number, int):
         raise PrimusCortexError(f"primus_cortex item at {source_url} has non-int 'number': {number!r}")
+    html_url = str(item.get("html_url") or item.get("url") or "")
+    repo_name = str(item.get("repo_name") or item.get("repository") or "").strip()
+    if not html_url and repo_name:
+        html_url = f"https://github.com/{repo_name}/pull/{number}"
     return GitHubPr(
         number=number,
         title=str(item.get("title") or ""),
-        html_url=str(item.get("html_url") or item.get("url") or ""),
+        html_url=html_url,
     )
 
 
@@ -402,7 +415,7 @@ def search_perf_prs_via_primus_search(
     base_url: str,
     query: str,
     limit: int = 5,
-    state: str = "all",
+    state: str = "open",
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``.
@@ -412,7 +425,7 @@ def search_perf_prs_via_primus_search(
         base_url (str): primus_cortex service base URL.
         query (str): Free-text search query.
         limit (int): Maximum number of PRs to return. Defaults to 5.
-        state (str): PR state filter. Defaults to ``"all"``.
+        state (str): PR state filter. Defaults to ``"open"``.
         timeout_sec (float): Per-request timeout. Defaults to 10.0.
 
     Returns:

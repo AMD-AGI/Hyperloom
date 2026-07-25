@@ -34,16 +34,11 @@ or Codex before running the install command.
 
 ### Install Hyperloom
 
-From the agent terminal in that workspace, download the latest release wheel
-from GitHub Releases, then install Hyperloom using the following command:
+From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
@@ -175,14 +170,13 @@ Common keys:
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
 Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
-`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. Production SGLang installs require a pinned
-`AITER_REF` 40-character commit SHA by default; set `AITER_ALLOW_UNPINNED=1`
-only for local compatibility exploration. `SGLANG_ROCM_INDEX_URL` is optional
-and lets operators provide an approved ROCm wheel index (for example an AMD ROCm
-PyPI mirror) without baking infrastructure URLs into the public installer. If it
-is unset, pip uses its configured default indexes. Kernel-agent paths
-(`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later
-by the workload skill's `install.sh`.
+`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
+tag or commit; when unset the installer selects the newest tag compatible with
+the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
+is controlled by `SGLANG_ROCM_EXTRA` (default `rocm720`) and
+`SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
+`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
+workload skill's `install.sh`.
 
 Specialist subprocesses inherit only a minimal non-secret environment by
 default. If a deployment still relies on parent-process LLM key variables,

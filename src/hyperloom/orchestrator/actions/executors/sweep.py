@@ -48,7 +48,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
-    sweep_run_eval_enabled,
 )
 
 
@@ -129,10 +128,9 @@ def _build_grid(
                 "OSL": str(osl),
                 "NUM_PROMPTS": str(num_prompts),
             }
-            # Accuracy eval is concurrency-invariant, so skip it per sweep point
-            # by default. Opt back in via INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1.
-            if not sweep_run_eval_enabled():
-                variant_envs["RUN_EVAL"] = "false"
+            # Accuracy eval is concurrency-invariant, so it is always skipped per
+            # sweep point (the accuracy gate still runs on explore / baseline).
+            variant_envs["RUN_EVAL"] = "false"
             out.append(
                 GridVariant(
                     name=name,
@@ -348,6 +346,9 @@ class SweepExecutor:
         # outlives its GPU lease. ``None`` on the local path (multi-node /
         # RAY_EXEC off / tests) keeps the legacy behaviour.
         sweep_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        # Stop the sweep grid mid-way when the session wall-clock budget runs out.
+        _ss = extra.get("shared_state") or extra.get("state")
+        session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
         try:
             # Pass resolved_model / resolved_gpu so variant servers inherit TP/precision.
             results = await run_grid(
@@ -361,6 +362,7 @@ class SweepExecutor:
                 benchmark_script=override_script,
                 result_dir=override_result_dir,
                 serving_lease=sweep_lease,
+                session_deadline_sec=session_deadline_sec,
             )
         finally:
             if sweep_lease is not None:

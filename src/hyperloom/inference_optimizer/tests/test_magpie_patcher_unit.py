@@ -29,6 +29,18 @@ _SGLANG_LEGACY = (
     '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
 )
 
+_SGLANG_MI355X_LEGACY = (
+    "#!/bin/bash\n"
+    "SERVER_MONITOR_ARGS=()\n"
+    'if [[ -n "${SERVER_PID:-}" ]]; then\n'
+    '  SERVER_MONITOR_ARGS+=(--server-pid "$SERVER_PID")\n'
+    "fi\n"
+    "    SERVER_MONITOR_ARGS=()\n"
+    "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
+    "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
+)
+
 
 def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: str | None = _SGLANG_LEGACY) -> Path:
     if benchmarker is not None:
@@ -70,6 +82,15 @@ def test_resolve_sglang_env(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
     monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
     assert mp._resolve_sglang_mi300x_script_path(None) is not None
+
+
+def test_resolve_sglang_mi355x(monkeypatch, tmp_path):
+    script = tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(_SGLANG_MI355X_LEGACY, encoding="utf-8")
+    assert mp._resolve_sglang_mi355x_script_path(tmp_path) == script
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert mp._resolve_sglang_mi355x_script_path(None) is None
 
 
 # ---- file lock ------------------------------------------------------------
@@ -241,6 +262,66 @@ def test_apply_remote_trust_fdopen_write_error(tmp_path, monkeypatch):
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
     monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert mp._apply_remote_trust_patch_atomic(f) is False
+
+
+def test_apply_sglang_client_trust_applied_and_idempotent(tmp_path):
+    # A script carrying the local-server client path (either mi300x or mi355x —
+    # the client blocks are byte-identical) gets both client paths gated.
+    f = tmp_path / "sglang_mi355x.sh"
+    f.write_text(_SGLANG_MI355X_LEGACY, encoding="utf-8")
+
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is True
+    first = f.read_text(encoding="utf-8")
+    assert "HYPERLOOM_SGLANG_LOCAL_TRUST" in first
+    assert "magpie_run_benchmark_serving_remote_direct trust" in first
+    assert "CLIENT_TRUST_ARGS+=(--trust-remote-code)" in first
+    assert '"${CLIENT_TRUST_ARGS[@]}"' in first
+    assert mp._is_sglang_client_trust_patched(f) is True
+
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is True
+    assert f.read_text(encoding="utf-8") == first
+
+
+def test_apply_sglang_client_trust_rejects_drifted_local_shape(tmp_path):
+    # Local path present (marker) but the splice block drifted -> fail loud.
+    f = tmp_path / "sglang_mi355x.sh"
+    f.write_text(
+        _SGLANG_MI355X_LEGACY.replace(
+            '        "${SERVER_MONITOR_ARGS[@]}" \\\n',
+            '        "${SERVER_MONITOR_ARGS[@]}" --changed \\\n',
+        ),
+        encoding="utf-8",
+    )
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is False
+
+
+def test_apply_sglang_client_trust_remote_only_skips_local(tmp_path):
+    # Reduced script with only the remote-direct path (no local marker): remote
+    # gets gated, the local splice is skipped rather than reported as drift.
+    f = tmp_path / "sglang_mi300x.sh"
+    f.write_text(_SGLANG_LEGACY, encoding="utf-8")
+
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is True
+    text = f.read_text(encoding="utf-8")
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "HYPERLOOM_SGLANG_LOCAL_TRUST" not in text
+    assert mp._is_sglang_client_trust_patched(f) is True
+    # Idempotent.
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is True
+
+
+def test_apply_sglang_client_trust_full_mi300x_gets_local(tmp_path):
+    # A realistic mi300x script (with the local-server client path) gets BOTH
+    # the remote-direct and local-server trust gates — closing the gap where
+    # the earlier patch only ever reached mi355x.
+    f = tmp_path / "sglang_mi300x.sh"
+    f.write_text(_SGLANG_MI355X_LEGACY, encoding="utf-8")
+
+    assert mp._apply_sglang_client_trust_patch_atomic(f) is True
+    text = f.read_text(encoding="utf-8")
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "HYPERLOOM_SGLANG_LOCAL_TRUST" in text
+    assert '"${CLIENT_TRUST_ARGS[@]}"' in text
 
 
 # ---- MagpiePatchStatus ----------------------------------------------------

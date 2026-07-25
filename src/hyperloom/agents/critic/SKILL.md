@@ -119,6 +119,14 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
 - For **`patch_landing`** proposals (the strict class): prefer `advise`
   / `needs_review` over `approve` based on packet evidence alone, and
   mention the missing KB recall in `notes`.
+- For **`enablement_landing`** proposals (enablement / framework-agent
+  authoring `integrate_patch`): treat like `evidence_producer` — an absent
+  KB prior is the default cold-start state, not a blocker. Do **not** block
+  on a missing before/after benchmark, accuracy gate, or a restated
+  rollback plan: the model cannot boot yet (so that evidence cannot
+  exist), and rollback is guaranteed by the enablement integrate executor
+  + runnable-decision gate. Approve unless a *contradicting* KB prior or a
+  packet-local defect (e.g. a malformed patch) is present.
 - For **`evidence_producer`** proposals (`explore` / `specialist` /
   `profile` / `kernel_opt` / ...): an absent KB prior is the **default
   cold-start state**, not a blocker. Approve unless a *contradicting*
@@ -139,14 +147,16 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 
 | Class | Actions | Approve bar |
 |---|---|---|
-| `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
+| `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
+| `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch only makes the model **boot at all** (runnability, not throughput): it is dispatched *before* any usable baseline, so a before/after benchmark + accuracy gate are impossible by construction, and rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate. **Default approve when KB priors are silent.** |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
 | `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_pr` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_pr` = FRAMEWORK_PR candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
 `runtime.decision_reviewer._PATCH_LANDING_ACTIONS` /
-`_EVIDENCE_PRODUCER_ACTIONS` / `_FRAMEWORK_OP_ACTIONS`; the runtime
+`_EVIDENCE_PRODUCER_ACTIONS` / `_FRAMEWORK_OP_ACTIONS`, and the
+enablement split in `_is_enablement_patch`; the runtime
 also exports the per-class checklists in
 `review_constraints.approve_requires_by_class`.
 
@@ -193,6 +203,27 @@ Return `approve` only when all blocker risks are cleared:
 - Build, cache, dispatch, and runtime implications are addressed.
 - Robustness findings and known failure patterns do not contradict the
   decision.
+
+### `enablement_landing` proposals — structural-only (pre-boot patch)
+
+Enablement / framework-agent-authoring `integrate_patch` proposals whose
+purpose is to make the model **boot at all**. Review them with the
+`evidence_producer` structural bar, **not** the strict `patch_landing`
+bar. Return `approve` when:
+
+- The action is in the current phase's allowed-action set.
+- The proposal has non-empty (specialist / framework-agent) provenance.
+- No KB prior actively contradicts the patch, and the packet shows no
+  self-evident defect (e.g. a patch that fails `git apply --check`).
+
+Do **not** require a comparable before/after benchmark or accuracy gate —
+there is no bootable baseline yet, so that evidence cannot exist. Do
+**not** block solely because the proposal does not restate a rollback
+plan: the enablement integrate executor reverts with `git reset --hard`
+and the runnable-decision gate REVERTs any patch that does not boot. The
+runnable gate — not the Critic — is the real filter for these patches.
+Use `needs_review` only when the packet shows an actual defect that the
+runnable gate would not catch.
 
 ### `evidence_producer` proposals — structural-only
 

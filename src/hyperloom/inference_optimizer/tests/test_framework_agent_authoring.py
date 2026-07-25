@@ -12,6 +12,8 @@ import pytest
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
@@ -101,6 +103,10 @@ class _BusStub:
         self.messages.append(msg)
         return msg
 
+    async def tail(self, n: int = 200, *, topic: str | None = None, **_: Any) -> list[Any]:
+        messages = [msg for msg in self.messages if topic is None or getattr(msg, "topic", topic) == topic]
+        return list(reversed(messages[-n:]))
+
 
 class _Stub:
     """Binds the Coordinator methods the pump + helpers touch."""
@@ -125,6 +131,8 @@ class _Stub:
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
     _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
     _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
+    _recover_framework_agent_authoring_outcome = Coordinator._recover_framework_agent_authoring_outcome
+    _record_framework_agent_authoring_empty_outcome = Coordinator._record_framework_agent_authoring_empty_outcome
     _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
     _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
     _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
@@ -428,6 +436,7 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     task = SimpleNamespace(
         task_id="i-1",
         params={
+            "framework_agent_authoring": True,
             "framework_agent_candidate_id": "pr-42",
             "framework_batch_id": "b1",
             "specialist_task_id": "s-1",
@@ -462,7 +471,10 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     every tick. Only empty/in-progress is skipped.
     """
     stub = _Stub(tmp_path, authoring=True)
-    task = SimpleNamespace(task_id="i-2", params={"framework_batch_id": "b1"})
+    task = SimpleNamespace(
+        task_id="i-2",
+        params={"framework_agent_authoring": True, "framework_batch_id": "b1"},
+    )
     result = SimpleNamespace(
         state="succeeded",
         result={"status": "apply_failed"},
@@ -480,6 +492,19 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     assert rows[0]["kept"] is False
 
 
+def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
+    stub = _Stub(tmp_path, authoring=True)
+    task = SimpleNamespace(task_id="unrelated", params={"specialist_task_id": "s-other"})
+
+    Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        result={"status": "kept", "delta_pct": 1.0},
+    )
+
+    assert stub.shared_state.framework_agent_phase_progress == []
+
+
 def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
     """integrate_patch carries only specialist_task_id; the bridge must map it
     back to the originating PR-URL candidate so the row matches the select key.
@@ -490,7 +515,11 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
     }
     task = SimpleNamespace(
         task_id="i-9",
-        params={"framework_batch_id": "b1", "specialist_task_id": "spec-7"},
+        params={
+            "framework_agent_authoring": True,
+            "framework_batch_id": "b1",
+            "specialist_task_id": "spec-7",
+        },
     )
     result = SimpleNamespace(
         state="succeeded",
@@ -507,6 +536,171 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "https://github.com/ROCm/aiter/pull/3888"
     assert rows[0]["status"] == "reverted"
+
+
+def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
+    stub = _Stub(tmp_path, authoring=True)
+    stub.shared_state.phase = "EXPLORE"
+    stub.shared_state.framework_agent_phase_progress = [
+        {
+            "candidate_id": "local_explore:2",
+            "status": "author_empty",
+            "provenance": "authored_empty",
+        }
+    ]
+    task = SimpleNamespace(
+        task_id="integrate-local-2",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "local_explore:2",
+            "specialist_task_id": "specialist-local-2",
+        },
+    )
+
+    Coordinator._record_framework_agent_authored_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        result={"status": "reverted", "delta_pct": -0.2},
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["status"] == "reverted"
+    assert rows[0]["provenance"] == "authored"
+    assert rows[0]["integrate_task_id"] == "integrate-local-2"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_path: Path):
+    """A terminal specialist with no recoverable outcome stamps a terminal row so the pump cannot re-select it forever."""
+    stub = _Stub(tmp_path, authoring=True)
+    candidate = {
+        "candidate_id": "cand-x",
+        "pr_url": "https://github.com/o/r/pull/1",
+        "batch_id": "b0",
+    }
+
+    async def _create_or_return_existing(**kwargs: Any) -> Any:
+        terminal = SimpleNamespace(
+            kind=kwargs.get("kind"),
+            task_id="specialist-terminal",
+            params=kwargs.get("params") or {},
+            state="succeeded",
+        )
+        return terminal, True
+
+    stub.tasks.create_or_return_existing = _create_or_return_existing
+    # Empty bus -> recovery finds no delegated_result and returns False.
+    stub.bus.messages = []
+
+    tid = await Coordinator._enqueue_framework_agent_authoring_specialist(  # type: ignore[arg-type]
+        stub,
+        candidate,
+    )
+
+    assert tid == ""
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "cand-x"
+    assert rows[0]["status"] == "recovery_failed"
+    # Candidate is now marked processed so the pump will not re-select it.
+    assert "cand-x" in stub._framework_processed_candidate_keys()
+
+
+@pytest.mark.asyncio
+async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
+    stub = _Stub(tmp_path, authoring=True)
+    stub.shared_state.phase = "EXPLORE"
+    specialist_task = SimpleNamespace(
+        task_id="specialist-local-2",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "local_explore:2",
+        },
+    )
+    integrate_task = SimpleNamespace(
+        task_id="integrate-local-2",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "local_explore:2",
+            "specialist_task_id": specialist_task.task_id,
+        },
+    )
+
+    async def _get(task_id: str) -> Any:
+        assert task_id == integrate_task.task_id
+        return integrate_task
+
+    stub.tasks.get = _get
+    stub.bus.messages = [
+        SimpleNamespace(
+            topic="delegated_result",
+            payload={
+                "task_id": specialist_task.task_id,
+                "kind": "specialist",
+                "result": {
+                    "specialist_done": {
+                        "patches_written": ["patches/local.patch"],
+                        "proposal_set": [{"name": "local-source-change"}],
+                    }
+                },
+            },
+        ),
+        SimpleNamespace(
+            topic="delegated_result",
+            payload={
+                "task_id": integrate_task.task_id,
+                "kind": "integrate_patch",
+                "result": {"status": "reverted", "delta_pct": -0.2},
+            },
+        ),
+    ]
+
+    recovered = await Coordinator._recover_framework_agent_authoring_outcome(  # type: ignore[arg-type]
+        stub,
+        specialist_task=specialist_task,
+    )
+
+    assert recovered is True
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["status"] == "reverted"
+    assert rows[0]["provenance"] == "authored"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_path: Path):
+    stub = _Stub(tmp_path, authoring=False)
+    stub.shared_state.phase = "EXPLORE"
+    recorded: list[str] = []
+
+    async def _noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    stub._record_intervention_for_task = lambda *_args, **_kwargs: None
+    stub._record_framework_agent_authored_outcome = (
+        lambda *, task, result: recorded.append(str(result.result.get("status") or ""))
+    )
+    stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
+    stub._drain_apply_fail_retry_pending = _noop_async
+    stub._is_promotable_result = lambda *_args, **_kwargs: False
+    stub._handle_unpromotable_result = _noop_async
+    stub._fact_write_hook = _noop_async
+    stub._record_coordinator_exception = lambda **_kwargs: None
+    task = SimpleNamespace(
+        task_id="integrate-cross-phase",
+        kind="integrate_patch",
+        params={"framework_agent_authoring": True},
+    )
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={"status": "reverted"},
+    )
+
+    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
+
+    assert recorded == ["reverted"]
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
@@ -545,6 +739,30 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     assert rows[0]["kept"] is False
 
 
+def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
+    stub = _Stub(tmp_path, authoring=True)
+    stub.shared_state.phase = "EXPLORE"
+    task = SimpleNamespace(
+        task_id="spec-empty-cross-phase",
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "local_explore:3",
+            "framework_batch_id": "",
+        },
+    )
+
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=task,
+        done_payload={"patches_written": [], "proposal_set": [], "summary": "No safe change"},
+    )
+
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "local_explore:3"
+    assert rows[0]["status"] == "author_empty"
+
+
 def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
     """Non-empty patches_written means autosubmit will create an integrate_patch
     that owns the terminal row; the empty-outcome bridge must NOT also stamp one.
@@ -573,8 +791,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 
 def test_config_levers_helper_extracts_from_proposal_set():
-    """A proposal_set entry carrying extra_args / extra_envs is flattened into
-    a config_changes dict; patches take precedence (returns {})."""
+    """Proposal args and envs retain separate channels; patches take precedence."""
     from hyperloom.orchestrator.loop.coordinator import (
         _framework_config_levers_from_done,
     )
@@ -590,9 +807,10 @@ def test_config_levers_helper_extracts_from_proposal_set():
         ],
     }
     levers = _framework_config_levers_from_done(done)
-    assert levers["VLLM_USE_MTP"] == "1"
-    assert levers["--speculative-num-steps"] == "3"
-    assert levers["--enable-mtp"] == ""
+    assert levers == {
+        "extra_server_args": "--speculative-num-steps 3 --enable-mtp",
+        "extra_envs": {"VLLM_USE_MTP": "1"},
+    }
 
     # A patch deliverable is NOT a config-only outcome.
     assert (
@@ -606,7 +824,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     """A config-lever deliverable (proposal_set with extra_args/extra_envs and no
-    patch) is routed to integrate_patch's config_changes channel, so the
+    patch) is routed to integrate_patch, so the
     empty-outcome bridge must NOT stamp an authored_empty row for it."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(

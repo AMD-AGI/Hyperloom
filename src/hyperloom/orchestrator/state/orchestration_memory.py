@@ -125,6 +125,21 @@ class CheckpointPolicy:
         return self.context_token_hard > 0 and context_tokens_now >= self.context_token_hard
 
 
+# Max byte length for next_cycle_directive before truncation.
+_DIRECTIVE_MAX_LEN: int = 1500
+
+# Phrases that indicate the LLM is trying to embed policy overrides in the directive.
+_DIRECTIVE_POLICY_BLACKLIST: tuple[str, ...] = (
+    "ignore phase",
+    "bypass policy",
+    "allowed actions",
+    "phase contract",
+    "skip phase",
+    "override policy",
+    "ignore policy",
+)
+
+
 # Appended as the next user turn to elicit the compact summary (parsed as JSON).
 CHECKPOINT_REQUEST_PROMPT: str = """\
 === CHECKPOINT (compaction) ===
@@ -139,7 +154,8 @@ fenced JSON object and nothing else:
   "hypotheses": ["<open hypothesis you still want to test>", "..."],
   "tried_and_why": ["<what you tried + outcome + why it mattered>", "..."],
   "pending": ["<thread you have not closed yet>", "..."],
-  "learnings": ["<durable lesson from this session so far>", "..."]
+  "learnings": ["<durable lesson from this session so far>", "..."],
+  "next_cycle_directive": "<1-3 sentences for the NEXT macro-cycle: which bottleneck to attack, what to deprioritise, breadth vs depth posture, priority specialist domains. Leave empty string if no new cycle is expected.>"
 }
 ```
 
@@ -148,6 +164,25 @@ authoritative session facts — is all you will carry into the next
 conversation, so capture intent and rationale, not raw numbers you can
 re-pull from the context tools.
 """
+
+
+def _sanitize_cycle_directive(raw: str) -> str:
+    """Return ``raw`` if it passes safety checks, else empty string.
+
+    Truncates to :data:`_DIRECTIVE_MAX_LEN` bytes and rejects text that
+    contains a policy-override phrase from :data:`_DIRECTIVE_POLICY_BLACKLIST`.
+
+    Args:
+        raw: The raw directive string from the LLM.
+
+    Returns:
+        The sanitized directive, or ``""`` when rejected.
+    """
+    text = raw.strip()[:_DIRECTIVE_MAX_LEN]
+    lower = text.lower()
+    if any(phrase in lower for phrase in _DIRECTIVE_POLICY_BLACKLIST):
+        return ""
+    return text
 
 
 def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
@@ -162,8 +197,9 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
 
     Returns:
         The parsed memory dict (``current_plan`` / ``hypotheses`` /
-        ``tried_and_why`` / ``pending`` / ``learnings``), with a
-        ``parse_error`` marker when no JSON object was found.
+        ``tried_and_why`` / ``pending`` / ``learnings`` /
+        ``next_cycle_directive``), with a ``parse_error`` marker when no
+        JSON object was found.
     """
     obj = _extract_json_object(raw_text)
     if obj is None:
@@ -173,6 +209,7 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
             "tried_and_why": [],
             "pending": [],
             "learnings": [],
+            "next_cycle_directive": "",
             "parse_error": "no JSON object found in checkpoint reply",
         }
     out: dict[str, Any] = {}
@@ -185,6 +222,9 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
             out[key] = [str(val).strip()]
         else:
             out[key] = []
+    out["next_cycle_directive"] = _sanitize_cycle_directive(
+        str(obj.get("next_cycle_directive") or "")
+    )
     return out
 
 
@@ -304,9 +344,13 @@ def build_memory_record(
     learnings = learnings[-50:]  # cap so state.json stays bounded
     # Non-empty-wins: an empty field inherits the previous record's value.
     plan = str(parsed.get("current_plan") or "").strip() or prev.get("current_plan", "")
+    directive = str(parsed.get("next_cycle_directive") or "").strip() or str(
+        prev.get("next_cycle_directive") or ""
+    )
     record: dict[str, Any] = {
         "current_plan": plan,
         "learnings": learnings,
+        "next_cycle_directive": directive,
         "last_checkpoint_seq": int(seq),
         "last_checkpoint_tick": int(tick),
         "last_checkpoint_ts": _now_iso(),
@@ -419,6 +463,9 @@ __all__ = [
     "DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION",
     "DEFAULT_MODEL_CONTEXT_WINDOW",
     "MODEL_CONTEXT_WINDOWS",
+    "_DIRECTIVE_MAX_LEN",
+    "_DIRECTIVE_POLICY_BLACKLIST",
+    "_sanitize_cycle_directive",
     "build_memory_record",
     "context_window_for_model",
     "deterministic_memory_fallback",

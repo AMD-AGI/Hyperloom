@@ -160,8 +160,62 @@ def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
     migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
     assert migrated, "v0.6 payload should log a migration line"
     msg = migrated[0].getMessage()
-    assert "v1 → v2" in msg or "v1 \u2192 v2" in msg
+    assert f"v1 → v{LATEST_STATE_SCHEMA_VERSION}" in msg
     assert "§3.9 dropped scoreboard fields" in msg
+
+
+def test_v2_kernel_keep_migrates_to_stable_task_and_pending_patch():
+    state = SharedState.from_dict(
+        {
+            "schema_version": 2,
+            "kernel_opt_attempts": {
+                "k002": {
+                    "kernel_id": "k002",
+                    "task_group_key": "legacy-task",
+                    "last_decision": "KEEP",
+                    "last_source_file": "/repo/operator.py",
+                    "last_artifact_path": "/artifacts/operator.py",
+                    "last_micro_speedup": 1.2,
+                }
+            },
+        }
+    )
+
+    assert state.kernel_opt_task_attempts["legacy-task"]["current_kernel_id"] == "k002"
+    pending = state.pending_kernel_integration_records()
+    assert len(pending) == 1
+    assert pending[0]["task_key"] == "legacy-task"
+    assert pending[0]["artifact_path"] == "/artifacts/operator.py"
+
+
+def test_v2_ungrouped_kernel_uses_runtime_legacy_task_key():
+    state = SharedState.from_dict(
+        {
+            "schema_version": 2,
+            "kernel_opt_attempts": {
+                "k001": {
+                    "kernel_id": "k001",
+                    "last_decision": "KEEP",
+                    "last_source_file": "/repo/operator.py",
+                    "last_artifact_path": "/artifacts/operator.py",
+                    "last_micro_speedup": 1.2,
+                }
+            },
+        }
+    )
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k001",
+            "source_file": "/repo/operator.py",
+            "proposal": {"decision": "PARTIAL"},
+            "verification": {"micro_speedup": 1.0},
+            "attempts": [],
+        }
+    )
+
+    assert len(state.kernel_opt_task_attempts) == 1
+    assert len(state.pending_kernel_integrations) == 1
 
 
 # 5. Strict / lenient migration mode
@@ -303,7 +357,6 @@ def test_core_state_fields_contains_v08_new_additions():
         "warm_start_pitfalls",
         "warm_start_lessons",
         "specialist_rounds",
-        "specialist_domain_empty_streak",
         "research_lane_capacity",
         "stop_reason",
         "optimization_stack",

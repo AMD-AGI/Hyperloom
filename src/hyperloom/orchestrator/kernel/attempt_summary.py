@@ -597,7 +597,25 @@ def build_kernel_optimization_summary(
         (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
     )
 
-    attempts_map: dict[str, dict[str, Any]] = dict(getattr(state, "kernel_opt_attempts", {}) or {})
+    raw_attempts: dict[str, dict[str, Any]] = dict(
+        getattr(state, "kernel_opt_task_attempts", {})
+        or getattr(state, "kernel_opt_attempts", {})
+        or {}
+    )
+    attempts_map: dict[str, dict[str, Any]] = {}
+    for ledger_id, attempt in raw_attempts.items():
+        if not isinstance(attempt, dict):
+            continue
+        current_kernel_id = str(
+            attempt.get("current_kernel_id")
+            or attempt.get("kernel_id")
+            or ledger_id
+        )
+        previous = attempts_map.get(current_kernel_id)
+        if previous is None or str(attempt.get("last_ts") or "") >= str(
+            previous.get("last_ts") or ""
+        ):
+            attempts_map[current_kernel_id] = attempt
     rejected_ids: set[str] = set(str(x) for x in (getattr(state, "rejected_kernel_ids", []) or []))
     integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:

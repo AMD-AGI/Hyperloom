@@ -26,6 +26,19 @@ from ..specialists.domains import (
 _NONE_PLACEHOLDER = "(none)"
 
 
+# Curated launch-recipe sites the research scout mines for verified serve
+# flags / envs, keyed by (model x hardware x quant x strategy). Overridable
+# via HYPERLOOM_RECIPE_SITES (comma/space separated); values are advisory
+# templates, not fetched by the Coordinator.
+DEFAULT_RECIPE_SITES: tuple[str, ...] = (
+    "https://recipes.vllm.ai/<org>/<model>?hardware=<gpu>",
+    "https://lmsysorg.mintlify.app/cookbook/autoregressive/<family>/<model>",
+)
+
+# Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
+RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
+
+
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
 BASH_KILL_SAFETY_PREAMBLE = (
@@ -436,6 +449,30 @@ def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _recipe_sites_source_lines(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the recipe-site research source; the built-in defaults when unset, nothing when disabled via the sentinel."""
+    configured = tuple(s for s in inp.recipe_sites if s)
+    if configured and all(s.strip().lower() in RECIPE_SITES_DISABLED_VALUES for s in configured):
+        return []
+    sites = configured or DEFAULT_RECIPE_SITES
+    if not sites:
+        return []
+    lines = [
+        "4. **Verified launch-recipe sites** — structured per",
+        "   (model x hardware x quant x strategy) recipe pages carrying",
+        "   validated serve flags, env vars, and benchmark numbers. Use",
+        "   ``WebFetch`` on the page matching THIS model / GPU / precision",
+        "   (fall back to ``WebSearch`` if the exact page 404s). Extract only",
+        "   the serve flags, env vars, and reported throughput/accuracy;",
+        "   emit them as ``proposal_set`` variants with the page URL in",
+        "   ``source``. For a near-miss hardware/quant match, still surface it",
+        "   but note the mismatch in ``accuracy_risk``. Sites:",
+    ]
+    lines.extend(f"   - {site}" for site in sites)
+    lines.append("")
+    return lines
+
+
 def _focus_research_scout_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -462,7 +499,7 @@ def _focus_research_scout_specialist(
         "You are the **research scout** — a read-only collector of",
         "*already-proven* priors. You do NOT benchmark, apply patches, or",
         "decide KEEP/REVERT. Your single deliverable is a prioritised list",
-        "of research hints, each with an explicit source.",
+        "of source-backed findings and executable variants.",
         "",
         *proven_lines,
         "**Three research sources (cover all that are reachable)**",
@@ -481,20 +518,21 @@ def _focus_research_scout_specialist(
         "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
+        *_recipe_sites_source_lines(inp),
         "**Gap computation** — where you find a reference throughput, use",
         "the gap versus our current baseline only to prioritise your hints",
         "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
         "numbers as a structured target: measured competitor baselines are",
         "sourced from InferenceX, never authored by this scout.",
         "",
-        "**Output protocol** — emit ONE ``specialist_done`` carrying a",
-        "``research`` block:",
-        "- ``hints``: list of ``{what, expected_impact, accuracy_risk,",
-        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
-        "  / MLPerf row / reference script path); a hint without a source",
-        "  is dropped.",
-        "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
-        "  ids you actually inspected (feeds exploration-depth tracking).",
+        "**Output protocol** — use only the top-level ``specialist_done`` fields:",
+        "- ``proposal_set``: executable variants using the standard explore",
+        "  schema. Put inspected PRs and references in ``pr_evidence`` or",
+        "  ``source_evidence`` on each proposal.",
+        "- ``new_findings``: list of ``{what, expected_impact, accuracy_risk,",
+        "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog /",
+        "  MLPerf row / reference script path).",
+        "- ``residual_questions``: unanswered questions for the next scout round.",
         "",
         "**Iron rule** — read-only. Never write a patch, never launch a",
         "benchmark, never recommend a phase transition. Turn proven priors",
@@ -602,39 +640,32 @@ def _focus_static_recon_specialist(
 def _focus_enablement_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
-    """Build the enablement-specialist focus by delegating to ``build_mandate``.
+    """Stable enablement-specialist identity blurb.
 
-    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
-    renders the mandate's ``task_description`` verbatim from
-    ``framework_agent.enablement_ops.build_mandate``.
+    The per-task mandate (failure context + the ladder book) is rendered
+    separately into the user prompt by ``_section_enablement_playbook`` so this
+    system-prompt block stays constant across dispatches (cacheable).
 
     Args:
-        inp: Assembled prompt inputs for the current dispatch.
+        inp: Assembled prompt inputs for the current dispatch (unused; the
+            identity is task-independent).
 
     Returns:
-        Prompt lines rendered from the enablement mandate.
+        Prompt lines for the enablement-specialist identity.
     """
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import build_mandate
-
-    model = str((inp.gap_evidence or {}).get("model") or "").strip()
-    req = EnablementRequest(
-        framework=(inp.framework or "").strip().lower(),
-        model=model or "(target model)",
-        repo_url="",
-        launch_log=inp.gap_symptom or "",
-        gpu_type=(inp.gpu_type or "").strip().lower(),
-    )
-    mandate = build_mandate(req)
-    lines = [
-        "You are the **enablement specialist** — an AUTHORING sub-agent whose",
-        "single deliverable is a bridging patch that makes a currently",
-        "non-runnable (model, backend) combo *boot and pass a minimal",
-        "inference*. The gate is RUNNABILITY, not throughput.",
+    return [
+        "You are the **enablement specialist** — an AUTHORING sub-agent for a",
+        "currently non-runnable (model, backend) combo. The gate is RUNNABILITY",
+        "(the server boots and passes a minimal inference), not throughput.",
         "",
+        "Your deliverable is the smallest **runnable delta** that advances the",
+        "boot — which may be a serve flag, an in-tree source patch, an",
+        "attempt-scoped runtime, or a ``needs_targeted_build`` request. Do NOT",
+        "stop at a token registration / two-line alias when the diagnosis says the",
+        "architecture is genuinely new: advancing one boot step counts, and a",
+        "compiled or from-source need should be requested, not faked. Follow the",
+        "ENABLEMENT PLAYBOOK in the task context for the tiered methodology.",
     ]
-    lines.extend(mandate.task_description.splitlines())
-    return lines
 
 
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
@@ -674,6 +705,9 @@ class SpecialistPromptInputs:
     target_gap_notes: str = ""
     # Already-proven warm-recipe optimizations the research scout should skip.
     already_proven: list[dict[str, str]] = field(default_factory=list)
+    # Curated recipe-site URL templates the research scout may mine for
+    # verified serve flags / envs; empty falls back to the built-in defaults.
+    recipe_sites: tuple[str, ...] = ()
     # Advisory research-hint block; its presence suppresses cold-start fallback.
     research_hints: str = ""
     # Workload context mirrored from SharedState; renders in section 2.
@@ -1640,7 +1674,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the read-only framework source roots and per-domain focus
+    Lists the installed source roots and per-domain focus
     directories, or a ``(none)`` placeholder when neither is supplied.
 
     Args:
@@ -1654,7 +1688,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     if inp.framework_source_roots:
-        rows.append("Framework source roots (read-only):")
+        rows.append("Installed source roots (read-only):")
         for p in inp.framework_source_roots:
             rows.append(f"- {p}")
     if inp.source_hint_directories:
@@ -1816,9 +1850,9 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
         "  AND no ``patches_written``/``artifacts_written``; in that case",
         "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
-        "- ``new_findings`` is your free-form summary of anything you",
-        "  learned this round — Coordinator funnels it into the KB",
-        "  fact-write pipeline (lesson on KEEP, pitfall on REVERT).",
+        "- ``new_findings`` is a list of learned items. Research scouts must",
+        "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
+        "  domain_tags[]}`` records.",
         "- ``residual_questions`` carries to the next specialist round.",
         "",
         "**Heartbeat (Channel B only):** When running in subprocess mode,",
@@ -1917,6 +1951,38 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+# Section 1b — Enablement playbook (per-task; enablement specialist only)
+def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the per-task enablement mandate + ladder book into the user prompt.
+
+    Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
+    renders the mandate's ``task_description`` (which embeds the ladder book) from
+    ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
+    the cached system prompt stays task-independent.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch.
+
+    Returns:
+        list[str]: The enablement-playbook section lines.
+    """
+    from hyperloom.agents.framework.enablement import EnablementRequest
+    from hyperloom.agents.framework.enablement_ops import build_mandate
+
+    model = str((inp.gap_evidence or {}).get("model") or "").strip()
+    req = EnablementRequest(
+        framework=(inp.framework or "").strip().lower(),
+        model=model or "(target model)",
+        repo_url="",
+        launch_log=inp.gap_symptom or "",
+        gpu_type=(inp.gpu_type or "").strip().lower(),
+    )
+    mandate = build_mandate(req)
+    rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
+    rows.extend(mandate.task_description.splitlines())
+    return rows
+
+
 # Top-level assembler
 def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
     """§1a — PD-disaggregation context (omitted unless pd_mode==disaggregated).
@@ -1994,21 +2060,36 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         _section_output_protocol(inp),
         _section_iron_rules(inp),
     ]
-    user_sections = [
-        _section_hardware(inp),
-        _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
-        _section_execution_budget(inp),  # omitted when no budget
-        _section_gap(inp),
-        _section_kb_subgraph(inp),
-        _section_roofline_evidence(inp),
-        _section_recipe(inp),
-        _section_lessons(inp),
-        _section_pitfalls(inp),
-        _section_kg_recommended(inp),  # KG graph-recommended knobs
-        _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
-        _section_pr_feed(inp),
-        _section_source_hint(inp),
-    ]
+    if inp.domain.key == "enablement_specialist":
+        # Pre-baseline enablement: the perf context (roofline / recipe / lessons /
+        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot even
+        # boot. Carry only the failure, the tiered playbook, and the tools to
+        # discover + navigate a fix.
+        user_sections = [
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),  # § 1a (omitted unless disaggregated)
+            _section_execution_budget(inp),  # omitted when no budget
+            _section_gap(inp),
+            _section_enablement_playbook(inp),  # § 1b (mandate + ladder book)
+            _section_pr_feed(inp),
+            _section_source_hint(inp),
+        ]
+    else:
+        user_sections = [
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
+            _section_execution_budget(inp),  # omitted when no budget
+            _section_gap(inp),
+            _section_kb_subgraph(inp),
+            _section_roofline_evidence(inp),
+            _section_recipe(inp),
+            _section_lessons(inp),
+            _section_pitfalls(inp),
+            _section_kg_recommended(inp),  # KG graph-recommended knobs
+            _section_kg_guided_knobs(inp),  # KG graph-guided runnable knobs
+            _section_pr_feed(inp),
+            _section_source_hint(inp),
+        ]
     if inp.notes:
         user_sections.append(
             [

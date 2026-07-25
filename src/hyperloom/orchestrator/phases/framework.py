@@ -32,6 +32,128 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# Watchdog grace period (in coordinator ticks) before an in-flight enablement
+# round whose specialist has finished — but which never produced a rearm — is
+# counted as a stall. Generous enough not to race a just-completed specialist
+# whose integrate proposal is about to be emitted, small enough that a genuinely
+# stuck flag self-heals within a few minutes rather than spinning to wall-clock.
+_ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
+# Hard backstop: past this many ticks since dispatch, an in-flight enablement
+# round whose specialist has finished is counted as a stall unconditionally —
+# even if an integrate_patch proposal is still pending (dropped / never
+# executed). Larger than the soft grace so a normally-progressing integrate has
+# ample room to resolve first.
+_ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
+
+
+def _derive_gpu_arch(gpu_type: str) -> str:
+    """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
+    _MAP = {
+        "mi355x": "gfx950",
+        "mi300x": "gfx942",
+        "mi308x": "gfx942",
+        "mi300": "gfx942",
+        "mi250x": "gfx90a",
+        "mi250": "gfx90a",
+        "mi210": "gfx90a",
+    }
+    gt = (gpu_type or "").strip().lower()
+    for key, arch in _MAP.items():
+        if key in gt:
+            return arch
+    return ""
+
+
+def _repo_matches_targeted_build_component(repo_url: str, component: str) -> bool:
+    """Return whether a repo name is compatible with a targeted-build recipe.
+
+    This deliberately ignores the origin/owner: specialists may discover and
+    request forks on any host.  It only prevents routing an unrelated repository
+    into a component-specific recipe.  An empty URL is valid because each recipe
+    has its own built-in default repository.
+    """
+    repo = (repo_url or "").strip().rstrip("/")
+    if not repo:
+        return True
+    repo_name = repo.rsplit("/", 1)[-1].removesuffix(".git").lower()
+    hints = {
+        "aiter": ("aiter",),
+        "framework_ext": ("aiter",),
+        "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
+        "vllm_source": ("vllm",),
+    }
+    return any(hint in repo_name for hint in hints.get(component, ()))
+
+
+def _maybe_build_runtime_candidate(
+    capability_gap: Any,
+    *,
+    framework: str,
+    model: str,
+    gpu_type: str,
+) -> dict[str, Any] | None:
+    """Build a serialized runtime-candidate stack action, or None.
+
+    Returns None when the gap does not require code acquisition, the run is
+    multi-node (single-node-only guard), or the framework adapter cannot produce
+    an evidence-backed candidate. Fully exception-guarded.
+    """
+    if not getattr(capability_gap, "requires_code_acquisition", False):
+        return None
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return None
+        from ..framework.adapters import get_adapter
+
+        adapter = get_adapter(framework)
+        action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
+        if action is None:
+            return None
+        return action.to_state()
+    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+        log.debug("enablement: runtime-candidate construction failed", exc_info=True)
+        return None
+
+
+def _maybe_build_localization_candidate(
+    capability_gap: Any,
+    *,
+    framework: str,
+    model: str,
+    repo_url: str,
+    candidate_refs: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Build a serialized localization stack action, or None.
+
+    Returns None when the gap does not require code acquisition, the run is
+    multi-node, there is no merged-PR candidate ref, or the framework adapter
+    cannot localize. The compiled-closure gate runs later in the executor.
+    """
+    if not getattr(capability_gap, "requires_code_acquisition", False):
+        return None
+    ref = next((r for r in (candidate_refs or ()) if str(r).strip()), "")
+    if not ref or not repo_url:
+        return None
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return None
+        from ..framework.adapters import get_adapter
+
+        adapter = get_adapter(framework)
+        action = adapter.build_localization_action(
+            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
+        )
+        if action is None:
+            return None
+        return action.to_state()
+    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+        log.debug("enablement: localization-candidate construction failed", exc_info=True)
+        return None
+
 
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
@@ -582,6 +704,7 @@ class FrameworkPhase(PhaseHandler):
                 "confidence": float((audit or {}).get("confidence") or 0.0),
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
         try:
@@ -630,6 +753,7 @@ class FrameworkPhase(PhaseHandler):
                     applicability=str((audit or {}).get("applicability") or "").strip(),
                     provenance="phase_audit",
                     changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                    session_dir=self.session_dir,
                 )
             except Exception:  # noqa: BLE001 — KB writeback is best-effort
                 log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)
@@ -813,35 +937,36 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        # Livelock break (cross-resume): a specialist that finished before a
-        # resume is returned here by idempotency key without re-running, so its
-        # empty deliverable never got a terminal progress row. Stamp
-        # author_empty now and skip the no-op re-dispatch so the pump advances.
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
             already_rows = self._framework_processed_candidate_keys()
-            # Only stamp when the deliverable is genuinely NOT in flight;
-            # _framework_agent_authoring_inflight also checks pending
-            # integrate_patch proposals so a benched deliverable is not mislabeled.
             authoring_inflight = await self._framework_agent_authoring_inflight()
             if cand_id and cand_id not in already_rows and not authoring_inflight:
-                log.info(
-                    "FRAMEWORK: authoring specialist already terminal w/o progress "
-                    "row (cross-resume harvest miss) candidate=%s state=%s — stamping "
-                    "author_empty to break re-dispatch livelock",
-                    cand_id,
-                    getattr(spec_task, "state", ""),
-                )
                 try:
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=spec_task,
-                        done_payload={},
+                    recovered = await self._recover_framework_agent_authoring_outcome(
+                        specialist_task=spec_task,
                     )
                 except Exception:  # noqa: BLE001 — never wedge the pump
                     log.exception(
-                        "FRAMEWORK: livelock-break empty-outcome stamp failed candidate=%s",
+                        "FRAMEWORK: terminal authoring outcome recovery failed candidate=%s",
                         cand_id,
+                    )
+                    recovered = False
+                if not recovered:
+                    log.warning(
+                        "FRAMEWORK: terminal authoring outcome unavailable candidate=%s state=%s",
+                        cand_id,
+                        getattr(spec_task, "state", ""),
+                    )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="recovery_failed",
+                        rationale="authoring outcome unrecoverable from persisted results",
+                        provenance="pump",
                     )
                 return ""
         # Map specialist task -> candidate so the authored-outcome bridge can
@@ -989,6 +1114,8 @@ class FrameworkPhase(PhaseHandler):
             n = len(candidate_refs)
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
+        # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
+        state.enablement_candidate_refs = list(candidate_refs)
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
@@ -1004,6 +1131,12 @@ class FrameworkPhase(PhaseHandler):
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
+        # Only prior rounds' *actually-applied* setup commands (recorded by the
+        # specialist and replayed by integrate_patch) stack as a base. No install
+        # command is ever auto-seeded here: an unpinned upgrade of the shared
+        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
+        # transformers-major skew) and environment/build acquisition is owned by
+        # the isolated targeted-build path + the specialist's own setup_commands.
         base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
         notes = mandate.task_description
         if base_patches or base_setup:
@@ -1025,7 +1158,29 @@ class FrameworkPhase(PhaseHandler):
                 f"bridging approach / candidate than before.\n\n" + notes
             )
         gap_cid = f"gap.enablement.{signature.kind}"
-        return {
+        from hyperloom.agents.framework.enablement import CapabilityGap
+
+        capability_gap = CapabilityGap.from_signature(signature)
+
+        # When the gap requires code acquisition (not a resource constraint) and
+        # an adapter can build an evidence-backed candidate, attach a
+        # ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
+        # runtime before booting. Skipped in multi-node mode.
+        runtime_candidate = _maybe_build_runtime_candidate(
+            capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
+        )
+        # When a merged-PR candidate exists, attach a ``localization_candidate``
+        # so integrate_patch localizes the closure into the source tree
+        # (compiled closures defer to the targeted build at apply).
+        localization_candidate = _maybe_build_localization_candidate(
+            capability_gap,
+            framework=framework,
+            model=model,
+            repo_url=repo_url,
+            candidate_refs=tuple(candidate_refs),
+        )
+
+        params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (f"{framework or '?'} cannot launch {model or 'the target model'}: {signature.kind}"),
@@ -1040,6 +1195,8 @@ class FrameworkPhase(PhaseHandler):
             "enablement_search_repos": list(plan.repos),
             # Pre-patch failure signature, replayed by integrate_patch.
             "enablement_before_signature": signature.to_dict(),
+            # CapabilityGap projection: marks resource_constraint as not actionable.
+            "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
             # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
@@ -1052,6 +1209,33 @@ class FrameworkPhase(PhaseHandler):
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
+        if runtime_candidate is not None:
+            params_out["runtime_candidate"] = runtime_candidate
+        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
+        # the same runtime the last round promoted.
+        kept_action = getattr(state, "enablement_kept_stack_action", None)
+        if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
+            params_out["runtime_candidate"] = kept_action
+        if localization_candidate is not None:
+            params_out["localization_candidate"] = localization_candidate
+        # Inject the last targeted-build failure into the mandate.
+        last_build_failure = getattr(state, "enablement_last_build_failure", None) or {}
+        if isinstance(last_build_failure, dict) and last_build_failure:
+            fc = str(last_build_failure.get("failure_class") or "")
+            fs = str(last_build_failure.get("failure_summary") or "")
+            if fc or fs:
+                build_note = (
+                    f"PREVIOUS TARGETED-BUILD ATTEMPT: failure_class={fc!r}"
+                    + (f"; {fs}" if fs else "")
+                    + "\nIf the build ran out of time (failure_class='timeout' or "
+                    "'preflight_budget'), request more build_budget_sec or a smaller "
+                    "component scope.  For compile/symbol defects, choose a different "
+                    "ref or narrow the build target."
+                )
+                notes = build_note + "\n\n" + notes
+                params_out["notes"] = notes
+            params_out["enablement_last_build_failure"] = dict(last_build_failure)
+        return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
@@ -1258,7 +1442,7 @@ class FrameworkPhase(PhaseHandler):
                         "search_perf_prs": True,
                         "search_modes": search_modes,
                         "keywords": list(plan.keywords),
-                        "pr_states": ["open"],
+                        "pr_states": ["all"],
                         "max_search_candidates": max_candidates,
                         **primus_block,
                     }
@@ -1313,7 +1497,23 @@ class FrameworkPhase(PhaseHandler):
         if bool(getattr(state, "enablement_succeeded", False)):
             return ""
         if bool(getattr(state, "enablement_dispatched", False)):
-            return ""
+            # Watchdog: an enablement round is marked in-flight. If it has
+            # silently finished without ever calling _maybe_rearm_enablement
+            # (e.g. an approved-but-empty deliverable that routed to plain
+            # baseline retries, or any other path that never yields an integrate
+            # result), enablement_dispatched would stay stuck True forever and
+            # the run could never reach enablement_stalled. Detect the stuck flag
+            # and count the round as a stall so the loop keeps advancing.
+            if self._enablement_round_silently_finished():
+                self._maybe_rearm_enablement(
+                    {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
+                )
+                # Fall through: if the rearm cleared the guard (not at stall cap),
+                # a fresh round can be dispatched below this tick.
+                if bool(getattr(state, "enablement_dispatched", False)) or bool(getattr(state, "stop_reason", "")):
+                    return ""
+            else:
+                return ""
         if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
             return ""
         if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
@@ -1329,6 +1529,20 @@ class FrameworkPhase(PhaseHandler):
             # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
+        # Enqueue any build the *previous* round's specialist explicitly requested
+        # (``needs_targeted_build`` in its specialist_done), then auto-escalate to
+        # a targeted build when the residual gap is a compiled miss or a vLLM
+        # arch/weight deep-failure that source patches keep hitting. Both enqueues
+        # are no-ops when a matching build is already queued/running (idempotent by
+        # novelty key).
+        try:
+            await self._maybe_enqueue_specialist_requested_build()
+        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+            log.debug("enablement: specialist-requested build raised", exc_info=True)
+        try:
+            await self._maybe_escalate_to_targeted_build(launch_log, attempt=attempt)
+        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+            log.debug("enablement: targeted-build escalation raised", exc_info=True)
         from ..actions.executors._multi_node_env import is_multi_node
 
         if is_multi_node():
@@ -1358,13 +1572,15 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
         state.enablement_dispatched = True
         state.enablement_attempts = attempt + 1
+        state.enablement_inflight_task_id = spec_tid
+        state.enablement_dispatch_tick = int(getattr(state, "tick", 0) or 0)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("enablement: save after dispatch failed", exc_info=True)
-        spec_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
             "ENABLEMENT: dispatched authoring specialist kind=%s attempt=%d task=%s",
             params.get("enablement_failure_kind"),
@@ -1372,6 +1588,72 @@ class FrameworkPhase(PhaseHandler):
             spec_tid,
         )
         return spec_tid
+
+    def _enablement_round_silently_finished(self) -> bool:
+        """True when an in-flight enablement round has ended without a rearm.
+
+        A round is considered silently finished when ALL hold:
+        - the dispatched specialist has written its ``specialist_done.json``
+          (authoring is over), and
+        - a grace period of ticks has elapsed since dispatch (so we never race a
+          just-completed specialist whose integrate proposal is about to be
+          emitted), and
+        - no enablement ``integrate_patch`` proposal for this task is still
+          pending review, and
+        - no task is currently running.
+
+        This is the phase-independent backstop for every code path that finishes
+        an enablement round without calling :meth:`_maybe_rearm_enablement`
+        (approved-but-empty deliverables routed to baseline retries, dropped
+        proposals, etc.). Fully guarded: any error returns ``False`` (never
+        force a false stall).
+        """
+        state = self.shared_state
+        try:
+            if not bool(getattr(state, "enablement_dispatched", False)):
+                return False
+            # NB: use an explicit None-check, not ``or -1`` — a legitimate
+            # dispatch tick of 0 is falsy and would be corrupted to -1.
+            _raw_dt = getattr(state, "enablement_dispatch_tick", -1)
+            dispatch_tick = int(_raw_dt if _raw_dt is not None else -1)
+            cur_tick = int(getattr(state, "tick", 0) or 0)
+            tid = str(getattr(state, "enablement_inflight_task_id", "") or "")
+            if not tid:
+                # No recorded task id (older state / dispatch without id): fall
+                # back to a pure grace-tick check so we still self-heal.
+                return dispatch_tick >= 0 and (cur_tick - dispatch_tick) >= _ENABLEMENT_WATCHDOG_GRACE_TICKS
+            if dispatch_tick < 0 or (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_GRACE_TICKS:
+                return False
+            # Specialist must have finished authoring.
+            done_path = self.session_dir / "runs" / "specialist" / tid / "specialist_done.json"
+            if not done_path.exists():
+                return False
+            # A pending enablement integrate_patch proposal for this task means the
+            # round may still resolve normally — but only honor that within a
+            # bounded window: an integrate proposal that has sat pending for the
+            # full HARD grace never rearmed (dropped / stuck), so the watchdog
+            # still fires. Below HARD grace, defer to the in-flight proposal.
+            if (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_HARD_TICKS:
+                for p in (getattr(self.state, "pending_proposals", None) or {}).values():
+                    try:
+                        if getattr(p, "action_name", "") != "integrate_patch":
+                            continue
+                        pl = getattr(p, "payload", {}) or {}
+                        if (pl.get("params") or {}).get("specialist_task_id") == tid:
+                            return False
+                    except Exception:  # noqa: BLE001 — defensive
+                        continue
+            log.info(
+                "ENABLEMENT watchdog: in-flight round task=%s finished without a rearm "
+                "(tick %d, dispatched %d); counting as a stall",
+                tid,
+                cur_tick,
+                dispatch_tick,
+            )
+            return True
+        except Exception:  # noqa: BLE001 — watchdog must never wedge the loop
+            log.debug("enablement watchdog check failed", exc_info=True)
+            return False
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
         """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
@@ -1462,6 +1744,13 @@ class FrameworkPhase(PhaseHandler):
         state = self.shared_state
         status = str(res.get("status") or "")
         stop_set = ""
+        # Capture the finished round's specialist task id so the async dispatch
+        # chokepoint can read its specialist_done.json for a needs_targeted_build
+        # request (a build enqueue needs await; rearm is sync). Only overwrite on
+        # a real specialist round (targeted_build rearm rows carry no such id).
+        _spec_tid = str(res.get("specialist_task_id") or "").strip()
+        if _spec_tid:
+            state.enablement_last_specialist_task_id = _spec_tid
 
         def _stack_setup_commands() -> None:
             """Append this round's applied setup commands to the durable stack."""
@@ -1485,11 +1774,33 @@ class FrameworkPhase(PhaseHandler):
             state.baseline_arg_error_streak = 0
             state.baseline_total_failures = 0
 
+        def _stack_kept_runtime() -> None:
+            """Persist the KEEP'd attempt runtime + localization manifest so they
+            survive rearm."""
+            action = res.get("enablement_kept_stack_action")
+            if isinstance(action, dict) and action:
+                state.enablement_kept_stack_action = action
+            runtime = res.get("enablement_active_runtime")
+            if isinstance(runtime, dict) and runtime:
+                state.enablement_active_runtime = runtime
+                # Retain the attempt-runtime record (cap at 5 newest).
+                records = list(getattr(state, "enablement_attempt_runtimes", None) or [])
+                records.append(runtime)
+                state.enablement_attempt_runtimes = records[-5:]
+            # Record the localized closure manifest so it is not re-fetched on
+            # the next round.
+            manifest = res.get("enablement_localization_manifest")
+            if isinstance(manifest, dict) and manifest:
+                existing = list(getattr(state, "enablement_localization_manifest", None) or [])
+                existing.append(manifest)
+                state.enablement_localization_manifest = existing
+
         if status == "kept":
             state.enablement_succeeded = True
             state.enablement_stall_streak = 0
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
+            _stack_kept_runtime()
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
@@ -1500,6 +1811,7 @@ class FrameworkPhase(PhaseHandler):
                     kept.append(sp)
             state.enablement_kept_patches = kept
             _stack_setup_commands()
+            _stack_kept_runtime()
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
                 state.enablement_launch_log = new_log
@@ -1514,6 +1826,11 @@ class FrameworkPhase(PhaseHandler):
                 stop_set = "enablement_stalled"
             else:
                 state.enablement_dispatched = False
+        # Whenever the in-flight guard is cleared (or the run is stopping), drop
+        # the watchdog bookkeeping so a stale task id can't mis-fire next round.
+        if not bool(getattr(state, "enablement_dispatched", False)) or stop_set:
+            state.enablement_inflight_task_id = ""
+            state.enablement_dispatch_tick = -1
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -2076,8 +2393,7 @@ class FrameworkPhase(PhaseHandler):
         """Dispatch a local-exploration specialist when the arm is enabled.
 
         Used as the discovery-exhaustion fallback: rather than marking the phase
-        done, author a patch from the live source. No-op (returns ``False``)
-        when the arm is disabled so callers fall back to the historical exit.
+        done, author a patch from the live source. No-op when the arm is disabled.
 
         Args:
             reason: Short provenance tag recorded on the dispatch log line.
@@ -2132,17 +2448,14 @@ class FrameworkPhase(PhaseHandler):
             f"- framework: {framework or '(session framework)'}",
             "",
             "How to work:",
-            "- Read the live framework source (your framework_source_roots) and the",
+            "- Read installed package source (your framework_source_roots) and the",
             "  latest profiling breakdown to locate the serving hot path",
             "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
             "- You MAY use WebSearch / WebFetch to compare the live tree against the",
             "  LATEST upstream code (e.g. the framework's main branch) and port a",
             "  newer optimisation when the local checkout is behind.",
-            "- You MAY read /opt/rocm and the HIP source for understanding, and you",
-            "  MAY edit framework Python and aiter source (aiter JIT-recompiles via",
-            "  ninja/hipcc, so edits take effect on the next launch). Do NOT edit",
-            "  compiled /opt/rocm libraries that need a full rebuild to take effect —",
-            "  leave those to the kernel agent.",
+            "- You MAY inspect and patch installed package source. State expected",
+            "  reload, JIT, or rebuild behavior in the deliverable.",
             "",
             "Deliverable — EITHER is valid (pick what actually moves throughput):",
             "- a unified-diff source patch in your worktree (``patches_written``), OR",
@@ -2200,9 +2513,6 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        # Livelock break (cross-resume): a specialist that finished before a
-        # resume is returned by idempotency key without re-running; stamp its
-        # empty outcome so the pump advances instead of re-dispatching.
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
@@ -2210,14 +2520,29 @@ class FrameworkPhase(PhaseHandler):
             authoring_inflight = await self._framework_agent_authoring_inflight()
             if cand_id and cand_id not in already_rows and not authoring_inflight:
                 try:
-                    self._record_framework_agent_authoring_empty_outcome(
-                        task=spec_task,
-                        done_payload={},
+                    recovered = await self._recover_framework_agent_authoring_outcome(
+                        specialist_task=spec_task,
                     )
                 except Exception:  # noqa: BLE001 — never wedge the pump
                     log.exception(
-                        "FRAMEWORK local-explore: livelock-break empty-outcome stamp failed candidate=%s",
+                        "FRAMEWORK local-explore: terminal outcome recovery failed candidate=%s",
                         cand_id,
+                    )
+                    recovered = False
+                if not recovered:
+                    log.warning(
+                        "FRAMEWORK local-explore: terminal outcome unavailable candidate=%s state=%s",
+                        cand_id,
+                        getattr(spec_task, "state", ""),
+                    )
+                    # Stamp a terminal row so an unrecoverable outcome cannot make
+                    # the pump re-select the same finished specialist forever.
+                    self._stamp_framework_progress(
+                        candidate_id=cand_id,
+                        batch_id=str(candidate.get("batch_id") or ""),
+                        status="recovery_failed",
+                        rationale="local-explore outcome unrecoverable from persisted results",
+                        provenance="pump",
                     )
                 return ""
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
@@ -2418,9 +2743,12 @@ class FrameworkPhase(PhaseHandler):
     def _framework_agent_ranker_client(self) -> Any:
         """Return an OpenAI-compatible async client for ranking, or ``None``.
 
-        Reuses the ProposalScorer's client when present (same gateway/auth);
-        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
-        ``OPENAI_BASE_URL``. Cached on first successful build.
+        Reuses the ProposalScorer's client when present (same gateway/auth),
+        then the orchestration backend's own client (so the LLM ranker is on by
+        default whenever orchestration has LLM credentials); otherwise builds
+        one from the orchestration backend's configured key/URL env (falling
+        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        Cached on first successful build.
         """
         import os
 
@@ -2437,14 +2765,35 @@ class FrameworkPhase(PhaseHandler):
                     return client
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
+        # Reuse the orchestration backend's own OpenAI-compatible client when it
+        # exposes one (e.g. CodexBackend): same gateway + auth as the running
+        # session, so the ranker is default-on without extra configuration.
+        backend = self.backends.get("orchestration")
+        backend_client = getattr(backend, "_client", None)
+        if backend_client is not None and hasattr(backend_client, "chat"):
+            self._coord._fa_ranker_client = backend_client
+            return backend_client
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError:
             return None
-        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Resolve credentials from the orchestration backend's configured env
+        # names first (so a split-gateway orchestration key is reused), then the
+        # shared gateway defaults.
+        api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
+        base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
+        api_key = (
+            os.environ.get(api_key_env)
+            or os.environ.get("SAFE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
         if not api_key:
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        base_url = (
+            os.environ.get(base_url_env)
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
+        )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()
@@ -2975,7 +3324,7 @@ class FrameworkPhase(PhaseHandler):
                     repo_url=repo_url,
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
-                    pr_states=["open", "merged", "closed"],
+                    pr_states=["open"],
                     excluded_candidate_ids=excluded_candidate_ids,
                     failed_candidate_context=failed_candidate_context,
                     timeout_sec=per_repo_timeout,
@@ -3104,6 +3453,7 @@ class FrameworkPhase(PhaseHandler):
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             "candidate_count": len(norm),
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
@@ -3473,6 +3823,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
             "provenance": str(provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
         # onto the row too, without clobbering the canonical fields above, so
@@ -3719,6 +4070,441 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             log.exception("FRAMEWORK pump (%s) failed", caller)
 
+    async def _maybe_escalate_to_targeted_build(
+        self,
+        launch_log: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        """Enqueue a targeted build row when the residual gap is a compiled miss.
+
+        No-op when a build is already queued or running (idempotent by novelty
+        key), when the env var ``HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD=1``
+        is set, on multi-node, or when the gap is not a compiled miss.
+        """
+        import os as _os
+
+        if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+            return
+        try:
+            from ..actions.executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            from hyperloom.agents.framework.enablement import (
+                MISSING_MODEL_ARCH,
+                MISSING_WEIGHT,
+                NOT_IMPLEMENTED,
+                classify_failure,
+                is_targeted_build_candidate,
+            )
+            from ..framework.build_actions import TargetedBuildAction
+
+            signature = classify_failure(launch_log)
+
+            state = self.shared_state
+            framework = (getattr(state, "framework", "") or "").strip().lower()
+            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+
+            # Two escalation triggers:
+            #  1. An inherently *compiled* gap (build / rocm_hip / native-dtype /
+            #     hip-kernel) — the original Rung-5 path.
+            #  2. A vLLM **arch/weight deep-failure that source patches keep
+            #     hitting**: the enablement specialist authored ≥1 source patch
+            #     (attempt >= 1) yet the boot still stops at an arch/weight/
+            #     not-implemented wall. For a genuinely new architecture, aliasing
+            #     to an existing model class in the *installed* vLLM cannot model
+            #     the new op set; the correct acquisition is a from-source vLLM
+            #     build of a version that natively implements the arch. Only fires
+            #     on vLLM (the from-source recipe target) and never on the first
+            #     attempt (give the cheap source-patch path a chance first).
+            is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
+            arch_stall = (
+                signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
+                and framework == "vllm"
+                and int(attempt or 0) >= 1
+            )
+            if not is_compiled_gap and not arch_stall:
+                return
+
+            # Derive novelty fields from the current failure + session context.
+            # Ref and repo_url come from the existing stack action when present;
+            # otherwise the top discovery candidate for the component is used;
+            # empty ref falls back to tag-descending autoselect.
+            existing_stack = getattr(state, "enablement_kept_stack_action", None) or {}
+            repo_url = str(existing_stack.get("repo_url") or "").strip()
+            ref = str(existing_stack.get("ref") or "").strip()
+
+            # Pick the component from the failure evidence:
+            # sgl_kernel when the offending symbol/log names sgl-kernel;
+            # vllm_source when vLLM's own C extension is implicated;
+            # aiter (default) for all other compiled-miss gaps.
+            sym_lower = (signature.offending_symbol or "").lower()
+            log_lower = launch_log.lower()
+            if arch_stall and not is_compiled_gap:
+                # Arch/weight deep-failure on vLLM after source patches: the fix
+                # is a from-source vLLM build that natively implements the arch,
+                # not an aiter/sgl-kernel op build.
+                component = "vllm_source"
+            elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
+                component = "sgl_kernel"
+            elif framework == "vllm" and (
+                "vllm/_c" in log_lower or "vllm.extension" in log_lower
+                or "_c.so" in log_lower or "vllm._c" in sym_lower
+            ):
+                component = "vllm_source"
+            else:
+                component = "aiter"
+
+            source_pr_url = ""
+            # When no operator-pinned/kept ref, try the top discovery candidate.
+            if not ref:
+                from ..framework.build_actions import resolve_build_ref
+
+                _component_hints = {
+                    "aiter": ("aiter",),
+                    "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
+                    "vllm_source": ("vllm",),
+                    "framework_ext": (),
+                }
+                hints = _component_hints.get(component, ())
+                default_repo = repo_url or ""
+                for _cand in list(getattr(state, "enablement_candidate_refs", None) or []):
+                    _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
+                    if not _ref:
+                        continue
+                    if hints:
+                        _repo_lower = (_repo or _cand).lower()
+                        if not any(h in _repo_lower for h in hints):
+                            continue
+                    repo_url = _repo or repo_url
+                    ref = _ref
+                    source_pr_url = _pr_url
+                    break
+
+            reason = (
+                f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
+                f"after {int(attempt or 0)} source-patch attempt(s) — build vLLM from source"
+                if (arch_stall and not is_compiled_gap)
+                else f"Rung-5 auto-escalation from {signature.kind}"
+            )
+            if not _repo_matches_targeted_build_component(repo_url, component):
+                log.warning(
+                    "ENABLEMENT: targeted_build repo/component mismatch component=%s repo_url=%s",
+                    component,
+                    repo_url,
+                )
+                return
+            action = TargetedBuildAction(
+                gap_id=f"gap.enablement.{signature.kind}",
+                framework=framework or "vllm",
+                component=component,
+                capability=str(signature.offending_symbol or signature.kind or ""),
+                reason=reason,
+                repo_url=repo_url,
+                ref=ref,
+                gpu_arch=_derive_gpu_arch(gpu_type),
+                build_budget_sec=0,
+                source_pr_url=source_pr_url,
+            )
+            task_id = await self.enqueue_targeted_build(action)
+            if task_id:
+                log.info(
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s "
+                    "arch_stall=%s gpu_arch=%s task=%s",
+                    signature.kind,
+                    component,
+                    bool(arch_stall and not is_compiled_gap),
+                    action.gpu_arch,
+                    task_id,
+                )
+        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+            log.debug("enablement: targeted-build escalation failed", exc_info=True)
+
+    async def _maybe_enqueue_specialist_requested_build(
+        self,
+        *,
+        task_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Enqueue a targeted build the enablement specialist explicitly requested.
+
+        The enablement specialist may emit a ``needs_targeted_build`` object in its
+        ``specialist_done.json`` (see ``ENABLEMENT_BUILD_REQUEST_GUIDANCE``) when a
+        compiled component / from-source framework build is required that a source
+        patch against the installed tree cannot deliver. This reads that request
+        from the just-finished round's workdir (task id captured at rearm into
+        ``enablement_last_specialist_task_id``) and enqueues it on the isolated,
+        ROCm-safe build lane. The field is cleared once read so the request is
+        consumed at most once; ``enqueue_targeted_build`` is additionally
+        idempotent by build-novelty key. Best-effort — never wedges dispatch.
+        """
+        import os as _os
+
+        state = self.shared_state
+        marker_task_id = str(getattr(state, "enablement_last_specialist_task_id", "") or "").strip()
+        task_id = str(task_id or marker_task_id).strip()
+        if not task_id:
+            return
+
+        def _consume_marker() -> None:
+            if marker_task_id == task_id:
+                state.enablement_last_specialist_task_id = ""
+
+        try:
+            if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+                _consume_marker()
+                return
+            from ..actions.executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                _consume_marker()
+                return
+            if payload is None:
+                done_path = self.session_dir / "runs" / "specialist" / task_id / "specialist_done.json"
+                if not done_path.is_file():
+                    return
+                import json as _json
+
+                try:
+                    payload = _json.loads(done_path.read_text())
+                except Exception:  # noqa: BLE001 — malformed/partial done is non-fatal
+                    return
+            req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
+            if not isinstance(req, dict) or not req:
+                _consume_marker()
+                return
+
+            from ..framework.build_actions import (
+                _COMPONENTS,
+                TargetedBuildAction,
+                resolve_build_ref,
+            )
+
+            component = str(req.get("component") or "").strip().lower()
+            if component not in _COMPONENTS:
+                # A from-source framework build is the safest default for an
+                # arch/model request that named no valid compiled component.
+                component = "vllm_source"
+            framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
+            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+            repo_url = str(req.get("repo_url") or "").strip()
+            ref = str(req.get("ref") or "").strip()
+            source_pr_url = ""
+            # A PR-like ``ref``/``repo_url`` carries its own repo + provenance.
+            candidate = ref or repo_url
+            if candidate:
+                _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
+                repo_url = _repo or repo_url
+                ref = _ref or ref
+                source_pr_url = _pr
+            if not _repo_matches_targeted_build_component(repo_url, component):
+                log.warning(
+                    "ENABLEMENT: specialist-requested build repo/component mismatch "
+                    "component=%s repo_url=%s",
+                    component,
+                    repo_url,
+                )
+                _consume_marker()
+                return
+            capability = str(req.get("capability") or "").strip()
+            reason = str(req.get("reason") or "").strip() or "specialist-requested targeted build"
+            action = TargetedBuildAction(
+                gap_id=f"gap.enablement.{capability or component}",
+                framework=framework,
+                component=component,
+                capability=capability or component,
+                reason=f"specialist request: {reason}",
+                repo_url=repo_url,
+                ref=ref,
+                gpu_arch=_derive_gpu_arch(gpu_type),
+                build_budget_sec=0,
+                source_pr_url=source_pr_url,
+            )
+            build_task_id = await self.enqueue_targeted_build(action)
+            if build_task_id:
+                _consume_marker()
+                log.info(
+                    "ENABLEMENT: enqueued specialist-requested targeted_build "
+                    "component=%s capability=%s ref=%s task=%s",
+                    component,
+                    capability or "(none)",
+                    ref or "(autoselect)",
+                    build_task_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+            log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
+
+    async def _maybe_route_build_outcomes(self) -> None:
+        """Route terminal targeted_build rows to _maybe_rearm_enablement.
+
+        Called every tick from _pump_enablement_safely.  Reads succeeded/failed
+        rows, synthesises the rearm res dict (status='kept'/'reverted'/'advanced'),
+        and delegates to the existing stall-gate machinery.
+
+        Novelty: a 'timeout' or 'preflight_budget' failure_class maps to
+        'advanced' (novel attempt, time vs defect distinction — keep going); all
+        real defects map to 'reverted' (advance stall streak).
+
+        A succeeded build no longer synthesises status='kept' directly. Instead
+        it enqueues an integrate_patch launch probe so the runtime must actually
+        boot the model before KEEP is declared.
+        """
+        try:
+            from ..state.task_registry import TERMINAL_STATES
+
+            all_tasks = []
+            for st in ("succeeded", "failed"):
+                all_tasks.extend(
+                    t for t in await self.tasks.by_state(st) if t.kind == "targeted_build"
+                )
+            if not all_tasks:
+                return
+            # Pick the most recent terminal row (by updated_at).
+            task = sorted(all_tasks, key=lambda t: str(getattr(t, "updated_at", "") or ""))[-1]
+            task_id = str(getattr(task, "task_id", "") or "")
+            # Skip rows already accounted for (tracked by enablement_build_manifest).
+            state = self.shared_state
+            manifest = list(getattr(state, "enablement_build_manifest", None) or [])
+            seen_ids = {str(m.get("task_id") or "") for m in manifest if isinstance(m, dict)}
+            if task_id in seen_ids:
+                return
+            # Mark as seen immediately so we don't process the same row twice.
+            manifest.append({"task_id": task_id, "routed": True})
+            state.enablement_build_manifest = manifest
+
+            fc = ""
+            if task.state == "succeeded":
+                # Load the BuildResult from result.json for the rich runtime.
+                attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
+                # The build's attempt_root is resolved at pump time and is NOT
+                # written back into the task params (they keep the enqueue-time
+                # default ""). Fall back to the deterministic build path keyed by
+                # task_id so a *successful* build is not wrongly rejected as
+                # ``artifact_unreadable`` (mirrors BuildLifecycle._attempt_root).
+                if not attempt_root and task_id:
+                    attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
+                br = None
+                if attempt_root:
+                    from ..framework.targeted_build import _load_result_json
+
+                    br = _load_result_json(attempt_root)
+
+                # If the runtime can't be read, it can't be launched → reverted.
+                if br is None or not br.ok or not br.runtime.to_runtime_override():
+                    res: dict = {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
+                    log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
+                    self._maybe_rearm_enablement(res)
+                    return
+
+                # Enqueue a launch probe; KEEP is declared by the probe result.
+                log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
+                await self._enqueue_build_launch_probe(task_id, br)
+                return
+
+            # failed row — read failure_class from history or last_build_failure
+            history = getattr(task, "history", None) or []
+            if isinstance(history, (list, tuple)) and history:
+                last_ev = history[-1]
+                if isinstance(last_ev, dict):
+                    fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
+
+            lbf = getattr(state, "enablement_last_build_failure", None) or {}
+            if not fc and isinstance(lbf, dict):
+                fc = str(lbf.get("failure_class") or "")
+
+            # Novelty ledger: time-based failures are always advanced; defect
+            # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
+            # has not been seen before (novel), reverted when it is a repeat.
+            time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
+            if fc in time_classes:
+                new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                res = {
+                    "enablement": True,
+                    "status": "advanced",
+                    "advanced": True,
+                    "patches_applied": [],
+                    "enablement_launch_log": new_log,
+                }
+            else:
+                from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
+
+                task_params = getattr(task, "params", None) or {}
+                _action = _TBA.from_state(task_params)
+                _key = list(_bnk(_action))
+                ledger = list(getattr(state, "enablement_build_novelty", None) or [])
+                is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
+                ledger.append(_key)
+                state.enablement_build_novelty = ledger[-20:]
+                if is_repeat:
+                    res = {"enablement": True, "status": "reverted"}
+                else:
+                    new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                    res = {
+                        "enablement": True,
+                        "status": "advanced",
+                        "advanced": True,
+                        "patches_applied": [],
+                        "enablement_launch_log": new_log,
+                    }
+            log.info(
+                "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
+                res["status"],
+                task_id,
+                fc,
+            )
+            self._maybe_rearm_enablement(res)
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.debug("enablement: route_build_outcomes failed", exc_info=True)
+
+    async def _enqueue_build_launch_probe(self, build_task_id: str, br: Any) -> None:
+        """Enqueue an integrate_patch launch probe for a verified build.
+
+        Runs the built runtime through the enablement runnable gate without
+        applying any patch.  The probe completes as an ordinary integrate_patch
+        task whose enablement:True result is routed by the dispatcher through
+        _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
+        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
+        acquired via _framework_gpu_params.
+        """
+        from hyperloom.agents.framework.enablement import classify_failure
+
+        state = self.shared_state
+        runtime_override = br.runtime.to_runtime_override()
+        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
+        before_sig = classify_failure(launch_log).to_dict()
+        params: dict[str, Any] = {
+            "enablement": True,
+            "enablement_launch_only": True,
+            "runtime_override": runtime_override,
+            "framework": str(getattr(state, "framework", "") or ""),
+            "enablement_before_signature": before_sig,
+            "source": "coordinator_internal",
+            **self._framework_gpu_params(),
+        }
+        cfg = str(getattr(state, "baseline_config_path", "") or "")
+        if cfg:
+            params["config_path"] = cfg
+        idem = f"build_launch_probe:{build_task_id}"
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        probe_task, existing = await self.tasks.create_or_return_existing(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        probe_tid = str(getattr(probe_task, "task_id", "") or "")
+        log.info(
+            "ENABLEMENT: build launch probe %s task=%s (existing=%s)",
+            "re-used" if existing else "enqueued",
+            probe_tid,
+            existing,
+        )
+
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
 
@@ -3741,6 +4527,10 @@ class FrameworkPhase(PhaseHandler):
             caller: Label identifying the caller ("tick" / "run"), for logs.
         """
         try:
+            await self._maybe_route_build_outcomes()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT route_build_outcomes (%s) failed", caller)
+        try:
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.exception("ENABLEMENT pump (%s) failed", caller)
@@ -3759,7 +4549,10 @@ class FrameworkPhase(PhaseHandler):
             result: The task result; only ``kept``/``reverted`` statuses are
                 recorded.
         """
-        res = getattr(result, "result", None)
+        params = getattr(task, "params", None) or {}
+        if not bool(params.get("framework_agent_authoring")):
+            return
+        res = result if isinstance(result, dict) else getattr(result, "result", None)
         if not isinstance(res, dict):
             return
         status = str(res.get("status") or "")
@@ -3777,7 +4570,6 @@ class FrameworkPhase(PhaseHandler):
         # Do NOT stamp a progress row here — that would block the retry pump.
         if status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore"):
             return
-        params = getattr(task, "params", None) or {}
         # Resolve the FRAMEWORK candidate id (a PR URL) that this authored
         # patch belongs to. The integrate_patch task carries only
         # ``specialist_task_id``; map that back to the originating candidate via
@@ -3800,38 +4592,23 @@ class FrameworkPhase(PhaseHandler):
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": "",
-            "status": status,
-            "provenance": "authored",
-            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-            "gain_pct": gain,
-            "kept": status == "kept",
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=status == "kept",
-                provenance="authored",
-                reason=str(res.get("reason") or ""),
-                gain_pct=gain,
-                accuracy_pass=res.get("accuracy_pass"),
-                extra={"specialist_task_id": str(params.get("specialist_task_id") or "")},
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: authored decision.json write failed", exc_info=True)
+        progress = getattr(self.shared_state, "framework_agent_phase_progress", None)
+        if not isinstance(progress, list):
+            progress = []
+            self.shared_state.framework_agent_phase_progress = progress
+        matching = [
+            row
+            for row in progress
+            if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id
+        ]
+        if any(str(row.get("provenance") or "") != "authored_empty" for row in matching):
+            return
+        if matching:
+            progress[:] = [
+                row
+                for row in progress
+                if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
+            ]
         # Roll the batch max-gain stat the plateau judge reads.
         batches = getattr(self.shared_state, "framework_agent_batches", None) or []
         if isinstance(batches, list) and batch_id:
@@ -3841,13 +4618,24 @@ class FrameworkPhase(PhaseHandler):
                     if gain > prev:
                         entry["max_gain_pct_observed_in_batch"] = gain
                     break
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "FRAMEWORK authored-outcome: save failed for task=%s",
-                getattr(task, "task_id", "?"),
-            )
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status=status,
+            kept=status == "kept",
+            rationale=str(res.get("reason") or ""),
+            provenance="authored",
+            gain_pct=gain,
+            extra={
+                "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+                "accuracy_pass": res.get("accuracy_pass"),
+                "specialist_task_id": spec_tid,
+                "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+            },
+        )
+        if not recorded:
+            return
         log.info(
             "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
@@ -3855,6 +4643,61 @@ class FrameworkPhase(PhaseHandler):
             status,
             gain,
         )
+
+    async def _recover_framework_agent_authoring_outcome(
+        self,
+        *,
+        specialist_task: "Task",
+    ) -> bool:
+        """Recover a missed authoring outcome from persisted delegated results."""
+        params = getattr(specialist_task, "params", None) or {}
+        specialist_task_id = str(getattr(specialist_task, "task_id", "") or "")
+        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        if not specialist_task_id or not cand_id:
+            return False
+        messages = await self.bus.tail(n=10000, topic="delegated_result")
+        for message in messages:
+            payload = getattr(message, "payload", None) or {}
+            if (
+                str(payload.get("task_id") or "") != specialist_task_id
+                or str(payload.get("kind") or "") != "specialist"
+            ):
+                continue
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            done_payload = result.get("specialist_done")
+            if isinstance(done_payload, dict):
+                self._record_framework_agent_authoring_empty_outcome(
+                    task=specialist_task,
+                    done_payload=done_payload,
+                )
+                if cand_id in self._framework_processed_candidate_keys():
+                    return True
+            break
+        for message in messages:
+            payload = getattr(message, "payload", None) or {}
+            if str(payload.get("kind") or "") != "integrate_patch":
+                continue
+            task_id = str(payload.get("task_id") or "")
+            if not task_id:
+                continue
+            try:
+                integrate_task = await self.tasks.get(task_id)
+            except Exception:  # noqa: BLE001 — stale bus entries are ignored
+                continue
+            integrate_params = getattr(integrate_task, "params", None) or {}
+            if (
+                str(integrate_params.get("specialist_task_id") or "") != specialist_task_id
+                or not bool(integrate_params.get("framework_agent_authoring"))
+            ):
+                continue
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            self._record_framework_agent_authored_outcome(
+                task=integrate_task,
+                result=result,
+            )
+            if cand_id in self._framework_processed_candidate_keys():
+                return True
+        return False
 
     def _record_framework_agent_authoring_empty_outcome(
         self,
@@ -3881,8 +4724,6 @@ class FrameworkPhase(PhaseHandler):
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
-            return
-        if (self.shared_state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         payload = done_payload if isinstance(done_payload, dict) else {}
         inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
@@ -3935,10 +4776,6 @@ class FrameworkPhase(PhaseHandler):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        if cand_id in self._framework_processed_candidate_keys():
-            return
         # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
         sem = str((audit or {}).get("semantic_status") or "").strip().lower()
@@ -3949,40 +4786,18 @@ class FrameworkPhase(PhaseHandler):
         else:
             status = "author_empty"
         reason = str(inner.get("summary") or "").strip()[:500]
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": "",
-            "status": status,
-            "provenance": "authored_empty",
-            "kept": False,
-            "gain_pct": 0.0,
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        try:
-            from ..framework.artifacts import write_decision_json
-
-            write_decision_json(
-                self.session_dir,
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=status,
-                kept=False,
-                provenance="authored_empty",
-                reason=reason,
-                gain_pct=0.0,
-                extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
-            )
-        except Exception:  # noqa: BLE001 — observability is best-effort
-            log.debug("FRAMEWORK: authored-empty decision.json write failed", exc_info=True)
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "FRAMEWORK authored-empty: save failed for task=%s",
-                getattr(task, "task_id", "?"),
-            )
+        recorded = self._stamp_framework_progress(
+            candidate_id=cand_id,
+            batch_id=batch_id,
+            status=status,
+            kept=False,
+            rationale=reason,
+            provenance="authored_empty",
+            gain_pct=0.0,
+            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+        )
+        if not recorded:
+            return
         log.info(
             "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
             cand_id,

@@ -24,7 +24,12 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import is_python_package_root, scrub_child_process_env
+from hyperloom.common.env_safety import (
+    BLOCKED_CHILD_ENV_NAMES,
+    _ENV_KEY_RE,
+    is_python_package_root,
+    scrub_child_process_env,
+)
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
@@ -437,6 +442,111 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
+def _is_safe_path_entry(entry: str) -> bool:
+    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
+    return (
+        bool(entry)
+        and ":" not in entry
+        and ".." not in Path(entry).parts
+        and not any(c in entry for c in ("\n", "\r", "\x00"))
+    )
+
+
+def _prepend_path_entry(envs: dict[str, str], var: str, entry: str) -> None:
+    """Prepend a single already-validated entry onto a ``:``-joined env var."""
+    parts = [p for p in str(envs.get(var, "") or "").split(":") if p]
+    if entry not in parts:
+        parts.insert(0, entry)
+    envs[var] = ":".join(parts)
+
+
+# Reserved keys carried by dedicated override fields; never accepted via runtime_env.
+_RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
+
+
+def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
+    """Inject an attempt runtime override into the materialized YAML envs dict.
+
+    Writes the base keys (path_prefix, pythonpath_prefix, framework_bin,
+    framework_python, framework_venv_root) and the compiled-artifact keys
+    (pythonpath_prefixes, ld_library_path_prefix, runtime_env, entrypoint_bin_dir)
+    into benchmark.envs so the Magpie subprocess re-exports them to the server it
+    boots. All writes land in the YAML layer; os.environ is never mutated.
+
+    Path entries use the same containment checks as overlay_pythonpath (no colon
+    separator, no traversal, no control chars); unsafe entries are dropped with a
+    warning. runtime_env entries with an invalid/blocked/reserved key are dropped.
+    An empty or all-missing override is a no-op.
+
+    Args:
+        envs: The benchmark.envs dict from the materialized YAML (mutated in place).
+        override: Dict with optional keys path_prefix, pythonpath_prefix,
+            framework_bin, framework_python, framework_venv_root,
+            pythonpath_prefixes (list), ld_library_path_prefix (list),
+            runtime_env (dict), entrypoint_bin_dir.
+    """
+    if not override:
+        return
+    path_prefix = str(override.get("path_prefix") or "").strip()
+    if path_prefix:
+        _prepend_path_entry(envs, "PATH", path_prefix)
+    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
+    if entrypoint_bin:
+        if _is_safe_path_entry(entrypoint_bin):
+            _prepend_path_entry(envs, "PATH", entrypoint_bin)
+        else:
+            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
+    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
+    if pp_prefix:
+        if _is_safe_path_entry(pp_prefix):
+            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+            envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
+        else:
+            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
+    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of
+    # any single-dir pythonpath_prefix and the inherited value.
+    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
+        if _is_safe_path_entry(entry):
+            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+            envs["PYTHONPATH"] = f"{entry}:{_cur_pp}" if _cur_pp else entry
+        else:
+            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
+    # Native loader path: prepend attempt entries while preserving any inherited
+    # entries (e.g. /opt/rocm/lib), which _prepend_path_entry never drops.
+    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
+        if _is_safe_path_entry(entry):
+            _prepend_path_entry(envs, "LD_LIBRARY_PATH", entry)
+        else:
+            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
+    _runtime_env = override.get("runtime_env")
+    if isinstance(_runtime_env, dict):
+        for raw_k, raw_v in _runtime_env.items():
+            key = str(raw_k)
+            if not _ENV_KEY_RE.match(key) or key in BLOCKED_CHILD_ENV_NAMES or key in _RUNTIME_ENV_RESERVED:
+                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
+                continue
+            envs[key] = str(raw_v)
+    for key in ("framework_bin", "framework_python", "framework_venv_root"):
+        val = str(override.get(key) or "").strip()
+        if val:
+            envs[f"HYPERLOOM_{key.upper()}"] = val
+    # runtime_python_exe takes priority over framework_python as the launch interpreter.
+    rpe = str(override.get("runtime_python_exe") or "").strip()
+    if rpe:
+        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
+
+
+def _coerce_prefix_list(value: Any) -> list[str]:
+    """Normalize a runtime-prefix field (list/tuple/str) to a list of entries."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
 def _build_variant_yaml(
     base_yaml_path: Path,
     base_extra_args: str,
@@ -524,6 +634,13 @@ def _build_variant_yaml(
                 "existing directory / contains separator or traversal)",
                 _overlay,
             )
+
+    # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin
+    # etc. into benchmark.envs so the server subprocess resolves the attempt
+    # runtime.  All writes are YAML-layer; os.environ is never mutated.
+    _rt_override = getattr(variant, "runtime_override", None) or {}
+    if _rt_override:
+        apply_runtime_override(envs, _rt_override)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console
     # script) and `/opt/rocm/bin` (`hipcc`); force-prepend both so an
@@ -928,6 +1045,7 @@ async def run_grid(
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
+    session_deadline_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute each grid variant and return all per-variant results.
 
@@ -938,6 +1056,11 @@ async def run_grid(
     close) is owned by the caller so it can also span multiple ``run_grid``
     calls that reuse one persistent server (conc_sweep arm, explore warmup +
     decision).
+
+    ``session_deadline_sec`` is a ``time.monotonic()`` deadline for the whole
+    session budget; a variant is skipped once the remaining budget cannot fit
+    another ``variant_timeout_sec`` worst-case run, so a wall-clock timeout stops
+    the grid mid-way and the last variant never overruns the close window.
     """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -992,6 +1115,23 @@ async def run_grid(
             log.debug("robustness pulse swallowed: %r", exc)
 
     for i, variant in enumerate(grid):
+        # Session-budget stop: skip the remaining variants once the wall-clock
+        # deadline is reached or the remaining budget cannot fit another
+        # variant's worst-case runtime, so a timeout halts the grid instead of
+        # draining it (and the last variant cannot overrun the close window).
+        if session_deadline_sec is not None:
+            remaining_sec = session_deadline_sec - time.monotonic()
+            if remaining_sec < float(variant_timeout_sec):
+                log.warning(
+                    "grid_runner: session budget exhausted (%.0fs left < variant cap %ds); "
+                    "skipping %d remaining variant(s)",
+                    max(0.0, remaining_sec),
+                    variant_timeout_sec,
+                    len(grid) - i,
+                )
+                for skipped_variant in grid[i:]:
+                    results.append(_session_deadline_skip_result(skipped_variant))
+                break
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
         # Capability fast-fail: drop a variant whose env flag the build cannot
         # honour before booting a doomed server, still recording the failure so
@@ -1778,6 +1918,19 @@ async def run_grid(
         )
         await _pulse_after_variant(i)
     return results
+
+
+def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
+    """Synthetic ``skipped`` result for a variant dropped when the session budget ran out."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="skipped",
+        error="session wall-clock budget exhausted before this variant ran",
+        error_class="session_time_exhausted",
+        note=variant.note,
+    )
 
 
 SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0

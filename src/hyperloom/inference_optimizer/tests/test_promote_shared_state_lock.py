@@ -322,7 +322,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
             "output_throughput": 140.0,
             "specialist_task_id": "spec-1",
             "delta_pct": 40.0,
-            "config_changes_applied": {"FOO": "1"},
+            "extra_server_args_applied": "--kv-cache-dtype fp8",
+            "extra_envs_applied": {"FOO": "1"},
             "workspace": "/w",
         },
         task=_task("integrate_patch", task_id="t1"),
@@ -330,6 +331,8 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["tput"] == 140.0
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert s.current_best["extra_envs"] == {"FOO": "1"}
     # pending_integrate sentinel cleared after the outcome is observed.
     assert s.pending_integrate == {}
     # Not an audited action: no last_integrate_patch attribute is created.
@@ -561,3 +564,92 @@ async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(
 def test_promote_handlers_are_callable(task_kind, handler_name):
     handler = getattr(WritebackCollaborator, handler_name, None)
     assert callable(handler), f"{task_kind!r} -> {handler_name!r} is not a callable on WritebackCollaborator"
+
+
+# ---------------------------------------------------------------------------
+# Env preservation across layers and source_snapshot propagation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_integrate_keep_preserves_prior_explore_envs(session_dir):
+    """An artifact-only integrate KEEP must not erase envs from the explore layer."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1083.0
+    s.current_best = {
+        "action": "explore",
+        "tput": 4616.0,
+        "extra_server_args": "--no-scheduler-reserve-full-isl",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"},
+    }
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 4700.0,
+            "specialist_task_id": "spec-keep",
+            "config_changes_applied": {},
+        },
+        task=_task("integrate_patch", task_id="t-keep"),
+    )
+
+    assert s.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER_MOE") == "0", (
+        "explore env must survive artifact-only integrate KEEP"
+    )
+
+
+def test_lift_applies_unset_envs_before_new_envs(session_dir):
+    coord = _coord(session_dir)
+    coord.shared_state.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "",
+        "extra_envs": {"KEEP": "old", "DROP": "old", "RESTORE": "old"},
+    }
+
+    coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {
+            "name": "env-update",
+            "extra_server_args": "",
+            "extra_envs": {"KEEP": "new", "RESTORE": "new"},
+            "unset_envs": ["DROP", "RESTORE"],
+        },
+    )
+
+    assert coord.shared_state.current_best["extra_envs"] == {
+        "KEEP": "new",
+        "RESTORE": "new",
+    }
+
+
+@pytest.mark.asyncio
+async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
+    """source_snapshot/framework_root/base_sha from the lift bv reach the stack entry."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1500.0,
+        {
+            "name": "patch-1",
+            "candidate_extra_server_args": "",
+            "extra_envs": {},
+            "tput": 1500.0,
+            "scope": "source_patch",
+            "source_snapshot": "/session/optimization_stack/src/abc123",
+            "framework_root": "/opt/vllm",
+            "base_sha": "deadbeef",
+        },
+    )
+
+    top = s.optimization_stack[-1]
+    assert top.get("source_snapshot") == "/session/optimization_stack/src/abc123"
+    assert top.get("framework_root") == "/opt/vllm"
+    assert top.get("base_sha") == "deadbeef"

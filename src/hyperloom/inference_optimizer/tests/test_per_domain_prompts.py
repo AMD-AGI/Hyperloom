@@ -187,6 +187,72 @@ def test_enablement_specialist_mentions_runnability_and_authoring():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
+def _build_split(domain_key: str) -> tuple[str, str]:
+    domain = get_domain(domain_key)
+    assert domain is not None, domain_key
+    inp = SpecialistPromptInputs(
+        task_id=f"task-{domain_key}",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id=f"gap.{domain_key}.example",
+        gap_symptom="Model architecture 'DeepseekV4ForCausalLM' is not supported",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "deepseek-ai/DeepSeek-V4"},
+        # Perf context that MUST be stripped for the enablement domain.
+        roofline_evidence={"roofline_snapshot_id": 7, "executive_summary": {"compute_pct": 50}},
+        warm_start_recipe={"name": "r1"},
+        warm_start_lessons=[{"attrs": {"statement": "prior keep lesson"}}],
+        warm_start_pitfalls=[{"attrs": {"description": "prior revert pitfall"}}],
+        kg_recommended_knobs=[{"knob": "--enable-chunked-prefill"}],
+        kg_guided_knobs=[{"name": "kg-knob", "args": "--foo"}],
+        kb_subgraph={"nodes": ["x"]},
+        workspace_path=f"/tmp/test/{domain_key}",
+    )
+    return build_specialist_prompts(inp)
+
+
+def test_enablement_user_prompt_injects_ladder_book_and_keeps_essentials():
+    """Enablement dispatch carries the ladder book + gap + PR monitor + source hint in the USER prompt."""
+    _system, user = _build_split("enablement_specialist")
+    assert "## 1b. ENABLEMENT PLAYBOOK" in user
+    assert "ENABLEMENT METHODOLOGY" in user
+    assert "Rung 5" in user
+    assert "## 3. GAP STATEMENT" in user
+    assert "## 6. PR MONITOR" in user
+    assert "## 7. LOCAL SOURCE NAVIGATION HINT" in user
+
+
+def test_enablement_user_prompt_strips_perf_only_sections():
+    """Pre-baseline perf context is omitted for the enablement domain."""
+    _system, user = _build_split("enablement_specialist")
+    for banned in (
+        "## 4. KB CONTEXT",
+        "## 4a. ROOFLINE EVIDENCE",
+        "## 5. WARM-START RECIPE",
+        "## 5b. RELATED LESSONS",
+        "## 5c. KNOWN PITFALLS",
+        "## 5d. GRAPH-RECOMMENDED KNOBS",
+        "## 5e. GRAPH-GUIDED CONFIG KNOBS",
+    ):
+        assert banned not in user, f"perf section leaked into enablement prompt: {banned!r}"
+
+
+def test_enablement_book_lives_in_user_not_system_prompt():
+    """The per-task book/mandate stays out of the cached system prompt."""
+    system, user = _build_split("enablement_specialist")
+    assert "ENABLEMENT METHODOLOGY" not in system
+    assert "ENABLEMENT METHODOLOGY" in user
+
+
+def test_perf_specialist_prompt_unchanged_keeps_perf_context():
+    """A perf domain still carries roofline / recipe / KG sections and no ladder book."""
+    _system, user = _build_split("serving_specialist")
+    assert "## 4a. ROOFLINE EVIDENCE" in user
+    assert "## 5. WARM-START RECIPE" in user
+    assert "## 5d. GRAPH-RECOMMENDED KNOBS" in user
+    assert "ENABLEMENT PLAYBOOK" not in user
+
+
 def test_static_recon_shared_expert_model_features_line():
     """Model-features line includes shared_expert=True and n_shared= for shared-expert MoE."""
     domain = get_domain("static_recon_specialist")
@@ -967,7 +1033,6 @@ def test_build_empty_specialist_done_is_R3_valid():
 def test_shared_state_specialist_rounds_default_empty():
     s = SharedState()
     assert s.specialist_rounds == []
-    assert s.specialist_domain_empty_streak == {}
     assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
     assert s.rounds_since_last_specialist == {}
@@ -1069,18 +1134,6 @@ def test_record_specialist_round_dedup_by_round_id():
     assert len(s.specialist_rounds) == 2
     by_round = {r["round_id"]: r for r in s.specialist_rounds}
     assert by_round["explore-001"]["proposals_total"] == 5
-
-
-def test_bump_specialist_domain_empty_streak():
-    s = SharedState()
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 1
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 2
-    # A non-empty proposal_set resets.
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=False) == 0
-    # Other domains don't share state.
-    assert s.bump_specialist_domain_empty_streak("kernel_switch_specialist", empty=True) == 1
-    assert s.specialist_domain_empty_streak["serving_specialist"] == 0
-    assert s.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 def test_update_last_specialist_snapshot():
