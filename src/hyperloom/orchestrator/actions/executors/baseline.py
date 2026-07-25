@@ -1101,40 +1101,41 @@ class BaselineExecutor:
         return None
 
     @staticmethod
-    def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
-        """Whether a failed baseline result was caused by the accuracy eval.
+    def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
+        """Detect an eval-rooted baseline failure and capture bounded evidence.
 
         Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
         benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
-        for ``run_eval``-failure markers. Recursive so the double-run path is
-        covered (the warmup round's logs carry the marker even when the measure
-        round failed for a downstream reason). Never raises.
-
-        Args:
-            result: A ``status="failed"`` baseline result dict.
+        for ``run_eval``-failure markers. Climbs to the shared task root so the
+        double-run warmup logs are covered. Returns the first matched window
+        (marker plus a bounded slice) so callers need not rescan. Never raises.
 
         Returns:
-            ``True`` when an eval-failure marker is found, else ``False``.
+            ``(is_eval_rooted, evidence)``; ``evidence`` is empty when not rooted.
         """
 
-        def _hit(text: str) -> bool:
-            return any(m in text for m in _EVAL_FAILURE_MARKERS)
+        def _window(text: str) -> str | None:
+            for m in _EVAL_FAILURE_MARKERS:
+                i = text.find(m)
+                if i != -1:
+                    return text[max(0, i - 200) : i + len(m) + 400]
+            return None
 
-        if _hit(str(result.get("error") or "")):
-            return True
-        for w in result.get("nonfatal_warnings") or []:
-            if _hit(str(w)):
-                return True
+        w = _window(str(result.get("error") or ""))
+        if w is not None:
+            return True, w
+        for warn in result.get("nonfatal_warnings") or []:
+            w = _window(str(warn))
+            if w is not None:
+                return True, w
         out_dir = result.get("output_dir")
         if not out_dir:
-            return False
+            return False, ""
         root = Path(out_dir)
-        # Double-run: the eval failure markers may live in the sibling warmup
-        # round, so climb to the shared task root to scan both rounds.
         if root.name in ("warmup_round", "measure_round"):
             root = root.parent
         if not root.exists():
-            return False
+            return False, ""
         log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
         seen = 0
         try:
@@ -1152,11 +1153,17 @@ class BaselineExecutor:
                         chunk = f.read().decode("utf-8", "replace")
                 except OSError:
                     continue
-                if _hit(chunk):
-                    return True
+                w = _window(chunk)
+                if w is not None:
+                    return True, f"{path.name}: {w}"
         except OSError:
-            return False
-        return False
+            return False, ""
+        return False, ""
+
+    @staticmethod
+    def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
+        """Whether a failed baseline result was caused by the accuracy eval."""
+        return BaselineExecutor._eval_failure_evidence(result)[0]
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback.
@@ -1187,20 +1194,92 @@ class BaselineExecutor:
             "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
-        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
-            log.warning(
-                "baseline_executor: failure looks eval-rooted (InferenceX "
-                "run_eval aborted the benchmark); retrying once with "
-                "RUN_EVAL=false to salvage the throughput baseline without "
-                "the accuracy gate."
-            )
-            retry = await self._run_once(ctx, force_disable_eval=True)
-            retry.setdefault("nonfatal_warnings", [])
-            retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-            if retry.get("status") == "succeeded":
-                retry["accuracy_source"] = "eval_unavailable"
-            result = retry
+        if result.get("status") != "succeeded" and not eval_already_off:
+            rooted, evidence = self._eval_failure_evidence(result)
+            if rooted:
+                if self._eval_enablement_active(ctx):
+                    from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+                    log.warning(
+                        "baseline_executor: eval-rooted failure; routing to "
+                        "enablement instead of salvaging (RUN_EVAL stays on)."
+                    )
+                    self._stamp_eval_failure_contract(
+                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                    )
+                    return result
+                log.warning(
+                    "baseline_executor: failure looks eval-rooted (InferenceX "
+                    "run_eval aborted the benchmark); retrying once with "
+                    "RUN_EVAL=false to salvage the throughput baseline without "
+                    "the accuracy gate."
+                )
+                retry = await self._run_once(ctx, force_disable_eval=True)
+                retry.setdefault("nonfatal_warnings", [])
+                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+                if retry.get("status") == "succeeded":
+                    retry["accuracy_source"] = "eval_unavailable"
+                result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
+        return result
+
+    def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
+        """Whether an eval failure should route into enablement this run.
+
+        Only for a genuine baseline, single-node, with the flag enabled.
+        """
+        from ._accuracy_gate import enablement_on_eval_fail_enabled
+        from ._multi_node_env import is_multi_node
+
+        if not enablement_on_eval_fail_enabled():
+            return False
+        if is_multi_node():
+            return False
+        return _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
+
+    def _stamp_eval_failure_contract(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+        *,
+        kind: str,
+        observed_accuracy: float | None,
+        evidence: str,
+    ) -> dict[str, Any]:
+        """Mark ``result`` as an eval-rooted baseline failure for enablement.
+
+        Records the failure kind, observed accuracy, effective floor, bounded
+        evidence and an eval-contract fingerprint so writeback can persist the
+        trigger and a later enablement round can re-run the same contract.
+        """
+        from ._accuracy_gate import (
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+            BASELINE_EVAL_EVIDENCE_KEY,
+            BASELINE_EVAL_FAILED_KEY,
+            BASELINE_EVAL_FAILURE_KIND_KEY,
+            BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+            enablement_accuracy_floor,
+            eval_contract_fingerprint,
+        )
+
+        params = ctx.task.params or {}
+        framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
+        model = params.get("model") or params.get("resolved_model")
+        floor = enablement_accuracy_floor()
+        result[BASELINE_EVAL_FAILED_KEY] = True
+        result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
+        result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
+        result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
+        result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
+        result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
+            config_path=result.get("materialized_config"),
+            framework=framework,
+            model=model,
+            task=result.get("accuracy_task"),
+            metric=result.get("accuracy_metric"),
+        )
+        result["eval_origin"] = "eval"
         return result
 
     def _maybe_stop_on_missing_baseline_accuracy(
@@ -1237,7 +1316,14 @@ class BaselineExecutor:
         if result.get("status") != "succeeded":
             return
         acc = result.get("accuracy")
-        if acc is not None and float(acc) > 0.0:
+        eval_enablement = self._eval_enablement_active(ctx)
+        from ._accuracy_gate import accuracy_meets_floor, classify_accuracy_failure, enablement_accuracy_floor
+
+        floor = enablement_accuracy_floor()
+        if eval_enablement:
+            if accuracy_meets_floor(acc, floor):
+                return  # a usable baseline accuracy at/above the floor exists
+        elif acc is not None and float(acc) > 0.0:
             return  # a usable baseline accuracy exists
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
@@ -1252,6 +1338,26 @@ class BaselineExecutor:
             result.get("accuracy_source") != "eval_unavailable"
         )
         if not (scriptable or not operator_disabled_eval):
+            return
+        # Route into enablement instead of stopping/salvaging: the throughput
+        # baseline stays for diagnostics but is blocked from anchoring.
+        if eval_enablement:
+            kind = classify_accuracy_failure(acc, floor)
+            observed = float(acc) if isinstance(acc, (int, float)) else None
+            evidence = (
+                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
+                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
+                f"source={result.get('accuracy_source')}"
+            )
+            self._stamp_eval_failure_contract(
+                ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
+            )
+            log.warning(
+                "baseline_executor: accuracy %s below floor %.4f; routing to "
+                "enablement instead of stopping the run.",
+                acc,
+                floor,
+            )
             return
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
@@ -1942,6 +2048,13 @@ class BaselineExecutor:
         # that ignore it are caught by the salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
         env["RESULT_DIR"] = str(result_dir)
+        # Config/eval-contract facts echoed onto every failure result so an
+        # eval-rooted failure can be fingerprinted and re-run by enablement.
+        capture_meta = {
+            "materialized_config": str(materialized_config_path),
+            "result_dir": str(result_dir),
+            "run_eval_disabled": bool(run_eval_disabled),
+        }
         # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
         # lm-eval output. Keep it under the task workspace but separate from
         # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
@@ -2120,6 +2233,7 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
+                **capture_meta,
             }
 
         # Detokenizer-stall watchdog reap: the server came up healthy but went
@@ -2150,6 +2264,7 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in stall_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
+                **capture_meta,
             }
 
         # When the server's engine/worker bootstrap dies, the root cause is in
@@ -2202,6 +2317,7 @@ class BaselineExecutor:
             failure_extras = {
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
+                **capture_meta,
             }
             # Magpie never created a benchmark_* workspace, so the wrapper never
             # wrote server.log. Persist captured stderr/stdout so the failure
@@ -2313,6 +2429,7 @@ class BaselineExecutor:
                 "reported_success": measurement.get("reported_success"),
                 "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                 "nonfatal_warnings": warnings,
+                **capture_meta,
             }
 
         result = {

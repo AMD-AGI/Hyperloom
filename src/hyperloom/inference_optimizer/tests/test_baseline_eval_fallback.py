@@ -27,6 +27,13 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
+@pytest.fixture(autouse=True)
+def _legacy_salvage_default(monkeypatch):
+    """Exercise the legacy salvage/stop path by default; eval-origin enablement
+    routing is opted into per-test."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "0")
+
+
 def _write_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -573,3 +580,79 @@ def test_eval_already_off_does_not_retry(tmp_path):
 
     assert len(calls) == 1  # already off, no fallback
     assert result["status"] == "failed"
+
+
+# --- eval-origin enablement routing (flag on) ------------------------------
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E402
+    BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
+    BASELINE_EVAL_FAILED_KEY,
+    BASELINE_EVAL_FAILURE_KIND_KEY,
+    BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+    EVAL_KIND_ACCURACY_BELOW_FLOOR,
+    EVAL_KIND_ACCURACY_UNAVAILABLE,
+)
+
+
+def _route(monkeypatch, framework, result, *, floor=None, nodes=None):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
+    if floor is not None:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", str(floor))
+    if nodes is not None:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
+    return rec.stop_reason
+
+
+def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch):
+    result = {"status": "succeeded", "run_eval_disabled": False, "materialized_config": "/tmp/c.yaml"}
+    reason = _route(monkeypatch, "sglang", result)
+    assert reason == ""
+    assert result[BASELINE_EVAL_FAILED_KEY] is True
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == 0.0
+    assert result[BASELINE_EVAL_EVIDENCE_KEY]
+    assert result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY]
+    assert result["eval_origin"] == "eval"
+
+
+def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
+    result = {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": False}
+    reason = _route(monkeypatch, "sglang", result)
+    assert reason == ""
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
+
+
+def test_eval_enablement_positive_below_configured_floor(monkeypatch):
+    result = {"status": "succeeded", "accuracy": 0.2, "run_eval_disabled": False}
+    reason = _route(monkeypatch, "sglang", result, floor=0.5)
+    assert reason == ""
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.2
+    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == 0.5
+
+
+def test_eval_enablement_accuracy_at_floor_passes(monkeypatch):
+    result = {"status": "succeeded", "accuracy": 0.5, "run_eval_disabled": False}
+    reason = _route(monkeypatch, "sglang", result, floor=0.5)
+    assert reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_eval_enablement_multi_node_falls_back_to_stop(monkeypatch):
+    result = {"status": "succeeded", "run_eval_disabled": False}
+    reason = _route(monkeypatch, "sglang", result, nodes=2)
+    assert reason == "baseline_accuracy_failed"
+    assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_eval_enablement_operator_optout_not_routed(monkeypatch):
+    result = {"status": "succeeded", "run_eval_disabled": True}
+    reason = _route(monkeypatch, "sglang", result)
+    assert reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
