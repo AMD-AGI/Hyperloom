@@ -2013,6 +2013,7 @@ def _run_loop_via_cli(
     experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
+    deadline_unix: float = 0.0,
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2027,6 +2028,8 @@ def _run_loop_via_cli(
     """
     import json as _json
 
+    if deadline_unix <= 0:
+        deadline_unix = time.time() + timeout_s
     result_json = experiments_dir.parent / "forge_cli_result.json"
     checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
     for stale_path in (result_json, checkpoint_json):
@@ -2048,11 +2051,11 @@ def _run_loop_via_cli(
     env["GPU_TARGET"] = gpu_target
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
-    # aiter JITs each op from source, so an edit only takes effect on rebuild:
-    # force AITER_REBUILD=1 for aiter kernels. setdefault so an operator
-    # override wins.
+    # KernelForge owns content-addressed AITER cache invalidation. Do not set
+    # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
+    # tree on every driver-process import, causing repeated attention rebuilds.
     if "/aiter/" in (worktree_kernel or ""):
-        env.setdefault("AITER_REBUILD", "1")
+        env.pop("AITER_REBUILD", None)
         # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
         # disabled before the loop imports aiter.
         _ensure_flydsl_aiter_compat()
@@ -2085,6 +2088,8 @@ def _run_loop_via_cli(
         str(experiments_dir),
         "--experiment-id",
         _FORGE_EXPERIMENT_ID,
+        "--deadline-unix",
+        str(deadline_unix),
         "--result-json",
         str(result_json),
     ]
@@ -2107,13 +2112,16 @@ def _run_loop_via_cli(
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             timed_out = True
             stdout, stderr = _terminate_forge_process(proc)
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
-            loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
+            loop_exc = RuntimeError(
+                f"forge-loop exceeded absolute deadline after {timeout_s}s"
+            )
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
@@ -2150,6 +2158,12 @@ def _run_loop_via_cli(
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
         improved = bool(parsed.get("improved"))
+        if parsed.get("deadline_expired"):
+            timed_out = True
+            if loop_exc is None:
+                loop_exc = RuntimeError(
+                    "forge-loop reached its graceful absolute deadline"
+                )
     checkpoint = _read_forge_checkpoint(experiments_dir)
     return ForgeLoopOutcome(
         baseline_ms=baseline_ms,
@@ -2481,6 +2495,10 @@ def submit(
             experiments_dir=experiments_dir,
             forge_log=forge_log,
             timeout_s=timeout_s,
+            deadline_unix=max(
+                time.time() + 1.0,
+                started + timeout_s,
+            ),
         )
         recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,
