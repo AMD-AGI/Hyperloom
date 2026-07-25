@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import signal
 import time
 import traceback
@@ -196,22 +197,21 @@ def _resolvable_artifacts_from_done(
 
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Extract a config-lever set from a FRAMEWORK specialist deliverable.
 
     A specialist may translate an upstream PR into a config win (serving flags /
-    env vars) instead of a source patch; it flows through the ``integrate_patch``
-    ``config_changes`` channel. Levers are read from the first ``proposal_set``
-    entry carrying ``extra_args`` and/or ``extra_envs``, flattened into a single
-    ``{KEY: value}`` config-changes dict. Returns ``{}`` when no config lever is
-    present.
+    env vars) instead of a source patch. Levers are read from the first
+    ``proposal_set`` entry carrying ``extra_args`` and/or ``extra_envs`` while
+    preserving the separate server-argument and environment channels.
 
     Args:
         done_payload: The specialist ``specialist_done`` payload (already
             unwrapped of any envelope).
 
     Returns:
-        dict[str, str]: The flattened config-change mapping, or ``{}``.
+        dict[str, Any]: The server arguments and environment overrides, or
+            ``{}``.
     """
     if not isinstance(done_payload, dict):
         return {}
@@ -225,40 +225,25 @@ def _framework_config_levers_from_done(
     for entry in proposals:
         if not isinstance(entry, dict):
             continue
-        levers: dict[str, str] = {}
+        extra_envs: dict[str, str] = {}
         envs = entry.get("extra_envs")
         if isinstance(envs, dict):
             for k, v in envs.items():
                 key = str(k).strip()
                 if key:
-                    levers[key] = str(v)
+                    extra_envs[key] = str(v)
         args = entry.get("extra_args")
-        arg_tokens: list[str] = []
+        extra_server_args = ""
         if isinstance(args, str) and args.strip():
-            arg_tokens = args.split()
+            extra_server_args = args
         elif isinstance(args, (list, tuple)):
             arg_tokens = [str(a) for a in args if str(a).strip()]
-        # Fold ``--flag value`` / ``--flag=value`` / bare ``--flag`` pairs into
-        # the config dict.
-        i = 0
-        while i < len(arg_tokens):
-            tok = arg_tokens[i].strip()
-            if not tok:
-                i += 1
-                continue
-            if "=" in tok and tok.startswith("-"):
-                k, _, v = tok.partition("=")
-                levers[k.strip()] = v.strip()
-                i += 1
-                continue
-            if tok.startswith("-") and i + 1 < len(arg_tokens) and not arg_tokens[i + 1].startswith("-"):
-                levers[tok] = str(arg_tokens[i + 1]).strip()
-                i += 2
-                continue
-            levers[tok] = ""
-            i += 1
-        if levers:
-            return levers
+            extra_server_args = shlex.join(arg_tokens)
+        if extra_server_args or extra_envs:
+            return {
+                "extra_server_args": extra_server_args,
+                "extra_envs": extra_envs,
+            }
     return {}
 
 
@@ -1063,6 +1048,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
+        "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
         "_framework_agent_repo_url_origin_framework": "phase_framework",
         "_build_framework_config_grid": "phase_framework",

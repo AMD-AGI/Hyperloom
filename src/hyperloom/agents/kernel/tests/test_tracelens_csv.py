@@ -19,6 +19,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _bypass_report as bypass_report  # noqa: E402
 import _idle_gate as idle_gate  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
@@ -608,6 +609,17 @@ def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
     assert all(s and s != "()" for s in shapes)
 
 
+def test_resolve_fused_moe_preserves_invocation_boundaries(tmp_path):
+    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
+
+    cases = tla.resolve_fused_moe_invocation_cases_from_csv(csv_dir)
+
+    assert len(cases) == 2
+    assert "(15360,2048) bf16" in cases[0]["input_shapes"][0]["shape"]
+    assert "(122880,768) bf16" in cases[1]["input_shapes"][0]["shape"]
+    assert cases[0]["raw_arg_spec"]["input_dims"] != cases[1]["raw_arg_spec"]["input_dims"]
+
+
 def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
     """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
     assert tla.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
@@ -642,6 +654,8 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
     assert "(15360,2048) bf16" in out[0]["shapes"]
     assert out[0]["shape_provenance"] == "torch_trace"
+    assert len(out[0]["invocation_cases"]) == 2
+    assert out[0]["raw_arg_spec"] == out[0]["invocation_cases"][0]["raw_arg_spec"]
 
 
 def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
@@ -712,6 +726,9 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     )
     assert out[0]["shapes"] == []
     assert out[1]["shapes"] == ["(99,99) bf16"]
+    assert out[1]["invocation_cases"][0]["input_shapes"] == [
+        "(99,99) bf16"
+    ]
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
@@ -3160,6 +3177,116 @@ def test_aggregate_by_source_function_groups_same_function_calls(tmp_path):
     assert g1["definition_line"] == 5
 
 
+def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path):
+    src = tmp_path / "operator.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    candidate = {
+        "kernel_id": "k001",
+        "name": "fused_operator",
+        "duration_us": 100.0,
+        "tracelens_launcher_path": f"{src}(1): forward",
+    }
+    first_key = tlr.aggregate_by_source_function([candidate])[0][
+        "task_group_key"
+    ]
+
+    src.write_text("\n\n\ndef forward(x):\n    return x\n", encoding="utf-8")
+    candidate["tracelens_launcher_path"] = f"{src}(4): forward"
+    second_key = tlr.aggregate_by_source_function([candidate])[0][
+        "task_group_key"
+    ]
+
+    assert first_key == second_key
+
+
+def test_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    operation = "fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "fused_operator_kernel",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): forward",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert (
+        set(bypass_group["legacy_task_group_keys"])
+        & set(skill_group["legacy_task_group_keys"])
+    )
+    assert bypass_group["task_group_key"].startswith('{"function":')
+
+
+def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.cu"
+    src.write_text("// native kernel\n", encoding="utf-8")
+    operation = "aiter::fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "_ZN5aiter14fused_operatorIfEEv",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): fused_operator",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert (
+        set(bypass_group["legacy_task_group_keys"])
+        & set(skill_group["legacy_task_group_keys"])
+    )
+    legacy_skill_key = json.dumps(
+        (
+            "native",
+            "aiter::fused_operator",
+            str(src.resolve()),
+            "fused_operator",
+        ),
+        separators=(",", ":"),
+    )
+    assert legacy_skill_key in bypass_group["legacy_task_group_keys"]
+    assert legacy_skill_key in skill_group["legacy_task_group_keys"]
+
+
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
     src = tmp_path / "gpt_oss.py"
@@ -3206,6 +3333,39 @@ def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path)
     )
     rms_group = by_op["vllm::rocm_aiter_triton_add_rmsnorm_pad"]
     assert rms_group["kernel_ids"] == ["k002"]
+
+
+def test_aggregate_keeps_same_operation_in_different_functions_separate(
+    tmp_path,
+):
+    src = tmp_path / "operator.py"
+    src.write_text(
+        "def first(x):\n    return x\n\n"
+        "def second(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    candidates = [
+        {
+            "kernel_id": "k001",
+            "name": "shared_operation",
+            "duration_us": 100.0,
+            "tracelens_launcher_path": f"{src}(1): first",
+        },
+        {
+            "kernel_id": "k002",
+            "name": "shared_operation",
+            "duration_us": 90.0,
+            "tracelens_launcher_path": f"{src}(4): second",
+        },
+    ]
+
+    groups = tlr.aggregate_by_source_function(candidates)
+
+    assert len(groups) == 2
+    assert {group["function_name"] for group in groups} == {
+        "first",
+        "second",
+    }
 
 
 def test_aggregate_collects_distinct_pitem_prose_when_function_spans_pitems(tmp_path):
@@ -3329,6 +3489,12 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert set(g["kernel_ids"]) == {"k001", "k002", "k003", "k004"}
     assert g["primary_kernel_id"] == "k001"  # heaviest (12704 us)
     assert len(g["rows"]) == 4
+    assert [case["case_id"] for case in g["shape_cases"]] == [
+        "case_001",
+        "case_002",
+        "case_003",
+        "case_004",
+    ]
     # Each row preserves its own shape list verbatim — no merging,
     # no de-duplication. Order is duration-desc post-aggregation so
     # row[0]=k001, row[3]=k004.
@@ -3544,6 +3710,37 @@ def test_aggregate_merges_native_template_instances_by_source(tmp_path):
     assert g["aggregate_duration_us"] == 600.0
     assert g["aggregate_call_count"] == 60
     assert g["source_path"].endswith("rmsnorm_quant_kernels.cu")
+
+
+def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
+    src = tmp_path / "quant_kernels.cu"
+    src.write_text(
+        "__global__ void quantize_kernel() {}\n"
+        "__global__ void dequantize_kernel() {}\n",
+        encoding="utf-8",
+    )
+    cands = [
+        {
+            "kernel_id": "k001",
+            "name": "quantize_kernel",
+            "duration_us": 100.0,
+            "tracelens_launcher_path": str(src),
+        },
+        {
+            "kernel_id": "k002",
+            "name": "dequantize_kernel",
+            "duration_us": 80.0,
+            "tracelens_launcher_path": str(src),
+        },
+    ]
+
+    groups = tlr.aggregate_by_source_function(cands)
+
+    assert len(groups) == 2
+    assert {group["operation_key"] for group in groups} == {
+        "quantize_kernel",
+        "dequantize_kernel",
+    }
 
 
 def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):

@@ -1180,6 +1180,50 @@ def _fill_integrate_defaults_from_state(
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
 
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_records = state.pending_kernel_integration_records()
+    pending_record = next(
+        (
+            record
+            for record in pending_records
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is None and resolved.get("kernel_id"):
+        requested_kernel_id = str(resolved.get("kernel_id") or "")
+        requested_task_key = str(resolved.get("task_group_key") or "")
+        pending_record = next(
+            (
+                record
+                for record in pending_records
+                if str(record.get("kernel_id") or "") == requested_kernel_id
+                and (
+                    not requested_task_key
+                    or str(record.get("task_group_key") or "")
+                    == requested_task_key
+                )
+            ),
+            None,
+        )
+    if pending_record is not None:
+        resolved.setdefault(
+            "integration_id",
+            str(pending_record.get("integration_id") or ""),
+        )
+        resolved.setdefault(
+            "kernel_id",
+            str(pending_record.get("kernel_id") or ""),
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
         bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if bt > 0:
@@ -1195,6 +1239,13 @@ def _fill_integrate_defaults_from_state(
         cb_args = current_best.get("extra_server_args") or ""
         if cb_args:
             resolved["extra_server_args"] = cb_args
+
+    kernel_id = str(resolved.get("kernel_id") or "")
+    if kernel_id and not resolved.get("task_group_key"):
+        attempt = (state.kernel_opt_attempts or {}).get(kernel_id) or {}
+        task_group_key = str(attempt.get("task_group_key") or "")
+        if task_group_key:
+            resolved["task_group_key"] = task_group_key
 
     return resolved
 
@@ -1229,6 +1280,47 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     kernel_id = str(resolved.get("kernel_id") or "")
     state = SharedState.load_or_init(session_dir)
     last_kernel = state.last_kernel_opt or {}
+    integration_id = str(resolved.get("integration_id") or "")
+    pending_record = next(
+        (
+            record
+            for record in state.pending_kernel_integration_records()
+            if str(record.get("integration_id") or "") == integration_id
+        ),
+        None,
+    )
+    if pending_record is not None:
+        kernel_id = str(pending_record.get("kernel_id") or kernel_id)
+        resolved["kernel_id"] = kernel_id
+        resolved["integration_id"] = str(
+            pending_record.get("integration_id") or integration_id
+        )
+        resolved.setdefault(
+            "task_group_key",
+            str(pending_record.get("task_group_key") or ""),
+        )
+        resolved.setdefault(
+            "identity_route",
+            str(pending_record.get("identity_route") or ""),
+        )
+        _fill_integrate_snapshot_from_bundle(
+            resolved,
+            pending_record.get("artifact_bundle"),
+        )
+        if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
+            resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
+        if not resolved.get("patch_path"):
+            resolved["patch_path"] = str(
+                pending_record.get("deploy_patch_path")
+                or pending_record.get("artifact_path")
+                or ""
+            )
+        if not resolved.get("kernel_repo") and pending_record.get(
+            "deploy_repo_root"
+        ):
+            resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
+        if not resolved.get("source_file") and pending_record.get("source_file"):
+            resolved["source_file"] = str(pending_record["source_file"])
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch + snapshot dir so the whole
@@ -2258,7 +2350,11 @@ def _merge_tunableop_untuned_files(base_path: Path) -> int:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
-            pass
+            log.debug(
+                "shape capture: failed to remove temporary TunableOp file %s",
+                tmp_path,
+                exc_info=True,
+            )
         return 0
     return len(rows)
 
@@ -2341,14 +2437,6 @@ async def _capture_vllm_tunableop_shapes(
         {
             "PORT": str(capture_port),
             "RUN_EVAL": "false",
-            "HL_TUNABLEOP_MODE": "",
-            "HL_TUNABLEOP_FILE": "",
-            "HL_TUNABLEOP_VERBOSE": "",
-            "PYTORCH_TUNABLEOP_ENABLED": "1",
-            "PYTORCH_TUNABLEOP_TUNING": "0",
-            "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
-            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
-            "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
         }
     )
     if profile_mode:
@@ -2356,6 +2444,19 @@ async def _capture_vllm_tunableop_shapes(
             {
                 "VLLM_ROCM_USE_AITER": "1",
                 "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            }
+        )
+    else:
+        capture_envs.update(
+            {
+                "HL_TUNABLEOP_MODE": "",
+                "HL_TUNABLEOP_FILE": "",
+                "HL_TUNABLEOP_VERBOSE": "",
+                "PYTORCH_TUNABLEOP_ENABLED": "1",
+                "PYTORCH_TUNABLEOP_TUNING": "0",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
+                "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
             }
         )
     for env_name, state_name in (
@@ -2500,7 +2601,11 @@ async def _capture_vllm_tunableop_shapes(
         try:
             untuned_base.unlink(missing_ok=True)
         except OSError:
-            pass
+            log.debug(
+                "shape capture: failed to remove incomplete TunableOp recording %s",
+                untuned_base,
+                exc_info=True,
+            )
         benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
         detail = f": {benchmark_error}" if benchmark_error else ""
         return {
@@ -3611,6 +3716,14 @@ async def run_optimization_handler(
                 single_payload.get("kernel_id"),
                 candidates,
             )
+            # Preserve the selected candidate itself: it may carry a task_group
+            # that does not exist on the raw hot-kernel row reloaded by the
+            # kernel_optimization subprocess.
+            single_payload["candidate"] = candidates[0]
+            single_payload.setdefault(
+                "source_file",
+                candidates[0].get("source_file"),
+            )
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
             canon = _resolve_candidate_id(
@@ -3632,7 +3745,15 @@ async def run_optimization_handler(
                     ),
                 }
         single_payload["_single_kernel"] = True
-        return await _run_optimization_single(single_payload, session_dir=session_dir)
+        result = await _run_optimization_single(
+            single_payload,
+            session_dir=session_dir,
+        )
+        return _stamp_task_group_result(
+            result,
+            candidates[0] if candidates else None,
+            fallback_kernel_id=str(single_payload.get("kernel_id") or ""),
+        )
     return await _run_optimization_batch(
         payload,
         candidates,
@@ -4014,6 +4135,7 @@ def _batch_kernel_candidates(
     # Build the "live" exclusion sets up front (empty without session_dir).
     rejected_kernel_ids: set[str] = set()
     attempts_by_kid: dict[str, dict] = {}
+    attempts_by_task: dict[str, dict] = {}
     in_flight: set[str] = set()
     from ..state.shared_state import (
         _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
@@ -4038,6 +4160,7 @@ def _batch_kernel_candidates(
             state = SharedState.load_or_init(session_dir)
             rejected_kernel_ids = set(state.rejected_kernel_ids or [])
             attempts_by_kid = dict(state.kernel_opt_attempts or {})
+            attempts_by_task = dict(state.kernel_opt_task_attempts or {})
             in_flight = _in_flight_kernel_ids(session_dir)
         except Exception:
             log.exception(
@@ -4045,7 +4168,26 @@ def _batch_kernel_candidates(
                 session_dir,
             )
 
-    def _is_live(kid: str, current_source: str = "") -> bool:
+    def _entry_allows_dispatch(
+        entry: dict[str, Any],
+        current_source: str,
+    ) -> bool:
+        """Apply retry and terminal-state rules to one persisted task ledger."""
+        if str(entry.get("last_decision") or "").upper() in {"KEEP", "REVERT"}:
+            return False
+        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
+        if current_source:
+            per_source = entry.get("attempts_per_source")
+            if isinstance(per_source, dict):
+                src_attempts = int(per_source.get(current_source, 0))
+                return src_attempts < attempt_cap
+        return int(entry.get("attempts", 0)) < attempt_cap
+
+    def _is_live(
+        kid: str,
+        current_source: str = "",
+        current_task_group_key: str = "",
+    ) -> bool:
         """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (per-source counting).
 
         Args:
@@ -4055,18 +4197,29 @@ def _batch_kernel_candidates(
         Returns:
             ``True`` when the kernel is batch-eligible, else ``False``.
         """
-        if kid in rejected_kernel_ids:
-            return False
         if kid in in_flight:
             return False
         entry = attempts_by_kid.get(kid) or {}
-        attempt_cap = _kernel_dispatch_attempt_cap(entry, max_failures=max_failures)
-        if current_source:
-            per_source = entry.get("attempts_per_source")
-            if isinstance(per_source, dict):
-                src_attempts = int(per_source.get(current_source, 0))
-                return src_attempts < attempt_cap
-        if int(entry.get("attempts", 0)) >= attempt_cap:
+        recorded_group_key = str(entry.get("task_group_key") or "")
+        if (
+            current_task_group_key
+            and recorded_group_key
+            and recorded_group_key != current_task_group_key
+        ):
+            return True
+        recorded_source = str(entry.get("last_source_file") or "")
+        same_source = (
+            not current_source
+            or not recorded_source
+            or recorded_source == current_source
+        )
+        if (
+            kid in rejected_kernel_ids
+            and same_source
+            and not (current_task_group_key and not recorded_group_key)
+        ):
+            return False
+        if not _entry_allows_dispatch(entry, current_source):
             return False
         return True
 
@@ -4089,33 +4242,122 @@ def _batch_kernel_candidates(
             continue
         # Mark all members so the legacy loop never re-picks them.
         grouped_kernel_ids.update(member_ids)
-        # Only reusable_native members survive; fall back to the next live one
-        # when the primary is rejected, else skip the group.
+        group_id = str(group.get("task_group_id") or "")
+        group_key = str(group.get("task_group_key") or "")
+        group_key_aliases = {
+            group_key,
+            *[
+                str(alias)
+                for alias in (group.get("legacy_task_group_keys") or [])
+                if str(alias)
+            ],
+        }
+        group_key_aliases.discard("")
         primary = str(group.get("primary_kernel_id") or "")
-        primary_cand = kernel_by_id.get(primary)
-        primary_live = (
-            primary_cand is not None
-            and primary_cand.get("reusable_native_kernel") is True
-            and bool(primary_cand.get("source_file"))
-            and _is_live(primary, str(primary_cand.get("source_file") or ""))
+        if any(member_id in in_flight for member_id in member_ids):
+            for member_id in member_ids:
+                skipped.setdefault(member_id, "group_in_flight")
+            continue
+
+        # Once the merged task has a ledger entry, retry or retire that task as
+        # one unit. Never rotate to an untouched sibling shape.
+        recorded_ledger = next(
+            (
+                (ledger_id, entry)
+                for ledger_id, entry in {
+                    **attempts_by_kid,
+                    **attempts_by_task,
+                }.items()
+                if isinstance(entry, dict)
+                and (
+                    (
+                        group_key
+                        and (
+                            str(entry.get("stable_task_key") or "")
+                            == group_key
+                            or str(entry.get("task_group_key") or "")
+                            == group_key
+                            or str(entry.get("stable_task_key") or "")
+                            in group_key_aliases
+                            or str(entry.get("task_group_key") or "")
+                            in group_key_aliases
+                        )
+                    )
+                    or (
+                        not group_key
+                        and ledger_id in member_ids
+                        and group_id
+                        and str(entry.get("task_group_id") or "") == group_id
+                    )
+                )
+            ),
+            None,
         )
-        if not primary_live:
-            primary_cand = next(
+        if recorded_ledger is not None:
+            _recorded_member_id, recorded_entry = recorded_ledger
+            recorded_candidate = kernel_by_id.get(primary) or next(
                 (
-                    kernel_by_id[m]
-                    for m in member_ids
-                    if m in kernel_by_id
-                    and kernel_by_id[m].get("reusable_native_kernel") is True
-                    and kernel_by_id[m].get("source_file")
-                    and _is_live(m, str(kernel_by_id[m].get("source_file") or ""))
+                    kernel_by_id[member_id]
+                    for member_id in member_ids
+                    if member_id in kernel_by_id
+                    and kernel_by_id[member_id].get("reusable_native_kernel")
+                    is True
+                    and kernel_by_id[member_id].get("source_file")
                 ),
                 None,
             )
-            if primary_cand is None:
-                # Every reusable member exhausted -> nothing to dispatch.
-                for m in member_ids:
-                    skipped.setdefault(m, "group_exhausted")
+            recorded_live = (
+                recorded_candidate is not None
+                and recorded_candidate.get("reusable_native_kernel") is True
+                and bool(recorded_candidate.get("source_file"))
+                and _entry_allows_dispatch(
+                    recorded_entry,
+                    str(recorded_candidate.get("source_file") or ""),
+                )
+            )
+            if not recorded_live:
+                for member_id in member_ids:
+                    skipped.setdefault(member_id, "group_task_complete")
                 continue
+            primary_cand = recorded_candidate
+        else:
+            primary_cand = None
+
+        # Only reusable_native members survive; fall back to the next live one
+        # when the primary is rejected, else skip the group.
+        if primary_cand is None:
+            primary_cand = kernel_by_id.get(primary)
+            primary_live = (
+                primary_cand is not None
+                and primary_cand.get("reusable_native_kernel") is True
+                and bool(primary_cand.get("source_file"))
+                and _is_live(
+                    primary,
+                    str(primary_cand.get("source_file") or ""),
+                    group_key,
+                )
+            )
+            if not primary_live:
+                primary_cand = next(
+                    (
+                        kernel_by_id[m]
+                        for m in member_ids
+                        if m in kernel_by_id
+                        and kernel_by_id[m].get("reusable_native_kernel") is True
+                        and kernel_by_id[m].get("source_file")
+                        and _is_live(
+                            m,
+                            str(kernel_by_id[m].get("source_file") or ""),
+                            group_key,
+                        )
+                    ),
+                    None,
+                )
+                if primary_cand is None:
+                    # Every reusable member exhausted -> nothing to dispatch.
+                    for m in member_ids:
+                        skipped.setdefault(m, "group_exhausted")
+                    continue
         if not primary_cand.get("source_file"):
             continue
         try:
@@ -4307,6 +4549,60 @@ async def _run_backend_ladder(
     return best, attempts
 
 
+def _stamp_task_group_result(
+    result: HandlerResult,
+    candidate: dict[str, Any] | None,
+    *,
+    fallback_kernel_id: str = "",
+) -> HandlerResult:
+    """Attach task-group identity to every single or batched result path."""
+    if not isinstance(result, dict) or not isinstance(candidate, dict):
+        return result
+    task_group = candidate.get("task_group")
+    if not isinstance(task_group, dict):
+        return result
+
+    stamped = dict(result)
+    stamped.setdefault("task_group_id", str(task_group.get("task_group_id") or ""))
+    stamped.setdefault("task_group_key", str(task_group.get("task_group_key") or ""))
+    stamped.setdefault(
+        "identity_route",
+        str(task_group.get("identity_route") or ""),
+    )
+    stamped.setdefault(
+        "operator_identity",
+        dict(task_group.get("operator_identity") or {}),
+    )
+    stamped.setdefault(
+        "legacy_task_group_keys",
+        [
+            str(item)
+            for item in (task_group.get("legacy_task_group_keys") or [])
+            if str(item)
+        ],
+    )
+    stamped.setdefault(
+        "task_group_kernel_ids",
+        [str(item) for item in (task_group.get("kernel_ids") or []) if str(item)],
+    )
+    stamped.setdefault(
+        "task_group_primary_kernel_id",
+        str(task_group.get("primary_kernel_id") or candidate.get("kernel_id") or fallback_kernel_id),
+    )
+    shape_cases = task_group.get("shape_cases")
+    if isinstance(shape_cases, list):
+        stamped.setdefault("task_group_shape_case_count", len(shape_cases))
+        stamped.setdefault(
+            "task_group_shape_case_ids",
+            [
+                str(case.get("case_id") or "")
+                for case in shape_cases
+                if isinstance(case, dict) and str(case.get("case_id") or "")
+            ],
+        )
+    return stamped
+
+
 async def _run_kernel_backend_sequence(
     base_payload: dict,
     candidate: dict[str, Any],
@@ -4350,6 +4646,11 @@ async def _run_kernel_backend_sequence(
     best = dict(best)
     best["backend_fallback_attempts"] = attempts
     best["batch_kernel_id"] = kernel_id
+    best = _stamp_task_group_result(
+        best,
+        candidate,
+        fallback_kernel_id=kernel_id,
+    )
     # Preserve source_file so the streaming callback can group by file.
     if not best.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
@@ -4440,6 +4741,11 @@ async def _run_optimization_batch(
         # KEEPs on one file (defensive; the sequence already preserves it).
         if isinstance(result, dict) and not result.get("source_file") and cand_src:
             result["source_file"] = cand_src
+        result = _stamp_task_group_result(
+            result,
+            candidate,
+            fallback_kernel_id=cand_kid,
+        )
         if record_partial is not None:
             try:
                 record_partial(result)
@@ -4554,6 +4860,38 @@ async def _run_optimization_single(
         "--workspace-path",
         workspace_path,
     ]
+    candidate_payload = payload.get("candidate")
+    if isinstance(candidate_payload, dict):
+        task_group = candidate_payload.get("task_group")
+        group_id = (
+            str(task_group.get("task_group_id") or "")
+            if isinstance(task_group, dict)
+            else ""
+        )
+        identity = group_id or str(candidate_payload.get("kernel_id") or kernel_id)
+        safe_identity = re.sub(r"[^A-Za-z0-9._-]+", "_", identity).strip("._-") or "candidate"
+        candidate_json_path = (
+            Path(workspace_path)
+            / "kernel-agent"
+            / "runs"
+            / str(payload.get("session_id") or session_dir.name)
+            / "inputs"
+            / f"candidate_{safe_identity}.json"
+        )
+        try:
+            candidate_json_path.parent.mkdir(parents=True, exist_ok=True)
+            candidate_json_path.write_text(
+                json.dumps(candidate_payload, indent=2, sort_keys=True, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            cmd += ["--candidate-json", str(candidate_json_path)]
+        except OSError as exc:
+            log.warning(
+                "could not persist grouped candidate input %s: %s",
+                candidate_json_path,
+                exc,
+            )
     backends_arg = _backends_cli_arg(payload.get("backends"))
     if backends_arg:
         cmd += ["--backends", backends_arg]
@@ -4658,6 +4996,11 @@ async def _run_optimization_single(
             and not result.get("attempts")
         ):
             result["backend"] = dispatched_backend
+        result = _stamp_task_group_result(
+            result,
+            candidate_payload if isinstance(candidate_payload, dict) else None,
+            fallback_kernel_id=str(kernel_id),
+        )
     # Full-trace: mine each forge attempt's stdout for token usage and append an
     # ``llm_calls.jsonl`` row. Best-effort; no-op without a usage block.
     _trace_kernel_attempt_usage(result, session_dir=session_dir)
@@ -4932,6 +5275,100 @@ def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     return ""
 
 
+def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
+    """Best-effort orphaned-lock sweep immediately before an integrate boot."""
+    from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+    try:
+        stats = sweep_stale_aiter_locks_if_dead()
+    except Exception as exc:  # noqa: BLE001 - cache hygiene must not hide benchmark results
+        log.warning("integrate_handler: aiter lock sweep failed before %s: %r", reason, exc)
+        return {"errors": 1, "exception": repr(exc)}
+    if stats.get("skipped_live"):
+        log.info(
+            "integrate_handler: aiter lock sweep skipped before %s; a compiler is alive",
+            reason,
+        )
+    elif stats.get("deleted"):
+        log.warning(
+            "integrate_handler: reaped %d orphaned aiter lock(s) across %s before %s",
+            stats.get("deleted"),
+            stats.get("dirs") or [stats.get("dir")],
+            reason,
+        )
+    return stats
+
+
+async def _run_integrate_rebaseline_with_lock_retry(
+    executor: Any,
+    ctx: Any,
+    *,
+    workspace: Path,
+    reason: str,
+) -> dict[str, Any]:
+    """Run one integrate baseline and retry once after a confirmed baton stall."""
+    from ..actions.executors._aiter_jit import find_aiter_baton_wait
+
+    prelaunch_sweep = _sweep_integrate_aiter_locks(reason=reason)
+    first_started_unix = time.time()
+    result = await executor(ctx)
+    if not isinstance(result, dict) or result.get("status") == "succeeded":
+        return result
+
+    evidence = find_aiter_baton_wait(
+        workspace,
+        since_unix=first_started_unix - 1.0,
+    )
+    if evidence is None:
+        return result
+
+    cleanup = _sweep_integrate_aiter_locks(reason=f"{reason} stale-lock retry")
+    result["error_class"] = "stale_jit_lock"
+    result["stale_jit_lock"] = {
+        "evidence": evidence,
+        "prelaunch_sweep": prelaunch_sweep,
+        "post_failure_sweep": cleanup,
+        "retry_attempted": False,
+    }
+
+    # A live compiler may legitimately own the observed lock. When liveness is
+    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
+    # at least one deletion or after confirming the lock disappeared.
+    cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
+    lock_removed = bool(cleanup.get("deleted")) or (
+        cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh")
+    )
+    if not (cleanup_safe and lock_removed):
+        return result
+
+    log.warning(
+        "integrate_handler: classified %s as stale_jit_lock; retrying once after cleanup",
+        reason,
+    )
+    retry_started_unix = time.time()
+    retry_result = await executor(ctx)
+    if not isinstance(retry_result, dict):
+        return retry_result
+    retry_evidence = (
+        find_aiter_baton_wait(
+            workspace,
+            since_unix=retry_started_unix - 1.0,
+        )
+        if retry_result.get("status") != "succeeded"
+        else None
+    )
+    retry_result["stale_jit_lock_retry"] = {
+        "evidence": evidence,
+        "cleanup": cleanup,
+        "retry_attempted": True,
+        "retry_succeeded": retry_result.get("status") == "succeeded",
+    }
+    if retry_evidence is not None:
+        retry_result["error_class"] = "stale_jit_lock"
+        retry_result["stale_jit_lock_retry"]["retry_evidence"] = retry_evidence
+    return retry_result
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -5076,6 +5513,11 @@ async def integrate_handler(
     # stops a double restart; force_full_restart scopes the resume override here.
     from ..actions.executors._multi_node_env import is_multi_node
 
+    # This must run even when the regular JIT cache is warm: cpp_itfs attention
+    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+    # from a timed-out Forge driver.
+    _sweep_integrate_aiter_locks(reason="integrate server startup")
+
     if is_multi_node():
         from ..actions.executors._multi_node_server_lifecycle import (
             ServerRestartFailed,
@@ -5107,7 +5549,12 @@ async def integrate_handler(
             }
 
     try:
-        bench_result = await BaselineExecutor(session_dir=session_dir)(ctx)
+        bench_result = await _run_integrate_rebaseline_with_lock_retry(
+            BaselineExecutor(session_dir=session_dir),
+            ctx,
+            workspace=workspace,
+            reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
+        )
     except Exception as exc:  # noqa: BLE001
         revert_result = _maybe_revert_kernel_patch(apply_result)
         return {
@@ -5248,7 +5695,12 @@ async def integrate_handler(
                 },
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )
-            paired_bench = await BaselineExecutor(session_dir=session_dir)(RunnerContext(task=paired_task, lease=None))
+            paired_bench = await _run_integrate_rebaseline_with_lock_retry(
+                BaselineExecutor(session_dir=session_dir),
+                RunnerContext(task=paired_task, lease=None),
+                workspace=paired_ws,
+                reason=f"integrate {kernel_id or 'anonymous'} paired pristine baseline",
+            )
             if is_valid_measurement(paired_bench):
                 paired_base_tput = float(paired_bench.get("output_throughput") or 0.0)
                 paired_gain = gain_pct_or_zero(new_tput, paired_base_tput)
@@ -5323,6 +5775,9 @@ async def integrate_handler(
         "apply_result": apply_result,
         "revert_result": revert_result,
         "rebuild_check": rebuild_check,
+        "task_group_key": str(payload.get("task_group_key") or ""),
+        "identity_route": str(payload.get("identity_route") or ""),
+        "integration_id": str(payload.get("integration_id") or ""),
     }
     if stack_positive_keep and gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"

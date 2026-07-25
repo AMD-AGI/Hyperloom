@@ -3020,11 +3020,100 @@ def _resolve_shapes_from_ops_unique_args_csv(
     return shapes
 
 
+def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
+    """Preserve one ops_unique_args row as an exact invocation case."""
+    raw_dims = str(row.get("Input Dims") or "").strip()
+    raw_types = str(row.get("Input type") or "").strip()
+    raw_concrete = str(row.get("Concrete Inputs") or "").strip()
+    try:
+        dims = ast.literal_eval(raw_dims or "()")
+        dtypes = ast.literal_eval(raw_types or "()")
+    except (ValueError, SyntaxError):
+        return None
+    if not isinstance(dims, (list, tuple)):
+        return None
+    if not isinstance(dtypes, (list, tuple)):
+        dtypes = ()
+
+    operands: list[str] = []
+    tensor_dtypes: list[str] = []
+    for index, operand in enumerate(dims):
+        dtype = dtypes[index] if index < len(dtypes) else ""
+        rendered = _format_trace_shape(operand, dtype)
+        if rendered:
+            operands.append(rendered)
+            tensor_dtypes.append(str(dtype or ""))
+
+    raw_arg_spec = {
+        "input_dims": raw_dims,
+        "input_type": raw_types,
+        "concrete_inputs": raw_concrete,
+    }
+    if not operands and not any(raw_arg_spec.values()):
+        return None
+    return {
+        "operation": str(row.get("name") or ""),
+        "input_shapes": (
+            [{"call_num": 1, "shape": "<br>".join(operands)}]
+            if operands
+            else []
+        ),
+        "input_dtypes": tensor_dtypes,
+        "raw_arg_spec": raw_arg_spec,
+    }
+
+
+def _resolve_invocation_cases_from_ops_unique_args_csv(
+    perf_report_csv_dir: Path | str | None,
+    row_matches: Callable[[str], bool],
+) -> list[dict[str, Any]]:
+    """Return distinct CSV invocations without flattening argument boundaries."""
+    if not perf_report_csv_dir:
+        return []
+    csv_path = Path(perf_report_csv_dir) / "ops_unique_args.csv"
+    if not csv_path.is_file():
+        return []
+
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                name = str(row.get("name") or "").strip().lower()
+                if not row_matches(name):
+                    continue
+                case = _invocation_case_from_csv_row(row)
+                if case is None:
+                    continue
+                signature = json.dumps(
+                    case,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                cases.append(case)
+    except (OSError, csv.Error):
+        return []
+    return cases
+
+
 def resolve_fused_moe_shapes_from_csv(
     perf_report_csv_dir: Path | str | None,
 ) -> list[str]:
     """Recover the fused-MoE expert-kernel operand shapes from ``ops_unique_args.csv``."""
     return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: _FUSED_MOE_KERNEL_MARKER in name,
+    )
+
+
+def resolve_fused_moe_invocation_cases_from_csv(
+    perf_report_csv_dir: Path | str | None,
+) -> list[dict[str, Any]]:
+    """Recover every fused-MoE invocation row as an independent case."""
+    return _resolve_invocation_cases_from_ops_unique_args_csv(
         perf_report_csv_dir,
         lambda name: _FUSED_MOE_KERNEL_MARKER in name,
     )
@@ -3039,6 +3128,20 @@ def resolve_shapes_from_csv_for_op(
     if not target:
         return []
     return _resolve_shapes_from_ops_unique_args_csv(
+        perf_report_csv_dir,
+        lambda name: name == target,
+    )
+
+
+def resolve_invocation_cases_from_csv(
+    perf_report_csv_dir: Path | str | None,
+    op_name: str,
+) -> list[dict[str, Any]]:
+    """Recover every exact-name invocation row without merging its arguments."""
+    target = str(op_name or "").strip().lower()
+    if not target:
+        return []
+    return _resolve_invocation_cases_from_ops_unique_args_csv(
         perf_report_csv_dir,
         lambda name: name == target,
     )
@@ -3605,29 +3708,70 @@ def _finalize_candidates(
     # Recover the fused-MoE expert kernel's operand shapes (its trace event carries
     # no Input Dims) once from the sidecar and graft onto candidates lacking shapes.
     _fused_moe_shapes: list[str] | None = None
+    _fused_moe_invocation_cases: list[dict[str, Any]] | None = None
     for idx, item in enumerate(top, 1):
         item.pop("_extracted_source_checked", None)
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
-        if not item.get("shapes") and _is_fused_moe_candidate(item):
+        had_observed_shapes = bool(item.get("shapes"))
+        operation = str(item.get("name") or "")
+        if _is_fused_moe_candidate(item):
             if _fused_moe_shapes is None:
                 _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
-            if _fused_moe_shapes:
+            if _fused_moe_invocation_cases is None:
+                _fused_moe_invocation_cases = (
+                    resolve_fused_moe_invocation_cases_from_csv(
+                        perf_report_csv_dir
+                    )
+                )
+            invocation_cases = list(_fused_moe_invocation_cases or [])
+            if not item.get("shapes") and _fused_moe_shapes:
                 item["shapes"] = list(_fused_moe_shapes)
                 item["shape_provenance"] = "torch_trace"
+        else:
+            invocation_cases = resolve_invocation_cases_from_csv(
+                perf_report_csv_dir,
+                operation,
+            )
         if not item.get("shapes"):
-            csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, str(item.get("name") or ""))
+            csv_shapes = resolve_shapes_from_csv_for_op(
+                perf_report_csv_dir,
+                operation,
+            )
             if csv_shapes:
                 item["shapes"] = csv_shapes
                 item["shape_provenance"] = "torch_trace"
+        if invocation_cases:
+            if had_observed_shapes:
+                invocation_cases = [
+                    {
+                        "operation": operation,
+                        "input_shapes": (
+                            item.get("input_shapes")
+                            or item.get("shapes")
+                            or []
+                        ),
+                        "input_dtypes": item.get("input_dtypes") or [],
+                        "raw_arg_spec": item.get("raw_arg_spec") or {},
+                    },
+                    *invocation_cases,
+                ]
+            item["invocation_cases"] = invocation_cases
         # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
         if item.get("shapes"):
             item.setdefault("shape_provenance", "torch_trace")
         # Forward the full ordered arg metadata so GEAK's harness builder can
         # reconstruct the exact call signature.
         if not item.get("raw_arg_spec"):
-            raw_spec = resolve_raw_arg_spec_from_csv(perf_report_csv_dir, str(item.get("name") or ""))
+            raw_spec = (
+                invocation_cases[0].get("raw_arg_spec")
+                if invocation_cases
+                else resolve_raw_arg_spec_from_csv(
+                    perf_report_csv_dir,
+                    str(item.get("name") or ""),
+                )
+            )
             if raw_spec:
                 item["raw_arg_spec"] = raw_spec
         item["kernel_id"] = f"k{idx:03d}"

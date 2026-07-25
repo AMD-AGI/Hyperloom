@@ -1712,6 +1712,16 @@ class IntegratePatchExecutor:
             cc = done_payload.get("config_changes")
             if isinstance(cc, dict):
                 config_changes = {str(k): str(v) for k, v in cc.items()}
+        proposal_extra_args_raw = params.get("extra_server_args")
+        proposal_extra_args = (
+            proposal_extra_args_raw
+            if isinstance(proposal_extra_args_raw, str) and proposal_extra_args_raw.strip()
+            else ""
+        )
+        proposal_extra_envs = dict(config_changes)
+        raw_extra_envs = params.get("extra_envs")
+        if isinstance(raw_extra_envs, dict):
+            proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
 
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
@@ -1721,7 +1731,13 @@ class IntegratePatchExecutor:
         )
 
         _setup_ran = bool(setup_result.get("applied"))
-        if not patch_paths and not config_changes and not artifact_specs and not _setup_ran:
+        if (
+            not patch_paths
+            and not proposal_extra_args
+            and not proposal_extra_envs
+            and not artifact_specs
+            and not _setup_ran
+        ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
@@ -1841,6 +1857,8 @@ class IntegratePatchExecutor:
                     "patches": [str(p) for p in patch_paths],
                     "artifacts": [{"target": str(s.target), "rel_target": s.rel_target} for s in artifact_specs],
                     "config_changes": dict(config_changes),
+                    "extra_server_args": proposal_extra_args,
+                    "extra_envs": dict(proposal_extra_envs),
                     "framework_source_root": str(framework_root or ""),
                     "workspace": str(output_root),
                     # Attempt venv root for crash-resume GC.
@@ -1956,7 +1974,9 @@ class IntegratePatchExecutor:
                     },
                 )
 
-        config_changes_applied = dict(config_changes)
+        extra_server_args_applied = proposal_extra_args
+        extra_envs_applied = dict(proposal_extra_envs)
+        config_changes_applied = dict(extra_envs_applied)
 
         if params.get("apply_only"):
             return _with_stash_restore(
@@ -1970,6 +1990,8 @@ class IntegratePatchExecutor:
                     "patches_reverted": [],
                     "artifacts_applied": applied_artifacts,
                     "config_changes_applied": config_changes_applied,
+                    "extra_server_args_applied": extra_server_args_applied,
+                    "extra_envs_applied": extra_envs_applied,
                     "reason": "apply_only=True; benchmark skipped",
                     "workspace": str(output_root),
                 },
@@ -2019,7 +2041,8 @@ class IntegratePatchExecutor:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
                 output_root=output_root,
-                config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
             )
         except FrameworkScriptMismatchError as exc:
@@ -2265,6 +2288,8 @@ class IntegratePatchExecutor:
             "patches_reverted": [],
             "artifacts_applied": applied_artifacts,
             "config_changes_applied": config_changes_applied,
+            "extra_server_args_applied": extra_server_args_applied,
+            "extra_envs_applied": extra_envs_applied,
             "output_throughput": new_tput,
             "enablement": True,
             "runnable": True,
@@ -2458,7 +2483,8 @@ class IntegratePatchExecutor:
             confirm = await self._confirm_stack_rebench(
                 params=params,
                 output_root=output_root,
-                config_changes_applied=config_changes_applied,
+                extra_server_args_applied=extra_server_args_applied,
+                extra_envs_applied=extra_envs_applied,
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
             )
@@ -2582,6 +2608,8 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
                 "config_changes_applied": config_changes_applied,
+                "extra_server_args_applied": extra_server_args_applied,
+                "extra_envs_applied": extra_envs_applied,
                 "output_throughput": new_tput,
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
@@ -2849,7 +2877,8 @@ class IntegratePatchExecutor:
         *,
         params: dict[str, Any],
         output_root: Path,
-        config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
         specialist_task_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
@@ -2860,7 +2889,8 @@ class IntegratePatchExecutor:
         Args:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
-            config_changes_applied: Env overrides layered onto the variant.
+            extra_server_args_applied: Server CLI arguments for the variant.
+            extra_envs_applied: Environment overrides layered onto the variant.
             specialist_task_id: The originating specialist task id (names the
                 variant).
 
@@ -2891,14 +2921,15 @@ class IntegratePatchExecutor:
         )
 
         # Split config_changes into server args (--flags) and env vars so that
-        # --prefixed flags reach EXTRA_{FW}_ARGS instead of being silently dropped.
-        # Env vars are layered on top of the live base_extra_envs (current_best).
+        # --prefixed flags reach EXTRA_{FW}_ARGS instead of being silently dropped,
+        # then merge the rescued flags with the explicit extra_server_args from the
+        # proposal. Env vars are layered on top of the live base_extra_envs.
         _cc_args, _cc_envs = split_config_changes(config_changes_applied)
         _variant_envs = dict(params.get("base_extra_envs") or {})
         _variant_envs.update(_cc_envs)
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
-            extra_server_args=merge_server_args(str(params.get("base_extra_args") or "").strip(), _cc_args),
+            extra_server_args=merge_server_args(extra_server_args_applied, _cc_args),
             extra_envs=_variant_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
@@ -3059,7 +3090,8 @@ class IntegratePatchExecutor:
         *,
         params: dict[str, Any],
         output_root: Path,
-        config_changes_applied: dict[str, str],
+        extra_server_args_applied: str,
+        extra_envs_applied: dict[str, str],
         specialist_task_id: str,
         base_tput: float,
     ) -> dict[str, Any]:
@@ -3093,7 +3125,7 @@ class IntegratePatchExecutor:
         _variant_envs_rb = {**dict(params.get("base_extra_envs") or {}), **_cc_envs_rb}
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
-            extra_server_args=merge_server_args(base_extra_args, _cc_args_rb),
+            extra_server_args=merge_server_args(extra_server_args_applied, _cc_args_rb),
             extra_envs=_variant_envs_rb,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),

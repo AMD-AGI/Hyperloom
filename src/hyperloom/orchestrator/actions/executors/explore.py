@@ -30,6 +30,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1001,8 +1002,19 @@ class ExploreExecutor:
         # every variant, which destabilised the single-node raylet and took the
         # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
+        # Stop testing further variants once the session wall-clock budget runs
+        # out; untested variants stay out of the ledger so a resume can retry them.
+        _ss = extra.get("shared_state") or extra.get("state")
+        session_deadline_sec = _ss.grid_session_deadline_sec() if _ss is not None else None
         try:
             for idx, gv in enumerate(runnable):
+                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < float(timeout_sec):
+                    log.warning(
+                        "explore: session budget cannot fit another variant; stopping after %d/%d variant(s)",
+                        idx,
+                        len(runnable),
+                    )
+                    break
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
