@@ -1829,6 +1829,11 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
+            # Persist the actual materialized config used for the KEEP'd bench so
+            # the revalidation baseline re-runs the identical effective config.
+            accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
+            if accepted_cfg:
+                state.enablement_accepted_config_path = accepted_cfg
             if str(getattr(state, "enablement_origin", "") or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
@@ -4552,10 +4557,10 @@ class FrameworkPhase(PhaseHandler):
     async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
         """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
 
-        Reproduces the original workload/eval contract (probe config, RUN_EVAL on)
-        so the accuracy is measured for real; the KEEP is finalized in
-        ``_promote_baseline`` only when that baseline promotes with accuracy at or
-        above the floor. Idempotent and one-at-a-time.
+        Uses the accepted config from the KEEP'd candidate bench (preferred) or
+        falls back to the original probe config.  The frozen eval controls from
+        the carrier params ensure RUN_EVAL and eval task/limit match the trigger
+        contract. Idempotent and one-at-a-time.
         """
         state = self.shared_state
         if not bool(getattr(state, "enablement_validation_pending", False)):
@@ -4574,9 +4579,24 @@ class FrameworkPhase(PhaseHandler):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
-        cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
+        # Prefer the accepted (post-fix) config so revalidation uses the same
+        # effective config the KEEP'd candidate ran; fall back to the trigger
+        # probe config only when no accepted config was recorded.
+        accepted_cfg = str(getattr(state, "enablement_accepted_config_path", "") or "").strip()
+        probe_cfg = str(getattr(state, "enablement_probe_config_path", "") or "").strip()
+        cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
+        # Carry the active runtime override so the revalidation baseline runs
+        # under the same framework runtime as the KEEP'd candidate.
+        active_rt = getattr(state, "enablement_active_runtime", None) or {}
+        if isinstance(active_rt, dict) and active_rt:
+            from ..framework.stack_actions import FrameworkRuntime
+
+            rt_obj = FrameworkRuntime.from_state(active_rt)
+            rt_override = rt_obj.to_runtime_override()
+            if rt_override:
+                params["runtime_override"] = rt_override
         attempt = int(getattr(state, "enablement_attempts", 0) or 0)
         task, _existing = await self.tasks.create_or_return_existing(
             kind="baseline",

@@ -464,6 +464,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Path to the materialized config produced by the KEEP'd candidate bench.
+    # This is the effective config (with server fixes applied) used for
+    # revalidation; distinct from enablement_probe_config_path (the original
+    # trigger config before any enablement patches).  Optional; defaults via
+    # from_dict, no schema bump.
+    enablement_accepted_config_path: str = ""
     # Attempt-scoped runtime acquisition state. All optional; NOT in
     # fact_layer_keys and do NOT bump schema_version (default via from_dict).
     # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
