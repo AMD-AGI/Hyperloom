@@ -112,3 +112,73 @@ class TestAccuracyPassed:
     def test_custom_threshold(self):
         assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
         assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+
+
+class TestEnablementReaders:
+    def test_on_eval_fail_default_on(self, monkeypatch):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", raising=False)
+        assert ag.enablement_on_eval_fail_enabled() is True
+
+    def test_on_eval_fail_disabled(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "off")
+        assert ag.enablement_on_eval_fail_enabled() is False
+
+    def test_floor_default(self, monkeypatch):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", raising=False)
+        assert ag.enablement_accuracy_floor() == 0.0
+
+    def test_floor_valid(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", "0.7")
+        assert ag.enablement_accuracy_floor() == pytest.approx(0.7)
+
+    @pytest.mark.parametrize("bad", ["1.5", "-0.1", "nonsense", "nan", "inf"])
+    def test_floor_invalid_or_out_of_range_falls_back(self, monkeypatch, bad):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", bad)
+        assert ag.enablement_accuracy_floor() == 0.0
+
+
+class TestAccuracyValidator:
+    @pytest.mark.parametrize(
+        "score,floor,expected",
+        [
+            (0.5, 0.2, True),
+            (0.2, 0.2, True),
+            (0.19, 0.2, False),
+            (0.0, 0.0, False),
+            (-0.1, 0.0, False),
+            (None, 0.0, False),
+            (True, 0.0, False),
+            (float("nan"), 0.0, False),
+            (float("inf"), 0.0, False),
+            ("0.5", 0.2, False),
+        ],
+    )
+    def test_meets_floor(self, score, floor, expected):
+        assert ag.accuracy_meets_floor(score, floor) is expected
+
+    def test_classify(self):
+        assert ag.classify_accuracy_failure(0.5, 0.2) is None
+        assert ag.classify_accuracy_failure(None, 0.2) == ag.EVAL_KIND_ACCURACY_UNAVAILABLE
+        assert ag.classify_accuracy_failure(float("nan"), 0.2) == ag.EVAL_KIND_ACCURACY_UNAVAILABLE
+        assert ag.classify_accuracy_failure(0.1, 0.2) == ag.EVAL_KIND_ACCURACY_BELOW_FLOOR
+        assert ag.classify_accuracy_failure(0.0, 0.0) == ag.EVAL_KIND_ACCURACY_BELOW_FLOOR
+
+
+class TestEvalContractFingerprint:
+    def test_stable_and_sensitive(self):
+        a = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="gsm8k", metric="em")
+        b = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="gsm8k", metric="em")
+        c = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="mmlu", metric="em")
+        assert a == b and a != c and len(a) == 16
+
+    def test_hashes_config_bytes(self, tmp_path):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("a: 1\n")
+        fp1 = ag.eval_contract_fingerprint(config_path=cfg, framework="f", model="m", task="t", metric="x")
+        cfg.write_text("a: 2\n")
+        fp2 = ag.eval_contract_fingerprint(config_path=cfg, framework="f", model="m", task="t", metric="x")
+        assert fp1 != fp2
+        # A missing config path contributes its string form and never raises.
+        assert ag.eval_contract_fingerprint(
+            config_path="/no/such/file.yaml", framework="f", model="m", task="t", metric="x"
+        )
