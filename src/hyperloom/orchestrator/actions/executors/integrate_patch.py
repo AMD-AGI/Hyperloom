@@ -2981,6 +2981,9 @@ class IntegratePatchExecutor:
         _base_envs = dict(params.get("base_extra_envs") or {})
         _variant_envs = dict(_base_envs)
         _variant_envs.update(extra_envs_applied)
+        # For enablement runs, ensure RUN_EVAL=true survives any variant overlay.
+        if bool(params.get("enablement")):
+            _variant_envs["RUN_EVAL"] = "true"
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=extra_server_args_applied,
@@ -2992,7 +2995,8 @@ class IntegratePatchExecutor:
         )
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:
-            variant.runtime_override = {str(k): str(v) for k, v in _rt.items()}
+            # Preserve list/dict values; apply_runtime_override expects them.
+            variant.runtime_override = dict(_rt)
 
         # Ray-managed GPU execution: hold a serving lease
         # (num_gpus=TP + serving_slot) for the whole run_grid so
@@ -3061,26 +3065,28 @@ class IntegratePatchExecutor:
         enablement_accuracy_task = ""
         enablement_accuracy_metric = ""
         candidate_fingerprint = ""
-        if bool(params.get("enablement")) and bench.get("status") == "succeeded":
-            try:
-                eval_results = parse_eval_results(
-                    eval_search_root,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                )
-                acc = eval_results.get("accuracy")
-                if isinstance(acc, (int, float)):
-                    enablement_accuracy = float(acc)
-                enablement_accuracy_task = str(eval_results.get("task") or "")
-                enablement_accuracy_metric = str(eval_results.get("metric") or "")
-                candidate_fingerprint = eval_contract_fingerprint(
-                    config_path=config_path,
-                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                    model=resolved_model,
-                    task=enablement_accuracy_task,
-                    metric=enablement_accuracy_metric,
-                )
-            except Exception:  # noqa: BLE001 — eval may not produce a result
-                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+        if bool(params.get("enablement")):
+            # Compute the candidate fingerprint from the materialized config
+            # regardless of bench outcome — eval crash must still produce a
+            # comparable fingerprint.
+            candidate_fingerprint = eval_contract_fingerprint(
+                config_path=config_path,
+                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                model=resolved_model,
+            )
+            if bench.get("status") == "succeeded":
+                try:
+                    eval_results = parse_eval_results(
+                        eval_search_root,
+                        framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                    )
+                    acc = eval_results.get("accuracy")
+                    if isinstance(acc, (int, float)):
+                        enablement_accuracy = float(acc)
+                    enablement_accuracy_task = str(eval_results.get("task") or "")
+                    enablement_accuracy_metric = str(eval_results.get("metric") or "")
+                except Exception:  # noqa: BLE001 — eval may not produce a result
+                    log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
         return bench, {
             "accuracy_pass": accuracy_pass,
@@ -3204,7 +3210,7 @@ class IntegratePatchExecutor:
         )
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
-            variant.runtime_override = {str(k): str(v) for k, v in _rt_rb.items()}
+            variant.runtime_override = dict(_rt_rb)
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,

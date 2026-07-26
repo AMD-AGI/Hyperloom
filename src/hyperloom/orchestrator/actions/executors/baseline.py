@@ -1272,12 +1272,13 @@ class BaselineExecutor:
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
         result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
         result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
+        # Fingerprint derives from the materialized YAML contract fields only —
+        # task/metric are result outputs and may be absent on eval crash, so they
+        # must not participate in the stable identity.
         result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
             config_path=result.get("materialized_config"),
             framework=framework,
             model=model,
-            task=result.get("accuracy_task"),
-            metric=result.get("accuracy_metric"),
         )
         result["eval_origin"] = "eval"
         return result
