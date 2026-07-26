@@ -120,8 +120,9 @@ The LLM doesn't own a separate framework role in the current runtime.
 
 ### Enablement escalation ladder
 
-When a `(model, backend)` combination cannot launch, enablement repairs it
-along two axes. **Diagnosis (once):** work out which capability layer is
+When a `(model, backend)` combination cannot launch — or it launches but fails
+its accuracy eval (`accuracy_below_floor` / `eval_runtime_failure`) — enablement
+repairs it along two axes. **Diagnosis (once):** work out which capability layer is
 missing — read the failure signature, the model's `config.json` architecture,
 the framework's supported-architecture registry and installed version, and
 upstream (whether the capability already exists and in which version/PR). That
@@ -171,8 +172,11 @@ A verified build does not KEEP on artifact verification alone. After a
 build's artifacts verify, the Coordinator runs a launch probe: it boots the
 actual model with the built runtime through the same runnable-decision gate
 the authored-patch lane uses. Only a runtime that actually launches — and
-passes minimal correctness — earns KEEP. Otherwise the build reverts, or, if
-the boot advanced past the original failure to a new or deeper gap, the loop
+passes minimal correctness — earns KEEP. For an eval-origin trigger the gate
+additionally re-runs the accuracy eval against the captured contract and a
+KEEP requires the accuracy to meet the floor; the KEEP is finalized only after
+a genuine baseline revalidates it. Otherwise the build reverts, or, if the
+boot advanced past the original failure to a new or deeper gap, the loop
 advances to the next round to repair that gap.
 
 ### Discovery-driven build refs

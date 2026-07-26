@@ -12,7 +12,9 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.agents.framework.enablement import (
+    ACCURACY_BELOW_FLOOR,
     CAPABILITY_DISABLED,
+    EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
     IMPORT_ERROR,
     MISSING_MODEL_ARCH,
@@ -37,6 +39,26 @@ from hyperloom.agents.framework.enablement import (
 
 
 # --- classify_failure: kind detection --------------------------------------
+
+
+def test_accuracy_below_floor_kind() -> None:
+    sig = classify_failure("baseline accuracy did not meet floor: accuracy=0.12 floor=0.30 task=gsm8k")
+    assert sig.kind == ACCURACY_BELOW_FLOOR
+    assert sig.bridge_layer == ""
+
+
+def test_eval_runtime_failure_kind() -> None:
+    sig = classify_failure("benchmark_stderr.log: ERROR: run_eval failed with exit code 1")
+    assert sig.kind == EVAL_RUNTIME_FAILURE
+
+
+def test_eval_crash_with_import_error_classifies_as_import_error() -> None:
+    """The generic eval rule is lowest priority: a real root cause in the same
+    log (import/serve-flag) must win over eval_runtime_failure."""
+    log = "run_eval failed with exit code 1\nModuleNotFoundError: No module named 'lm_eval'"
+    assert classify_failure(log).kind == IMPORT_ERROR
+    log2 = "run_eval failed with exit code 1\nvllm: error: unrecognized arguments: --bad"
+    assert classify_failure(log2).kind == SERVE_FLAG
 
 
 def test_missing_model_arch() -> None:

@@ -18,6 +18,31 @@ def test_collect_enablement_returns_empty_when_nothing():
     assert collect_enablement(Path("/tmp"), _state(), []) == {}
 
 
+def test_collect_enablement_eval_origin_surfaced():
+    out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            enablement_origin="eval",
+            enablement_baseline_eval_kind="accuracy_below_floor",
+            enablement_observed_accuracy=0.12,
+            enablement_accuracy_floor=0.3,
+            enablement_observed_task="gsm8k",
+            enablement_observed_metric="exact_match",
+            enablement_eval_contract_fingerprint="fp1",
+            enablement_validation_pending=True,
+            enablement_probe_config_path="/tmp/runs/materialized.yaml",
+        ),
+        [],
+    )
+    assert out["origin"] == "eval"
+    assert out["trigger_kind"] == "accuracy_below_floor"
+    assert out["observed_accuracy"] == 0.12
+    assert out["accuracy_floor"] == 0.3
+    assert out["eval_contract_fingerprint"] == "fp1"
+    assert out["validation_pending"] is True
+    assert out["probe_config_path"]
+
+
 def test_collect_enablement_build_manifest_surfaced():
     manifest = [
         {
