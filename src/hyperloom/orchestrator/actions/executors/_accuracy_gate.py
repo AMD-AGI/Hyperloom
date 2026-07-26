@@ -154,30 +154,92 @@ def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     return None
 
 
+def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, str]:
+    """Extract stable eval-contract fields from a materialized Magpie YAML.
+
+    Reads the fields that define what workload is evaluated and how eval is
+    controlled.  Server args, runtime paths, lifecycle envs and any field
+    that a server-arg tuning candidate is allowed to change are excluded so
+    the fingerprint stays stable across valid enablement patches.
+
+    Returns an empty dict when the config is absent or unreadable.
+    """
+    if not config_path:
+        return {}
+    try:
+        import yaml as _yaml
+
+        p = Path(config_path)
+        if not p.is_file():
+            return {}
+        data = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — best-effort
+        return {}
+
+    bench = data.get("benchmark") or {}
+    envs: dict = bench.get("envs") or {}
+
+    # Eval-contract keys in benchmark.envs; all others are excluded.
+    _EVAL_CONTRACT_ENV_KEYS = (
+        "RUN_EVAL",
+        "MAGPIE_EVAL_TASKS",
+        "MAGPIE_EVAL_LIMIT",
+    )
+    # Workload-shape keys that define what is being measured.
+    _WORKLOAD_SHAPE_ENV_KEYS = (
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "TP",
+        "RANDOM_RANGE_RATIO",
+    )
+    contract: dict[str, str] = {
+        "framework": str(bench.get("framework") or ""),
+        "model": str(bench.get("model") or ""),
+        "benchmark_script": str(bench.get("benchmark_script") or ""),
+        "precision": str(bench.get("precision") or ""),
+    }
+    for k in _EVAL_CONTRACT_ENV_KEYS + _WORKLOAD_SHAPE_ENV_KEYS:
+        v = envs.get(k)
+        if v is not None:
+            contract[k] = str(v)
+    return contract
+
+
 def eval_contract_fingerprint(
     *,
     config_path: str | Path | None,
-    framework: str | None,
-    model: str | None,
-    task: str | None,
-    metric: str | None,
+    framework: str | None = None,
+    model: str | None = None,
+    task: str | None = None,
+    metric: str | None = None,
 ) -> str:
     """Short stable digest of the eval contract (workload + eval definition).
 
-    Hashes the materialized config bytes when available plus the framework,
-    model, task and metric so a later enablement re-run can detect contract
-    drift. Never raises; unreadable inputs contribute their string form.
+    Derives the digest from stable eval-contract inputs extracted from the
+    materialized YAML (framework, model, script, precision, workload shape,
+    eval controls).  Result-level outputs such as task/metric names are NOT
+    included so an eval crash (where those are absent) produces the same
+    fingerprint as a successful eval on the identical contract.
+
+    ``task`` and ``metric`` parameters are accepted for call-site compatibility
+    but are not included in the hash.
+
+    Returns an empty string when the config cannot be read, signalling to
+    callers that the contract is invalid and drift checking should fail closed.
     """
-    parts = [str(framework or ""), str(model or ""), str(task or ""), str(metric or "")]
-    cfg = ""
-    if config_path:
-        p = Path(config_path)
-        try:
-            cfg = p.read_bytes().hex() if p.is_file() else str(config_path)
-        except OSError:
-            cfg = str(config_path)
-    parts.append(cfg)
-    return hashlib.sha256("\x1e".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+    contract = _extract_eval_contract_fields(config_path)
+    if not contract:
+        # Unreadable or missing config — return invalid sentinel.
+        return ""
+    # Supplement with caller-supplied framework/model when the YAML lacks them.
+    if framework and not contract.get("framework"):
+        contract["framework"] = str(framework)
+    if model and not contract.get("model"):
+        contract["model"] = str(model)
+    payload = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def accuracy_keep_block(
@@ -500,6 +562,7 @@ __all__ = [
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_RUNTIME_FAILURE",
+    "_extract_eval_contract_fields",
     "accuracy_keep_block",
     "accuracy_meets_floor",
     "accuracy_passed",

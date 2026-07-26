@@ -641,21 +641,40 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E
 )
 
 
-def _route(monkeypatch, framework, result, *, floor=None, nodes=None):
+def _write_minimal_route_yaml(tmp_path: Path, framework: str = "sglang") -> Path:
+    """Write a minimal materialized YAML for _route tests."""
+    p = tmp_path / "route_config.yaml"
+    cfg = {
+        "benchmark": {
+            "framework": framework,
+            "model": "/path/models/test",
+            "benchmark_script": f"{framework}_mi300x.sh",
+            "precision": "bf16",
+            "envs": {"CONC": 64, "ISL": 1024, "OSL": 1024, "TP": 8, "RUN_EVAL": "true"},
+        }
+    }
+    p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return p
+
+
+def _route(monkeypatch, framework, result, *, floor=None, nodes=None, tmp_path=None):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
     if floor is not None:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", str(floor))
     if nodes is not None:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
+    if tmp_path is not None and "materialized_config" not in result:
+        result["materialized_config"] = str(_write_minimal_route_yaml(tmp_path, framework))
     executor = BaselineExecutor()
     rec = _StopRecorder()
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
     return rec.stop_reason
 
 
-def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch):
-    result = {"status": "succeeded", "run_eval_disabled": False, "materialized_config": "/tmp/c.yaml"}
-    reason = _route(monkeypatch, "sglang", result)
+def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch, tmp_path):
+    cfg_path = str(_write_minimal_route_yaml(tmp_path))
+    result = {"status": "succeeded", "run_eval_disabled": False, "materialized_config": cfg_path}
+    reason = _route(monkeypatch, "sglang", result, tmp_path=tmp_path)
     assert reason == ""
     assert result[BASELINE_EVAL_FAILED_KEY] is True
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE

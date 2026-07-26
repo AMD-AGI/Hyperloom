@@ -164,21 +164,92 @@ class TestAccuracyValidator:
         assert ag.classify_accuracy_failure(0.0, 0.0) == ag.EVAL_KIND_ACCURACY_BELOW_FLOOR
 
 
-class TestEvalContractFingerprint:
-    def test_stable_and_sensitive(self):
-        a = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="gsm8k", metric="em")
-        b = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="gsm8k", metric="em")
-        c = ag.eval_contract_fingerprint(config_path=None, framework="sglang", model="m", task="mmlu", metric="em")
-        assert a == b and a != c and len(a) == 16
+def _write_minimal_bench_yaml(path, *, framework="sglang", model="/m", conc=64, isl=1024, osl=1024, run_eval="true"):
+    """Write a minimal Magpie YAML for fingerprint tests."""
+    import yaml as _yaml
 
-    def test_hashes_config_bytes(self, tmp_path):
+    cfg = {
+        "benchmark": {
+            "framework": framework,
+            "model": model,
+            "benchmark_script": f"{framework}_mi300x.sh",
+            "precision": "fp8",
+            "envs": {
+                "CONC": conc,
+                "ISL": isl,
+                "OSL": osl,
+                "TP": 8,
+                "RUN_EVAL": run_eval,
+            },
+        }
+    }
+    path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+
+class TestEvalContractFingerprint:
+    def test_stable_across_calls(self, tmp_path):
+        """Same config produces the same fingerprint on repeated calls."""
         cfg = tmp_path / "c.yaml"
-        cfg.write_text("a: 1\n")
-        fp1 = ag.eval_contract_fingerprint(config_path=cfg, framework="f", model="m", task="t", metric="x")
-        cfg.write_text("a: 2\n")
-        fp2 = ag.eval_contract_fingerprint(config_path=cfg, framework="f", model="m", task="t", metric="x")
-        assert fp1 != fp2
-        # A missing config path contributes its string form and never raises.
-        assert ag.eval_contract_fingerprint(
-            config_path="/no/such/file.yaml", framework="f", model="m", task="t", metric="x"
-        )
+        _write_minimal_bench_yaml(cfg)
+        a = ag.eval_contract_fingerprint(config_path=cfg)
+        b = ag.eval_contract_fingerprint(config_path=cfg)
+        assert a == b and len(a) == 16
+
+    def test_task_metric_do_not_affect_fingerprint(self, tmp_path):
+        """Result-level task/metric do not change the fingerprint."""
+        cfg = tmp_path / "c.yaml"
+        _write_minimal_bench_yaml(cfg)
+        fp_no_task = ag.eval_contract_fingerprint(config_path=cfg)
+        fp_with_task = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match")
+        fp_other_task = ag.eval_contract_fingerprint(config_path=cfg, task="mmlu", metric="acc")
+        assert fp_no_task == fp_with_task == fp_other_task
+
+    def test_crash_and_success_produce_same_fingerprint(self, tmp_path):
+        """eval crash (no task/metric) and successful eval produce identical fingerprint."""
+        cfg = tmp_path / "c.yaml"
+        _write_minimal_bench_yaml(cfg)
+        fp_crash = ag.eval_contract_fingerprint(config_path=cfg, task=None, metric=None)
+        fp_success = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match,strict-match")
+        assert fp_crash == fp_success
+
+    def test_workload_change_changes_fingerprint(self, tmp_path):
+        """A change to workload shape (ISL) changes the fingerprint."""
+        import yaml as _yaml
+
+        cfg1 = tmp_path / "c1.yaml"
+        cfg2 = tmp_path / "c2.yaml"
+        _write_minimal_bench_yaml(cfg1, isl=1024)
+        _write_minimal_bench_yaml(cfg2, isl=2048)
+        assert ag.eval_contract_fingerprint(config_path=cfg1) != ag.eval_contract_fingerprint(config_path=cfg2)
+
+    def test_eval_control_change_changes_fingerprint(self, tmp_path):
+        """Changing RUN_EVAL changes the fingerprint."""
+        cfg_on = tmp_path / "on.yaml"
+        cfg_off = tmp_path / "off.yaml"
+        _write_minimal_bench_yaml(cfg_on, run_eval="true")
+        _write_minimal_bench_yaml(cfg_off, run_eval="false")
+        assert ag.eval_contract_fingerprint(config_path=cfg_on) != ag.eval_contract_fingerprint(config_path=cfg_off)
+
+    def test_server_args_do_not_affect_fingerprint(self, tmp_path):
+        """Server arg changes (allowed tuning) do not change the fingerprint."""
+        import yaml as _yaml
+
+        cfg = tmp_path / "c.yaml"
+        _write_minimal_bench_yaml(cfg)
+        fp_base = ag.eval_contract_fingerprint(config_path=cfg)
+        # Add server args to YAML (different from contract fields).
+        data = _yaml.safe_load(cfg.read_text())
+        data["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--some-tuning-flag"
+        cfg.write_text(_yaml.safe_dump(data))
+        fp_with_args = ag.eval_contract_fingerprint(config_path=cfg)
+        assert fp_base == fp_with_args
+
+    def test_missing_config_returns_empty_string(self):
+        """Missing config returns empty string (invalid contract sentinel)."""
+        fp = ag.eval_contract_fingerprint(config_path="/no/such/file.yaml")
+        assert fp == ""
+
+    def test_none_config_returns_empty_string(self):
+        """None config returns empty string."""
+        fp = ag.eval_contract_fingerprint(config_path=None)
+        assert fp == ""
