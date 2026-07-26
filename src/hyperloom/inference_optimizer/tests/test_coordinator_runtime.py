@@ -952,6 +952,8 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
         c.shared_state.enablement_origin = "eval"
         c.shared_state.enablement_validation_pending = True
         c.shared_state.enablement_accuracy_floor = 0.3
+        # Set tracked task_id so the gate recognizes this as the revalidation task.
+        c.shared_state.enablement_revalidation_task_id = "t-reval-ok"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
@@ -966,15 +968,90 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
 
 
 @pytest.mark.asyncio
+async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(session_dir):
+    """A baseline that is NOT the tracked revalidation task must not consume pending state."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement_revalidation_task_id = "t-reval-tracked"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
+            task=_mk_task("baseline", "t-unrelated"),
+        )
+        assert c.shared_state.baseline_tput == 1000.0
+        # Pending state must NOT be consumed by the unrelated baseline.
+        assert c.shared_state.enablement_validation_pending is True
+        assert c.shared_state.enablement_succeeded is False
+        assert c.shared_state.enablement_revalidation_task_id == "t-reval-tracked"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
+    """Tracked revalidation baseline with sub-floor accuracy should rearm, not succeed."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.8
+        c.shared_state.enablement_revalidation_task_id = "t-reval-subflo"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.5},
+            task=_mk_task("baseline", "t-reval-subflo"),
+        )
+        # Baseline tput anchors normally, but enablement is NOT succeeded.
+        assert c.shared_state.baseline_tput == 1000.0
+        assert c.shared_state.enablement_succeeded is False
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement_revalidation_task_id == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
         c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_revalidation_task_id = "t-reval-fail"
         await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
         assert c.shared_state.enablement_validation_pending is False
         assert c.shared_state.enablement_stall_streak == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir, monkeypatch):
+    """Any revalidation failure (including plain boot failures) clears pending and increments stall."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_revalidation_task_id = "t-reval-boot"
+        c.shared_state.enablement_eval_contract_fingerprint = "frozen-fp"
+        c.shared_state.enablement_accuracy_floor = 0.5
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-reval-boot"),
+            {"status": "failed", "error_class": "oom"},
+        )
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement_revalidation_task_id == ""
+        # Frozen trigger identity must be preserved.
+        assert c.shared_state.enablement_eval_contract_fingerprint == "frozen-fp"
+        assert c.shared_state.enablement_accuracy_floor == 0.5
     finally:
         await c.stop()
 

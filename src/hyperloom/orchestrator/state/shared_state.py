@@ -470,6 +470,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # trigger config before any enablement patches).  Optional; defaults via
     # from_dict, no schema bump.
     enablement_accepted_config_path: str = ""
+    # Task identity for the current revalidation baseline task. Cleared when
+    # the task finishes (success or failure).  Optional; defaults via from_dict.
+    enablement_revalidation_task_id: str = ""
+    # Monotonically increasing counter: incremented each time an eval-origin
+    # KEEP opens a new revalidation window so each window gets a fresh idempotency
+    # key and cannot reuse a prior terminal TaskRegistry row.
+    enablement_revalidation_generation: int = 0
     # Attempt-scoped runtime acquisition state. All optional; NOT in
     # fact_layer_keys and do NOT bump schema_version (default via from_dict).
     # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.

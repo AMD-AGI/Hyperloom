@@ -616,6 +616,39 @@ class WritebackCollaborator:
                 or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
             )
             eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
+            # Revalidation task failed for any reason (boot/OOM/timeout/eval): clear
+            # pending state, preserve the frozen trigger identity, increment stall.
+            reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+            is_revalidation = bool(
+                (task.params or {}).get("reason") == "enablement_eval_revalidation"
+                or (reval_tid and reval_tid == str(task.task_id or ""))
+            )
+            if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
+                self.shared_state.enablement_validation_pending = False
+                self.shared_state.enablement_revalidation_task_id = ""
+                self.shared_state.enablement_stall_streak = (
+                    int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+                )
+                try:
+                    from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+                except ImportError:
+                    _max_stall = 5
+                if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                    self.shared_state.set_stop_reason("enablement_stalled")
+                else:
+                    self.shared_state.enablement_dispatched = False
+                launch_log = _extract_enablement_launch_log(result_payload)
+                if launch_log:
+                    self.shared_state.enablement_launch_log = launch_log
+                log.warning(
+                    "enablement revalidation task %s failed (error_class=%s); "
+                    "stall_streak=%d rearm=%s",
+                    task.task_id,
+                    err_class,
+                    self.shared_state.enablement_stall_streak,
+                    not bool(self.shared_state.stop_reason),
+                )
+                any_changed = True
             from ..actions.executors._multi_node_env import is_multi_node  # noqa: PLC0415
 
             # Single-node eval-pending failure: throughput measured fine and the
@@ -2272,17 +2305,61 @@ class WritebackCollaborator:
                 self.shared_state.baseline_tput = float(tput)
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
-            # A genuine anchor revalidates an eval-origin enablement: reaching here
-            # means the result was promotable (not baseline_eval_failed), i.e. the
-            # accuracy met the floor, so finalize the enablement success.
+            # A genuine baseline may revalidate an eval-origin enablement.
             if bool(getattr(self.shared_state, "enablement_validation_pending", False)):
-                acc = result.get("accuracy")
-                floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
-                if accuracy_meets_floor(acc, floor):
-                    self.shared_state.enablement_succeeded = True
-                self.shared_state.enablement_validation_pending = False
-            self.shared_state.enablement_origin = ""
-            self.shared_state.enablement_pending = False
+                tracked_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+                promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
+                task_params = getattr(task, "params", None) or {} if task is not None else {}
+                is_revalidation = (
+                    task_params.get("reason") == "enablement_eval_revalidation"
+                    or (tracked_tid and tracked_tid == promoting_tid)
+                )
+                if is_revalidation:
+                    acc = result.get("accuracy")
+                    floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
+                    if accuracy_meets_floor(acc, floor):
+                        self.shared_state.enablement_succeeded = True
+                        self.shared_state.enablement_validation_pending = False
+                        self.shared_state.enablement_revalidation_task_id = ""
+                        self.shared_state.enablement_origin = ""
+                        self.shared_state.enablement_pending = False
+                    else:
+                        # Sub-floor accuracy on the tracked revalidation: rearm the
+                        # specialist loop without clearing the frozen trigger identity.
+                        log.warning(
+                            "enablement revalidation: accuracy %.4f below floor %.4f; rearming",
+                            acc if isinstance(acc, (int, float)) else float("nan"),
+                            floor,
+                        )
+                        self.shared_state.enablement_validation_pending = False
+                        self.shared_state.enablement_revalidation_task_id = ""
+                        self.shared_state.enablement_stall_streak = (
+                            int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+                        )
+                        _max_stall = getattr(self, "_ENABLEMENT_MAX_STALL", None)
+                        if _max_stall is None:
+                            try:
+                                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+                            except ImportError:
+                                _max_stall = 5
+                        if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                            self.shared_state.set_stop_reason("enablement_stalled")
+                        else:
+                            self.shared_state.enablement_dispatched = False
+                else:
+                    # An unrelated baseline promoted while revalidation is pending.
+                    # Only anchor tput; do not consume or clear the pending state.
+                    log.info(
+                        "enablement revalidation pending: unrelated baseline promoted "
+                        "(task=%s tracked=%s); not consuming pending state",
+                        promoting_tid,
+                        tracked_tid,
+                    )
+                    self.shared_state.enablement_origin = ""
+                    self.shared_state.enablement_pending = False
+            else:
+                self.shared_state.enablement_origin = ""
+                self.shared_state.enablement_pending = False
             changed = True
         acc = result.get("accuracy")
         if isinstance(acc, (int, float)):
@@ -3305,6 +3382,10 @@ class WritebackCollaborator:
         # coordinator restart, so kill the orphan group, GC its attempt dir,
         # sweep its jit locks, fail the row, and clear the sentinel.
         await self._resume_recover_pending_targeted_build(report)
+        # (1c) Orphaned revalidation tasks: if enablement_validation_pending is set
+        # but the tracked revalidation task is already terminal, clear the pending
+        # flag and rearm the stall counter so a fresh revalidation can be enqueued.
+        await self._resume_recover_pending_revalidation(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
@@ -3616,6 +3697,45 @@ class WritebackCollaborator:
 
         state.pending_targeted_build = {}
         report["fixes"].append(summary)
+
+    async def _resume_recover_pending_revalidation(self, report: dict[str, Any]) -> None:
+        """Clear stale enablement_validation_pending when the tracked revalidation task is terminal.
+
+        If the coordinator died while a revalidation baseline was running, the
+        task row may already be in a terminal state on resume.  Without this
+        recovery the pending flag stays set indefinitely and the next
+        revalidation cannot be enqueued (tracked_tid is still the old row).
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "enablement_validation_pending", False)):
+            return
+        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        if not tracked_tid:
+            return
+        try:
+            from ..state.task_registry import TERMINAL_STATES, TaskNotFound
+
+            try:
+                row = await self.tasks.get(tracked_tid)
+                is_terminal = row.state in TERMINAL_STATES
+            except TaskNotFound:
+                is_terminal = True
+            if is_terminal:
+                state.enablement_validation_pending = False
+                state.enablement_revalidation_task_id = ""
+                state.enablement_stall_streak = (
+                    int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+                )
+                state.enablement_dispatched = False
+                report["fixes"].append(
+                    {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+                )
+                log.info(
+                    "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                    tracked_tid,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
         """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).

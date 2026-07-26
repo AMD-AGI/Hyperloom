@@ -1842,6 +1842,12 @@ class FrameworkPhase(PhaseHandler):
                 # reach the stall cap.
                 state.enablement_validation_pending = True
                 state.enablement_dispatched = False
+                # Increment generation so the new window gets a fresh idempotency
+                # key and cannot reuse a prior terminal TaskRegistry row.
+                state.enablement_revalidation_generation = (
+                    int(getattr(state, "enablement_revalidation_generation", 0) or 0) + 1
+                )
+                state.enablement_revalidation_task_id = ""
             else:
                 state.enablement_succeeded = True
                 state.enablement_stall_streak = 0
@@ -4565,14 +4571,16 @@ class FrameworkPhase(PhaseHandler):
         state = self.shared_state
         if not bool(getattr(state, "enablement_validation_pending", False)):
             return ""
-        if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
-            return ""
-        try:
-            for t in (*await self.tasks.queued(), *await self.tasks.running()):
-                if getattr(t, "kind", "") == "baseline":
-                    return ""
-        except Exception:  # noqa: BLE001 — defensive
-            return ""
+        # If we already have a tracked revalidation task that is still alive, do
+        # not create another one.
+        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        if tracked_tid:
+            try:
+                for t in (*await self.tasks.queued(), *await self.tasks.running()):
+                    if str(getattr(t, "task_id", "") or "") == tracked_tid:
+                        return tracked_tid
+            except Exception:  # noqa: BLE001 — defensive
+                pass
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": "enablement_eval_revalidation",
@@ -4597,13 +4605,23 @@ class FrameworkPhase(PhaseHandler):
             rt_override = rt_obj.to_runtime_override()
             if rt_override:
                 params["runtime_override"] = rt_override
-        attempt = int(getattr(state, "enablement_attempts", 0) or 0)
+        # Use generation in the idempotency key so each revalidation window gets
+        # a fresh row even when a prior window's row is in a terminal state.
+        gen = int(getattr(state, "enablement_revalidation_generation", 0) or 0)
         task, _existing = await self.tasks.create_or_return_existing(
             kind="baseline",
             params=params,
-            idempotency_key=f"enablement_revalidation:{attempt}",
+            idempotency_key=f"enablement_revalidation:gen{gen}",
         )
-        return str(getattr(task, "task_id", "") or "")
+        task_id = str(getattr(task, "task_id", "") or "")
+        # Persist the task_id so _promote_baseline can verify identity.
+        if task_id and task_id != str(getattr(state, "enablement_revalidation_task_id", "") or ""):
+            state.enablement_revalidation_task_id = task_id
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.debug("enablement revalidation: save of task_id failed", exc_info=True)
+        return task_id
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
