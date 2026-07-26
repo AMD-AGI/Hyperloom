@@ -68,3 +68,30 @@ def test_persist_aiter_not_importable_falls_back(tmp_path, monkeypatch):
     extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
     out, snap = rh._persist_forge_gemm_csv_durably(extra, model_path="/m/x", snapshot_root=ws)
     assert out == extra and snap == ""  # unchanged; never breaks KEEP
+
+
+def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
+    # A snapshot failure must NOT discard the durable copy + env repoint that
+    # were already committed (that is what makes the KEEP survive replay).
+    aiter_pkg = _fake_aiter(monkeypatch, tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = ws / "tuned.csv"
+    src.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
+
+    import hyperloom.orchestrator.source_snapshot as ss
+
+    def _boom(**kwargs):
+        raise RuntimeError("snapshot dest not writable")
+
+    monkeypatch.setattr(ss, "snapshot_source_layer", _boom)
+
+    extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
+    out, snap = rh._persist_forge_gemm_csv_durably(
+        extra, model_path="/models/Qwen3-14B-FP8", snapshot_root=ws
+    )
+
+    dst = aiter_pkg / "configs" / "model_configs" / "a8w8_blockscale_tuned_gemm_qwen3-14b-fp8.csv"
+    assert dst.is_file()  # copy committed despite the snapshot failure
+    assert out["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"] == str(dst)  # repoint SURVIVES
+    assert snap == ""  # snapshot dir empty (it failed), but durability is kept

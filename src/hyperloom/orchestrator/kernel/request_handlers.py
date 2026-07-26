@@ -2881,6 +2881,10 @@ def _persist_forge_gemm_csv_durably(
     src_csv = str(extra_envs.get(env_key) or "").strip()
     if not src_csv or not Path(src_csv).is_file():
         return extra_envs, ""
+
+    # Step 1 -- commit the durable copy + env repoint. This is what makes the
+    # KEEP survive: the CSV lands in aiter's default config dir and the env
+    # points there instead of the ephemeral tuner workspace.
     try:
         import importlib.util
 
@@ -2898,7 +2902,18 @@ def _persist_forge_gemm_csv_durably(
         dst = aiter_pkg / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_csv, dst)
+        updated = dict(extra_envs)
+        updated[env_key] = str(dst)
+    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
+        log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
+        return extra_envs, ""
 
+    # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
+    # snapshot failure must NOT discard the copy + repoint committed above (the
+    # tuned CSV already lives in aiter's config dir and the env already points
+    # at it), so this runs in its own guard and only affects the returned dir.
+    snap_dir = ""
+    try:
         from ..source_snapshot import snapshot_source_layer
 
         snap = snapshot_source_layer(
@@ -2909,12 +2924,10 @@ def _persist_forge_gemm_csv_durably(
             provenance="forge_gemm_tune",
             extra={"env_key": env_key, "model": slug},
         )
-        updated = dict(extra_envs)
-        updated[env_key] = str(dst)
-        return updated, str((snap or {}).get("snapshot_dir") or "")
-    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
-        log.exception("forge gemm CSV durable-persist failed; keeping workspace path")
-        return extra_envs, ""
+        snap_dir = str((snap or {}).get("snapshot_dir") or "")
+    except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
+        log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
+    return updated, snap_dir
 
 
 async def _run_geak_gemm_tuning(

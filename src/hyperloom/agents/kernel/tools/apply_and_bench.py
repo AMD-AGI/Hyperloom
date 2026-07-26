@@ -465,7 +465,14 @@ def _gpu_vram_used_mb(gpu_ids: str) -> float | None:
     Sampled while the server is up (weights + KV cache resident) as a proxy for
     peak serving VRAM. Returns ``None`` on any probe/parse failure (never raises)
     so the ABBA result degrades gracefully when rocm-smi is unavailable.
+
+    Requires an explicit GPU scope: with no ``gpu_ids`` it returns ``None`` rather
+    than summing the whole host, which would over-count co-tenant GPUs and make
+    the drain check wait out its timeout on VRAM that isn't this arm's.
     """
+    wanted = {g.strip() for g in (gpu_ids or "").split(",") if g.strip()}
+    if not wanted:
+        return None
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showmeminfo", "vram", "--json"],
@@ -476,7 +483,6 @@ def _gpu_vram_used_mb(gpu_ids: str) -> float | None:
         data = json.loads(proc.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    wanted = {g.strip() for g in (gpu_ids or "").split(",") if g.strip()}
     total = 0.0
     found = False
     for key, info in data.items():

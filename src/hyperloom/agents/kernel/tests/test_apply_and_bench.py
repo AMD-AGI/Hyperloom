@@ -201,3 +201,16 @@ def test_wait_vram_drain_warns_on_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(ab, "_log", lambda out_dir, msg: logged.append(msg))
     ab._wait_vram_drain("0", out_dir=tmp_path, threshold_mb=20000.0, timeout_s=0.0)
     assert any("did not drain" in m for m in logged)
+
+
+def test_gpu_vram_used_none_without_gpu_scope(monkeypatch):
+    # No GPU scope -> None WITHOUT probing rocm-smi (never sum the whole host).
+    import hyperloom.agents.kernel.tools.apply_and_bench as _ab
+
+    def _fail(*a, **k):
+        raise AssertionError("rocm-smi must not be called without a GPU scope")
+
+    monkeypatch.setattr(_ab.subprocess, "run", _fail)
+    assert _ab._gpu_vram_used_mb("") is None
+    assert _ab._gpu_vram_used_mb(None) is None
+    assert _ab._gpu_vram_used_mb("  ,  ") is None
