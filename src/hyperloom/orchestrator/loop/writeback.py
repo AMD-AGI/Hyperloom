@@ -2413,12 +2413,17 @@ class WritebackCollaborator:
         }
         changed = True
         audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
+        _task_params = task.params if task is not None else {}
         audit_extras = {
             "materialized_config": result.get("materialized_config"),
             "accuracy": result.get("accuracy"),
             "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
             # Stamp canonical params fingerprint for the self-loop denial helper.
-            "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
+            "fingerprint": _baseline_params_fingerprint(_task_params),
+            # Record revalidation context for history.
+            "is_revalidation": bool(_task_params.get("reason") == "enablement_eval_revalidation"),
+            "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
+            "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
@@ -2977,6 +2982,12 @@ class WritebackCollaborator:
             "accuracy_pass": result.get("accuracy_pass"),
             "patches_applied": result.get("patches_applied") or [],
             "patches_reverted": result.get("patches_reverted") or [],
+            # Enablement eval-origin verdict fields for history.
+            "correctness_verified": result.get("correctness_verified"),
+            "enablement_eval_failure_kind": result.get("enablement_eval_failure_kind"),
+            "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
+            "enablement_eval_contract_drift": result.get("enablement_eval_contract_drift"),
+            "provisional": result.get("provisional"),
         }
         outcome.changed = changed
         outcome.audit_decision = audit_decision
