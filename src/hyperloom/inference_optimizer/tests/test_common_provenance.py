@@ -148,3 +148,67 @@ def test_stack_fingerprint_from_env():
 def test_json_serializable():
     p = build_provenance(args=_ns(model="/m/x", framework="sglang"), env={"TP": "1"}, probe=False)
     json.dumps(p)
+
+
+# --- probe/marker branch coverage (WP-0) -----------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+import hyperloom.common.provenance as _prov  # noqa: E402
+
+
+def test_gfx_arch_probe_via_rocminfo(monkeypatch):
+    # empty env -> falls through to the rocminfo subprocess probe.
+    monkeypatch.setattr(
+        _prov.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="  Name:  gfx950  \n"),
+    )
+    assert detect_gfx_arch({}, probe=True) == "gfx950"
+
+
+def test_gfx_arch_probe_subprocess_absent(monkeypatch):
+    def _boom(*a, **k):
+        raise FileNotFoundError("rocminfo not installed")
+
+    monkeypatch.setattr(_prov.subprocess, "run", _boom)
+    assert detect_gfx_arch({}, probe=True) is None
+
+
+def test_gfx_arch_probe_nonzero_returncode(monkeypatch):
+    monkeypatch.setattr(
+        _prov.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="")
+    )
+    assert detect_gfx_arch({}, probe=True) is None
+
+
+def test_read_first_line(tmp_path):
+    f = tmp_path / "v.txt"
+    f.write_text("\n\n  first real line \nsecond\n", encoding="utf-8")
+    assert _prov._read_first_line(f) == "first real line"
+    # non-existent path degrades to "" (never raises)
+    assert _prov._read_first_line(tmp_path / "nope.txt") == ""
+
+
+def test_detect_image_none_when_absent(monkeypatch):
+    # no image env vars and no marker files -> None (markers absent on runner).
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "")
+    assert _prov.detect_image({}) is None
+
+
+def test_detect_image_from_marker(monkeypatch):
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "myrepo/img:tag")
+    assert _prov.detect_image({}) == "myrepo/img:tag"
+
+
+def test_stack_fingerprint_reads_rocm_marker(monkeypatch):
+    # empty env + probe -> rocm resolves from the /opt/rocm marker file.
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "6.2.0")
+    fp = _prov.detect_stack_fingerprint({}, probe=True)
+    assert fp["rocm"] == "6.2.0"
+
+
+def test_code_revision_falls_back_when_git_absent(monkeypatch):
+    def _boom(*a, **k):
+        raise FileNotFoundError("git not installed")
+
+    monkeypatch.setattr(_prov.subprocess, "run", _boom)
+    assert _prov.detect_code_revision({"HYPERLOOM_CODE_REVISION": "envrev"}, probe=True) == "envrev"
