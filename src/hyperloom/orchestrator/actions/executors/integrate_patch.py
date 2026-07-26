@@ -23,8 +23,11 @@ from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import (
     accuracy_keep_block,
+    accuracy_meets_floor,
     accuracy_passed,
+    classify_accuracy_failure,
     enablement_accuracy_floor,
+    eval_contract_fingerprint,
     parse_eval_results,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
@@ -2196,13 +2199,39 @@ class IntegratePatchExecutor:
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
         floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else enablement_accuracy_floor()
+        eval_origin = str(params.get("enablement_origin") or "") == "eval"
+        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
         correctness_ok: bool | None
-        if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
-            correctness_ok = float(enablement_accuracy) > floor
-        elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
-            correctness_ok = False
+        if enablement_accuracy is None:
+            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+            correctness_ok = False if eval_origin else None
+        elif accuracy_meets_floor(enablement_accuracy, floor):
+            correctness_ok = True
         else:
-            correctness_ok = None
+            # Present but below floor / non-positive / non-finite.
+            correctness_ok = False
+        # eval-origin only: a changed eval contract (dataset/task/metric/config)
+        # means the score is not comparable — fail closed.
+        expected_fp = str(params.get("enablement_eval_contract_fingerprint") or "")
+        candidate_fp = str(gate_evidence.get("enablement_eval_contract_fingerprint") or "")
+        fp_drift = eval_origin and bool(expected_fp) and bool(candidate_fp) and expected_fp != candidate_fp
+        if fp_drift:
+            correctness_ok = False
+            log.warning(
+                "integrate_patch: eval-contract fingerprint drift (expected %s, got %s); reverting",
+                expected_fp,
+                candidate_fp,
+            )
+        eval_provenance = {
+            "enablement_origin": str(params.get("enablement_origin") or ""),
+            "enablement_observed_accuracy": enablement_accuracy,
+            "enablement_accuracy_floor": floor,
+            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+            "enablement_eval_contract_fingerprint": candidate_fp,
+            "enablement_eval_contract_drift": fp_drift,
+            "enablement_eval_failure_kind": accuracy_kind or "",
+        }
 
         after_signature = classify_failure(str(bench_result.get("error") or ""))
         before_signature: FailureSignature | None = None
@@ -2259,6 +2288,7 @@ class IntegratePatchExecutor:
                         "setup_commands_applied": list(setup_result.get("applied") or []),
                         "bench_result": bench_result,
                         "workspace": str(output_root),
+                        **eval_provenance,
                     },
                 )
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2285,9 +2315,14 @@ class IntegratePatchExecutor:
                     "enablement": True,
                     "runnable": False,
                     "correctness_verified": correctness_ok is True,
-                    "reason": f"enablement not runnable: {run_reason}",
+                    "reason": (
+                        "enablement eval-contract drift; reverted"
+                        if fp_drift
+                        else f"enablement not runnable: {run_reason}"
+                    ),
                     "bench_result": bench_result,
                     "workspace": str(output_root),
+                    **eval_provenance,
                 },
             )
 
@@ -2319,6 +2354,7 @@ class IntegratePatchExecutor:
             "setup_commands_applied": list(setup_result.get("applied") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later
         # bench in this session re-activates it.
@@ -3022,6 +3058,9 @@ class IntegratePatchExecutor:
 
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
+        enablement_accuracy_task = ""
+        enablement_accuracy_metric = ""
+        candidate_fingerprint = ""
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
             try:
                 eval_results = parse_eval_results(
@@ -3031,10 +3070,25 @@ class IntegratePatchExecutor:
                 acc = eval_results.get("accuracy")
                 if isinstance(acc, (int, float)):
                     enablement_accuracy = float(acc)
+                enablement_accuracy_task = str(eval_results.get("task") or "")
+                enablement_accuracy_metric = str(eval_results.get("metric") or "")
+                candidate_fingerprint = eval_contract_fingerprint(
+                    config_path=config_path,
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                    model=resolved_model,
+                    task=enablement_accuracy_task,
+                    metric=enablement_accuracy_metric,
+                )
             except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
-        return bench, {"accuracy_pass": accuracy_pass, "enablement_accuracy": enablement_accuracy}
+        return bench, {
+            "accuracy_pass": accuracy_pass,
+            "enablement_accuracy": enablement_accuracy,
+            "enablement_accuracy_task": enablement_accuracy_task,
+            "enablement_accuracy_metric": enablement_accuracy_metric,
+            "enablement_eval_contract_fingerprint": candidate_fingerprint,
+        }
 
     @staticmethod
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
