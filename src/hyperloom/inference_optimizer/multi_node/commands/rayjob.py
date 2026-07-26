@@ -24,9 +24,10 @@ import json
 import os
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
-from ...session.paths import mn_profile_trace_root
+from ...session.paths import ENV_CURRENT_SESSION_DIR, mn_profile_trace_root
 from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
 
@@ -48,6 +49,57 @@ _SAFE_GET_WORKLOAD_404_GRACE_S = 30.0
 _TERMINAL_FAIL_PHASES = {"Failed", "Stopped", "Cancelled"}
 
 _TERMINAL_OK_PHASES = {"Running"}
+
+
+def _prior_rayjob_ids_from_state_files() -> list[str]:
+    """Collect candidate ``rayjob_id`` values from every canonical state-file location.
+
+    The idempotency guard must survive state-file path divergence. ``optimize``
+    self-provisions using :func:`resolve_state_file` (session-dir), while a
+    separately-launched ``create-rayjob`` may pin
+    ``MULTI_NODE_STATE_FILE=/tmp/multi_node_state.json``; each writes its own
+    file, so a guard that reads only the current process's resolved path misses
+    the other invocation's ``rayjob_id`` and leaks a duplicate workload. Read
+    ``rayjob_id`` from all known locations (the resolved path, the session-dir
+    path, and the legacy ``/tmp`` file), de-duplicated and ordered
+    most-specific-first. Best-effort: missing / unreadable files are skipped and
+    never raise.
+
+    Returns:
+        list[str]: Distinct non-empty ``rayjob_id`` values, resolved-path first.
+    """
+    from ..state_paths import legacy_state_file, resolve_state_file
+
+    paths: list[Path] = []
+    try:
+        paths.append(resolve_state_file())
+    except Exception:  # noqa: BLE001 - resolution may raise when unpinned
+        pass
+    sess = os.environ.get(ENV_CURRENT_SESSION_DIR, "").strip()
+    if sess:
+        paths.append(Path(sess) / "runtime" / "multi_node_state.json")
+    paths.append(legacy_state_file())
+
+    ids: list[str] = []
+    seen_paths: set[str] = set()
+    for p in paths:
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        try:
+            if not p.is_file():
+                continue
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        wid = str((data or {}).get("rayjob_id") or "").strip()
+        if wid and wid not in ids:
+            ids.append(wid)
+    return ids
 
 
 def _checkpoint_create_rayjob_state(
@@ -316,35 +368,44 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
     body: dict[str, Any] | None = None
 
     with safe_client.from_env() as safe:
-        # Idempotency guard: reuse a state ``rayjob_id`` that's still
-        # non-terminal in SaFE (--recreate forces a fresh workload).
+        # Idempotency guard: reuse any state ``rayjob_id`` that's still
+        # non-terminal in SaFE (--recreate forces a fresh workload). Scan ALL
+        # canonical state-file locations, not just this process's resolved path:
+        # a separately-launched create-rayjob (e.g. one that pinned
+        # MULTI_NODE_STATE_FILE=/tmp) and optimize's in-process provisioning
+        # (session-dir path) otherwise miss each other's rayjob_id and leak a
+        # duplicate workload.
         wid: str | None = None
-        existing = _mn_cli()._load_state()
-        prior_wid = (existing.get("rayjob_id") or "").strip()
-        if prior_wid and not getattr(args, "recreate", False):
+        prior_wids = [] if getattr(args, "recreate", False) else _prior_rayjob_ids_from_state_files()
+        for prior_wid in prior_wids:
             try:
                 prior_wl = safe.get_workload(prior_wid)
             except safe_client.SafeApiError as exc:
                 if exc.status == 404:
-                    info(f"prior rayjob_id={prior_wid} no longer exists in SaFE; will create a fresh workload")
-                else:
-                    raise
-            else:
-                prior_phase = str(prior_wl.get("phase") or "?")
-                if prior_phase in _TERMINAL_FAIL_PHASES:
-                    info(
-                        f"prior rayjob_id={prior_wid} is in terminal phase "
-                        f"{prior_phase!r}; will create a fresh workload"
-                    )
-                else:
-                    info(
-                        f"reusing existing rayjob_id={prior_wid} from state file "
-                        f"(phase={prior_phase}); will resume polling instead of "
-                        f"creating a new workload"
-                    )
-                    wid = prior_wid
+                    info(f"prior rayjob_id={prior_wid} no longer exists in SaFE; skipping")
+                    continue
+                raise
+            prior_phase = str(prior_wl.get("phase") or "?")
+            if prior_phase in _TERMINAL_FAIL_PHASES:
+                info(
+                    f"prior rayjob_id={prior_wid} is in terminal phase "
+                    f"{prior_phase!r}; skipping"
+                )
+                continue
+            info(
+                f"reusing existing rayjob_id={prior_wid} from state file "
+                f"(phase={prior_phase}); will resume polling instead of "
+                f"creating a new workload"
+            )
+            wid = prior_wid
+            break
 
         if wid is None:
+            if prior_wids:
+                info(
+                    "no reusable non-terminal workload among prior rayjob_ids "
+                    f"{prior_wids}; creating a fresh workload"
+                )
             pending_dashboard_token = secrets.token_urlsafe(32)
             env = dict(extra_env)
             env["RAY_DASHBOARD_TOKEN"] = pending_dashboard_token
