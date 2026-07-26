@@ -68,28 +68,29 @@ def _prior_rayjob_ids_from_state_files() -> list[str]:
     Returns:
         list[str]: Distinct non-empty ``rayjob_id`` values, resolved-path first.
     """
-    from ..state_paths import legacy_state_file, resolve_state_file
+    ids: list[str] = []
 
-    paths: list[Path] = []
+    # Primary source: the CLI's canonical state loader. It honors the same
+    # MULTI_NODE_STATE_FILE / session-dir resolution the rest of the CLI uses
+    # (and is the seam unit tests patch), so keep it authoritative and first.
     try:
-        paths.append(resolve_state_file())
-    except Exception:  # noqa: BLE001 - resolution may raise when unpinned
-        pass
+        primary = str((_mn_cli()._load_state() or {}).get("rayjob_id") or "").strip()
+    except Exception:  # noqa: BLE001 - never let state read block creation
+        primary = ""
+    if primary:
+        ids.append(primary)
+
+    # Additional canonical locations a *differently-configured* invocation may
+    # have written (state-path divergence): the session-dir file and the legacy
+    # /tmp file. De-dup by rayjob_id, so overlap with the primary path is fine.
+    from ..state_paths import legacy_state_file
+
+    extra_paths: list[Path] = []
     sess = os.environ.get(ENV_CURRENT_SESSION_DIR, "").strip()
     if sess:
-        paths.append(Path(sess) / "runtime" / "multi_node_state.json")
-    paths.append(legacy_state_file())
-
-    ids: list[str] = []
-    seen_paths: set[str] = set()
-    for p in paths:
-        try:
-            key = str(p.resolve())
-        except OSError:
-            key = str(p)
-        if key in seen_paths:
-            continue
-        seen_paths.add(key)
+        extra_paths.append(Path(sess) / "runtime" / "multi_node_state.json")
+    extra_paths.append(legacy_state_file())
+    for p in extra_paths:
         try:
             if not p.is_file():
                 continue
