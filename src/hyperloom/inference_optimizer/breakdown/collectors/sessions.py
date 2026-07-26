@@ -1353,15 +1353,29 @@ def collect_enablement(
     build_manifest_raw = state.get("enablement_build_manifest")
     last_build_failure_raw = state.get("enablement_last_build_failure")
 
+    origin = str(state.get("enablement_origin") or "")
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
     have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
     have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
-    if not (have_active or have_attempts or have_actions or have_build_manifest or have_last_failure):
+    have_eval = origin == "eval"
+    if not (have_active or have_attempts or have_actions or have_build_manifest or have_last_failure or have_eval):
         return {}
 
     out: dict[str, Any] = {}
+    if have_eval:
+        out["origin"] = origin
+        out["trigger_kind"] = str(state.get("enablement_baseline_eval_kind") or "")
+        out["observed_accuracy"] = float(state.get("enablement_observed_accuracy") or 0.0)
+        out["accuracy_floor"] = float(state.get("enablement_accuracy_floor") or 0.0)
+        out["observed_task"] = str(state.get("enablement_observed_task") or "")
+        out["observed_metric"] = str(state.get("enablement_observed_metric") or "")
+        out["eval_contract_fingerprint"] = str(state.get("enablement_eval_contract_fingerprint") or "")
+        out["validation_pending"] = bool(state.get("enablement_validation_pending"))
+        probe_cfg = str(state.get("enablement_probe_config_path") or "")
+        if probe_cfg:
+            out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
     if have_actions:
         summaries: list[dict[str, Any]] = []
         for a in stack_actions_raw:

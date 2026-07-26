@@ -67,11 +67,13 @@ Default behavior summary:
 - `patch_landing` proposal without comparable benchmark + accuracy
   gate → `needs_review` (or `reject` if the packet itself shows a
   regression).
-- `enablement_landing` proposal (pre-boot enablement / framework-agent
+- `enablement_landing` proposal (enablement / framework-agent
   `integrate_patch`) → **approve** on the structural bar; do NOT block on
-  a missing before/after benchmark, accuracy gate, or restated rollback
-  plan (the model cannot boot yet and rollback is automatic). The
-  downstream runnable-decision gate REVERTs any patch that fails to boot.
+  a missing throughput before/after or a restated rollback plan (rollback is
+  automatic). Boot-origin has no baseline yet; eval-origin booted but missed the
+  accuracy floor. Either way the downstream runnable-decision gate REVERTs any
+  patch that fails to boot, and for eval-origin additionally re-runs the accuracy
+  eval and REVERTs a patch that still misses the floor.
 - `framework_op` proposal → approve by default; only block when
   structurally malformed.
 

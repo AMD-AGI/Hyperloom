@@ -200,6 +200,20 @@ do not publish it unchanged in support bundles.
 
 ---
 
+## Enablement accuracy trigger
+
+When a first baseline boots and measures throughput but its accuracy eval fails
+(crashes, produces no result, or scores below the floor), enablement can repair
+the model instead of halting the run. Single-node only; multi-node keeps the
+existing behavior.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL` | `1` (on) | Route a baseline accuracy-eval failure into enablement instead of halting. Set `0`/`false`/`no`/`off` to keep the legacy salvage/stop behavior. Reader: `_accuracy_gate.enablement_on_eval_fail_enabled`. |
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR` | `0.0` | Shared accuracy floor used by BOTH the baseline eval-failure trigger and the enablement KEEP gate. Accepts a finite value in `[0, 1]`; out-of-range values are ignored with a warning. Reader: `_accuracy_gate.enablement_accuracy_floor`. |
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.

@@ -1498,20 +1498,23 @@ class FrameworkPhase(PhaseHandler):
         return tuple(refs)
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
-        """Dispatch an enablement_specialist when baseline cannot launch.
+        """Dispatch an enablement_specialist when a baseline cannot launch or its
+        accuracy eval fails.
 
-        Retries until the combo runs or the run wall-clock deadline passes (no
-        attempt-count cap). Guards:
+        Retries until the combo runs correctly or the run wall-clock deadline
+        passes (no attempt-count cap). Guards:
 
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
+        * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
+          genuine-baseline revalidation; authoring is paused until it resolves.
         * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
           on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
           with the next bridging candidate (``enablement_attempts`` rotates it).
         * run deadline passed — stop dispatching new work near the close.
 
-        When the captured log classifies to ``UNKNOWN``, no authoring is
-        dispatched; a one-shot ``needs_human_review`` record is emitted (deduped
-        per distinct log). No-op on multi-node.
+        A non-blank log is always dispatched (the specialist repairs from the raw
+        log even when it classifies to ``UNKNOWN``); only a blank log is a no-op,
+        recorded once as ``needs_human_review``. No-op on multi-node.
 
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).

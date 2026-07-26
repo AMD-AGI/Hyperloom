@@ -67,12 +67,13 @@ The package serves two distinct objectives, gated differently:
   only if throughput improves. Patch authoring for perf is owned by the
   Hyperloom `specialist → integrate_patch` path; this package does the
   discovery + static audit + git-apply/bench execution.
-- **Enablement** (opt-in) — make a currently **non-runnable**
-  `(model, backend)` combo *run at all*. This path DOES author bridging
+- **Enablement** (opt-in) — make a `(model, backend)` combo that is
+  **non-runnable**, or that boots but **fails its accuracy eval**, *run
+  correctly*. This path DOES author bridging
   patches (via the `enablement_specialist` domain / `SpecialistRunner`
   worktree authoring) and is gated on **runnability** (server boots + minimal
-  correctness), not throughput. Pure, GPU-free building blocks live in this
-  package:
+  correctness) or, for eval-origin, the accuracy floor; not throughput. Pure,
+  GPU-free building blocks live in this package:
   - `hyperloom.agents.framework.enablement` — failure-signature classifier
     (`classify_failure`) + `EnablementRequest` + the `runnable_decision` gate.
   - `hyperloom.agents.framework.enablement_ops` — discovery + authoring:
