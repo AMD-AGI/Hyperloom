@@ -230,8 +230,10 @@ def _enqueue_self(**state_kw):
         enablement_origin=state_kw.get("enablement_origin", ""),
         enablement_validation_pending=state_kw.get("enablement_validation_pending", False),
         enablement_probe_config_path=state_kw.get("enablement_probe_config_path", ""),
+        enablement_accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
         enablement_accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
         enablement_eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
+        enablement_active_runtime=state_kw.get("enablement_active_runtime", {}),
         tick=state_kw.get("tick", 0),
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
@@ -451,6 +453,43 @@ async def test_revalidation_enqueues_genuine_baseline():
     assert created["params"]["config_path"] == "/runs/baseline/materialized.yaml"
     assert created["params"]["disable_run_eval"] is False
     assert created["params"]["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_prefers_accepted_config_over_probe():
+    """accepted_config_path (from KEEP'd bench) takes precedence over probe config."""
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_probe_config_path="/runs/baseline/probe.yaml",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_accuracy_floor=0.3,
+    )
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert tid
+    created = fake.tasks.created[-1]
+    assert created["params"]["config_path"] == "/runs/specialist/accepted.yaml"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_carries_active_runtime():
+    """When an active runtime is recorded, its override is included in params."""
+    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+
+    rt = FrameworkRuntime(bin_path="/attempt/bin", python_path="/attempt/bin/python", venv_root="/attempt/venv")
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_probe_config_path="/runs/baseline/probe.yaml",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_active_runtime=rt.to_state(),
+    )
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert tid
+    created = fake.tasks.created[-1]
+    rt_override = created["params"].get("runtime_override")
+    assert isinstance(rt_override, dict) and rt_override
+    assert rt_override.get("framework_bin") == "/attempt/bin"
 
 
 @pytest.mark.asyncio

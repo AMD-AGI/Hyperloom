@@ -1595,6 +1595,23 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        # Apply runtime_override from params into the materialized YAML so the
+        # revalidation baseline boots under the same framework runtime as the
+        # KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
+        _rt_from_params = params.get("runtime_override")
+        if isinstance(_rt_from_params, dict) and _rt_from_params:
+            try:
+                import yaml as _yaml
+
+                from ._grid_runner import apply_runtime_override
+
+                _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                _cfg_bench = _cfg_data.setdefault("benchmark", {})
+                _cfg_envs = _cfg_bench.setdefault("envs", {})
+                apply_runtime_override(_cfg_envs, _rt_from_params)
+                config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
+            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+                log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Whether THIS run actually executes lm-eval, read back from the
         # materialized config the subprocess consumes -- the single source of
         # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base

@@ -2354,6 +2354,9 @@ class IntegratePatchExecutor:
             "setup_commands_applied": list(setup_result.get("applied") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            # The actual materialized config from the KEEP'd bench, used for
+            # revalidation baseline so the same effective config is re-run.
+            "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
             **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later
@@ -3043,6 +3046,8 @@ class IntegratePatchExecutor:
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
+                # Materialized config used for this bench; needed by revalidation.
+                "materialized_config": str(config_path),
             }
 
         accuracy_pass: bool | None = None
