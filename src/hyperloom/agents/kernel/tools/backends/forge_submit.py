@@ -2016,6 +2016,7 @@ def _run_loop_via_cli(
     deadline_unix: float = 0.0,
     e2e_pct: float | None = None,
     operator_name: str = "",
+    experience_id: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2090,6 +2091,8 @@ def _run_loop_via_cli(
         str(experiments_dir),
         "--experiment-id",
         _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        experience_id or experiments_dir.parent.name,
         "--deadline-unix",
         str(deadline_unix),
         "--result-json",
@@ -2519,6 +2522,7 @@ def submit(
             ),
             e2e_pct=e2e_pct,
             operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
+            experience_id=output_dir.name,
         )
         recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,

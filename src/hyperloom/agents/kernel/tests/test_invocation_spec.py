@@ -341,12 +341,14 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
         forge_log=tmp_path / "forge.log",
         timeout_s=60,
         deadline_unix=9_999_999_999.0,
+        experience_id="forge-attempt-1",
     )
 
     cmd = captured["cmd"]
     option_index = cmd.index("--invocation-spec-file")
     assert cmd[option_index + 1] == str(spec_path.resolve())
     assert cmd[cmd.index("--experiment-id") + 1] == "hyperloom"
+    assert cmd[cmd.index("--experience-id") + 1] == "forge-attempt-1"
     assert cmd[cmd.index("--deadline-unix") + 1] == "9999999999.0"
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
