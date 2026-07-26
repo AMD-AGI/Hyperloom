@@ -234,6 +234,8 @@ def _enqueue_self(**state_kw):
         enablement_accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
         enablement_eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
         enablement_active_runtime=state_kw.get("enablement_active_runtime", {}),
+        enablement_revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
+        enablement_revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
         tick=state_kw.get("tick", 0),
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
@@ -425,12 +427,16 @@ async def test_rearm_kept_is_terminal(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(enablement_dispatched=True, enablement_origin="eval")
+    fake = _enqueue_self(enablement_dispatched=True, enablement_origin="eval", enablement_revalidation_generation=1)
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
     assert fake.shared_state.enablement_validation_pending is True
     assert fake.shared_state.enablement_succeeded is False
     assert fake.shared_state.enablement_dispatched is False
+    # Generation is incremented to get a fresh idempotency key.
+    assert fake.shared_state.enablement_revalidation_generation == 2
+    # Tracked task_id is cleared for the new window.
+    assert fake.shared_state.enablement_revalidation_task_id == ""
     # The specialist pump is blocked while validation is pending.
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -493,17 +499,35 @@ async def test_revalidation_carries_active_runtime():
 
 
 @pytest.mark.asyncio
-async def test_revalidation_skips_when_tput_positive():
-    fake = _enqueue_self(enablement_validation_pending=True, enablement_origin="eval", baseline_tput=123.0)
-    assert await fake._maybe_enqueue_enablement_baseline_revalidation() == ""
+async def test_revalidation_skips_when_already_tracked():
+    """If a tracked revalidation task is already alive, no new task is created."""
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_revalidation_task_id="existing-spec-1",
+    )
+    # Put the tracked task in the running list so it appears alive.
+    import types as _types
+
+    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="existing-spec-1")])
+    result = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert result == "existing-spec-1"
     assert fake.tasks.created == []
 
 
 @pytest.mark.asyncio
-async def test_revalidation_skips_when_baseline_in_flight():
-    fake = _enqueue_self(enablement_validation_pending=True, enablement_origin="eval")
-    fake.tasks = _FakeTasks(running=[types.SimpleNamespace(kind="baseline")])
-    assert await fake._maybe_enqueue_enablement_baseline_revalidation() == ""
+async def test_revalidation_skips_when_tracked_task_in_flight():
+    """Skip enqueue when the tracked revalidation task is still running."""
+    import types as _types
+
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_revalidation_task_id="reval-in-flight",
+    )
+    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="reval-in-flight")])
+    result = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert result == "reval-in-flight"
     assert fake.tasks.created == []
 
 
