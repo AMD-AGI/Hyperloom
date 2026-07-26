@@ -572,6 +572,10 @@ async def _run_enablement_integrate(
     enablement_accuracy=None,
     bench_error: str = "",
     before_signature=None,
+    enablement_origin: str = "",
+    accuracy_floor=None,
+    expected_fingerprint: str = "",
+    candidate_fingerprint: str = "",
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -589,6 +593,9 @@ async def _run_enablement_integrate(
         return bench_result, {
             "accuracy_pass": None,
             "enablement_accuracy": enablement_accuracy,
+            "enablement_accuracy_task": "gsm8k",
+            "enablement_accuracy_metric": "exact_match",
+            "enablement_eval_contract_fingerprint": candidate_fingerprint,
             "timed_out": False,
         }
 
@@ -606,6 +613,12 @@ async def _run_enablement_integrate(
     }
     if before_signature is not None:
         params["enablement_before_signature"] = before_signature
+    if enablement_origin:
+        params["enablement_origin"] = enablement_origin
+    if accuracy_floor is not None:
+        params["enablement_accuracy_floor"] = accuracy_floor
+    if expected_fingerprint:
+        params["enablement_eval_contract_fingerprint"] = expected_fingerprint
     ctx = _make_ctx("t-int-en", params)
     return await executor(ctx), repo
 
@@ -652,6 +665,68 @@ async def test_enablement_reverts_when_accuracy_zero(tmp_path: Path, monkeypatch
     assert result["correctness_verified"] is False
     assert result["patches_applied"] == []
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_when_accuracy_missing(tmp_path: Path, monkeypatch):
+    """eval-origin: booted but no accuracy -> fail closed (REVERT), not provisional KEEP."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=None, enablement_origin="eval"
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["correctness_verified"] is False
+    assert result["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_below_configured_floor(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.2, enablement_origin="eval", accuracy_floor=0.5
+    )
+    assert result["status"] == "reverted"
+    assert result["enablement_eval_failure_kind"] == "accuracy_below_floor"
+    assert result["enablement_observed_accuracy"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_keeps_at_or_above_floor(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.5, enablement_origin="eval", accuracy_floor=0.5
+    )
+    assert result["status"] == "kept"
+    assert result["correctness_verified"] is True
+    assert result["provisional"] is False
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_on_fingerprint_drift(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.9,
+        enablement_origin="eval",
+        expected_fingerprint="fp_baseline",
+        candidate_fingerprint="fp_changed",
+    )
+    assert result["status"] == "reverted"
+    assert result["enablement_eval_contract_drift"] is True
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_keeps_when_fingerprint_matches(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.9,
+        enablement_origin="eval",
+        expected_fingerprint="fp_same",
+        candidate_fingerprint="fp_same",
+    )
+    assert result["status"] == "kept"
+    assert result["enablement_eval_contract_drift"] is False
 
 
 @pytest.mark.asyncio
