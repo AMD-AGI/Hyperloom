@@ -945,6 +945,41 @@ async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(
 
 
 @pytest.mark.asyncio
+async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.3
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
+            task=_mk_task("baseline", "t-reval-ok"),
+        )
+        assert c.shared_state.baseline_tput == 1000.0
+        assert c.shared_state.enablement_succeeded is True
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_origin == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_validation_pending = True
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
