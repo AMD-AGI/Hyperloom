@@ -2130,9 +2130,15 @@ class EnablementBreakdown(TypedDict, total=False):
         observed_task: Eval task name observed at the trigger.
         observed_metric: Eval metric observed at the trigger.
         probe_config_path: Materialized config re-run to reproduce the contract.
+        accepted_config_path: Effective config from the KEEP'd candidate bench
+            used as the revalidation baseline config.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
         validation_pending: True while an eval-origin KEEP awaits baseline
             revalidation.
+        succeeded: True once the revalidation baseline promoted with accuracy
+            at or above the floor.
+        revalidation_task_id: TaskRegistry id of the tracked revalidation task,
+            or "" when no revalidation is in progress.
     """
 
     stack_actions: list[EnablementStackActionSummary]
@@ -2149,8 +2155,11 @@ class EnablementBreakdown(TypedDict, total=False):
     observed_task: str
     observed_metric: str
     probe_config_path: str
+    accepted_config_path: str
     eval_contract_fingerprint: str
     validation_pending: bool
+    succeeded: bool
+    revalidation_task_id: str
 
 
 # ---------------------------------------------------------------------------

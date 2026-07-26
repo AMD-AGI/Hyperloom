@@ -1354,28 +1354,39 @@ def collect_enablement(
     last_build_failure_raw = state.get("enablement_last_build_failure")
 
     origin = str(state.get("enablement_origin") or "")
+    # eval_kind is NOT cleared on success, so it can identify an eval-origin
+    # enablement even after the run succeeds and origin is reset to "".
+    eval_kind = str(state.get("enablement_baseline_eval_kind") or "")
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
     have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
     have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
-    have_eval = origin == "eval"
+    # Detect eval-origin by active origin OR persisted kind from a completed run.
+    have_eval = origin == "eval" or bool(eval_kind)
     if not (have_active or have_attempts or have_actions or have_build_manifest or have_last_failure or have_eval):
         return {}
 
     out: dict[str, Any] = {}
     if have_eval:
-        out["origin"] = origin
-        out["trigger_kind"] = str(state.get("enablement_baseline_eval_kind") or "")
+        out["origin"] = origin if origin else "eval"
+        out["trigger_kind"] = eval_kind
         out["observed_accuracy"] = float(state.get("enablement_observed_accuracy") or 0.0)
         out["accuracy_floor"] = float(state.get("enablement_accuracy_floor") or 0.0)
         out["observed_task"] = str(state.get("enablement_observed_task") or "")
         out["observed_metric"] = str(state.get("enablement_observed_metric") or "")
         out["eval_contract_fingerprint"] = str(state.get("enablement_eval_contract_fingerprint") or "")
         out["validation_pending"] = bool(state.get("enablement_validation_pending"))
+        out["succeeded"] = bool(state.get("enablement_succeeded"))
         probe_cfg = str(state.get("enablement_probe_config_path") or "")
         if probe_cfg:
             out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
+        accepted_cfg = str(state.get("enablement_accepted_config_path") or "")
+        if accepted_cfg:
+            out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
+        reval_tid = str(state.get("enablement_revalidation_task_id") or "")
+        if reval_tid:
+            out["revalidation_task_id"] = reval_tid
     if have_actions:
         summaries: list[dict[str, Any]] = []
         for a in stack_actions_raw:
