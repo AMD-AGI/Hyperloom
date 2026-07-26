@@ -237,6 +237,52 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
 
 
+def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
+    """flag on + single-node: an eval crash is stamped as an eval-failure
+    contract with no RUN_EVAL=false salvage retry."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    calls: list[dict] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        calls.append({"run_eval": run_eval})
+        return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/path/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        }
+    )
+    ctx.task.kind = "baseline"
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    # No RUN_EVAL=false salvage retry: eval stays on.
+    assert all(c["run_eval"] != "false" for c in calls)
+    assert result["status"] == "failed"
+    assert result["baseline_eval_failed"] is True
+    assert result["baseline_eval_failure_kind"] == "eval_runtime_failure"
+    assert result["eval_origin"] == "eval"
+    assert result["materialized_config"]
+    assert result["baseline_eval_contract_fingerprint"]
+
+
 def test_non_eval_failure_does_not_retry(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
