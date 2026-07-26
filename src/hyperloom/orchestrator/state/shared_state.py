@@ -420,6 +420,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_observed_task: str = ""
     enablement_observed_metric: str = ""
     enablement_pending: bool = False
+    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
+    # must revalidate accuracy before the run is considered enabled.
+    enablement_validation_pending: bool = False
     # Enablement path (framework-agent) state.
     # ``enablement_launch_log``: captured launch/traceback text when baseline
     #   cannot launch.
@@ -1497,7 +1500,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             phase in ("PRELUDE", "FRAMEWORK_AGENT")
             and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
             and not bool(getattr(self, "enablement_succeeded", False))
-        )
+        ) or bool(getattr(self, "enablement_validation_pending", False))
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(

@@ -1519,6 +1519,10 @@ class FrameworkPhase(PhaseHandler):
         state = self.shared_state
         if bool(getattr(state, "enablement_succeeded", False)):
             return ""
+        if bool(getattr(state, "enablement_validation_pending", False)):
+            # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation;
+            # do not dispatch another authoring round until that resolves.
+            return ""
         if bool(getattr(state, "enablement_dispatched", False)):
             # Watchdog: an enablement round is marked in-flight. If it has
             # silently finished without ever calling _maybe_rearm_enablement
@@ -1819,11 +1823,20 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement_localization_manifest = existing
 
         if status == "kept":
-            state.enablement_succeeded = True
-            state.enablement_stall_streak = 0
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
+            if str(getattr(state, "enablement_origin", "") or "") == "eval":
+                # eval-origin: the patch boots and re-passed accuracy in the gate,
+                # but tput/accuracy only become official once a GENUINE baseline
+                # promotes. Hold succeeded; open the revalidation window. Keep the
+                # stall streak so repeated KEEP->revalidation-fail cycles still
+                # reach the stall cap.
+                state.enablement_validation_pending = True
+                state.enablement_dispatched = False
+            else:
+                state.enablement_succeeded = True
+                state.enablement_stall_streak = 0
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
@@ -4533,6 +4546,42 @@ class FrameworkPhase(PhaseHandler):
             existing,
         )
 
+    async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
+        """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
+
+        Reproduces the original workload/eval contract (probe config, RUN_EVAL on)
+        so the accuracy is measured for real; the KEEP is finalized in
+        ``_promote_baseline`` only when that baseline promotes with accuracy at or
+        above the floor. Idempotent and one-at-a-time.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "enablement_validation_pending", False)):
+            return ""
+        if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
+            return ""
+        try:
+            for t in (*await self.tasks.queued(), *await self.tasks.running()):
+                if getattr(t, "kind", "") == "baseline":
+                    return ""
+        except Exception:  # noqa: BLE001 — defensive
+            return ""
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": "enablement_eval_revalidation",
+            "disable_run_eval": False,
+            **_enablement_carrier_params(state),
+        }
+        cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
+        if cfg:
+            params["config_path"] = cfg
+        attempt = int(getattr(state, "enablement_attempts", 0) or 0)
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="baseline",
+            params=params,
+            idempotency_key=f"enablement_revalidation:{attempt}",
+        )
+        return str(getattr(task, "task_id", "") or "")
+
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
 
@@ -4558,6 +4607,10 @@ class FrameworkPhase(PhaseHandler):
             await self._maybe_route_build_outcomes()
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.exception("ENABLEMENT route_build_outcomes (%s) failed", caller)
+        try:
+            await self._maybe_enqueue_enablement_baseline_revalidation()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT revalidation (%s) failed", caller)
         try:
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick

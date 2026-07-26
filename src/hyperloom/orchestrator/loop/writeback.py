@@ -49,12 +49,14 @@ from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_FAILED_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+    accuracy_meets_floor,
 )
 
 from .coordinator import (
     _AUDIT_ACTIONS,
     _BASELINE_MAX_TOTAL_FAILURES,
     _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
+    _ENABLEMENT_MAX_STALL,
     _SEVERITY_CRASH,
     _SEVERITY_REGRESS,
     PendingProposal,
@@ -441,8 +443,16 @@ class WritebackCollaborator:
         FRAMEWORK pump dispatches even when the failure carries no boot log.
         """
         state = self.shared_state
+        was_validation_pending = bool(getattr(state, "enablement_validation_pending", False))
         state.enablement_origin = "eval"
         state.enablement_pending = True
+        # A failed revalidation reopens the authoring loop and counts as a
+        # no-progress round so the enablement_stalled cap can still terminate.
+        if was_validation_pending:
+            state.enablement_validation_pending = False
+            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
             state.enablement_accuracy_floor = float(floor)
@@ -2262,7 +2272,15 @@ class WritebackCollaborator:
                 self.shared_state.baseline_tput = float(tput)
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
-            # A genuine anchor clears any lingering eval-failure trigger state.
+            # A genuine anchor revalidates an eval-origin enablement: reaching here
+            # means the result was promotable (not baseline_eval_failed), i.e. the
+            # accuracy met the floor, so finalize the enablement success.
+            if bool(getattr(self.shared_state, "enablement_validation_pending", False)):
+                acc = result.get("accuracy")
+                floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
+                if accuracy_meets_floor(acc, floor):
+                    self.shared_state.enablement_succeeded = True
+                self.shared_state.enablement_validation_pending = False
             self.shared_state.enablement_origin = ""
             self.shared_state.enablement_pending = False
             changed = True
