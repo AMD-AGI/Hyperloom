@@ -11,7 +11,12 @@ such a run salvageable rather than wasted:
     checkpoint) -- and what happens when they disagree,
   * the rule that a timed-out run with NO validated recovery discards its
     measurements and fails, while one WITH a validated recovery returns a
-    salvaged, exportable best commit.
+    salvaged, exportable best commit,
+  * the precondition that makes any of that trustworthy -- a campaign starts
+    fresh or not at all -- and the workspace hygiene around it: a stale campaign
+    worktree is replaced rather than reused, and an in-place campaign (which
+    runs *in* the developer's checkout) keeps every campaign-owned path under
+    the output dir and hands the checkout back as it found it.
 """
 
 from __future__ import annotations
@@ -962,6 +967,372 @@ def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
     # The live (non-git) source tree is never converted into a repo.
     assert not (source_root / ".git").exists()
     assert source.read_text() == "pass\n"
+
+
+def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypatch):
+    """An in-place campaign must leave the developer's checkout as it found it.
+
+    In-place mode hands forge the *live* repo as its workspace, so every
+    campaign-owned path -- ``--experiments-dir``, the generated driver, the CLI
+    sidecar -- is addressed at the output dir up front rather than written into
+    the checkout and relocated afterwards. Pin both halves: what the loop is
+    handed points outside the repo, and after the run the repo's tracked state,
+    branch and temp-branch set are exactly what they were before forge started.
+    """
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "attempt-inplace"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        kernel.write_text("VERIFIED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "verified best")
+        best_commit = _git(workspace, "rev-parse", "HEAD")
+        experiments = workspace / "forge_experiments"
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(best_commit))
+        )
+        kernel.write_text("UNVERIFIED_MID_ITERATION\n")
+        captured.update(
+            workspace=workspace,
+            kernel=kernel,
+            driver=Path(kwargs["driver"]),
+            experiments_dir=Path(kwargs["experiments_dir"]),
+            branch=_git(workspace, "branch", "--show-current"),
+            best_commit=best_commit,
+        )
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_needs_inplace", lambda _repo: True)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    result = forge_submit.submit(
+        source_file=str(source),
+        prompt_file=prompt,
+        output_dir=output_dir,
+        test_command="python -c 'print(\"allclose: True\")'",
+        source_type="triton",
+        candidate={"platform": "mi355x"},
+        timeout_s=10,
+        kernel_repo=str(repo),
+    )
+
+    # The run really was in-place: forge edited the live checkout, not a copy.
+    assert captured["workspace"] == repo
+    assert captured["kernel"] == source
+    assert captured["branch"].startswith("forge/")
+
+    assert result["returncode"] == 0
+    assert result["salvaged"] is True
+    assert result["best_commit"] == captured["best_commit"]
+    # Every campaign-owned path the loop was handed lives under the output dir.
+    assert captured["experiments_dir"] == output_dir / "forge_experiments"
+    assert captured["driver"].parent == output_dir
+    assert result["checkpoint_path"] == str(
+        output_dir / "forge_experiments" / "hyperloom.json"
+    )
+    assert (output_dir / "forge_experiments").is_dir()
+    assert (
+        output_dir / "optimized_versions" / "v1_forge.py"
+    ).read_text() == "VERIFIED_BEST\n"
+
+    # ... and the live checkout is handed back untouched: original branch, no
+    # forge temp branch, pre-forge bytes, nothing tracked left dirty.
+    assert _git(repo, "branch", "--show-current") == "main"
+    assert _git(repo, "branch", "--list", captured["branch"]) == ""
+    assert source.read_text() == "BASELINE\n"
+    assert (repo / "forge_driver.py").read_text() == "TRACKED_DRIVER\n"
+    assert _git(repo, "status", "--short", "--untracked-files=no") == ""
+    # No generated driver or CLI sidecar was ever written into the checkout.
+    assert not (repo / "forge_driver_adapter.py").exists()
+    assert not (repo / "forge_task_driver.py").exists()
+    assert not (repo / "forge_cli_result.json").exists()
+
+
+def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """In-place cleanup touches the live repo, so its failure must be loud.
+
+    Restore is still attempted, the failure is reported rather than swallowed,
+    and the salvaged forge result survives it.
+    """
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "attempt-inplace-cleanup-failure"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+    restore_attempts = []
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        kernel.write_text("VERIFIED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "verified best")
+        best_commit = _git(workspace, "rev-parse", "HEAD")
+        experiments = workspace / "forge_experiments"
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(best_commit))
+        )
+        captured["best_commit"] = best_commit
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
+        )
+
+    def failing_restore(restore_info):
+        restore_attempts.append(restore_info)
+        raise OSError("in-place restore failed")
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_needs_inplace", lambda _repo: True)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+    monkeypatch.setattr(forge_submit, "_restore_inplace", failing_restore)
+
+    with caplog.at_level(logging.ERROR, logger=forge_submit.log.name):
+        result = forge_submit.submit(
+            source_file=str(source),
+            prompt_file=prompt,
+            output_dir=output_dir,
+            test_command="python -c 'print(\"allclose: True\")'",
+            source_type="triton",
+            candidate={"platform": "mi355x"},
+            timeout_s=10,
+            kernel_repo=str(repo),
+        )
+
+    # Restore was attempted with this run's snapshot (not skipped) ...
+    assert len(restore_attempts) == 1
+    assert restore_attempts[0]["repo"] == str(repo)
+    assert restore_attempts[0]["orig_branch"] == "main"
+    # ... its failure was surfaced ...
+    assert "forge workspace finalization failed" in caplog.text
+    # ... and it did not eat the salvaged result.
+    assert result["returncode"] == 0
+    assert result["salvaged"] is True
+    assert result["best_commit"] == captured["best_commit"]
+    assert (
+        output_dir / "optimized_versions" / "v1_forge.py"
+    ).read_text() == "VERIFIED_BEST\n"
+
+
+def test_stale_campaign_worktree_is_replaced_by_a_fresh_one(tmp_path):
+    """A leftover directory at the campaign worktree path never blocks a rerun.
+
+    ``output_dir/worktree`` is the fixed campaign workspace path, so a crashed
+    predecessor can leave anything there. Preparation force-cleans it and hands
+    back a worktree at the repo's current HEAD -- returning a workspace (rather
+    than None) is also what keeps submit off the no-git scratch fallback.
+    """
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "output"
+    stale = output_dir / "worktree"
+    stale.mkdir(parents=True)
+    (stale / "leftover.txt").write_text("from a crashed run\n")
+    branch = "forge/session/stale-collision"
+
+    prepared = forge_submit._prepare_worktree(
+        str(source),
+        str(repo),
+        output_dir,
+        branch,
+    )
+
+    assert prepared is not None
+    workspace, kernel, base_commit = prepared
+    assert Path(workspace) == stale
+    assert not (stale / "leftover.txt").exists()
+    # A real, usable worktree of the live repo at its current HEAD.
+    assert base_commit == _git(repo, "rev-parse", "HEAD")
+    assert _git(workspace, "rev-parse", "HEAD") == base_commit
+    assert _git(workspace, "branch", "--show-current") == branch
+    assert Path(kernel).read_text() == "BASELINE\n"
+    assert str(stale) in _git(repo, "worktree", "list")
+    # The live checkout stayed on its own branch throughout.
+    assert _git(repo, "branch", "--show-current") == "main"
+
+
+def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
+    tmp_path,
+    monkeypatch,
+):
+    """Every campaign starts fresh, or it does not start at all.
+
+    ``_run_loop_via_cli`` clears the two recovery artifacts up front so anything
+    found afterwards provably belongs to this run. If one cannot be cleared the
+    launch is refused -- silently proceeding would let a previous campaign's
+    checkpoint be salvaged as if this run had produced it.
+    """
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = experiments.parent / "forge_cli_result.json"
+    result_json.write_text(json.dumps({"baseline_ms": 9.0, "best_ms": 9.0}))
+    # Something at the checkpoint path that unlink() cannot remove.
+    unclearable = experiments / "hyperloom.json"
+    unclearable.mkdir()
+    (unclearable / "blocker.txt").write_text("stale\n")
+
+    def forbidden_popen(*_args, **_kwargs):
+        raise AssertionError("a campaign must not start on unclearable artifacts")
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", forbidden_popen)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        forge_submit._run_loop_via_cli(
+            worktree_kernel=str(kernel),
+            driver=str(driver),
+            workspace=str(workspace),
+            shapes={},
+            snr_threshold=30.0,
+            max_iters=8,
+            max_hours=1.0,
+            branch="forge/session/kernel",
+            gpu_target="gfx950",
+            fellow="triton-fellow",
+            program_md_file="",
+            invocation_spec_file="",
+            experiments_dir=experiments,
+            forge_log=tmp_path / "forge.log",
+            timeout_s=10,
+        )
+
+    assert "stale Forge recovery artifact" in str(excinfo.value)
+    assert str(unclearable) in str(excinfo.value)
+    # The refusal is an abort, not a partial start: nothing ran.
+    assert not (tmp_path / "forge.log").exists()
+    assert (unclearable / "blocker.txt").is_file()
+
+
+def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Two validated bests claiming the same iteration must not be blended.
+
+    Both channels can name a best for iteration N; when they name different
+    commits one of them is stale. The published manifest wins *entirely* --
+    commit AND measurements -- so the exported artifacts, the reported speedup
+    and the returned commit all describe one coherent result rather than a mix.
+    """
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "attempt-same-iteration"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        base_commit = _git(workspace, "rev-parse", "HEAD")
+        kernel.write_text("PUBLISHED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "published best")
+        published_commit = _git(workspace, "rev-parse", "HEAD")
+        kernel.write_text("CHECKPOINTED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "checkpointed best")
+        checkpointed_commit = _git(workspace, "rev-parse", "HEAD")
+        experiments = workspace / "forge_experiments"
+        experiments.mkdir(parents=True, exist_ok=True)
+        # Same iteration, different commit, different timings.
+        (experiments / "best_result.json").write_text(
+            json.dumps(
+                _published_manifest(
+                    published_commit,
+                    iteration=2,
+                    baseline_wall_ms=3.0,
+                    best_wall_ms=2.0,
+                )
+            )
+        )
+        kernel.write_text("UNVALIDATED_MID_ITERATION\n")
+        captured.update(
+            published_commit=published_commit,
+            checkpointed_commit=checkpointed_commit,
+        )
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=_checkpoint(
+                base_commit,
+                checkpointed_commit,
+                iteration=2,
+                baseline_ms=3.0,
+                best_ms=1.5,
+            ),
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    with caplog.at_level(logging.WARNING, logger=forge_submit.log.name):
+        result = forge_submit.submit(
+            source_file=str(source),
+            prompt_file=prompt,
+            output_dir=output_dir,
+            test_command="python -c 'print(\"allclose: True\")'",
+            source_type="triton",
+            candidate={"platform": "mi355x"},
+            timeout_s=10,
+            kernel_repo=str(repo),
+        )
+
+    # The warning only fires when BOTH channels validated, so reaching it proves
+    # the conflict was real and not a one-sided rejection.
+    assert "disagree" in caplog.text
+    assert captured["published_commit"][:12] in caplog.text
+    assert captured["checkpointed_commit"][:12] in caplog.text
+
+    assert result["returncode"] == 0
+    assert result["best_commit"] == captured["published_commit"]
+    assert result["best_commit"] != captured["checkpointed_commit"]
+    assert (
+        output_dir / "optimized_versions" / "v1_forge.py"
+    ).read_text() == "PUBLISHED_BEST\n"
+
+    # The manifest's own numbers are reported -- the checkpoint's faster
+    # best_ms=1.5 (a 2.0x claim) is not merged in behind the manifest's commit.
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[micro_speedup] 1.5000x" in report
+    assert "baseline_ms=3.0000 best_ms=2.0000" in report
+    assert "2.0000x" not in report
+    assert "best_ms=1.5000" not in report
 
 
 def test_trace_reads_llm_usage_from_the_cli_sidecar(tmp_path):
