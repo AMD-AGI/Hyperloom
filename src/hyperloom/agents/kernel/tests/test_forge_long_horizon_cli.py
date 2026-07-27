@@ -430,6 +430,23 @@ def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkey
     assert killed == [(descendants, signal.SIGKILL)]
 
 
+def _grandchild_running(pid: int) -> bool:
+    """True only while ``pid`` exists and is not a reaped zombie.
+
+    Reads ``/proc/<pid>/stat`` defensively: the file can vanish between an
+    existence check and the read once the kernel reaps the process, so a
+    missing file (FileNotFoundError / ProcessLookupError) means "not running"
+    -- the success condition here -- rather than a test error. Guarding the
+    read this way removes a TOCTOU race that made the assertion flaky under
+    load (it surfaced as ``FileNotFoundError: /proc/<pid>/stat`` on CI).
+    """
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return False
+    return state != "Z"
+
+
 def test_forced_termination_leaves_no_running_grandchild(tmp_path):
     child_pid_file = tmp_path / "child.pid"
     script = tmp_path / "spawn_child.py"
@@ -470,19 +487,16 @@ def test_forced_termination_leaves_no_running_grandchild(tmp_path):
         # patience is relaxed, so a real leak still fails here.
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            stat_path = Path(f"/proc/{child_pid}/stat")
-            if not stat_path.exists() or stat_path.read_text().split()[2] == "Z":
+            if not _grandchild_running(child_pid):
                 break
             time.sleep(0.05)
         else:
             pytest.fail(f"child process {child_pid} survived process-group timeout")
     finally:
-        if child_pid is not None:
+        if child_pid is not None and _grandchild_running(child_pid):
             try:
-                stat_path = Path(f"/proc/{child_pid}/stat")
-                if stat_path.exists() and stat_path.read_text().split()[2] != "Z":
-                    os.kill(child_pid, signal.SIGKILL)
-            except (OSError, IndexError):
+                os.kill(child_pid, signal.SIGKILL)
+            except OSError:
                 pass
         if proc.poll() is None:
             proc.kill()
