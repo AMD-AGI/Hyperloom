@@ -39,6 +39,9 @@ if _TOOLS_DIR_INSERTED:
 log = logging.getLogger(__name__)
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
+# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
+# runtime budget rather than running a non-productive campaign.
+_FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
@@ -2470,6 +2473,21 @@ def submit(
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
+        # forge-loop rejects --max-hours below its own MIN_MAX_HOURS (1.0) with a
+        # click BadParameter (exit 2) that reads like a forge crash and leaves no
+        # checkpoint to salvage. Floor the soft budget at that minimum so the
+        # campaign always starts; timeout_s still bounds the hard kill, and any
+        # KEEP committed before it is recoverable from the checkpoint.
+        if timeout_s < _FORGE_MIN_BUDGET_SEC:
+            log.warning(
+                "forge budget %.0f min is below the %d-min minimum forge-loop "
+                "accepts; running with --max-hours %.1f and hard-killing at "
+                "%.0f min (raise --budget-minutes to avoid a truncated run)",
+                timeout_s / 60.0,
+                _FORGE_MIN_BUDGET_SEC // 60,
+                _FORGE_MIN_BUDGET_SEC / 3600.0,
+                timeout_s / 60.0,
+            )
         loop_outcome = _run_loop_via_cli(
             worktree_kernel=worktree_kernel,
             driver=driver,
@@ -2477,7 +2495,7 @@ def submit(
             shapes=shapes,
             snr_threshold=snr_threshold,
             max_iters=max_iters,
-            max_hours=max(0.05, timeout_s / 3600.0),
+            max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
             branch=branch,
             gpu_target=gpu_target,
             fellow=fellow,
