@@ -95,7 +95,7 @@ def test_clean_no_dir_returns_zero_stats():
 
 def test_clean_unresolvable_dir_returns_empty_stats(monkeypatch):
     # Force resolution to fail so the resolved-is-None early return is hit.
-    monkeypatch.setattr(aj, "_resolve_lock_sweep_dir", lambda d: None)
+    monkeypatch.setattr(aj, "_resolve_lock_sweep_dirs", lambda d: [])
     stats = aj.clean_stale_aiter_locks(None)
     assert stats["dir"] is None
     assert stats["scanned"] == 0
@@ -173,6 +173,47 @@ def test_clean_walk_oserror(tmp_path, monkeypatch):
     assert stats["errors"] == 1
 
 
+def test_auto_resolution_sweeps_cpp_and_jit_build_trees(tmp_path, monkeypatch):
+    aiter_root = tmp_path / "cpp"
+    jit_root = tmp_path / "jit"
+    cpp_lock = aiter_root / "build" / "pa_ragged" / "lock"
+    jit_lock = jit_root / "build" / "lock_module"
+    cpp_lock.parent.mkdir(parents=True)
+    jit_lock.parent.mkdir(parents=True)
+    cpp_lock.write_text("", encoding="utf-8")
+    jit_lock.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AITER_ROOT_DIR", str(aiter_root))
+    monkeypatch.setenv("AITER_JIT_DIR", str(jit_root))
+    monkeypatch.setattr(aj, "AITER_CPP_BUILD_PROBE_PATHS", ())
+    monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", ())
+    monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _name: None)
+
+    stats = aj.clean_stale_aiter_locks(stale_minutes=0)
+
+    assert stats["deleted"] == 2
+    assert str(aiter_root / "build") in stats["dirs"]
+    assert str(jit_root / "build") in stats["dirs"]
+    assert not cpp_lock.exists()
+    assert not jit_lock.exists()
+
+
+def test_find_aiter_baton_wait_returns_bounded_evidence(tmp_path):
+    server_log = tmp_path / "warmup" / "server.log"
+    server_log.parent.mkdir()
+    server_log.write_text(
+        "model loaded\n"
+        "[aiter] waiting for baton release at "
+        "/root/.aiter/build/pa_ragged/lock\n",
+        encoding="utf-8",
+    )
+
+    evidence = aj.find_aiter_baton_wait(tmp_path)
+
+    assert evidence is not None
+    assert evidence["log_path"] == str(server_log)
+    assert "waiting for baton release" in evidence["excerpt"]
+
+
 # ---------------------------------------------------------------------------
 # _any_live_compiler
 # ---------------------------------------------------------------------------
@@ -231,6 +272,47 @@ def test_any_live_compiler_cmdline_match(monkeypatch):
     assert aj._any_live_compiler() is True
 
 
+def test_live_compiler_filter_ignores_unrelated_build(monkeypatch, tmp_path):
+    _install_fake_psutil(
+        monkeypatch,
+        [
+            _FakeProc(
+                {
+                    "name": "hipcc",
+                    "cmdline": ["hipcc", "-c", "/dev/null", "-o", "/dev/null"],
+                    "cwd": "/tmp/unrelated",
+                }
+            )
+        ],
+    )
+
+    assert aj._any_live_compiler([tmp_path / "aiter" / "build"]) is False
+
+
+def test_live_compiler_filter_matches_build_output(monkeypatch, tmp_path):
+    build_dir = tmp_path / "aiter" / "build"
+    _install_fake_psutil(
+        monkeypatch,
+        [
+            _FakeProc(
+                {
+                    "name": "hipcc",
+                    "cmdline": [
+                        "hipcc",
+                        "-c",
+                        "/src/attention.cu",
+                        "-o",
+                        str(build_dir / "pa_ragged" / "attention.o"),
+                    ],
+                    "cwd": "/src",
+                }
+            )
+        ],
+    )
+
+    assert aj._any_live_compiler([build_dir]) is True
+
+
 def test_any_live_compiler_none_alive(monkeypatch):
     _install_fake_psutil(
         monkeypatch,
@@ -278,23 +360,24 @@ def test_any_live_compiler_skips_dead_process(monkeypatch):
 
 
 def test_sweep_skips_when_compiler_alive(monkeypatch):
-    monkeypatch.setattr(aj, "_any_live_compiler", lambda: True)
+    monkeypatch.setattr(aj, "_any_live_compiler", lambda *_args: True)
     stats = aj.sweep_stale_aiter_locks_if_dead(Path("/whatever"))
     assert stats["skipped_live"] is True
     assert stats["compiler_alive"] is True
 
 
 def test_sweep_unknown_liveness_uses_mtime_gate(tmp_path, monkeypatch):
-    monkeypatch.setattr(aj, "_any_live_compiler", lambda: None)
+    monkeypatch.setattr(aj, "_any_live_compiler", lambda *_args: None)
     stats = aj.sweep_stale_aiter_locks_if_dead(tmp_path)
     assert stats["compiler_alive"] is None
 
 
-def test_sweep_dead_compiler_sweeps_with_zero_gate(tmp_path, monkeypatch):
+def test_sweep_dead_compiler_keeps_fresh_ownerless_lock(tmp_path, monkeypatch):
     lock = tmp_path / "lock"
-    lock.write_text("", encoding="utf-8")  # fresh, but dead compiler → deleted
-    monkeypatch.setattr(aj, "_any_live_compiler", lambda: False)
+    lock.write_text("", encoding="utf-8")
+    monkeypatch.setattr(aj, "_any_live_compiler", lambda *_args: False)
     stats = aj.sweep_stale_aiter_locks_if_dead(tmp_path)
     assert stats["compiler_alive"] is False
-    assert stats["deleted"] == 1
-    assert not lock.exists()
+    assert stats["deleted"] == 0
+    assert stats["skipped_fresh"] == 1
+    assert lock.exists()

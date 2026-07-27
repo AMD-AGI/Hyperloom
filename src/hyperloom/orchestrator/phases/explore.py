@@ -1565,7 +1565,24 @@ class ExplorePhase(PhaseHandler):
         if isinstance(patches, list) and patches:
             return
         config_levers = _framework_config_levers_from_done(done_payload)
-        if not config_levers:
+        is_enablement = bool(spec_params.get("enablement"))
+        build_request = done_payload.get("needs_targeted_build")
+        if (
+            is_enablement
+            and isinstance(build_request, dict)
+            and build_request
+            and not config_levers
+            and not done_payload.get("setup_commands")
+            and not done_payload.get("artifacts_written")
+        ):
+            return
+        # Normally route only when there are config levers to test. For an
+        # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
+        # integrate_patch owns the enablement stall accounting, so an enablement
+        # round must reach it to bump ``enablement_stall_streak`` / clear
+        # ``enablement_dispatched`` and eventually fire ``enablement_stalled``.
+        # Non-enablement config deliverables keep the strict "levers required" gate.
+        if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()
         if not sid:
@@ -1605,6 +1622,39 @@ class ExplorePhase(PhaseHandler):
             integrate_params["framework_agent_candidate_id"] = fa_cand
         if fa_batch:
             integrate_params["framework_batch_id"] = fa_batch
+        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
+        # config-lever-only enablement deliverable MUST still flow the enablement
+        # marker + setup_commands into integrate_patch, otherwise the result never
+        # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
+        # ``enablement_dispatched`` stays stuck ``True`` forever — the run then
+        # cannot reach ``enablement_stalled`` and spins until wall-clock. See
+        # framework.py::_maybe_rearm_enablement.
+        if bool(spec_params.get("enablement")):
+            integrate_params["enablement"] = True
+            probe = str(spec_params.get("launch_probe") or "").strip()
+            if probe:
+                integrate_params["launch_probe"] = probe
+            before_sig = spec_params.get("enablement_before_signature")
+            if isinstance(before_sig, dict):
+                integrate_params["enablement_before_signature"] = before_sig
+            base_patches = spec_params.get("enablement_base_patches")
+            if isinstance(base_patches, list) and base_patches:
+                integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+            # Merge the stacked base setup commands with any NEW setup_commands the
+            # specialist just proposed in this deliverable (e.g. a stack upgrade),
+            # so a config-lever-only enablement round actually replays the install
+            # step before booting instead of silently dropping it.
+            merged_setup: list[str] = []
+            for c in spec_params.get("enablement_setup_commands") or []:
+                sc = str(c)
+                if sc and sc not in merged_setup:
+                    merged_setup.append(sc)
+            for c in done_payload.get("setup_commands") or []:
+                sc = str(c)
+                if sc and sc not in merged_setup:
+                    merged_setup.append(sc)
+            if merged_setup:
+                integrate_params["enablement_setup_commands"] = merged_setup
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",

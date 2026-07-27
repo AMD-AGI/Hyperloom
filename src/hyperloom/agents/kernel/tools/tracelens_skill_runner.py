@@ -30,6 +30,14 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import safe_float  # noqa: E402
+from _task_group_contract import (  # noqa: E402
+    build_operator_identity,
+    build_task_group_shape_cases,
+    legacy_operator_identity_keys,
+    native_operation_key,
+    normalize_operation_key,
+    operator_identity_key,
+)
 
 sys.path.pop(0)
 
@@ -1877,21 +1885,12 @@ def _normalize_operation_key(operation: str) -> str:
         The canonicalized operation name, or the original string when
         stripping leaves nothing.
     """
-    s = str(operation).strip()
-    if "<" not in s:
-        return s
-    out: list[str] = []
-    depth = 0
-    for ch in s:
-        if ch == "<":
-            depth += 1
-        elif ch == ">":
-            if depth > 0:
-                depth -= 1
-        elif depth == 0:
-            out.append(ch)
-    normalized = "".join(out).strip()
-    return normalized or s
+    return normalize_operation_key(operation)
+
+
+def _native_operation_key(operation: str) -> str:
+    """Return a stable native operator identity across template instances."""
+    return native_operation_key(operation)
 
 
 def aggregate_by_source_function(
@@ -1901,11 +1900,11 @@ def aggregate_by_source_function(
 ) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
-    Groups are sorted by aggregate time (descending). Native (.cu/.hip/.cpp)
-    candidates key on ``(source_path, function)`` only (collapsing #420
-    over-split instantiations); Python candidates key on
-    ``(operation, path, line, function)`` since one caller frame can launch
-    distinct kernels (Q1). Each group carries ``task_group_id``,
+    Groups are sorted by aggregate time (descending). Native symbols are
+    normalized to their logical function before keying by operation and source,
+    so template/shape instances merge but different operators stay separate.
+    Python candidates key on the same versioned ``(kind, source, operation)``
+    identity used by the bypass path. Each group carries ``task_group_id``,
     ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
     ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
 
@@ -1925,10 +1924,10 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Grouping key: native on (source_path, function) only; Python on
-    # (operation, path, line, function) with operation normalized across dtypes.
-    # source_path is normpath-canonicalized.
-    groups: dict[tuple, dict[str, Any]] = {}
+    # Both TraceLens routes use the same versioned identity builder. Operation
+    # normalization keeps different kernels in one source separate while
+    # template/shape instances of one operator merge.
+    groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -1937,26 +1936,39 @@ def aggregate_by_source_function(
             continue
         operation = str(cand.get("name") or "").strip()
         src_norm = os.path.normpath(str(target["source_path"]))
+        reported_source = src_norm
         function_name = str(target["function_name"])
-        if _is_native_source(src_norm):
-            # Drop the mangled operation + per-call line; key on the source TU.
-            key: tuple = ("native", src_norm, function_name)
-        else:
-            # Keep the normalized operation so distinct kernels sharing one
-            # Python caller frame stay separate.
-            norm_op = _normalize_operation_key(operation)
-            key = (
-                "py",
-                norm_op,
-                src_norm,
-                int(target["definition_line"]),
-                function_name,
-            )
+        source_kind = "native" if _is_native_source(src_norm) else "py"
+        identity = build_operator_identity(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=function_name,
+        )
+        src_norm = str(identity["source_path"])
+        norm_op = str(identity["operation"])
+        key = operator_identity_key(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=function_name,
+        )
+        legacy_keys = legacy_operator_identity_keys(
+            source_kind=source_kind,
+            source_path=reported_source,
+            operation=operation,
+            function_name=function_name,
+        )
         bucket = groups.get(key)
         if bucket is None:
             bucket = {
                 "task_group_id": "",  # filled below after sorting
+                "task_group_key": key,
+                "operator_identity": identity,
+                "identity_route": "skill",
+                "legacy_task_group_keys": legacy_keys,
                 "operation": operation,
+                "operation_key": norm_op,
                 "source_path": src_norm,
                 "definition_line": target["definition_line"],
                 "function_name": target["function_name"],
@@ -1973,6 +1985,15 @@ def aggregate_by_source_function(
                 "_pitem_prose_seen": set(),  # popped before return
             }
             groups[key] = bucket
+        else:
+            bucket["legacy_task_group_keys"] = list(
+                dict.fromkeys(
+                    [
+                        *(bucket.get("legacy_task_group_keys") or []),
+                        *legacy_keys,
+                    ]
+                )
+            )
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)
@@ -2046,6 +2067,7 @@ def aggregate_by_source_function(
         ]
         # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
         group.pop("_pitem_prose_seen", None)
+        group["shape_cases"] = build_task_group_shape_cases(group)
     return ordered
 
 

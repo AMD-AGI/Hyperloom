@@ -590,10 +590,10 @@ def _cand(kernel_id, name, source_file, *, reusable=True, dur=100.0, gpu_pct=10.
     }
 
 
-def test_task_groups_merge_same_native_source():
+def test_task_groups_merge_same_native_operator_shapes():
     hot = [
-        _cand("k001", "quant_a", "/opt/aiter/csrc/quant_kernels.cu", dur=300.0, gpu_pct=30.0, shapes=[[8, 8]]),
-        _cand("k002", "quant_b", "/opt/aiter/csrc/quant_kernels.cu", dur=100.0, gpu_pct=10.0, shapes=[[4, 4]]),
+        _cand("k001", "quantize", "/opt/aiter/csrc/quant_kernels.cu", dur=300.0, gpu_pct=30.0, shapes=[8, 8]),
+        _cand("k002", "quantize", "/opt/aiter/csrc/quant_kernels.cu", dur=100.0, gpu_pct=10.0, shapes=[4, 4]),
     ]
     groups = report._build_task_groups(hot)
     assert len(groups) == 1
@@ -607,6 +607,21 @@ def test_task_groups_merge_same_native_source():
     assert g["aggregate_gpu_pct"] == 40.0
     # rows carry harness-consumable shapes
     assert g["rows"][0]["shapes"] == [[8, 8]]
+    assert [case["selector"] for case in g["shape_cases"]] == [
+        {"CASE_ID": "case_001"},
+        {"CASE_ID": "case_002"},
+    ]
+
+
+def test_task_groups_split_different_native_operators():
+    hot = [
+        _cand("k001", "quant_a", "/opt/aiter/csrc/quant_kernels.cu"),
+        _cand("k002", "quant_b", "/opt/aiter/csrc/quant_kernels.cu"),
+    ]
+
+    groups = report._build_task_groups(hot)
+
+    assert len(groups) == 2
 
 
 def test_task_groups_py_keys_on_operation():
@@ -722,11 +737,25 @@ def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monke
 
 
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
-    # Two candidates resolve to the same .cu -> one group attached to both.
+    # Two shapes of one logical operator resolve to one grouped optimization task.
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/quant.cu", "op_to_source"))
     kernels = [
-        {"name": "aiter::quant_a", "op_name": "aiter::quant_a", "gpu_time_us": 300.0, "count": 2},
-        {"name": "aiter::quant_b", "op_name": "aiter::quant_b", "gpu_time_us": 100.0, "count": 1},
+        {
+            "name": "aiter::quant_kernel_shape_a",
+            "op_name": "aiter::quantize",
+            "gpu_time_us": 300.0,
+            "count": 2,
+            "op_shapes": [[8, 8]],
+            "op_dtypes": ["c10::BFloat16"],
+        },
+        {
+            "name": "aiter::quant_kernel_shape_b",
+            "op_name": "aiter::quantize",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[16, 16]],
+            "op_dtypes": ["c10::BFloat16"],
+        },
     ]
     cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")
     assert len(cands["task_groups"]) == 1
@@ -736,5 +765,6 @@ def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     assert summ["task_group_count"] == 1
     entry = summ["task_groups"][0]
     assert entry["row_count"] == 2 and entry["primary_kernel_id"]
+    assert len(cands["task_groups"][0]["shape_cases"]) == 2
     # compact projection: no full rows leak into the summary entry
     assert "rows" not in entry

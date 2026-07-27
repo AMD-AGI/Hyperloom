@@ -222,7 +222,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 2
+LATEST_STATE_SCHEMA_VERSION: int = 3
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -419,6 +419,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
     enablement_succeeded: bool = False
+    # Watchdog bookkeeping for the in-flight enablement round: the dispatched
+    #   specialist task id and the tick it was dispatched on. If a round ends
+    #   without ever calling ``_maybe_rearm_enablement`` (e.g. the deliverable
+    #   was approved-but-empty and routed to plain baseline retries, or any other
+    #   path that never produces an integrate result), ``enablement_dispatched``
+    #   would stay stuck True forever and the run could never reach
+    #   ``enablement_stalled``. The watchdog in ``_maybe_enqueue_enablement_specialist``
+    #   uses these to detect a silently-finished round and count it as a stall.
+    enablement_inflight_task_id: str = ""
+    enablement_dispatch_tick: int = -1
+    # Task id of the most recently completed enablement specialist round. Captured
+    #   at rearm so the async dispatch chokepoint can read that round's
+    #   ``specialist_done.json`` for a ``needs_targeted_build`` request and enqueue
+    #   an off-loop build (see ``_maybe_enqueue_specialist_requested_build``).
+    #   Cleared once consumed. Optional; defaults via from_dict, no schema bump.
+    enablement_last_specialist_task_id: str = ""
     # Ordered, deduped patch paths from prior enablement rounds that made forward
     #   progress; re-applied as a base before the next round's patch so serial
     #   gaps stack. See ``_maybe_rearm_enablement``.
@@ -433,6 +449,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Attempt-scoped runtime acquisition state. All optional; NOT in
+    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
+    # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
+    # ``enablement_active_runtime``: the currently-promoted attempt FrameworkRuntime dict.
+    # ``enablement_attempt_runtimes``: retained attempt-runtime records (capped).
+    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm.
+    # ``enablement_localization_manifest``: localization records.
+    enablement_stack_actions: list = field(default_factory=list)
+    enablement_active_runtime: dict = field(default_factory=dict)
+    enablement_attempt_runtimes: list = field(default_factory=list)
+    enablement_kept_stack_action: dict = field(default_factory=dict)
+    enablement_localization_manifest: list = field(default_factory=list)
+    # Off-loop targeted-build state. All optional; NOT in fact_layer_keys and
+    # do NOT bump schema_version (default via from_dict).
+    # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
+    #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
+    # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
+    # ``enablement_last_build_failure``: failure_class + failure_summary.
+    # ``enablement_build_novelty``: compact repeat-vs-novel ledger.
+    # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
+    pending_targeted_build: dict = field(default_factory=dict)
+    enablement_build_manifest: list = field(default_factory=list)
+    enablement_last_build_failure: dict = field(default_factory=dict)
+    enablement_build_novelty: list = field(default_factory=list)
+    enablement_candidate_refs: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
@@ -646,6 +687,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Per-kernel run_optimization history by kernel_id; record_kernel_opt retires kernels stuck in PARTIAL (default 2; override via INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
     kernel_opt_attempts: dict[str, Any] = field(default_factory=dict)
+    # Authoritative optimization history keyed by stable operator identity.
+    # ``kernel_opt_attempts`` remains the current ordinal compatibility index.
+    kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
+    # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
+    # Their lifecycle is independent of trace-local kernel ordinals.
+    pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Cross-round params/backends/sweep aggregation (cap 10); legacy rows folded into the unified winners_history on resume.
     params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
@@ -1036,6 +1083,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         filtered = {k: v for k, v in raw.items() if k in known}
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
+        if not isinstance(filtered.get("kernel_opt_attempts"), dict):
+            filtered["kernel_opt_attempts"] = {}
+        if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
+            filtered["kernel_opt_task_attempts"] = {}
+        if not isinstance(filtered.get("pending_kernel_integrations"), dict):
+            filtered["pending_kernel_integrations"] = {}
+        if incoming_version < 3:
+            for ledger_id, entry in filtered["kernel_opt_attempts"].items():
+                if not isinstance(entry, dict):
+                    continue
+                task_key = str(entry.get("task_group_key") or "").strip()
+                if not task_key:
+                    source = str(entry.get("last_source_file") or "")
+                    task_key = json.dumps(
+                        {
+                            "version": 1,
+                            "kind": "legacy-kernel",
+                            "kernel_id": str(ledger_id),
+                            "source_file": source,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                migrated = dict(entry)
+                migrated.setdefault("current_kernel_id", str(ledger_id))
+                migrated.setdefault("stable_task_key", task_key)
+                filtered["kernel_opt_task_attempts"].setdefault(
+                    task_key,
+                    migrated,
+                )
+            migration_events.append(
+                "migrated kernel optimization attempts to stable task identities"
+            )
         # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
@@ -1870,6 +1950,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         return _m.integrate_attempt_count_for_kernel(self, kernel_id)
 
+    def integrate_attempt_count_for_integration(
+        self,
+        integration_id: str,
+    ) -> int:
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.integrate_attempt_count_for_integration(
+            self,
+            integration_id,
+        )
+
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
@@ -1887,6 +1979,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         from ..kernel import _kernel_decisions as _m
 
         return _m.pending_keep_kernel_ids(self)
+
+    def pending_kernel_integration_records(self) -> list[dict[str, Any]]:
+        """Return immutable pending KEEP snapshots in integration priority order."""
+        from ..kernel import _kernel_decisions as _m
+
+        return _m.pending_kernel_integration_records(self)
 
     @property
     def has_keep_pending_integrate(self) -> bool:
@@ -2056,10 +2154,29 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
+            capture_result = dict(result)
+            capture_result.setdefault(
+                "workload",
+                {
+                    "framework": str(getattr(self, "framework", "") or ""),
+                    "model_name": str(getattr(self, "model_name", "") or ""),
+                    "gpu_type": str(getattr(self, "gpu_type", "") or ""),
+                    "precision": str(getattr(self, "precision", "") or ""),
+                    "tp": int(getattr(self, "tp", 0) or 0),
+                    "ep": int(getattr(self, "ep", 0) or 0),
+                    "conc": int(getattr(self, "conc", 0) or 0),
+                    "isl": int(getattr(self, "isl", 0) or 0),
+                    "osl": int(getattr(self, "osl", 0) or 0),
+                },
+            )
             instrument.record_phase_event(
                 getattr(self, "_session_dir", None),
                 action=action,
                 entry=entry,
+                result=capture_result,
+                phase=str(getattr(self, "phase", "") or ""),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                tick=int(getattr(self, "tick", 0) or 0),
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("record_phase_event capture failed", exc_info=True)

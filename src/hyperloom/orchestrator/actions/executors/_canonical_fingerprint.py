@@ -38,6 +38,27 @@ def _coerce_list(value: Any) -> list[str]:
     return [str(value)] if str(value).strip() else []
 
 
+def _canonical_runtime_override(value: Any) -> Any:
+    """Order-independent canonical form of a runtime_override payload.
+
+    Sorts dict keys and list entries so semantically-equal overrides fingerprint
+    identically; returns ``None`` for an empty/absent override so the hash for a
+    plain variant is unchanged (back-compat).
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    out: dict[str, Any] = {}
+    for k in sorted(value):
+        v = value[k]
+        if isinstance(v, (list, tuple)):
+            out[str(k)] = sorted(str(x) for x in v)
+        elif isinstance(v, dict):
+            out[str(k)] = {str(ik): str(iv) for ik, iv in sorted(v.items())}
+        else:
+            out[str(k)] = str(v)
+    return out
+
+
 def canonical_fingerprint(
     extra_args: str | None,
     extra_envs: dict[str, Any] | None,
@@ -45,13 +66,15 @@ def canonical_fingerprint(
     remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
     args_mode: str = "append",
+    runtime_override: dict[str, Any] | None = None,
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
     Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
     delegates here. Normalization: args ``shlex.split``
     → sorted tokens; envs ``(str(k), str(v))`` sorted by key; removal /
-    replacement controls sorted by value; 16-char SHA-1.
+    replacement controls sorted by value; a non-empty ``runtime_override`` folded
+    as an order-independent canonical dict; 16-char SHA-1.
 
     Args:
         extra_args: The variant's extra server args string, or ``None``.
@@ -61,6 +84,8 @@ def canonical_fingerprint(
         unset_envs: Inherited env names to remove before applying
             ``extra_envs``.
         args_mode: ``"append"`` (default) or ``"replace"``.
+        runtime_override: Attempt runtime override; folded into the hash only
+            when non-empty so plain variants keep their historical fingerprint.
 
     Returns:
         The canonical 16-char SHA-1 content fingerprint for the variant.
@@ -77,7 +102,8 @@ def canonical_fingerprint(
         mode = "append"
     remove_list = sorted(_coerce_list(remove_args))
     unset_list = sorted(_coerce_list(unset_envs))
-    if not remove_list and not unset_list and mode == "append":
+    rt = _canonical_runtime_override(runtime_override)
+    if not remove_list and not unset_list and mode == "append" and rt is None:
         payload_obj: Any = [args_tokens, [list(p) for p in env_pairs]]
     else:
         payload_obj = [
@@ -87,6 +113,10 @@ def canonical_fingerprint(
             unset_list,
             mode,
         ]
+        # Append the runtime override only when present so variants with removal/
+        # replacement controls but no override keep their historical fingerprint.
+        if rt is not None:
+            payload_obj.append(rt)
     payload = json.dumps(
         payload_obj,
         sort_keys=True,

@@ -192,7 +192,20 @@ SERVER_DEAD_RETURNCODE: int = -910
 # unrecoverable within the same Magpie subprocess. Kept specific (terminal
 # bootstrap failures, never transient per-shape warnings) so the watchdog cannot
 # false-positive on a server that is merely slow to load.
+#
+# Two families:
+#  1. Runtime engine/worker bootstrap crashes (engine core / worker proc).
+#  2. Config-validation-stage failures that die BEFORE the engine starts — most
+#     importantly a brand-new checkpoint ``model_type`` that the installed
+#     transformers / vLLM does not recognise (``pydantic`` ``ModelConfig``
+#     ``ValidationError``). These are just as terminal, and surfacing their
+#     excerpt is what lets the enablement failure classifier see
+#     ``missing_model_arch`` (and seed the ``pip install -U transformers/vllm``
+#     bridge) instead of the Magpie wrapper's uninformative ``subprocess_nonzero``
+#     stdout tail, which classifies as ``unknown`` and starves every enablement
+#     round of the real root cause.
 _SERVER_DEAD_MARKERS: tuple[str, ...] = (
+    # (1) runtime engine/worker bootstrap crashes
     "WorkerProc initialization failed",
     "EngineCore failed to start",
     "Engine core initialization failed",
@@ -200,6 +213,14 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "AsyncEngineDeadError",
     "raise EngineDeadError",
     "Failed core proc(s)",
+    # (2) config-validation-stage terminal failures (pre-engine). Kept to
+    #     specific failure phrases (never a bare "Model architectures" INFO
+    #     banner) so the liveness watchdog cannot false-positive on a healthy
+    #     slow-loading server.
+    "does not recognize this architecture",
+    "Transformers does not recognize",
+    "ValidationError for ModelConfig",
+    "are not supported for now",
 )
 
 # Default grace after the first fatal marker before forcing a reap. Overridable

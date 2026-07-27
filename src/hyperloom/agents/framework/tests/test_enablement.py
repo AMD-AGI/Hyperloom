@@ -18,13 +18,20 @@ from hyperloom.agents.framework.enablement import (
     MISSING_MODEL_ARCH,
     MISSING_WEIGHT,
     NOT_IMPLEMENTED,
+    RESOURCE_CONSTRAINT,
+    SERVE_FLAG,
     SHAPE_MISMATCH,
+    TOKENIZER_ERROR,
     UNKNOWN,
     UNSUPPORTED_DTYPE,
+    CapabilityGap,
     EnablementRequest,
     FailureSignature,
+    _extract_offending_file,
+    _failure_identity,
     classify_failure,
     enablement_made_progress,
+    is_targeted_build_candidate,
     runnable_decision,
 )
 
@@ -38,6 +45,23 @@ def test_missing_model_arch() -> None:
     sig = classify_failure(log)
     assert sig.kind == MISSING_MODEL_ARCH
     assert sig.offending_symbol == "Glm5ForCausalLM"
+    assert sig.bridge_layer == "framework"
+    assert sig.confidence > 0.9
+    assert sig.is_actionable
+
+
+def test_missing_model_arch_transformers_unrecognized() -> None:
+    """Transformers 'does not recognize this architecture' (the DeepSeek-V4
+    brand-new-arch-on-old-stack signature, wrapped in a vLLM ModelConfig
+    ValidationError) -> missing_model_arch with the model_type as symbol."""
+    log = (
+        "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig\n"
+        "  Value error, The checkpoint you are trying to load has model type "
+        "`deepseek_v4` but Transformers does not recognize this architecture."
+    )
+    sig = classify_failure(log)
+    assert sig.kind == MISSING_MODEL_ARCH
+    assert sig.offending_symbol == "deepseek_v4"
     assert sig.bridge_layer == "framework"
     assert sig.confidence > 0.9
     assert sig.is_actionable
@@ -171,6 +195,40 @@ def test_enablement_setup_guidance_in_mandate() -> None:
     assert "ENVIRONMENT SETUP" in m.task_description
     assert "setup_commands" in m.task_description
     assert ENABLEMENT_SETUP_GUIDANCE
+
+
+def test_enablement_progress_contract_in_mandate() -> None:
+    """Serial-enablement contract: the mandate must tell the specialist that a
+    patch which only ADVANCES the boot one step is a valid KEPT deliverable, so
+    a large gap yields incremental progress instead of a wholesale empty=true.
+
+    This is the specialist-side counterpart of ``enablement_made_progress`` /
+    integrate_patch ``status="advanced"`` — without it the incremental stacking
+    machinery is never fed any patches (observed on DeepSeek-V4-Flash: every
+    round returned empty=true and nothing was ever stacked)."""
+    from hyperloom.agents.framework.enablement import EnablementRequest
+    from hyperloom.agents.framework.enablement_ops import (
+        ENABLEMENT_PROGRESS_GUIDANCE,
+        build_mandate,
+    )
+
+    req = EnablementRequest(
+        framework="vllm",
+        model="deepseek-ai-DeepSeek-V4-Flash",
+        repo_url="https://github.com/ROCm/vllm.git",
+        launch_log=(
+            "The checkpoint you are trying to load has model type `deepseek_v4` "
+            "but Transformers does not recognize this architecture."
+        ),
+        gpu_type="mi355x",
+    )
+    m = build_mandate(req)
+    assert "PROGRESS DELIVERABLE" in m.task_description
+    # The contract must explicitly permit an advance-one-step patch and reserve
+    # empty=true for "cannot advance even one step".
+    assert "ADVANCES the boot" in m.task_description
+    assert "empty=true" in m.task_description
+    assert ENABLEMENT_PROGRESS_GUIDANCE
 
 
 def test_not_implemented() -> None:
@@ -387,3 +445,165 @@ def test_runnable_pass_when_post_signature_clean() -> None:
         after_signature=after,
     )
     assert runs is True
+
+
+# --- New kinds: tokenizer_error, serve_flag, resource_constraint -----------
+
+
+def test_tokenizer_error_classified() -> None:
+    """A vLLM --tokenizer-mode not supported message -> tokenizer_error."""
+    sig = classify_failure("Error: Tokenizer mode 'deepseek_v4' is not supported")
+    assert sig.kind == TOKENIZER_ERROR
+
+
+def test_tokenizer_unknown_backend() -> None:
+    sig = classify_failure("Unknown tokenizer class: FastTokenizerV2")
+    assert sig.kind == TOKENIZER_ERROR
+
+
+def test_serve_flag_classified() -> None:
+    """Argparse unrecognized flag -> serve_flag."""
+    sig = classify_failure("unrecognized arguments: --enable-mtp-speculative-decoding")
+    assert sig.kind == SERVE_FLAG
+
+
+def test_serve_flag_invalid_choice() -> None:
+    sig = classify_failure("error: argument --tokenizer-mode: invalid choice: 'deepseek_v4'")
+    assert sig.kind in (SERVE_FLAG, TOKENIZER_ERROR)
+
+
+def test_resource_constraint_oom() -> None:
+    """Out-of-memory -> resource_constraint."""
+    sig = classify_failure("RuntimeError: CUDA out of memory. Tried to allocate 20 GiB")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_hip_oom() -> None:
+    sig = classify_failure("RuntimeError: HIP out of memory.")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_tp() -> None:
+    sig = classify_failure("requires at least 8 GPUs for tensor parallel size 8, but only 4 are available")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_no_kv_cache() -> None:
+    sig = classify_failure("No GPU memory left for the KV cache. Please try enabling quantization")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+# --- CapabilityGap projection -----------------------------------------------
+
+
+def test_capability_gap_from_resource_constraint() -> None:
+    """resource_constraint -> requires_code_acquisition=False."""
+    sig = FailureSignature(kind=RESOURCE_CONSTRAINT, confidence=0.88)
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.kind == RESOURCE_CONSTRAINT
+    assert gap.requires_code_acquisition is False
+
+
+def test_capability_gap_from_import_error() -> None:
+    """import_error -> requires_code_acquisition=True."""
+    sig = FailureSignature(kind=IMPORT_ERROR, confidence=0.7, bridge_layer="build")
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is True
+    assert gap.bridge_layer == "build"
+
+
+def test_capability_gap_from_tokenizer_error() -> None:
+    sig = FailureSignature(kind=TOKENIZER_ERROR, confidence=0.75, bridge_layer="framework")
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is True
+
+
+def test_capability_gap_to_dict() -> None:
+    gap = CapabilityGap(kind=RESOURCE_CONSTRAINT, requires_code_acquisition=False)
+    d = gap.to_dict()
+    assert d["kind"] == RESOURCE_CONSTRAINT
+    assert d["requires_code_acquisition"] is False
+
+
+def test_oom_classify_and_gap_no_code_acquisition() -> None:
+    """End-to-end: OOM log -> classify -> CapabilityGap.requires_code_acquisition is False."""
+    sig = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
+    assert sig.kind == RESOURCE_CONSTRAINT
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is False
+
+
+# --- is_targeted_build_candidate (Rung 5 eligibility) ----------------------
+
+
+def test_targeted_build_candidate_build_bridge_layer() -> None:
+    sig = FailureSignature(kind=IMPORT_ERROR, bridge_layer="build")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_rocm_hip_bridge_layer() -> None:
+    sig = FailureSignature(kind=HIP_KERNEL_MISSING, bridge_layer="rocm_hip")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_hip_kernel_missing_kind() -> None:
+    sig = FailureSignature(kind=HIP_KERNEL_MISSING, bridge_layer="")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_pure_python_dtype_rejected() -> None:
+    """A dtype guard with no native evidence stays Rung 4 (pure Python)."""
+    sig = FailureSignature(kind=UNSUPPORTED_DTYPE, bridge_layer="framework", raw_excerpt="dtype bf16 is not supported")
+    assert is_targeted_build_candidate(sig) is False
+
+
+def test_targeted_build_candidate_native_dtype_from_symbol() -> None:
+    sig = FailureSignature(
+        kind=UNSUPPORTED_DTYPE,
+        bridge_layer="framework",
+        offending_symbol="aiter::fp4_moe",
+    )
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_native_dtype_from_log() -> None:
+    sig = FailureSignature(kind=UNSUPPORTED_DTYPE, bridge_layer="framework")
+    log = "torch.ops._C.fp4_gemm undefined symbol: _ZN5aiter..."
+    assert is_targeted_build_candidate(sig, log) is True
+
+
+def test_targeted_build_candidate_framework_python_gap_rejected() -> None:
+    sig = FailureSignature(kind=MISSING_MODEL_ARCH, bridge_layer="framework")
+    assert is_targeted_build_candidate(sig) is False
+
+
+def test_targeted_build_candidate_none_signature() -> None:
+    assert is_targeted_build_candidate(None) is False  # type: ignore[arg-type]
+
+
+# --- _extract_offending_file / _failure_identity ---------------------------
+
+
+def test_extract_offending_file_falls_back_to_last_traceback_frame() -> None:
+    """With no ``near`` offset, the last traceback ``File "..."`` frame wins."""
+    text = (
+        'Traceback (most recent call last):\n'
+        '  File "/opt/vllm/first.py", line 10, in boot\n'
+        '  File "/opt/vllm/last.py", line 42, in load_model\n'
+        "RuntimeError: boom"
+    )
+    assert _extract_offending_file(text) == "/opt/vllm/last.py"
+
+
+def test_failure_identity_none_signature_is_empty_triple() -> None:
+    """A ``None`` signature yields three empty strings (dedup key for no-sig)."""
+    assert _failure_identity(None) == ("", "", "")
+
+
+def test_failure_signature_to_dict_round_trips_fields() -> None:
+    """``FailureSignature.to_dict`` serializes all dataclass fields."""
+    sig = FailureSignature(kind=MISSING_MODEL_ARCH, confidence=0.9, offending_file="m.py")
+    d = sig.to_dict()
+    assert d["kind"] == MISSING_MODEL_ARCH
+    assert d["offending_file"] == "m.py"
+    assert d["confidence"] == 0.9

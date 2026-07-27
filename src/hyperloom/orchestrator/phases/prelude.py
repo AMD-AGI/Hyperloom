@@ -503,6 +503,7 @@ class PreludePhase(PhaseHandler):
                 "action": "replay_warm_recipe",
                 "name": "warm_replay",
                 "variant_name": "warm_replay",
+                "task_id": str(getattr(task, "task_id", "") or ""),
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
                 "tput": float(single_round_tput),
