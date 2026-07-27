@@ -223,12 +223,15 @@ class RooflineExecutor:
     last_profile_trace / analysis_md_path for audit.
     """
 
-    def __init__(self, *, shared_state: Any):
+    def __init__(self, *, shared_state: Any, persist_state: bool = True):
         """Initialize the executor with a required SharedState reference.
 
         Args:
             shared_state (Any): The SharedState instance the executor mutates
                 (profile fields, trace_analyze cache). Must not be ``None``.
+            persist_state: Whether lifecycle updates may save the mutated state
+                to the session. Nested shape-capture runs use an isolated copy
+                and disable persistence.
 
         Raises:
             ValueError: If ``shared_state`` is ``None``.
@@ -240,6 +243,7 @@ class RooflineExecutor:
                 "from cli._register_executors"
             )
         self.shared_state = shared_state
+        self.persist_state = persist_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the roofline action for the given context.
@@ -271,7 +275,12 @@ class RooflineExecutor:
                 detail="auto-roofline: profile + TraceLens",
             )
             _sd0 = Path(session_dir)
-            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
+            if (
+                self.persist_state
+                and _sd0.name
+                and _sd0.is_dir()
+                and (_sd0 / "state.json").exists()
+            ):
                 self.shared_state.save(_sd0)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
@@ -461,6 +470,10 @@ class RooflineExecutor:
         else:
             roofline_output_name = "kernel_roofline_current.json"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        for key in ("analysis_route", "steady_state_mode", "workspace_path"):
+            value = _task_params.get(key)
+            if value not in (None, ""):
+                ta_payload[key] = value
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
         if roofline_output_name:
@@ -515,6 +528,9 @@ class RooflineExecutor:
                 "_n26_auto_retry": True,
                 "_n26_retry_from_mode": from_mode,
             }
+            for key in ("analysis_route", "workspace_path"):
+                if key in ta_payload:
+                    ta_payload_retry[key] = ta_payload[key]
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
             if roofline_output_name:
@@ -693,7 +709,12 @@ class RooflineExecutor:
                 duration_s=time.monotonic() - _lc_t0,
             )
             sd = Path(session_dir)
-            if sd.name and sd.is_dir() and (sd / "state.json").exists():
+            if (
+                self.persist_state
+                and sd.name
+                and sd.is_dir()
+                and (sd / "state.json").exists()
+            ):
                 self.shared_state.save(sd)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle emit failed", exc_info=True)
@@ -703,6 +724,7 @@ class RooflineExecutor:
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": str(trace_path),
+            "steady_state_trace": cached.get("steady_state_trace", ""),
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),

@@ -1167,7 +1167,7 @@ class TestRunGemmTuningHandler:
         import gzip
 
         import yaml
-        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
         baseline_config = tmp_path / "baseline.yaml"
         baseline_config.write_text(
@@ -1191,15 +1191,18 @@ class TestRunGemmTuningHandler:
         )
         captured: dict = {}
 
-        class FakeBaselineExecutor:
-            def __init__(self, **kwargs):
-                pass
+        class FakeRooflineExecutor:
+            def __init__(self, *, shared_state, persist_state=True):
+                captured["init"] = {
+                    "shared_state": shared_state,
+                    "persist_state": persist_state,
+                }
 
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
                 config = yaml.safe_load(Path(ctx.task.params["config_path"]).read_text())
                 assert config["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
-                trace_dir = Path(ctx.task.params["output_dir"]) / "benchmark_vllm" / "torch_trace"
+                trace_dir = Path(ctx.task.params["output_dir"]) / "tracelens"
                 trace_dir.mkdir(parents=True)
                 trace = {
                     "traceEvents": [
@@ -1220,11 +1223,15 @@ class TestRunGemmTuningHandler:
                         },
                     ]
                 }
-                with gzip.open(trace_dir / "trace.json.gz", "wt", encoding="utf-8") as stream:
+                steady_trace = trace_dir / "mixed_steady_state.trace.json.gz"
+                with gzip.open(steady_trace, "wt", encoding="utf-8") as stream:
                     json.dump(trace, stream)
-                return {"status": "succeeded"}
+                return {
+                    "status": "succeeded",
+                    "steady_state_trace": str(steady_trace),
+                }
 
-        monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FakeRooflineExecutor)
 
         result = asyncio.run(
             krh._capture_vllm_tunableop_shapes(
@@ -1246,9 +1253,10 @@ class TestRunGemmTuningHandler:
             {"K": 5120, "M": 4149, "N": 34816},
         ]
         task = captured["task"]
-        assert "--profiler-config.delay_iterations 0" in task.params["extra_server_args"]
-        assert "--profiler-config.max_iterations 16" in task.params["extra_server_args"]
-        assert "--profiler-config.torch_profiler_record_shapes True" in task.params["extra_server_args"]
+        assert "profiler-config.delay_iterations" not in task.params["extra_server_args"]
+        assert "profiler-config.max_iterations" not in task.params["extra_server_args"]
+        assert task.params["analysis_route"] == "deterministic"
+        assert task.params["steady_state_mode"] == "mixed"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
         assert not any(
@@ -1256,6 +1264,81 @@ class TestRunGemmTuningHandler:
             for name in task.params["extra_envs"]
         )
         assert "PYTORCH_TUNABLEOP_ENABLED" in task.params["unset_envs"]
+        assert captured["init"]["persist_state"] is False
+
+    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch):
+        import gzip
+
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
+
+        baseline_config = tmp_path / "baseline.yaml"
+        baseline_config.write_text("benchmark:\n  framework: vllm\n")
+        steady_trace = tmp_path / "mixed_steady_state.trace.json.gz"
+        with gzip.open(steady_trace, "wt", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
+                        }
+                    ]
+                },
+                stream,
+            )
+        state = SharedState(
+            framework="vllm",
+            precision="fp8",
+            model_path="/models/qwen",
+            baseline_config_path=str(baseline_config),
+        )
+        captured: dict = {}
+
+        class FailBaselineExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __call__(self, ctx):
+                raise AssertionError("block-FP8 profile capture must use RooflineExecutor")
+
+        class FakeRooflineExecutor:
+            def __init__(self, *, shared_state, persist_state=True):
+                captured["shared_state"] = shared_state
+                captured["persist_state"] = persist_state
+
+            async def __call__(self, ctx):
+                captured["task"] = ctx.task
+                return {
+                    "status": "succeeded",
+                    "steady_state_trace": str(steady_trace),
+                }
+
+        monkeypatch.setattr(baseline_module, "BaselineExecutor", FailBaselineExecutor)
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FakeRooflineExecutor)
+
+        result = asyncio.run(
+            krh._capture_vllm_tunableop_shapes(
+                state=state,
+                session_dir=tmp_path,
+                payload={
+                    "task_id": "capture",
+                    "_shape_capture_mode": "block_fp8_profile",
+                },
+                workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["capture_mode"] == "block_fp8_profile"
+        assert result["shape_count"] == 1
+        assert result["source_profile_trace"] == str(steady_trace)
+        assert captured["persist_state"] is False
+        task = captured["task"]
+        assert task.params["analysis_route"] == "deterministic"
+        assert task.params["steady_state_mode"] == "mixed"
+        assert "profiler-config.delay_iterations" not in task.params["extra_server_args"]
+        assert "profiler-config.max_iterations" not in task.params["extra_server_args"]
 
     def test_vllm_block_fp8_profile_excludes_capture_sidecars(self, tmp_path):
         import gzip
@@ -1703,7 +1786,20 @@ class TestRunGemmTuningHandler:
             )
         )
         roofline_trace = tmp_path / "roofline.trace.json.gz"
+        steady_trace = tmp_path / "mixed_steady_state.trace.json.gz"
         with gzip.open(roofline_trace, "wt", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[1, 5120], [34816, 5120]]},
+                        }
+                    ]
+                },
+                stream,
+            )
+        with gzip.open(steady_trace, "wt", encoding="utf-8") as stream:
             json.dump(
                 {
                     "traceEvents": [
@@ -1734,6 +1830,7 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
+            last_trace_analyze={"steady_state_trace": str(steady_trace)},
         )
         state.last_profile_workload = state.current_profile_workload_context()
         state.save(tmp_path)
@@ -1777,7 +1874,7 @@ class TestRunGemmTuningHandler:
         ]
         assert captured_input["untuned_csv"] == ""
         assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
-        assert result["shape_capture"]["source_profile_trace"] == str(roofline_trace)
+        assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
         assert result["status"] == "ok"
 
     @pytest.mark.parametrize(
@@ -1821,6 +1918,7 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
+            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
         )
         state.last_profile_workload = state.current_profile_workload_context()
         state.last_profile_workload[field] = profile_value
@@ -1888,6 +1986,7 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
+            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
         )
         state.last_profile_workload = state.profile_workload_context(recorded_runtime)
         state.current_best = current_best
@@ -1902,7 +2001,7 @@ class TestRunGemmTuningHandler:
         )
 
     def test_vllm_block_fp8_logs_when_roofline_has_no_shapes(self, tmp_path, caplog):
-        roofline_trace = tmp_path / "roofline.trace.json"
+        roofline_trace = tmp_path / "mixed_steady_state.trace.json"
         roofline_trace.write_text(
             json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]})
         )
@@ -1917,6 +2016,7 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
+            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
         )
         state.last_profile_workload = state.profile_workload_context()
         caplog.set_level(20, logger=krh.__name__)
@@ -1929,6 +2029,45 @@ class TestRunGemmTuningHandler:
             is None
         )
         assert "contains no reusable block-FP8 shapes" in caplog.text
+
+    def test_vllm_block_fp8_rejects_decode_only_steady_trace(self, tmp_path, caplog):
+        decode_trace = tmp_path / "decode_only_steady_state.trace.json"
+        decode_trace.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[64, 5120], [34816, 5120]]},
+                        }
+                    ]
+                }
+            )
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(decode_trace),
+            last_profile_status="succeeded",
+            last_trace_analyze={"steady_state_trace": str(decode_trace)},
+        )
+        state.last_profile_workload = state.current_profile_workload_context()
+        caplog.set_level(20, logger=krh.__name__)
+
+        assert (
+            krh._reuse_vllm_block_fp8_roofline_shapes(
+                state,
+                workspace=tmp_path / "gemm",
+            )
+            is None
+        )
+        assert "not a mixed steady-state trace" in caplog.text
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
         root = tmp_path / "kernel-agent"

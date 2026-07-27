@@ -57,6 +57,9 @@ def _trace_analyze_success(*, snapshot_id_in_state: int = 1) -> dict:
         "status": "ok",
         "candidates_path": "/tmp/kc.json",
         "trace_report_path": "/tmp/analysis.md",
+        "artifact_paths": {
+            "tracelens_steady_state_trace": "/tmp/mixed_steady_state.trace.json.gz",
+        },
         "hot_kernels": [],
         "trace_health_warnings": [],
     }
@@ -113,6 +116,10 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert state.last_profile_status == "succeeded"
     assert state.last_profile_args == "--mem-fraction-static=0.92"
     assert state.last_profile_workload == state.profile_workload_context(ctx.task.params)
+    assert state.last_trace_analyze["steady_state_trace"] == (
+        "/tmp/mixed_steady_state.trace.json.gz"
+    )
+    assert result["steady_state_trace"] == "/tmp/mixed_steady_state.trace.json.gz"
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
     assert cached["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"

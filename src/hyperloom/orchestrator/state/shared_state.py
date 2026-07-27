@@ -2260,16 +2260,20 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(result, dict):
             return
         trace_input = (payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or ""
+        artifacts = result.get("artifact_paths") or {}
+        if not isinstance(artifacts, dict):
+            artifacts = {}
         candidates_path = result.get("candidates_path") or ""
         if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
+            candidates_path = artifacts.get("kernel_candidates", "") or ""
         kernel_roofline_path = result.get("kernel_roofline_path") or ""
         if not kernel_roofline_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+            kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+        steady_state_trace = (
+            result.get("steady_state_trace")
+            or artifacts.get("tracelens_steady_state_trace")
+            or ""
+        )
         summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
@@ -2325,6 +2329,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
+            "steady_state_trace": str(steady_state_trace),
             "candidates_path": str(candidates_path),
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,

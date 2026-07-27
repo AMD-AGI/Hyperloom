@@ -2175,6 +2175,11 @@ def _extract_vllm_block_fp8_profile_shapes(
     return str(out), len(payload)
 
 
+def _is_mixed_steady_state_trace(path: str) -> bool:
+    """Return whether TraceLens selected its mixed steady-state window."""
+    return "mixed_steady_state" in Path(path).name
+
+
 def _reuse_vllm_block_fp8_roofline_shapes(
     state: Any,
     *,
@@ -2182,8 +2187,15 @@ def _reuse_vllm_block_fp8_roofline_shapes(
     current_workload: dict[str, Any] | None = None,
 ) -> HandlerResult | None:
     """Reuse block-FP8 runtime shapes from the latest Roofline profile trace."""
-    source_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    last_trace_analyze = getattr(state, "last_trace_analyze", None)
+    if not isinstance(last_trace_analyze, dict):
+        return None
+    source_trace = str(last_trace_analyze.get("steady_state_trace") or "").strip()
     if not source_trace:
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline has no selected "
+            "steady-state trace; running a standard Roofline fallback"
+        )
         return None
     if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
         log.info(
@@ -2204,6 +2216,13 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
             "running a dedicated profile",
             ", ".join(mismatches) or "missing profile workload metadata",
+        )
+        return None
+    if not _is_mixed_steady_state_trace(source_trace):
+        log.info(
+            "vLLM block-FP8 shape capture: selected Roofline trace %s is not a "
+            "mixed steady-state trace; running a standard Roofline fallback",
+            source_trace,
         )
         return None
     shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
@@ -2477,26 +2496,6 @@ async def _capture_vllm_tunableop_shapes(
         if "extra_server_args" in payload
         else str(current_best.get("extra_server_args") or "")
     )
-    if profile_mode:
-        if "profiler-config.delay_iterations" not in extra_server_args:
-            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
-        if "profiler-config.max_iterations" not in extra_server_args:
-            try:
-                max_iterations = int(
-                    payload.get("shape_capture_max_iterations")
-                    or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_MAX_ITERATIONS")
-                    or 16
-                )
-            except (TypeError, ValueError):
-                max_iterations = 16
-            max_iterations = max(1, max_iterations)
-            extra_server_args = (
-                f"{extra_server_args} --profiler-config.max_iterations {max_iterations}"
-            ).strip()
-        if "torch_profiler_record_shapes" not in extra_server_args:
-            extra_server_args = (
-                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
-            ).strip()
     inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
     if isinstance(inherited_unset, str):
         capture_unset_envs = [inherited_unset]
@@ -2520,25 +2519,35 @@ async def _capture_vllm_tunableop_shapes(
     else:
         capture_remove_args = [str(arg) for arg in inherited_remove]
     capture_remove_args.append("--port")
+    task_params: dict[str, Any] = {
+        "config_path": config_path,
+        "output_dir": str(capture_dir),
+        "timeout_sec": timeout_sec,
+        "framework": "vllm",
+        "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+        "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+        "extra_server_args": extra_server_args,
+        "extra_envs": capture_envs,
+        "remove_args": capture_remove_args,
+        "unset_envs": capture_unset_envs,
+        "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+        "disable_run_eval": True,
+        "baseline_double_run": False,
+    }
+    if profile_mode:
+        task_params.update(
+            {
+                "analysis_route": "deterministic",
+                "steady_state_mode": "mixed",
+                "workspace_path": str(capture_dir / "tracelens"),
+                "reason": "gemm_block_fp8_shape_capture",
+            }
+        )
     task = Task(
         task_id=task_id,
         kind="gemm_shape_capture",
         state="running",
-        params={
-            "config_path": config_path,
-            "output_dir": str(capture_dir),
-            "timeout_sec": timeout_sec,
-            "framework": "vllm",
-            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
-            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
-            "extra_server_args": extra_server_args,
-            "extra_envs": capture_envs,
-            "remove_args": capture_remove_args,
-            "unset_envs": capture_unset_envs,
-            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
-            "disable_run_eval": True,
-            "baseline_double_run": False,
-        },
+        params=task_params,
         idempotency_key=f"{task_id}-run",
     )
     ctx = RunnerContext(task=task, lease=None)
@@ -2553,10 +2562,18 @@ async def _capture_vllm_tunableop_shapes(
     }
 
     try:
-        benchmark_result = await BaselineExecutor(
-            session_dir=session_dir,
-            shared_state=capture_state,
-        )(ctx)
+        if profile_mode:
+            from ..actions.executors.roofline import RooflineExecutor
+
+            benchmark_result = await RooflineExecutor(
+                shared_state=capture_state,
+                persist_state=False,
+            )(ctx)
+        else:
+            benchmark_result = await BaselineExecutor(
+                session_dir=session_dir,
+                shared_state=capture_state,
+            )(ctx)
     except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
         return {
             "status": "failed",
@@ -2570,7 +2587,28 @@ async def _capture_vllm_tunableop_shapes(
     if not isinstance(benchmark_result, dict):
         benchmark_result = {}
     if profile_mode:
-        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
+        if (
+            benchmark_result.get("status") == "succeeded"
+            and not _is_mixed_steady_state_trace(steady_state_trace)
+        ):
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_steady_state_missing",
+                "error": (
+                    "standard Roofline did not produce a mixed steady-state trace "
+                    f"(selected={steady_state_trace!r})"
+                ),
+                "shape_capture_workspace": str(capture_dir),
+                "shape_count": 0,
+                "capture_mode": "block_fp8_profile",
+            }
+        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+            Path(steady_state_trace),
+            output_dir=capture_dir,
+        )
         if benchmark_result.get("status") == "succeeded" and shape_count > 0:
             return {
                 "status": "ok",
@@ -2578,6 +2616,7 @@ async def _capture_vllm_tunableop_shapes(
                 "shape_capture_workspace": str(capture_dir),
                 "shape_count": shape_count,
                 "capture_mode": "block_fp8_profile",
+                "source_profile_trace": steady_state_trace,
             }
         benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
         detail = f": {benchmark_error}" if benchmark_error else ""
