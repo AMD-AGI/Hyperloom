@@ -2030,7 +2030,7 @@ class TestRunGemmTuningHandler:
         )
         assert "contains no reusable block-FP8 shapes" in caplog.text
 
-    def test_vllm_block_fp8_rejects_decode_only_steady_trace(self, tmp_path, caplog):
+    def test_vllm_block_fp8_reuses_decode_only_selected_by_roofline(self, tmp_path):
         decode_trace = tmp_path / "decode_only_steady_state.trace.json"
         decode_trace.write_text(
             json.dumps(
@@ -2058,16 +2058,15 @@ class TestRunGemmTuningHandler:
             last_trace_analyze={"steady_state_trace": str(decode_trace)},
         )
         state.last_profile_workload = state.current_profile_workload_context()
-        caplog.set_level(20, logger=krh.__name__)
 
-        assert (
-            krh._reuse_vllm_block_fp8_roofline_shapes(
-                state,
-                workspace=tmp_path / "gemm",
-            )
-            is None
+        reused = krh._reuse_vllm_block_fp8_roofline_shapes(
+            state,
+            workspace=tmp_path / "gemm",
         )
-        assert "not a mixed steady-state trace" in caplog.text
+
+        assert reused is not None
+        assert reused["source_profile_trace"] == str(decode_trace)
+        assert reused["shape_count"] == 1
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
         root = tmp_path / "kernel-agent"

@@ -2175,11 +2175,6 @@ def _extract_vllm_block_fp8_profile_shapes(
     return str(out), len(payload)
 
 
-def _is_mixed_steady_state_trace(path: str) -> bool:
-    """Return whether TraceLens selected its mixed steady-state window."""
-    return "mixed_steady_state" in Path(path).name
-
-
 def _reuse_vllm_block_fp8_roofline_shapes(
     state: Any,
     *,
@@ -2216,13 +2211,6 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
             "running a dedicated profile",
             ", ".join(mismatches) or "missing profile workload metadata",
-        )
-        return None
-    if not _is_mixed_steady_state_trace(source_trace):
-        log.info(
-            "vLLM block-FP8 shape capture: selected Roofline trace %s is not a "
-            "mixed steady-state trace; running a standard Roofline fallback",
-            source_trace,
         )
         return None
     shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
@@ -2588,23 +2576,6 @@ async def _capture_vllm_tunableop_shapes(
         benchmark_result = {}
     if profile_mode:
         steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
-        if (
-            benchmark_result.get("status") == "succeeded"
-            and not _is_mixed_steady_state_trace(steady_state_trace)
-        ):
-            return {
-                "status": "failed",
-                "decision": "REVERT",
-                "requires_e2e_validation": False,
-                "error_class": "shape_capture_steady_state_missing",
-                "error": (
-                    "standard Roofline did not produce a mixed steady-state trace "
-                    f"(selected={steady_state_trace!r})"
-                ),
-                "shape_capture_workspace": str(capture_dir),
-                "shape_count": 0,
-                "capture_mode": "block_fp8_profile",
-            }
         shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
             Path(steady_state_trace),
             output_dir=capture_dir,
