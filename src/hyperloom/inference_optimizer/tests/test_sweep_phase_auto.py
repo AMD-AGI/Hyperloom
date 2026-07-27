@@ -1328,3 +1328,24 @@ def test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed():
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
     assert excinfo.value.rule == "phase_incompatible"
+
+
+def test_validate_intent_denies_llm_conc_sweep_delegate_as_coordinator_managed():
+    """An LLM-delegated conc_sweep is rejected through the internal-action gate."""
+    from hyperloom.inference_optimizer.protocol.intent import (
+        Intent,
+        IntentType,
+    )
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    state = _SweepSingletonState(
+        phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
+    )
+    gate = _make_policy_gate(shared_state=state)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "conc_sweep"},
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate.validate_intent("orchestration", intent)
+    assert excinfo.value.rule == "phase_incompatible"

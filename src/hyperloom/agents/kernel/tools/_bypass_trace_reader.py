@@ -496,12 +496,31 @@ def _finalize(
 
     # Time-ordered per-launch sequence (opt-in) for fusion analysis, which needs
     # the kernel adjacency the name-aggregation discards.
+    #
+    # Each record additively carries the launching op's shape/dtype/source meta
+    # (when resolvable via the correlation chain). Existing consumers read only
+    # ``name``/``op_name``/``ts``/``dur``; the extra keys power the variant-
+    # discriminating TraceShapeManifest producer without changing that contract.
     kernel_launches: list[dict[str, Any]] = []
     if emit_launches:
         for _name, _dur, _corr, _ts, _e in k_events:
             _ex = corr_to_extid.get(_corr) if _corr is not None else None
             _op = extid_to_opname.get(_ex) if _ex is not None else None
-            kernel_launches.append({"name": _name, "op_name": _op or "", "ts": _ts, "dur": _dur})
+            _meta = extid_to_opmeta.get(_ex) if _ex is not None else None
+            _meta = _meta or {}
+            kernel_launches.append(
+                {
+                    "name": _name,
+                    "op_name": _op or "",
+                    "ts": _ts,
+                    "dur": _dur,
+                    "shapes": _meta.get("shapes") or [],
+                    "dtypes": _meta.get("dtypes") or [],
+                    "kernel_file": _meta.get("kernel_file") or "",
+                    "kernel_backend": _meta.get("kernel_backend") or "",
+                    "correlation": _corr,
+                }
+            )
         kernel_launches.sort(key=lambda r: r["ts"])
 
     return {

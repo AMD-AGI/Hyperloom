@@ -123,7 +123,8 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "token_usage":                 { /* LLM token spend rollup (see below) */ },
   "langfuse":                    { /* Langfuse push receipt */ },
   "kernel_journey":              { /* kernel lifecycle journey */ },
-  "versions":                    { /* component/version stamps */ }
+  "versions":                    { /* component/version stamps */ },
+  "enablement":                  { /* enablement / targeted-build subsystem summary */ }
 }
 ```
 
@@ -318,6 +319,81 @@ contains archived action names.
 `method` is one of `validated`, `single_source`, `reconstructed`,
 `missing` — consumers should display reconstruction caveats from the
 `notes[]` field.
+
+---
+
+## `enablement` — targeted-build & attempt-runtime summary
+
+`EnablementBreakdown`. The enablement subsystem's observability section:
+the attempt runtimes it provisioned and the targeted builds (AITER /
+sgl-kernel / vLLM-source) it attempted. Emitted as `{}` on sessions that
+never provisioned an attempt runtime or attempted a build, so the
+dashboard hides the block. Top-level fields:
+
+| Field                 | Type                          | Description                                                                                     |
+|-----------------------|-------------------------------|-------------------------------------------------------------------------------------------------|
+| `stack_actions`       | `EnablementStackActionSummary[]` | Candidate stack actions considered this session (see below).                                 |
+| `active_runtime`      | `EnablementAttemptRuntime`    | The currently-promoted attempt runtime, or `{}` when none.                                      |
+| `attempt_runtimes`    | `EnablementAttemptRuntime[]`  | Retained attempt-runtime records (capped).                                                      |
+| `failure_kind`        | string                        | Last classified enablement failure kind (present only when set).                               |
+| `build_attempts`      | `TargetedBuildAttemptSummary[]` | Targeted-build attempt history, newest last (see below).                                      |
+| `last_build_failure`  | object                        | `{failure_class, failure_summary}` from the most recent failed build (framework-channel input). |
+| `build_attempt_count` | int                           | Total number of targeted-build rows attempted.                                                  |
+
+### `stack_actions[]` — `EnablementStackActionSummary`
+
+One attempt-runtime stack action considered or applied.
+
+| Field                | Type   | Description                                                             |
+|----------------------|--------|-------------------------------------------------------------------------|
+| `kind`               | string | Stack-action kind (for example, `runtime_candidate`).                   |
+| `framework`          | string | Target framework.                                                       |
+| `capability`         | string | Missing capability being repaired.                                      |
+| `acquisition_method` | string | `wheel` / `editable_ref` / … .                                          |
+| `repo_url`           | string | Origin git URL (source acquisition), or `""`.                           |
+| `ref`                | string | Pinned ref (source acquisition), or `""`.                               |
+| `index_url`          | string | Pip index (wheel acquisition), or `""`.                                 |
+| `reason`             | string | Human-readable justification.                                           |
+
+### `active_runtime` / `attempt_runtimes[]` — `EnablementAttemptRuntime`
+
+One provisioned attempt runtime (promoted or discarded). `active_runtime`
+is the single promoted runtime; `attempt_runtimes[]` is the retained
+history, each flagged with `promoted`.
+
+| Field                | Type               | Description                                                                    |
+|----------------------|--------------------|--------------------------------------------------------------------------------|
+| `venv_root`          | string             | Attempt venv root (`$SESSION_DIR/enablement/stacks/…`).                        |
+| `bin_path`           | string             | Attempt bin dir prepended to the materialized-YAML `PATH`.                     |
+| `python_path`        | string             | Attempt interpreter.                                                           |
+| `installed_versions` | object (str → str) | Package → version installed into the attempt venv.                             |
+| `promoted`           | bool               | `true` when this runtime was kept (survives rearm).                            |
+
+### `build_attempts[]` — `TargetedBuildAttemptSummary`
+
+One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
+
+| Field                | Type               | Description                                                                    |
+|----------------------|--------------------|--------------------------------------------------------------------------------|
+| `component`          | string             | `aiter` / `sgl_kernel` / `vllm_source` / `framework_ext`.                      |
+| `ref`                | string             | Git ref / tag used for the build.                                              |
+| `gpu_arch`           | string             | Explicit target arch (`gfx942` / `gfx950` / …).                                |
+| `max_jobs`           | int                | Parallelism cap passed to the compile.                                         |
+| `ok`                 | bool               | Whether the build + verify passed.                                             |
+| `failure_class`      | string             | One of the `FAILURE_CLASSES` values, or `"ok"`.                                |
+| `failure_summary`    | string             | Human-readable reason (agent decision input).                                  |
+| `installed_versions` | object (str → str) | torch/ref/sha/arch recorded after a successful build (see below).              |
+| `built_artifacts`    | string[]           | Verified artifact paths (up to 8).                                             |
+| `build_log_path`     | string             | Path to the compile log inside the attempt dir.                                |
+| `attempt_root`       | string             | Attempt directory anchoring the build.                                         |
+
+`installed_versions` is a free-form string → string provenance map copied
+verbatim from the build manifest. Keys include torch and commit-SHA stamps,
+`arch`, and the component ref keys `aiter_ref` / `vllm_ref` / `sgl_kernel_ref`
+(the first present ref is also surfaced as the top-level `ref` field). When a
+discovered PR ref drove the build, it additionally carries a `source_pr_url`
+key pointing at the source PR. Because the map is free-form, `source_pr_url`
+is not a declared TypedDict key — consumers should read it opportunistically.
 
 ---
 

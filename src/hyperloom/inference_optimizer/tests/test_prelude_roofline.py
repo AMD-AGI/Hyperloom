@@ -220,6 +220,32 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinator, monkeypatch):
+    """Disabling GEMM tuning must not disable the independently gated fusion stage."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: True)
+    assert coord._gemm_tuning_required_before_kernel_opt() is False
+
+    fusion_calls = 0
+
+    async def _run_fusion() -> None:
+        nonlocal fusion_calls
+        fusion_calls += 1
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+
+    await coord._on_enter_kernel(from_phase="EXPLORE")
+
+    assert fusion_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]

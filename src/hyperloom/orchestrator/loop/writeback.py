@@ -269,7 +269,10 @@ class WritebackCollaborator:
                         break
         entry = {
             "action": "integrate",
+            "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
+            "task_group_key": result.get("task_group_key"),
+            "identity_route": result.get("identity_route"),
             "patch_path": result.get("patch_path"),
             "target_file": result.get("target_file"),
             "backup_manifest": backup_manifest,
@@ -284,9 +287,19 @@ class WritebackCollaborator:
         integrate_gap_cid = str(result.get("gap_canonical_id") or "").strip()
         if integrate_gap_cid:
             entry["gap_canonical_id"] = integrate_gap_cid
-        key = (entry["kernel_id"], entry["patch_path"], entry["target_file"])
+        key = (
+            entry.get("integration_id"),
+            entry["kernel_id"],
+            entry["patch_path"],
+            entry["target_file"],
+        )
         existing = {
-            (item.get("kernel_id"), item.get("patch_path"), item.get("target_file"))
+            (
+                item.get("integration_id"),
+                item.get("kernel_id"),
+                item.get("patch_path"),
+                item.get("target_file"),
+            )
             for item in self.shared_state.optimization_stack
             if isinstance(item, dict) and item.get("action") == "integrate"
         }
@@ -304,6 +317,7 @@ class WritebackCollaborator:
         self.shared_state.current_best = {
             "action": "integrate",
             "tput": float(new_tput),
+            "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
             "extra_server_args": extra_args,
             "optimization_stack": list(self.shared_state.optimization_stack),
@@ -420,6 +434,36 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
+        if task.kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                result_payload.setdefault(
+                    "workload",
+                    {
+                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
+                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
+                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
+                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
+                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
+                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
+                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
+                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
+                    },
+                )
+                instrument.record_action_operation(
+                    self.session_dir,
+                    action=task.kind,
+                    task_id=task.task_id,
+                    status="failed",
+                    decision="discarded",
+                    result=result_payload,
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("v4 action failure capture failed", exc_info=True)
         any_changed = False
         params = task.params or {}
         if task.kind == "explore" and bool(params.get("geak_fallback")):
@@ -1152,13 +1196,18 @@ class WritebackCollaborator:
             joined with its E2E integrate verdict where available.
         """
         ss = self.shared_state
-        opt_attempts = getattr(ss, "kernel_opt_attempts", {}) or {}
+        opt_attempts = (
+            getattr(ss, "kernel_opt_task_attempts", {})
+            or getattr(ss, "kernel_opt_attempts", {})
+            or {}
+        )
         integ_attempts = getattr(ss, "kernel_integrate_attempts", {}) or {}
         if not isinstance(opt_attempts, dict):
             return []
 
         # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
         integ_by_kid: dict[str, dict[str, Any]] = {}
+        integ_by_task: dict[str, dict[str, Any]] = {}
         if isinstance(integ_attempts, dict):
             for entry in integ_attempts.values():
                 if not isinstance(entry, dict):
@@ -1166,9 +1215,12 @@ class WritebackCollaborator:
                 kid = str(entry.get("kernel_id") or "")
                 if kid:
                     integ_by_kid[kid] = entry
+                task_group_key = str(entry.get("task_group_key") or "")
+                if task_group_key:
+                    integ_by_task[task_group_key] = entry
 
         out: list[dict[str, Any]] = []
-        for kid, e in opt_attempts.items():
+        for ledger_id, e in opt_attempts.items():
             if not isinstance(e, dict):
                 continue
             if str(e.get("last_decision", "")).upper() != "KEEP":
@@ -1177,7 +1229,17 @@ class WritebackCollaborator:
                 micro = float(e.get("last_micro_speedup") or 0.0)
             except (TypeError, ValueError):
                 micro = 0.0
-            integ = integ_by_kid.get(str(kid))
+            kid = str(
+                e.get("current_kernel_id")
+                or e.get("kernel_id")
+                or ledger_id
+            )
+            task_group_key = str(e.get("task_group_key") or "")
+            integ = (
+                integ_by_task.get(task_group_key)
+                if task_group_key
+                else integ_by_kid.get(kid)
+            )
             e2e_gain = 0.0
             e2e_tput = 0.0
             e2e_decision = ""
@@ -1200,7 +1262,7 @@ class WritebackCollaborator:
                         break
             out.append(
                 {
-                    "kernel_id": str(kid),
+                    "kernel_id": kid,
                     "source_file": str(e.get("last_source_file") or ""),
                     "artifact_path": str(e.get("last_artifact_path") or ""),
                     "micro_speedup": micro,
@@ -1695,6 +1757,19 @@ class WritebackCollaborator:
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
             )
+        if bool((task.params or {}).get("enablement")) and isinstance(
+            done_payload.get("needs_targeted_build"), dict
+        ):
+            try:
+                await self._maybe_enqueue_specialist_requested_build(
+                    task_id=str(task.task_id or ""),
+                    payload=done_payload,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "specialist build request failed for task=%s",
+                    task.task_id,
+                )
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(
@@ -1917,6 +1992,8 @@ class WritebackCollaborator:
                     for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                    if bv.get("task_id"):
+                        stack_entry["task_id"] = str(bv.get("task_id"))
                     if bv.get("effective_extra_server_args"):
                         stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
                             str(bv.get("effective_extra_server_args") or "")
@@ -2026,6 +2103,44 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
+        if task_kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                result_status = str(result.get("status") or "succeeded")
+                kept = task_kind == "framework_agent" and result_status.lower() == "kept"
+                v4_result = dict(result)
+                v4_result.setdefault(
+                    "workload",
+                    {
+                        "framework": str(getattr(self.shared_state, "framework", "") or ""),
+                        "model_name": str(getattr(self.shared_state, "model_name", "") or ""),
+                        "gpu_type": str(getattr(self.shared_state, "gpu_type", "") or ""),
+                        "precision": str(getattr(self.shared_state, "precision", "") or ""),
+                        "tp": int(getattr(self.shared_state, "tp", 0) or 0),
+                        "conc": int(getattr(self.shared_state, "conc", 0) or 0),
+                        "isl": int(getattr(self.shared_state, "isl", 0) or 0),
+                        "osl": int(getattr(self.shared_state, "osl", 0) or 0),
+                    },
+                )
+                instrument.record_action_operation(
+                    self.session_dir,
+                    action=task_kind,
+                    task_id=getattr(task, "task_id", "") if task is not None else "",
+                    status=result_status,
+                    decision="promoted" if kept else "discarded",
+                    result=v4_result,
+                    extras={
+                        "candidate_id": self._framework_candidate_key(result.get("candidate"))
+                        if task_kind == "framework_agent" and isinstance(result.get("candidate"), dict)
+                        else ""
+                    },
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("v4 action result capture failed", exc_info=True)
         outcome = _PromoteOutcome()
         handler_name = self._PROMOTE_HANDLERS.get(task_kind)
         if handler_name is not None:
@@ -2521,6 +2636,28 @@ class WritebackCollaborator:
                             "validated": False,
                             "reason": repr(exc),
                         }
+                        try:
+                            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                            geak_result = (
+                                self.shared_state.geak_result
+                                if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                                else {}
+                            )
+                            instrument.record_geak_operation(
+                                self.session_dir,
+                                stage="final_validation_failed",
+                                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                                result={
+                                    **geak_result,
+                                    "failure_reason": "geak_harness_fallback_exception",
+                                    "error": repr(exc),
+                                },
+                                status="failed",
+                                validation_source="geak_same_harness_geak",
+                            )
+                        except Exception:  # noqa: BLE001
+                            log.debug("geak v4 fallback-exception recording failed", exc_info=True)
                     if not bool(fallback_result.get("validated")):
                         geak_result = (
                             dict(self.shared_state.geak_result)
@@ -2589,6 +2726,9 @@ class WritebackCollaborator:
                 changed = True
             # 4. Lift the best winner into current_best / optimization_stack.
             if isinstance(best_winner, dict) and isinstance(best_tput, (int, float)) and best_tput > 0:
+                best_winner = dict(best_winner)
+                if task is not None:
+                    best_winner["task_id"] = str(task.task_id or "")
                 explore_gap_cid = (
                     str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
                 )
@@ -2648,6 +2788,7 @@ class WritebackCollaborator:
             specialist_task_id = str(result.get("specialist_task_id") or "")
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
+                "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
                 "extra_envs": dict(
                     result.get("extra_envs_applied")
@@ -2774,6 +2915,7 @@ class WritebackCollaborator:
             lift = {
                 "name": f"framework:{cand_id}",
                 "variant_name": cand_id,
+                "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": "",
                 "extra_envs": {},
                 "workspace": result.get("workspace"),
@@ -3090,6 +3232,10 @@ class WritebackCollaborator:
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.
         await self._resume_recover_pending_integrate(report)
+        # (1b) In-flight targeted build: an off-loop compile cannot survive a
+        # coordinator restart, so kill the orphan group, GC its attempt dir,
+        # sweep its jit locks, fail the row, and clear the sentinel.
+        await self._resume_recover_pending_targeted_build(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
@@ -3247,6 +3393,13 @@ class WritebackCollaborator:
         from ..actions.executors.integrate_patch import _git_apply_reverse
 
         summary: dict[str, Any] = {"reversed": [], "failed": []}
+        # Discard a half-provisioned attempt venv so a crash mid-provision
+        # cannot leak a multi-GB dir. Independent of the patch rollback below.
+        attempt_venv_root = str(pending.get("attempt_venv_root") or "").strip()
+        if attempt_venv_root:
+            gc_root = str(Path(attempt_venv_root).parent)
+            if self._gc_attempt_runtime(gc_root):
+                summary["attempt_runtime_gc"] = gc_root
         root = str(pending.get("framework_source_root") or "").strip()
         patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
         if not root or not patches:
@@ -3263,6 +3416,23 @@ class WritebackCollaborator:
             else:
                 summary["failed"].append({"patch": patch, "error": err})
         return summary
+
+    @staticmethod
+    def _gc_attempt_runtime(attempt_dir: str) -> bool:
+        """Remove an attempt-runtime dir (best-effort).
+
+        Returns True when a directory was present and removal was attempted.
+        """
+        import shutil
+
+        path = Path(str(attempt_dir or "").strip())
+        if not attempt_dir or not path.exists():
+            return False
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            return True
+        except Exception:  # noqa: BLE001 — GC is best-effort
+            return False
 
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
         """Recover a crashed integrate_patch window from the sentinel (Gap C).
@@ -3314,6 +3484,69 @@ class WritebackCollaborator:
             else:
                 report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
         state.pending_integrate = {}
+
+    async def _resume_recover_pending_targeted_build(self, report: dict[str, Any]) -> None:
+        """Reclaim an off-loop build that was in flight when the coordinator died.
+
+        A detached compile cannot be re-adopted across a restart: kill its
+        recorded process group, rmtree the attempt dir, sweep its per-attempt
+        aiter JIT locks (a killed compile leaves a pid-less lock that wedges
+        every later build of that module), mark the row failed with a
+        ``timeout`` failure_class for the framework channel, and clear the
+        sentinel. Best-effort throughout.
+        """
+        import shutil
+        import signal
+
+        from ..framework.targeted_build import kill_build_pgroup
+
+        state = self.shared_state
+        pending = getattr(state, "pending_targeted_build", {}) or {}
+        if not (isinstance(pending, dict) and pending):
+            return
+        task_id = str(pending.get("task_id") or "")
+        summary: dict[str, Any] = {"kind": "reclaimed_pending_targeted_build", "task_id": task_id}
+
+        try:
+            pgid = int(pending.get("pgid") or 0)
+        except (TypeError, ValueError):
+            pgid = 0
+        if pgid > 0:
+            kill_build_pgroup(pgid, sig=signal.SIGKILL)
+            summary["killed_pgid"] = pgid
+
+        attempt_root = str(pending.get("attempt_root") or "").strip()
+        if attempt_root and Path(attempt_root).exists():
+            shutil.rmtree(attempt_root, ignore_errors=True)
+            summary["removed_attempt_root"] = attempt_root
+
+        jit_dir = str(pending.get("aiter_jit_dir") or "").strip()
+        if jit_dir:
+            try:
+                from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+                sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
+                summary["swept_jit_dir"] = jit_dir
+            except Exception:  # noqa: BLE001 — sweep is best-effort
+                log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
+
+        state.enablement_last_build_failure = {
+            "failure_class": "timeout",
+            "failure_summary": "targeted build interrupted by coordinator restart",
+        }
+        if task_id:
+            try:
+                task = await self.tasks.get(task_id)
+                if getattr(task, "state", "") == "running":
+                    await self.tasks.transition(
+                        task_id, "failed", evidence={"failure_class": "resume_interrupted"}
+                    )
+                    summary["failed_row"] = True
+            except Exception:  # noqa: BLE001 — reclaim backstop still applies
+                log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
+
+        state.pending_targeted_build = {}
+        report["fixes"].append(summary)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
         """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).
@@ -3484,6 +3717,26 @@ class WritebackCollaborator:
                     params=params_ps,
                     idempotency_key="geak-revalidate",
                 )
+                try:
+                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                    instrument.record_geak_operation(
+                        self.session_dir,
+                        stage="rebench_started",
+                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                        result={
+                            **ps,
+                            "rebench": {
+                                "task_id": task.task_id,
+                                "existing": bool(existing),
+                                "mode": "orchestrator_same_harness",
+                                "expected_cfg_hash": expected_cfg_hash,
+                            },
+                        },
+                        status="running",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug("geak v4 rebench recording failed", exc_info=True)
                 return {
                     "task_id": task.task_id,
                     "task_state": task.state,
@@ -3555,6 +3808,19 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok":
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="geak_harness_fallback",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result={**ps, "fallback_reason": reason},
+                status="running",
+                validation_source="geak_same_harness_geak",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
         # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
@@ -3609,6 +3875,19 @@ class WritebackCollaborator:
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
                 log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
+                try:
+                    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                    instrument.record_geak_operation(
+                        self.session_dir,
+                        stage="final_validation_failed",
+                        macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                        result={**ps, "fallback_result": res, "failure_reason": "missing_measured_throughput"},
+                        status="failed",
+                        validation_source="geak_same_harness_geak",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug("geak v4 missing-measurement recording failed", exc_info=True)
                 return {"validated": False, "status": res.get("status"), "reason": reason}
             self._promote_geak_from_candidate(
                 ps,
@@ -3628,6 +3907,24 @@ class WritebackCollaborator:
             geak_sp,
             reason,
         )
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="final_validation_failed",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result={
+                    **ps,
+                    "fallback_result": res,
+                    "failure_reason": reason,
+                    "geak_speedup": geak_sp,
+                },
+                status="failed",
+                validation_source="geak_same_harness_geak",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 failed-validation recording failed", exc_info=True)
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _resume_reenter_kernel_if_needed(self) -> None:

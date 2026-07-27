@@ -195,6 +195,79 @@ def test_classify_framework_agent_is_framework_op():
     assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_FRAMEWORK_OP] == ()
 
 
+def test_classify_enablement_integrate_patch_is_enablement_landing():
+    """A pre-boot enablement integrate_patch drops the production bar."""
+    from hyperloom.agents.critic.runtime.decision_reviewer import (
+        _APPROVE_REQUIRES_BY_CLASS,
+        ACTION_CLASS_ENABLEMENT_LANDING,
+        ACTION_CLASS_PATCH_LANDING,
+        classify_proposal_action,
+    )
+
+    # Plain integrate_patch (no enablement marker) stays strict.
+    assert classify_proposal_action("integrate_patch", {"params": {}}) == ACTION_CLASS_PATCH_LANDING
+    assert classify_proposal_action("integrate_patch", None) == ACTION_CLASS_PATCH_LANDING
+    # enablement=True or framework_agent_authoring=True downgrades the class.
+    assert (
+        classify_proposal_action("integrate_patch", {"params": {"enablement": True}})
+        == ACTION_CLASS_ENABLEMENT_LANDING
+    )
+    assert (
+        classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})
+        == ACTION_CLASS_ENABLEMENT_LANDING
+    )
+    # The lighter bar excludes the pre-boot-impossible production evidence
+    # and the redundant rollback restatement.
+    reqs = _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_ENABLEMENT_LANDING]
+    assert "comparable_before_after_benchmark" not in reqs
+    assert "accuracy_gate_or_waiver" not in reqs
+    assert "rollback_plan" not in reqs
+    assert "specialist_or_default_grid_provenance" in reqs
+    assert "in_phase_allowed_action" in reqs
+    assert "no_contradicting_kb_prior" in reqs
+
+
+def test_prepare_review_enablement_integrate_relaxes_approve_requires(reviewer):
+    rev, _, _ = reviewer
+    prompt = (
+        "=== Shared session state ===\n"
+        "model=deepseek-v4 framework=vllm baseline_tput=0\n"
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=enA from=orchestration topic=proposal payload="
+        "{'action_name': 'integrate_patch', 'provenance': 'specialist', "
+        "'params': {'enablement': True, 'framework_agent_authoring': True}}\n"
+    )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_enable"))
+    constraints = bundle.review_constraints
+    assert constraints["bundle_action_class"] == "enablement_landing"
+    assert constraints["proposal_action_classes"] == {"enA": "enablement_landing"}
+    assert "comparable_before_after_benchmark" not in constraints["approve_requires"]
+    assert "accuracy_gate_or_waiver" not in constraints["approve_requires"]
+    assert "rollback_plan" not in constraints["approve_requires"]
+
+
+def test_prepare_review_enablement_mixed_with_real_patch_stays_strict(reviewer):
+    """A real production integrate in the same batch still forces the strict bar."""
+    rev, _, _ = reviewer
+    prompt = (
+        "=== Shared session state ===\n"
+        "model=deepseek-v4 framework=vllm baseline_tput=1200\n"
+        "=== Inbox for critic ===\n"
+        "  seq=1 msg_id=enA from=orchestration topic=proposal payload="
+        "{'action_name': 'integrate_patch', 'params': {'enablement': True}}\n"
+        "  seq=2 msg_id=plB from=orchestration topic=proposal payload="
+        "{'action_name': 'integrate_patch', 'params': {}}\n"
+    )
+    bundle = rev.prepare_review(_coordinator_request(prompt, "sess_enable_mixed"))
+    constraints = bundle.review_constraints
+    assert constraints["bundle_action_class"] == "patch_landing"
+    assert "comparable_before_after_benchmark" in constraints["approve_requires"]
+    assert constraints["proposal_action_classes"] == {
+        "enA": "enablement_landing",
+        "plB": "patch_landing",
+    }
+
+
 def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
     rev, _, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_mixed_prompt(), "sess_mix"))

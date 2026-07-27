@@ -32,7 +32,8 @@ For each proposal in `proposals`:
 
 1. Look up its class via
    `review_constraints.proposal_action_classes[<msg_id>]` →
-   `patch_landing` / `evidence_producer` / `framework_op`.
+   `patch_landing` / `enablement_landing` / `evidence_producer` /
+   `framework_op`.
 2. Apply the **per-class** Approve Standard from `SKILL.md`. The
    bundle-level `review_constraints.approve_requires` is the strictest
    class present in the batch (a fallback for callers that do not look
@@ -66,6 +67,11 @@ Default behavior summary:
 - `patch_landing` proposal without comparable benchmark + accuracy
   gate → `needs_review` (or `reject` if the packet itself shows a
   regression).
+- `enablement_landing` proposal (pre-boot enablement / framework-agent
+  `integrate_patch`) → **approve** on the structural bar; do NOT block on
+  a missing before/after benchmark, accuracy gate, or restated rollback
+  plan (the model cannot boot yet and rollback is automatic). The
+  downstream runnable-decision gate REVERTs any patch that fails to boot.
 - `framework_op` proposal → approve by default; only block when
   structurally malformed.
 

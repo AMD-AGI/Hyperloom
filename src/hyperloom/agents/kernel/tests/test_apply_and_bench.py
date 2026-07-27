@@ -10,8 +10,10 @@ measurement spread/significance helper (_spread).
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 
@@ -82,3 +84,133 @@ def test_spread_edge_cases():
     assert ab._spread([])["median"] is None
     one = ab._spread([5.0])
     assert one["median"] == 5.0 and one["stdev"] == 0.0 and one["n"] == 1
+
+
+# WP-6: P99 tail-latency parsing + peak-VRAM probe (additive to the ABBA result)
+
+
+def test_bench_once_parses_p99(tmp_path, monkeypatch):
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: None)
+    (tmp_path / "baseline_rep1.json").write_text(json.dumps({
+        "output_throughput": 1700.0, "median_tpot_ms": 12.0,
+        "p99_tpot_ms": 30.0, "p99_e2el_ms": 900.0, "p99_itl_ms": 15.0,
+    }))
+    out = ab._bench_once("bs.py", "m", 8888, 1024, 1024, 64, 320, "baseline", 1, tmp_path, 0)
+    assert out["output_throughput"] == 1700.0
+    assert out["p99_tpot_ms"] == 30.0
+    assert out["p99_e2el_ms"] == 900.0
+    assert out["p99_itl_ms"] == 15.0
+
+
+def test_gpu_vram_used_mb_sums_wanted(monkeypatch):
+    fake = json.dumps({
+        "card0": {"VRAM Total Used Memory (B)": str(2 * 1024 * 1024 * 1024)},  # 2048 MiB
+        "card1": {"VRAM Total Used Memory (B)": str(1 * 1024 * 1024 * 1024)},  # 1024 MiB
+    })
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=fake))
+    assert ab._gpu_vram_used_mb("0") == 2048.0
+    assert ab._gpu_vram_used_mb("0,1") == 3072.0
+
+
+def test_gpu_vram_used_mb_failure_returns_none(monkeypatch):
+    def _raise(*a, **k):
+        raise OSError("no rocm-smi")
+
+    monkeypatch.setattr(ab.subprocess, "run", _raise)
+    assert ab._gpu_vram_used_mb("0") is None
+
+
+# Leaked VLLM::EngineCore reap: vLLM's engine worker escapes killpg (fresh session),
+# so teardown must reap it by name — POSIX-only, self-match-safe, never fatal.
+
+
+def test_reap_vllm_orphans_skips_non_posix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(ab.os, "name", "nt")
+    ab._reap_vllm_orphans()
+    assert calls == []  # no POSIX pkill on non-POSIX hosts
+
+
+def test_reap_vllm_orphans_targets_enginecore_and_worker(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    ab._reap_vllm_orphans()
+    pats = [c[-1] for c in cmds if c[:3] == ["pkill", "-9", "-f"]]
+    assert any("EngineCore" in p for p in pats)
+    assert any("Worker" in p for p in pats)
+    # bracket trick: pattern must not contain a bare 'VLLM::' (would match pkill's own argv)
+    for p in pats:
+        assert p.startswith("[V]") and "VLLM::" not in p
+
+
+def test_reap_vllm_orphans_swallows_errors(monkeypatch):
+    def _raise(*a, **k):
+        raise OSError("no pkill")
+
+    monkeypatch.setattr(ab.subprocess, "run", _raise)
+    monkeypatch.setattr(ab.os, "name", "posix")
+    ab._reap_vllm_orphans()  # must not raise
+
+
+def test_reap_vllm_orphans_opt_out(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setenv("APPLY_BENCH_NO_ORPHAN_REAP", "1")
+    ab._reap_vllm_orphans()
+    assert cmds == []
+
+
+def test_kill_servers_reaps_orphans_for_vllm(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    ab._kill_servers(None, "vllm")  # gpu=None => no VRAM-drain probe
+    assert any(c[:3] == ["pkill", "-9", "-f"] and "EngineCore" in c[-1] for c in cmds)
+
+
+def test_kill_servers_skips_orphan_reap_for_sglang(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(ab.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
+    monkeypatch.setattr(ab.os, "name", "posix")
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    ab._kill_servers(None, "sglang")
+    assert not any("EngineCore" in c[-1] for c in cmds)
+
+
+def test_wait_vram_drain_returns_when_below_threshold(monkeypatch):
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: 1000.0)
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    assert ab._wait_vram_drain("0", threshold_mb=20000.0, timeout_s=5.0) == 1000.0
+
+
+def test_wait_vram_drain_none_when_no_rocm_smi(monkeypatch):
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: None)
+    assert ab._wait_vram_drain("0") is None
+
+
+def test_wait_vram_drain_warns_on_timeout(monkeypatch, tmp_path):
+    # Timeout without draining must NOT be silent — the next arm would launch on
+    # an occupied GPU (the contamination this guard exists to prevent).
+    monkeypatch.setattr(ab, "_gpu_vram_used_mb", lambda gpu: 50000.0)
+    monkeypatch.setattr(ab.time, "sleep", lambda *_: None)
+    logged = []
+    monkeypatch.setattr(ab, "_log", lambda out_dir, msg: logged.append(msg))
+    ab._wait_vram_drain("0", out_dir=tmp_path, threshold_mb=20000.0, timeout_s=0.0)
+    assert any("did not drain" in m for m in logged)
+
+
+def test_gpu_vram_used_none_without_gpu_scope(monkeypatch):
+    # No GPU scope -> None WITHOUT probing rocm-smi (never sum the whole host).
+    import hyperloom.agents.kernel.tools.apply_and_bench as _ab
+
+    def _fail(*a, **k):
+        raise AssertionError("rocm-smi must not be called without a GPU scope")
+
+    monkeypatch.setattr(_ab.subprocess, "run", _fail)
+    assert _ab._gpu_vram_used_mb("") is None
+    assert _ab._gpu_vram_used_mb(None) is None
+    assert _ab._gpu_vram_used_mb("  ,  ") is None

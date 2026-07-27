@@ -11,7 +11,7 @@ data as "not available", never fabricate); the wire shape is plain JSON;
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 #: breakdown schema version. Emitted on the legacy fallback path (no recorder fragments).
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
@@ -21,6 +21,11 @@ SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 #: sections; lets consumers tell a recorder-aggregated breakdown apart from a
 #: legacy collector fallback.
 SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
+
+#: Author-time-only canonical schema. Unlike v2/v3, this version is assembled
+#: exclusively from recorder SDK fragments and never reconstructed from session
+#: business files.
+SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
 
 
 # Session metadata
@@ -2029,6 +2034,347 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementStackActionSummary(TypedDict, total=False):
+    """One attempt-runtime stack action considered/applied.
+
+    Attributes:
+        kind: Stack-action kind (``runtime_candidate`` / ...).
+        framework: Target framework.
+        capability: Missing capability being repaired.
+        acquisition_method: ``wheel`` / ``editable_ref`` / ...
+        repo_url: Origin git URL (source acquisition), or "".
+        ref: Pinned ref (source acquisition), or "".
+        index_url: Pip index (wheel acquisition), or "".
+        reason: Human-readable justification.
+    """
+
+    kind: str
+    framework: str
+    capability: str
+    acquisition_method: str
+    repo_url: str
+    ref: str
+    index_url: str
+    reason: str
+
+
+class EnablementAttemptRuntime(TypedDict, total=False):
+    """One provisioned attempt runtime (promoted or discarded).
+
+    Attributes:
+        venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
+        bin_path: Attempt bin dir prepended to the materialized-YAML PATH.
+        python_path: Attempt interpreter.
+        installed_versions: Package -> version installed into the attempt venv.
+        promoted: True when this runtime was KEPT (survives rearm).
+    """
+
+    venv_root: str
+    bin_path: str
+    python_path: str
+    installed_versions: dict[str, str]
+    promoted: bool
+
+
+class TargetedBuildAttemptSummary(TypedDict, total=False):
+    """One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
+
+    Attributes:
+        component: ``aiter`` / ``sgl_kernel`` / ``vllm_source`` / ``framework_ext``.
+        ref: Git ref / tag used for the build.
+        gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
+        max_jobs: Parallelism cap passed to the compile.
+        ok: Whether the build + verify passed.
+        failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
+        failure_summary: Human-readable reason (agent decision input).
+        installed_versions: torch/ref/sha/arch recorded after a successful build;
+            includes ``source_pr_url`` when a discovered PR ref drove the build.
+        built_artifacts: Verified artifact paths (up to 8).
+        build_log_path: Path to the compile log inside the attempt dir.
+        attempt_root: Attempt directory anchoring the build.
+    """
+
+    component: str
+    ref: str
+    gpu_arch: str
+    max_jobs: int
+    ok: bool
+    failure_class: str
+    failure_summary: str
+    installed_versions: dict[str, str]
+    built_artifacts: list[str]
+    build_log_path: str
+    attempt_root: str
+
+
+class EnablementBreakdown(TypedDict, total=False):
+    """Enablement attempt-runtime observability section.
+
+    Empty {} on sessions that never provisioned an attempt runtime, so the
+    dashboard hides the block.
+
+    Attributes:
+        stack_actions: Candidate stack actions considered this session.
+        active_runtime: The currently-promoted attempt runtime, or {} when none.
+        attempt_runtimes: Retained attempt-runtime records (capped).
+        failure_kind: Last classified enablement failure kind.
+        build_attempts: Targeted-build attempt history (newest last).
+        last_build_failure: ``{failure_class, failure_summary}`` from the most
+            recent failed build attempt (framework-channel decision input).
+        build_attempt_count: Total number of targeted-build rows attempted.
+    """
+
+    stack_actions: list[EnablementStackActionSummary]
+    active_runtime: EnablementAttemptRuntime
+    attempt_runtimes: list[EnablementAttemptRuntime]
+    failure_kind: str
+    build_attempts: list[TargetedBuildAttemptSummary]
+    last_build_failure: dict[str, str]
+    build_attempt_count: int
+
+
+# ---------------------------------------------------------------------------
+# Session Breakdown v4 canonical author-time schema
+# ---------------------------------------------------------------------------
+class SubjectRef(TypedDict, total=False):
+    """Stable reference to a subject participating in an operation."""
+
+    subject_id: str
+    subject_type: str
+    role: str
+    name: str
+    attributes: dict[str, Any]
+
+
+class OperationRelation(TypedDict, total=False):
+    """Typed relation from an operation to another operation or subject."""
+
+    relation_id: str
+    relation_type: str
+    operation_id: str
+    target_operation_id: str
+    subject: SubjectRef
+    metadata: dict[str, Any]
+
+
+class OperationAttempt(TypedDict, total=False):
+    """One execution attempt belonging to an operation."""
+
+    attempt_id: str
+    status: str
+    producer: str
+    backend: str
+    started_at: str
+    ended_at: str
+    sequence: int
+    inputs: dict[str, Any]
+    outputs: dict[str, Any]
+    error: dict[str, Any] | str | None
+    measurements: list[str]
+    artifacts: list[str]
+    metadata: dict[str, Any]
+
+
+class OperationSubstep(TypedDict, total=False):
+    """One stable substep nested under an operation."""
+
+    substep_id: str
+    kind: str
+    name: str
+    status: str
+    started_at: str
+    ended_at: str
+    sequence: int
+    attempts: list[OperationAttempt]
+    measurements: list[str]
+    artifacts: list[str]
+    metadata: dict[str, Any]
+
+
+class OperationGate(TypedDict, total=False):
+    """A gate evaluated while deciding whether an operation may proceed."""
+
+    gate_id: str
+    kind: str
+    name: str
+    status: str
+    decision: str
+    reason: str
+    evaluated_at: str
+    inputs: dict[str, Any]
+    evidence: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+class OperationDecision(TypedDict, total=False):
+    """An author-time decision made within an operation."""
+
+    decision_id: str
+    kind: str
+    verdict: str
+    reason: str
+    component: str
+    confidence: float
+    decided_at: str
+    evidence: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+ExecutorClass = Literal["llm_agent", "llm_tool", "deterministic"]
+IntegrityStatus = Literal["exact", "derived", "partial", "unavailable"]
+
+
+class Operation(TypedDict, total=False):
+    """Canonical unit of work, incrementally upserted by stable id."""
+
+    operation_id: str
+    kind: str
+    name: str
+    phase: str
+    status: str
+    producer: str
+    sequence: int
+    started_at: str
+    ended_at: str
+    parent_operation_id: str
+    root_operation_id: str
+    macro_cycle: int
+    source: str
+    executor_class: ExecutorClass
+    purpose: str
+    scope: str
+    strategy_group: str
+    strategy: str
+    subject: SubjectRef
+    subjects: list[SubjectRef]
+    relations: list[OperationRelation]
+    attempts: list[OperationAttempt]
+    substeps: list[OperationSubstep]
+    gates: list[OperationGate]
+    decisions: list[OperationDecision]
+    inputs: dict[str, Any]
+    outputs: dict[str, Any]
+    error: dict[str, Any] | str | None
+    measurement_refs: list[str]
+    artifact_refs: list[str]
+    adoption_refs: list[str]
+    extensions: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+class Measurement(TypedDict, total=False):
+    """Canonical measured value authored at the measurement site."""
+
+    measurement_id: str
+    operation_id: str
+    subject: SubjectRef
+    kind: str
+    name: str
+    value: Any
+    unit: str
+    status: str
+    measured_at: str
+    sequence: int
+    producer: str
+    dimensions: dict[str, Any]
+    statistics: dict[str, Any]
+    source: dict[str, Any] | str
+    metric_basis: str
+    harness: dict[str, Any] | str
+    workload: dict[str, Any]
+    samples: list[Any]
+    aggregation: dict[str, Any] | str
+    metadata: dict[str, Any]
+
+
+class ArtifactRef(TypedDict, total=False):
+    """Canonical reference to an artifact without reading its contents."""
+
+    artifact_id: str
+    operation_id: str
+    subject: SubjectRef
+    kind: str
+    name: str
+    path: str
+    uri: str
+    digest: str
+    mime_type: str
+    size_bytes: int
+    status: str
+    present: bool
+    created_at: str
+    producer: str
+    producer_operation_id: str
+    consumers: list[str]
+    coverage: dict[str, Any] | str
+    retention: dict[str, Any] | str
+    metadata: dict[str, Any]
+
+
+class Adoption(TypedDict, total=False):
+    """Canonical adoption of an operation result into the accepted state."""
+
+    adoption_id: str
+    operation_id: str
+    subject: SubjectRef
+    artifact_ids: list[str]
+    measurement_ids: list[str]
+    kind: str
+    status: str
+    decision: str
+    reason: str
+    adopted_at: str
+    validated: bool
+    gain_pct: float | None
+    configuration: dict[str, Any]
+    producer: str
+    metadata: dict[str, Any]
+
+
+class IntegrityFieldStatus(TypedDict, total=False):
+    """Availability and provenance for one canonical v4 field."""
+
+    status: IntegrityStatus
+    source: str
+    reason: str
+    record_count: int
+    producers: list[str]
+    warnings: list[str]
+
+
+class Integrity(TypedDict, total=False):
+    """Completeness declaration for the v4 canonical envelope."""
+
+    status: IntegrityStatus
+    canonical_source: str
+    fields: dict[str, IntegrityFieldStatus]
+    warnings: list[str]
+    conflicts: list[dict[str, Any]]
+
+
+class SessionBreakdownV4(TypedDict, total=False):
+    """Top-level v4 canonical shape plus compatibility projections."""
+
+    schema_version: str
+    exported_at_utc: str
+    exporter_version: str
+    run: dict[str, Any]
+    workload: dict[str, Any]
+    model: dict[str, Any]
+    versions: dict[str, Any]
+    phases: dict[str, Any]
+    subjects: list[SubjectRef]
+    operations: list[Operation]
+    measurements: list[Measurement]
+    adoptions: list[Adoption]
+    outcome: dict[str, Any]
+    artifacts: list[ArtifactRef]
+    trace: dict[str, Any]
+    integrity: Integrity
+    projections: dict[str, Any]
+    compat: dict[str, Any]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2131,6 +2477,8 @@ class SessionBreakdown(TypedDict, total=False):
     kernel_journey: KernelJourney
     # Authoritative external-tool versions keyed by tool name; {} when absent.
     versions: dict[str, KernelToolMetadata]
+    # Enablement attempt-runtime observability; {} → dashboard hides the block.
+    enablement: EnablementBreakdown
 
     warnings: list[str]
     source_files: SourceFiles
@@ -2139,7 +2487,10 @@ class SessionBreakdown(TypedDict, total=False):
 __all__ = [
     "SCHEMA_VERSION",
     "SCHEMA_VERSION_V3",
+    "SCHEMA_VERSION_V4",
+    "Adoption",
     "AdoptedKernel",
+    "ArtifactRef",
     "Attribution",
     "Baseline",
     "BaselineAttemptSummary",
@@ -2155,6 +2506,10 @@ __all__ = [
     "DecisionTraceEntry",
     "DetectedKernel",
     "DiscoveredHotKernel",
+    "EnablementAttemptRuntime",
+    "EnablementBreakdown",
+    "EnablementStackActionSummary",
+    "ExecutorClass",
     "KernelBackendAttempt",
     "KernelDiscoveryRun",
     "KernelDispatch",
@@ -2165,10 +2520,20 @@ __all__ = [
     "LangfuseConfig",
     "LangfusePush",
     "LangfusePushCounts",
+    "Measurement",
     "ModelInfo",
+    "Operation",
+    "OperationAttempt",
+    "OperationDecision",
+    "OperationGate",
+    "OperationRelation",
+    "OperationSubstep",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
+    "Integrity",
+    "IntegrityFieldStatus",
+    "IntegrityStatus",
     "KBProvenance",
     "KBQueueStats",
     "LaneTimelineEntry",
@@ -2185,10 +2550,12 @@ __all__ = [
     "RejectedKernel",
     "RobustnessSignal",
     "SessionBreakdown",
+    "SessionBreakdownV4",
     "SessionMeta",
     "SpecialistDomainBreakdown",
     "SpecialistRound",
     "SpecialistTranscriptRef",
+    "SubjectRef",
     "PhaseBreakdown",
     "PhaseBreakdownExplore",
     "PhaseBreakdownKernel",

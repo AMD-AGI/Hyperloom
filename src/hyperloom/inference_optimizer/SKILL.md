@@ -822,6 +822,35 @@ cold-start seed grid (`_atom_default_grid`: `atom_level_{2,3}`,
 `atom_dp_attn` / `atom_mtp_{1,3}`, `atom_cudagraph_bracket`) — sglang/vllm
 fail `error_class="empty_grid"` on a cold start with no LLM variants.
 
+## Enablement Targeted Builds
+
+When a run needs a compiled component that only exists in source (AITER
+FP4/MLA/NSA kernels, `sgl-kernel`, or vLLM-from-source), the enablement
+subsystem acquires it off-loop. The launcher does not drive this; the notes
+below describe the runtime behavior operators observe.
+
+- **Off-loop build lane.** Compiled-component builds run on a dedicated
+  single-slot build lane. Each build is spawned as a detached process group
+  and polled (reaped) across coordinator ticks against a wall-clock budget, so
+  a multi-hour compile never blocks the tick loop. An in-flight build is tracked
+  by a durable sentinel (`pending_targeted_build`) so a crash/resume can recover
+  or terminate it.
+- **Runnable gate.** A verified build does not earn KEEP by
+  artifact-verification alone — it must actually launch the model through a
+  launch probe (the enablement runnable-decision gate) before it is kept.
+- **Interpreter switch.** A from-source build records the venv interpreter it
+  was compiled against (`runtime_python_exe`) and emits it as the
+  `HYPERLOOM_FRAMEWORK_PYTHON` env into the per-variant YAML benchmark envs
+  (`benchmark.envs`). The bypass backend launches the server via `python -m`
+  with that interpreter; the Magpie backend re-exports it from the YAML
+  benchmark envs. This guarantees the server loads the exact build.
+- **`build_budget_sec`.** Per-build-action wall-clock timeout knob; `0` selects
+  the per-component default.
+
+See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
+full env-var set, and `docs/reference/session-breakdown.md` for the emitted
+`enablement` / `build_attempts[]` fields.
+
 ## GPU Runner Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without

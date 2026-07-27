@@ -208,12 +208,39 @@ The following variables configure framework source discovery and path overrides.
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_RESCUE_PATHS`                | Unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
-| `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root for cold-cap sizing.                                                                                                  |
+| `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root. See [Targeted builds (Rung 5)](#targeted-builds-rung-5).  |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
 | `AITER_REF` | Unset | Optional bare-metal AITER install pin. When unset, the installer selects the newest tag compatible with the installed torch/triton stack. |
 | `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`AUDIT_USE_LLM`      | `auto`                                                                 | Controls the FRAMEWORK phase semantic-audit LLM deep-read. `off` keeps the hermetic static verdict only; `on` always runs the evidence-gated LLM refine; `auto` (default) escalates to the LLM only when the static verdict is `unknown` or `confidence < 0.5`. The refine never upgrades to an `already_*` status the static layer did not already back with evidence. |
+
+---
+
+## Targeted builds (Rung 5)
+
+These variables control the Rung-5 off-loop compiled-component acquisition
+step (AITER FP4/MLA/NSA kernels, sgl-kernel, and vLLM from source).  All are
+optional; defaults are safe for standard single-node deployments.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD` | Unset (`0`) | Set to `1` to completely disable Rung-5 auto-escalation.  When set, compiled-gap failures proceed to the stall gate without attempting a build.  Useful when the compile toolchain is unavailable or the session budget is too tight. |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`AITER_JIT_DIR` | Aiter default | Per-attempt override set automatically to `<attempt_root>/aiter_jit` by each targeted build.  Override manually only when you need the global JIT cache to point at a pre-built location; leaving it unset lets each build use its own isolated directory. |
+| `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically from the session `--gpu-type`; operator-override applies to bare-metal installs outside the session. |
+| `MAX_JOBS` | `8` | Parallelism cap for cmake/hipcc compile steps inside a targeted build.  Reduce on memory-constrained nodes (`MAX_JOBS=4` for a 64 GB compile node).  The default `8` is conservative enough for MI300X/MI355X nodes with 512 GB+. |
+| `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` via `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  The bypass backend honors it by launching `python -m`; the Magpie backend re-exports it from the YAML `benchmark.envs` to the server env.  Operators normally do not set this by hand. |
+| `HYPERLOOM_`<br>`VLLM_ROCM_`<br>`INDEX_URL` | Unset | ROCm pip index URL used as the default vLLM adapter wheel index; also seeds the index allowlist. |
+| `HYPERLOOM_`<br>`ENABLEMENT_`<br>`INDEX_ALLOWLIST` | Unset | Comma-separated allowlist of pip index URL prefixes; a candidate wheel index must match one of these prefixes or provisioning is refused (supply-chain safety). |
+| `HYPERLOOM_`<br>`ENABLEMENT_`<br>`ORIGIN_ALLOWLIST` | Unset | Comma-separated allowlist of git origin URL prefixes; a candidate repo origin must match one of these prefixes or provisioning is refused (supply-chain safety). |
+| `HYPERLOOM_`<br>`SGLANG_REPO_URL` | Unset | Override the SGLang source repo URL for the sgl-kernel / SGLang-from-source enablement build. |
+| `HYPERLOOM_`<br>`SGLANG_REF` | Unset | Pin the SGLang source ref (tag/branch/sha) for the enablement build. |
+| `HYPERLOOM_`<br>`SGLANG_INDEX_URL` | Unset | SGLang wheel index URL for the enablement build. |
+
+> **Supply-chain security:** `HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST` and
+> `HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST` are security controls.  When set, only
+> pip index / git origin URLs matching one of the listed prefixes are accepted
+> for runtime provisioning; any non-matching candidate is refused.
 
 ---
 

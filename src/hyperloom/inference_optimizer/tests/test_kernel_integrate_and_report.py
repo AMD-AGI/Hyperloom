@@ -127,6 +127,86 @@ def _write_patch_pair(
 
 
 # integrate_handler
+@pytest.mark.asyncio
+async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypatch):
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "[aiter] waiting for baton release at /root/.aiter/build/pa_ragged/lock\n",
+        encoding="utf-8",
+    )
+    sweeps = iter(
+        [
+            {"scanned": 0, "deleted": 0, "errors": 0},
+            {"scanned": 1, "deleted": 1, "errors": 0},
+        ]
+    )
+    monkeypatch.setattr(
+        krh,
+        "_sweep_integrate_aiter_locks",
+        lambda **_kwargs: next(sweeps),
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"status": "failed", "error_class": "timeout"}
+        return {"status": "succeeded", "output_throughput": 100.0}
+
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        object(),
+        workspace=tmp_path,
+        reason="test integrate",
+    )
+
+    assert calls == 2
+    assert result["status"] == "succeeded"
+    assert result["stale_jit_lock_retry"]["retry_succeeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, monkeypatch):
+    (tmp_path / "server.log").write_text(
+        "[aiter] waiting for baton release at /root/.aiter/build/pa_ragged/lock\n",
+        encoding="utf-8",
+    )
+    sweeps = iter(
+        [
+            {"scanned": 0, "deleted": 0, "errors": 0},
+            {
+                "scanned": 0,
+                "deleted": 0,
+                "errors": 0,
+                "skipped_live": True,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        krh,
+        "_sweep_integrate_aiter_locks",
+        lambda **_kwargs: next(sweeps),
+    )
+    calls = 0
+
+    async def _executor(_ctx):
+        nonlocal calls
+        calls += 1
+        return {"status": "failed", "error_class": "timeout"}
+
+    result = await krh._run_integrate_rebaseline_with_lock_retry(
+        _executor,
+        object(),
+        workspace=tmp_path,
+        reason="test integrate",
+    )
+
+    assert calls == 1
+    assert result["error_class"] == "stale_jit_lock"
+    assert result["stale_jit_lock"]["retry_attempted"] is False
+
+
 def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     session_dir,
     tmp_path,

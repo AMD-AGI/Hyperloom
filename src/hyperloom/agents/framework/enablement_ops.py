@@ -191,9 +191,60 @@ def rank_titles(
 # ---------------------------------------------------------------------------
 
 
-# Source-root families the authored patch may target.
+# Source-root families the authored patch may target (fallback when discovery fails).
 _FRAMEWORK_ROOT_HINT = "the serving-framework source tree (e.g. sglang / vllm / atom)"
 _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
+
+
+def _resolve_package_version(package: str) -> str:
+    """Return the installed version of *package*, or empty string on failure."""
+    try:
+        import importlib.metadata as _m
+
+        return _m.version(package)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_actual_root_hints(framework: str) -> list[str]:
+    """Return concrete source-root strings for the mandate (never empty).
+
+    Calls probe_framework_source_roots_for_env() and falls back to the generic
+    prose hints when discovery yields nothing.  Also appends version info for the
+    target framework package.
+    """
+    try:
+        from hyperloom.orchestrator.framework.paths import (
+            probe_framework_source_roots_for_env,
+            summarise_framework_root_discovery,
+        )
+
+        roots_str = probe_framework_source_roots_for_env()
+        if roots_str:
+            hints: list[str] = []
+            summary = summarise_framework_root_discovery(roots_str)
+            for root in roots_str.split(":"):
+                root = root.strip()
+                if root:
+                    hints.append(root)
+            hints.append(f"(discovery summary: {summary})")
+            pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
+            pkg_name = pkg_map.get(framework, framework)
+            ver = _resolve_package_version(pkg_name)
+            if ver:
+                hints.append(f"({pkg_name} installed version: {ver})")
+            # Always include the ROCm/HIP root hint (authoring sub-agent always
+            # has /opt/rocm in scope for ROCm-side fixes, regardless of whether
+            # probe discovered it or not).
+            if not any(_ROCM_HIP_ROOT_HINT in h for h in hints):
+                hints.append(_ROCM_HIP_ROOT_HINT)
+            # Keep the generic framework hint as context even when real paths exist.
+            if not any(_FRAMEWORK_ROOT_HINT in h for h in hints):
+                hints.append(_FRAMEWORK_ROOT_HINT)
+            return hints
+    except Exception:  # noqa: BLE001 — discovery is best-effort
+        pass
+    return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
 
 # Invariants every enablement patch must respect.
 ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
@@ -204,7 +255,10 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "setup via ENVIRONMENT SETUP below is separate and allowed.)",
     "Do NOT fabricate throughput/latency/accuracy numbers — the gate here is "
     "RUNNABILITY (does the server boot + pass a minimal inference), not perf.",
-    "Prefer the smallest bridging change that makes the combo run; do not refactor unrelated code.",
+    "Prefer the smallest bridging change that makes the combo run — or, when full "
+    "runnability is out of reach this round, the smallest change that ADVANCES the "
+    "boot past the current failure (see PROGRESS DELIVERABLE below); do not "
+    "refactor unrelated code.",
     "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
@@ -226,6 +280,150 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "they are validated against an install-only allowlist on replay.",
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
+
+# Serial-enablement progress contract. A brand-new architecture or a large
+# capability gap rarely becomes fully runnable inside a single budget window.
+# The integrate side already REWARDS partial progress: a patch that only
+# advances the boot to a *new, deeper* failure is KEPT and stacked as a base for
+# the next round (see ``enablement.enablement_made_progress`` and
+# ``integrate_patch`` ``status="advanced"``). Historically the specialist was
+# only told to make the combo *run*, so on a big gap it judged full runnability
+# infeasible and returned ``empty=true`` wholesale — starving that incremental
+# machinery of the very patches it stacks. This guidance closes that asymmetry:
+# advancing the boot ONE step is an explicit, valid deliverable.
+ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
+    "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
+    "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
+    "have to reach full end-to-end runnability in this one budget window.",
+    "If you cannot make the combo fully run, author the SMALLEST patch that "
+    "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
+    "new, different failure then appears. A patch that changes the failure "
+    "signature is KEPT and stacked as a base; the next round resumes from the "
+    "deeper failure. One step forward is strictly better than returning nothing.",
+    "Record that patch in ``patches_written`` (and any installs in "
+    "``setup_commands``), set ``empty=false``, and in ``summary`` state which "
+    "failure you cleared and what the next (deeper) failure now is.",
+    "Return ``empty=true`` ONLY when you cannot advance past the CURRENT failure "
+    "by even one step — NOT merely because full runnability is out of reach this "
+    "round.",
+)
+
+
+# Targeted-build request contract. A pure source patch (a unified diff against
+# the installed tree) cannot deliver a *compiled* component (a new AITER
+# FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
+# that natively implements a brand-new architecture). Historically the
+# specialist had no way to ask for one — it could only author a patch or return
+# empty — so genuinely-new architectures dead-ended at the arch-registry alias.
+# This contract lets the specialist REQUEST an off-loop targeted build; the
+# Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
+# pinned ROCm torch constraints), gated by the runnable-decision probe.
+ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
+    "REQUESTING A COMPILED / FROM-SOURCE BUILD. If clearing this gap needs a "
+    "*compiled* component (a new AITER FP4/MLA/NSA op, sgl-kernel) or a "
+    "from-source framework build (e.g. a newer vLLM that NATIVELY implements "
+    "this architecture, which a source patch against the INSTALLED tree cannot "
+    "provide), do NOT fake it with an install command or a stub patch. Emit a "
+    "``needs_targeted_build`` object in your final ``specialist_done`` and the "
+    "Coordinator runs it off-loop on an isolated, ROCm-safe build lane.",
+    "``needs_targeted_build`` schema: ``{component, capability, repo_url, ref, "
+    "reason}``. ``component`` is one of ``aiter`` / ``sgl_kernel`` / "
+    "``vllm_source`` / ``framework_ext``. ``capability`` names the missing op / "
+    "arch (e.g. ``deepseek_v4_nsa`` / ``fp4_moe``). ``repo_url`` + ``ref`` are "
+    "OPTIONAL but HIGH-VALUE: if you found (via WebSearch / mcp__pr_monitor__*) "
+    "a specific upstream PR / tag / commit that implements the fix, name it "
+    "(a GitHub PR URL, ``PR:1234``, a tag, or a sha) so the build checks out "
+    "exactly that; leave them empty for tag-descending autoselect. ``reason`` "
+    "is a one-line evidence summary.",
+    "A build request is COMPLEMENTARY to a source patch, not a replacement: you "
+    "MAY both author the smallest patch that advances the boot one step AND "
+    "request a build for the compiled/from-source piece the patch cannot cover. "
+    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT set "
+    "``empty=true`` when you emit one.",
+)
+
+
+_LADDER_TWO_AXES: tuple[str, ...] = (
+    "DIAGNOSE ONCE, THEN CLIMB ONLY AS FAR AS NEEDED. Enablement has two axes:",
+    "  - Diagnosis: work out WHICH capability layer is missing. Read the failure "
+    "signature below, read the model's config.json architecture, check the "
+    "framework's supported-architecture registry and installed version, and check "
+    "upstream (WebSearch / mcp__pr_monitor__*) whether the capability already "
+    "exists and in which version/PR. This picks your ENTRY rung.",
+    "  - Climb: start at the LOWEST plausible rung and go up only when the current "
+    "rung cannot make it boot. A model whose architecture is already supported but "
+    "merely un-wired needs only the cheap top rungs (a flag / a small patch) — do "
+    "NOT pull code or compile for it. A genuinely-new architecture climbs higher.",
+    "After each cleared boot failure, RE-DIAGNOSE the new (deeper) failure and pick "
+    "a rung again — enablement is serial and progress is stacked.",
+)
+
+_LADDER_RUNGS: tuple[str, ...] = (
+    "Rung 0 - Diagnose / capability-gap localization (read-only): classify the "
+    "failure, read config.json, check the supported-arch registry + version, look "
+    "up upstream. Output: the missing layer and your chosen entry rung.",
+    "Rung 1 - Serve-flag / config wire-up: the architecture is supported and only a "
+    "serve flag / env / tokenizer-mode / trivial registration alias is missing. No "
+    "new code or dependencies.",
+    "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
+    "— register the arch, a small forward/config/tokenizer bridge, or backport a "
+    "merged PR. Pure Python, no compile.",
+    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version — "
+    "acquire a wheel / editable checkout / ref into an isolated per-attempt venv. No "
+    "compile, no shared-venv mutation (record it in setup_commands).",
+    "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
+    "source root; changes touching compiled or build-backend files defer to Rung 5.",
+    "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
+    "in an isolated venv with pinned ROCm torch constraints on the off-loop build "
+    "lane. Request it via needs_targeted_build (see below); do not compile inline.",
+)
+
+_LADDER_KIND_TO_RUNG: tuple[str, ...] = (
+    "serve_flag / tokenizer_error -> Rung 1",
+    "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
+    "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
+    "import_error / merged-PR closure -> Rung 4",
+    "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
+    "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
+)
+
+
+def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
+    """Render the advisory enablement methodology (the "ladder book").
+
+    Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
+    ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
+    environment-setup / incremental-progress / targeted-build guidance. When a
+    ``signature`` is given, a one-line entry-rung hint is added; it never routes
+    deterministically.
+    """
+    lines: list[str] = ["ENABLEMENT METHODOLOGY (advisory — you decide how to apply it):", ""]
+    lines.extend(_LADDER_TWO_AXES)
+    lines.append("")
+    lines.append("THE LADDER (increasing complexity — enter at the lowest rung that fits):")
+    for rung in _LADDER_RUNGS:
+        lines.append(f"  - {rung}")
+    lines.append("")
+    lines.append("FAILURE-KIND -> RECOMMENDED ENTRY RUNG (advisory, not a hard mapping):")
+    for m in _LADDER_KIND_TO_RUNG:
+        lines.append(f"  - {m}")
+    kind = (getattr(signature, "kind", "") or "").strip() if signature is not None else ""
+    if kind:
+        lines.append("")
+        lines.append(f"This failure classified as `{kind}` — use the table above to pick your entry rung.")
+    lines.append("")
+    lines.append("ENVIRONMENT SETUP (installs are allowed AND must be recorded):")
+    for g in ENABLEMENT_SETUP_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
+    for g in ENABLEMENT_PROGRESS_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
+    for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
+        lines.append(f"  - {g}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -302,9 +500,7 @@ def _render_task_description(
     for hint in allowed_root_hints:
         lines.append(f"  - {hint}")
     lines.append("")
-    lines.append("ENVIRONMENT SETUP (installs are allowed AND must be recorded):")
-    for g in ENABLEMENT_SETUP_GUIDANCE:
-        lines.append(f"  - {g}")
+    lines.append(build_enablement_ladder_book(sig))
     lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
@@ -318,6 +514,7 @@ def build_mandate(
     signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
+    root_hints: Sequence[str] | None = None,
 ) -> EnablementMandate:
     """Build an :class:`EnablementMandate` from a request + candidates.
 
@@ -327,13 +524,20 @@ def build_mandate(
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
+        root_hints: Explicit source-root hints; when ``None`` (default) they
+            are resolved via :func:`_resolve_actual_root_hints` (which calls
+            ``probe_framework_source_roots_for_env()`` and falls back to the
+            generic prose constants on failure).
 
     Returns:
         EnablementMandate: The authoring contract, ready to hand to the
         specialist runner.
     """
     sig = signature if signature is not None else req.signature
-    hints: list[str] = [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    if root_hints is not None:
+        hints: list[str] = list(root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    else:
+        hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
     task = _render_task_description(req, sig, refs, hints, source_context)
     return EnablementMandate(
@@ -347,11 +551,14 @@ def build_mandate(
 
 
 __all__ = [
+    "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
+    "ENABLEMENT_PROGRESS_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
     "EnablementMandate",
     "EnablementSearchPlan",
+    "build_enablement_ladder_book",
     "build_mandate",
     "build_search_plan",
     "rank_titles",

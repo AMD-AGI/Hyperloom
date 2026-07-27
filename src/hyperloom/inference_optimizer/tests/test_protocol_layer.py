@@ -171,6 +171,7 @@ def test_known_lanes_v08_includes_research_lane():
         "profile_lane",
         "research_lane",
         "gpu_research_lane",
+        "build_lane",
     }
 
 

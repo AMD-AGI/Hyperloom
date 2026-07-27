@@ -31,7 +31,13 @@ from _io_utils import (  # noqa: E402
     source_text_looks_complete,
     utc_now,
 )
+from _invocation_spec import (  # noqa: E402
+    build_invocation_spec,
+    invocation_spec_filename,
+    write_invocation_spec,
+)
 from _paths import workspace_root  # noqa: E402
+from _task_group_contract import task_group_shape_cases  # noqa: E402
 
 sys.path.pop(0)
 
@@ -132,6 +138,40 @@ def load_candidates(path: Path) -> list[dict[str, Any]]:
             if isinstance(candidate, dict):
                 candidate.setdefault("trace_report_path", str(report_path))
     return candidates
+
+
+def load_candidate_input(path: str, kernel_id: str) -> dict[str, Any] | None:
+    """Load a serialized dispatch candidate, including task-group context."""
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate_id = str(payload.get("kernel_id") or "")
+    if candidate_id and candidate_id != str(kernel_id):
+        return None
+    return payload
+
+
+def task_group_result_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return stable task-group identity and shape-contract metadata."""
+    group = candidate.get("task_group")
+    if not isinstance(group, dict):
+        return {}
+    cases = task_group_shape_cases(candidate)
+    return {
+        "task_group_id": str(group.get("task_group_id") or ""),
+        "task_group_key": str(group.get("task_group_key") or ""),
+        "task_group_kernel_ids": [str(item) for item in (group.get("kernel_ids") or []) if str(item)],
+        "task_group_primary_kernel_id": str(group.get("primary_kernel_id") or candidate.get("kernel_id") or ""),
+        "task_group_shape_case_ids": [
+            str(case.get("case_id") or "") for case in cases if str(case.get("case_id") or "")
+        ],
+        "task_group_shape_case_count": len(cases),
+    }
 
 
 def _normalize_kernel_id(value: str) -> str:
@@ -793,10 +833,30 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
     """
     group = candidate.get("task_group")
     rows = group.get("rows") if isinstance(group, dict) else None
+    grouped_shape_cases = group.get("shape_cases") if isinstance(group, dict) else None
     cases: list[dict[str, Any]] = []
     input_shapes = candidate.get("input_shapes")
     is_synthetic = bool(candidate.get("_input_shapes_synthetic"))
-    if isinstance(rows, list) and rows:
+    if isinstance(grouped_shape_cases, list) and grouped_shape_cases:
+        for index, grouped_case in enumerate(grouped_shape_cases):
+            if not isinstance(grouped_case, dict):
+                continue
+            case = _shape_case_from_value(
+                grouped_case.get("input_shapes"),
+                call_count=grouped_case.get("call_count"),
+                primary=index == 0,
+            )
+            case.update(
+                {
+                    "case_id": str(grouped_case.get("case_id") or ""),
+                    "selector": dict(grouped_case.get("selector") or {}),
+                    "operation": str(grouped_case.get("operation") or ""),
+                    "source": "task_group_shape_cases",
+                }
+            )
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    elif isinstance(rows, list) and rows:
         # Prefer task_group rows so the prompt keeps supplementary shapes.
         for idx, row in enumerate(rows):
             if not isinstance(row, dict):
@@ -2084,6 +2144,24 @@ def invoke_backend(
             # emits optimized_versions/ + optimization_report.md.
             forge = _import_backend("forge_submit")
             out_dir = _forge_output_dir(args.session_id, prompt_file)
+            invocation_spec_path = out_dir / invocation_spec_filename(candidate)
+            try:
+                invocation_spec = build_invocation_spec(
+                    candidate,
+                    source_file=source_file,
+                    test_command=common_test_command,
+                )
+                write_invocation_spec(invocation_spec_path, invocation_spec)
+                if log_path is not None:
+                    append_log(log_path, f"[invocation_spec] wrote {invocation_spec_path}")
+            except Exception as exc:
+                # Evidence extraction must not block an otherwise runnable Forge
+                # attempt while the spec is not yet a required CLI input.
+                if log_path is not None:
+                    append_log(
+                        log_path,
+                        f"[invocation_spec] failed: {type(exc).__name__}: {exc}",
+                    )
             result = forge.submit(
                 source_file=source_file,
                 prompt_file=prompt_file,
@@ -2095,8 +2173,15 @@ def invoke_backend(
                 timeout_s=timeout_s,
                 prefer_ray=prefer_ray,
                 kernel_repo=kernel_repo,
+                invocation_spec_file=(
+                    str(invocation_spec_path)
+                    if invocation_spec_path.is_file()
+                    else ""
+                ),
             )
             result["output_dir"] = str(out_dir)
+            if invocation_spec_path.is_file():
+                result["invocation_spec_path"] = str(invocation_spec_path)
             if common_test_command:
                 result["test_command"] = common_test_command
             return result
@@ -2214,6 +2299,20 @@ def run_attempt(
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
+            invocation_spec_path = (
+                result.get("invocation_spec_path") or ""
+                if isinstance(result, dict)
+                else ""
+            )
+            if invocation_spec_path:
+                backend_paths["invocation_spec"] = str(invocation_spec_path)
+            checkpoint_path = (
+                result.get("checkpoint_path") or ""
+                if isinstance(result, dict)
+                else ""
+            )
+            if checkpoint_path:
+                backend_paths["forge_checkpoint"] = str(checkpoint_path)
             cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
             session_id_oob = (result.get("session_id") or "") if isinstance(result, dict) else ""
             cli_log = ""
@@ -2272,6 +2371,11 @@ def run_attempt(
                 "partial_latest_optimized",
                 "partial_report",
             )
+            unrecoverable_timeout = bool(
+                isinstance(result, dict)
+                and result.get("timed_out")
+                and not result.get("salvaged")
+            )
             auth_loop_hits = _count_auth_failures(full_stdout)
             if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
                 backend_paths["auth_failure_count"] = str(auth_loop_hits)
@@ -2279,7 +2383,11 @@ def run_attempt(
                 # Force a non-partial terminal state so make_proposal REVERTs.
                 if status == "timeout":
                     status = "failed"
-            elif status in {"timeout", "failed"} and any(k in backend_paths for k in partial_evidence_keys):
+            elif (
+                not unrecoverable_timeout
+                and status in {"timeout", "failed"}
+                and any(k in backend_paths for k in partial_evidence_keys)
+            ):
                 status = "partial"
 
     return {
@@ -2291,6 +2399,9 @@ def run_attempt(
         # Structured backend self-skip marker so the classifier labels the
         # kernel ``skip`` instead of a failure without parsing free-text stdout.
         "skipped": bool(result.get("skipped")) if isinstance(result, dict) else False,
+        "timed_out": bool(result.get("timed_out")) if isinstance(result, dict) else False,
+        "salvaged": bool(result.get("salvaged")) if isinstance(result, dict) else False,
+        "best_commit": str(result.get("best_commit") or "") if isinstance(result, dict) else "",
         "elapsed_s": elapsed,
         "prompt_path": str(prompt_file),
         "optimized_path": str(optimized_path) if optimized_path.exists() else "",
@@ -3172,6 +3283,11 @@ def main() -> int:
         ),
     )
     parser.add_argument("--candidates-path", default="")
+    parser.add_argument(
+        "--candidate-json",
+        default="",
+        help="Serialized dispatch candidate; preserves task-group context.",
+    )
     parser.add_argument("--backends", default="")
     parser.add_argument("--benchmark-file", default="")
     parser.add_argument("--test-harness-path", default="")
@@ -3226,7 +3342,9 @@ def main() -> int:
         )
         candidates_path = Path(args.candidates_path) if args.candidates_path else resolve_candidates_path(run_dir)
         all_candidates = load_candidates(candidates_path)
-        candidate = find_candidate(all_candidates, args.kernel_id)
+        candidate = load_candidate_input(args.candidate_json, args.kernel_id)
+        if candidate is None:
+            candidate = find_candidate(all_candidates, args.kernel_id)
         if candidate is None:
             # kernel_id matches no candidate; skip cleanly instead of crashing.
             known = [str(c.get("kernel_id") or "") for c in all_candidates]
@@ -3393,6 +3511,7 @@ def main() -> int:
                 "status_path": str(status_path),
             },
         }
+        result.update(task_group_result_metadata(candidate))
         atomic_write_json(result_path, result)
         artifacts.update(result["artifact_paths"])
         update_status(

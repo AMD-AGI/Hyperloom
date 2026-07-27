@@ -1,20 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared aiter JIT cache helpers: dir resolution, cold/warm constants, and
-stale-lock cleanup.
+"""Shared aiter build-cache helpers and stale-lock cleanup.
 
-aiter JIT-compiles GPU kernels on demand with ninja, guarding each module
-build with a per-module file lock. The lock is a zero-byte file with no pid
-inside and ``FileBaton.wait()`` spins forever with no timeout, so a ``hipcc``
-build killed mid-compile never releases its lock and every later process
-compiling that module spins forever.
+aiter has two independent runtime build trees:
 
-This module resolves the aiter jit dir and sweeps orphaned locks before each
-cold server start, but ONLY when no compiler process is alive (the jit dir is
-node-global and shared across concurrent benchmarks). ninja resumes the build
-incrementally once the lock is gone, so we delete only locks — never build
-artifacts.
+* ``AITER_JIT_DIR`` / ``aiter/jit/build`` for ``compile_ops`` modules.
+* ``AITER_ROOT_DIR/build`` (normally ``~/.aiter/build``) for ``cpp_itfs``
+  template modules such as paged attention.
+
+Both use zero-byte ``FileBaton`` locks with no owner pid and an unbounded
+``wait()``. A build killed mid-compile therefore blocks every later process
+that needs the same module.
+
+This module resolves and sweeps both trees. Upstream lock files do not encode an
+owner pid, so shared-cache locks are removed only after the conservative age
+threshold and only when no compiler is alive. Forge-owned private caches carry
+separate owner metadata and are cleaned by KernelForge. Build artifacts are
+never deleted.
 """
 
 from __future__ import annotations
@@ -45,6 +48,12 @@ AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
     "/opt/venv/lib/python3.12/site-packages/aiter/jit",
 )
 
+# Fallback locations for cpp_itfs template builds. ``AITER_ROOT_DIR`` and the
+# current HOME are resolved dynamically before these paths.
+AITER_CPP_BUILD_PROBE_PATHS: tuple[str, ...] = (
+    "/root/.aiter/build",
+)
+
 # Default mtime gate (minutes) for the lock sweep; fallback when compiler
 # liveness is unknown. The proven-dead path bypasses it with stale_minutes=0.
 AITER_LOCK_STALE_MINUTES = 5
@@ -66,6 +75,8 @@ COMPILER_PROCESS_NAMES = frozenset(
 
 # Lock file names left by aiter / ninja under the jit dir.
 _LOCK_NAMES = {"lock", ".ninja_lock"}
+_BATON_WAIT_MARKER = "waiting for baton release at"
+_BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"}
 
 
 def _resolve_aiter_jit_dir_dynamic() -> list[str]:
@@ -91,12 +102,16 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     ]
 
 
-def _any_live_compiler() -> bool | None:
-    """Return True if any aiter/ninja compiler process is alive, else False.
+def _any_live_compiler(
+    build_dirs: list[Path] | None = None,
+) -> bool | None:
+    """Return True if a compiler associated with the build trees is alive.
 
     Used to decide whether an aiter JIT lock is dead (orphaned by a killed
-    build) or held by a legitimate in-flight compile. The lock file carries no
-    pid, so we scan the node for live compiler processes instead.
+    build) or held by a legitimate in-flight compile. When ``build_dirs`` is
+    provided, a compiler counts only when its cwd or command line references
+    one of those trees. This prevents an unrelated long-running ``hipcc`` on the
+    same node from disabling cleanup forever.
 
     Returns ``None`` when process enumeration itself fails (psutil missing or
     erroring) — callers MUST treat ``None`` as "unknown" and refuse to delete
@@ -107,17 +122,33 @@ def _any_live_compiler() -> bool | None:
     except ImportError:
         return None
     try:
-        for proc in psutil.process_iter(["name", "cmdline"]):
+        normalized_dirs = [
+            str(path.resolve())
+            for path in (build_dirs or [])
+        ]
+        for proc in psutil.process_iter(["name", "cmdline", "cwd"]):
             try:
                 info = proc.info
                 name = (info.get("name") or "").strip()
-                if name in COMPILER_PROCESS_NAMES:
-                    return True
                 cmdline = info.get("cmdline") or []
+                is_compiler = name in COMPILER_PROCESS_NAMES
                 if cmdline:
                     first = os.path.basename(str(cmdline[0]).strip())
                     if first in COMPILER_PROCESS_NAMES:
-                        return True
+                        is_compiler = True
+                if not is_compiler:
+                    continue
+                if not normalized_dirs:
+                    return True
+                cwd = str(info.get("cwd") or "")
+                command = "\0".join(str(arg) for arg in cmdline)
+                if any(
+                    cwd == build_dir
+                    or cwd.startswith(f"{build_dir}{os.sep}")
+                    or build_dir in command
+                    for build_dir in normalized_dirs
+                ):
+                    return True
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
     except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
@@ -126,43 +157,90 @@ def _any_live_compiler() -> bool | None:
     return False
 
 
-def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
-    """Resolve the build dir to sweep for locks: arg → env → dynamic → fallbacks.
+def _dedupe_existing_dirs(candidates: list[Path]) -> list[Path]:
+    """Return existing candidate directories once, preserving priority."""
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            normalized = candidate.expanduser().resolve()
+        except OSError:
+            normalized = candidate.expanduser().absolute()
+        key = str(normalized)
+        if key in seen or not normalized.is_dir():
+            continue
+        seen.add(key)
+        resolved.append(normalized)
+    return resolved
 
-    Returns the first existing directory, or ``None`` when nothing resolves, so
-    the swept dir matches what aiter actually writes locks into. A non-None
-    caller arg is trusted as-is (the ``os.walk`` of a nonexistent path simply
-    yields nothing).
+
+def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None) -> list[Path]:
+    """Resolve every active aiter build tree that may contain baton locks.
+
+    An explicit argument remains a single-directory test/diagnostic override.
+    Automatic resolution covers both ``AITER_ROOT_DIR/build`` and
+    ``AITER_JIT_DIR/build`` rather than stopping at the first JIT directory.
     """
     if aiter_jit_dir is not None:
-        return aiter_jit_dir
+        return [aiter_jit_dir]
 
-    candidates: list[str] = []
+    candidates: list[Path] = []
+    aiter_root = os.environ.get("AITER_ROOT_DIR", "").strip()
+    if aiter_root:
+        candidates.append(Path(aiter_root) / "build")
+    else:
+        home = os.environ.get("HOME", "").strip()
+        if home:
+            candidates.append(Path(home) / ".aiter" / "build")
+        candidates.extend(Path(path) for path in AITER_CPP_BUILD_PROBE_PATHS)
+
+    aiter_jit_override = os.environ.get("AITER_JIT_DIR", "").strip()
+    if aiter_jit_override:
+        override_path = Path(aiter_jit_override)
+        candidates.extend([override_path / "build", override_path])
+    if aiter_root and aiter_jit_override:
+        # Forge sets both variables for a private attempt. Treat the pair as an
+        # authoritative namespace and never wander into shared fallback trees.
+        return _dedupe_existing_dirs(candidates)
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
     if override:
         override_path = Path(override)
-        candidates.extend([str(override_path), str(override_path / "build")])
+        # Preserve the legacy explicit-override contract: callers use this
+        # variable to constrain a diagnostic/test sweep to one tree.
+        return _dedupe_existing_dirs([override_path / "build", override_path])
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
         spec = None
     if spec is not None and spec.origin:
         aiter_root = Path(spec.origin).parent
-        candidates.append(str(aiter_root / "jit" / "build"))
+        candidates.append(aiter_root / "jit" / "build")
     candidates.extend(
-        [
+        Path(path)
+        for path in (
             "/sgl-workspace/aiter/aiter/jit/build",
             "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
             "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
             "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
             "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
-        ]
+        )
     )
-    for cand in candidates:
-        p = Path(cand)
-        if p.is_dir():
-            return p
-    return None
+    return _dedupe_existing_dirs(candidates)
+
+
+def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
+    """Compatibility wrapper returning the first resolved build tree."""
+    if aiter_jit_dir is None:
+        override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+        if override:
+            override_path = Path(override)
+            preferred = _dedupe_existing_dirs(
+                [override_path / "build", override_path]
+            )
+            if preferred:
+                return preferred[0]
+    resolved = _resolve_lock_sweep_dirs(aiter_jit_dir)
+    return resolved[0] if resolved else None
 
 
 def clean_stale_aiter_locks(
@@ -173,8 +251,8 @@ def clean_stale_aiter_locks(
 
     Killed runs leave locks that block the next compile. Only deletes locks
     with mtime older than ``stale_minutes`` (default 5). Pass
-    ``stale_minutes=0`` only when liveness has proven the locks are orphaned
-    (see ``sweep_stale_aiter_locks_if_dead``). Build dir resolution: caller arg
+    ``stale_minutes=0`` is reserved for a caller that independently owns the
+    cache. Build dir resolution: caller arg
     → $INFERENCE_OPTIMIZER_AITER_JIT_DIR → dynamic <aiter>/jit/build → legacy
     fallbacks. Never raises (errors counted).
 
@@ -190,46 +268,51 @@ def clean_stale_aiter_locks(
     """
     stats: dict[str, Any] = {
         "dir": None,
+        "dirs": [],
         "scanned": 0,
         "deleted": 0,
         "skipped_fresh": 0,
         "errors": 0,
     }
 
-    resolved = _resolve_lock_sweep_dir(aiter_jit_dir)
-    if resolved is None:
+    resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
+    if not resolved_dirs:
         return stats
-    aiter_jit_dir = resolved
 
-    stats["dir"] = str(aiter_jit_dir)
+    primary = (
+        _resolve_lock_sweep_dir(None)
+        if aiter_jit_dir is None
+        else resolved_dirs[0]
+    )
+    stats["dir"] = str(primary or resolved_dirs[0])
+    stats["dirs"] = [str(path) for path in resolved_dirs]
 
     threshold_seconds = float(stale_minutes) * 60.0
     now = time.time()
-    try:
-        walker = os.walk(str(aiter_jit_dir))
-    except OSError:
-        stats["errors"] += 1
-        return stats
-
-    for root, _dirs, files in walker:
-        for fname in files:
-            if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
-                continue
-            stats["scanned"] += 1
-            fpath = Path(root) / fname
-            try:
-                age = now - fpath.stat().st_mtime
-            except OSError:
-                stats["errors"] += 1
-                continue
-            if age < threshold_seconds:
-                stats["skipped_fresh"] += 1
-                continue
-            try:
-                fpath.unlink()
-                stats["deleted"] += 1
-            except OSError:
-                stats["errors"] += 1
+    for resolved in resolved_dirs:
+        try:
+            walker = os.walk(str(resolved))
+            for root, _dirs, files in walker:
+                for fname in files:
+                    if not (fname in _LOCK_NAMES or fname.startswith("lock_")):
+                        continue
+                    stats["scanned"] += 1
+                    fpath = Path(root) / fname
+                    try:
+                        age = now - fpath.stat().st_mtime
+                    except OSError:
+                        stats["errors"] += 1
+                        continue
+                    if age < threshold_seconds:
+                        stats["skipped_fresh"] += 1
+                        continue
+                    try:
+                        fpath.unlink()
+                        stats["deleted"] += 1
+                    except OSError:
+                        stats["errors"] += 1
+        except OSError:
+            stats["errors"] += 1
 
     return stats
 
@@ -239,24 +322,27 @@ def sweep_stale_aiter_locks_if_dead(
 ) -> dict[str, Any]:
     """Sweep orphaned aiter JIT locks, gated on no live compiler process.
 
-    The jit dir is node-global and shared across concurrent benchmarks, so a
-    live ``hipcc``/``ninja`` may legitimately hold a lock. We therefore only
-    delete when liveness is confidently ``False``:
+    The build dirs may be node-global and shared across concurrent benchmarks,
+    so a live ``hipcc``/``ninja`` may legitimately hold a lock. Upstream baton
+    files have no owner pid, so process liveness alone cannot prove a fresh lock
+    is orphaned. The policy is:
 
     * live compiler present (``True``) → skip entirely (don't disturb a real
       in-flight compile).
     * liveness unknown (``None``, psutil missing/errored) → fall back to the
       mtime-gated sweep so a genuinely ancient lock can still be reaped.
-    * no live compiler (``False``) → every lock is orphaned; sweep with
-      ``stale_minutes=0`` (mtime gate not needed — liveness already proved it).
+    * no live compiler (``False``) → remove only locks older than the stale-age
+      threshold. Fresh locks remain protected because their owner is unknown.
 
     Returns the underlying stats dict augmented with ``compiler_alive`` and,
     on the skip path, ``skipped_live=True``.
     """
-    alive = _any_live_compiler()
+    resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
+    alive = _any_live_compiler(resolved_dirs)
     if alive is True:
         return {
             "dir": None,
+            "dirs": [],
             "scanned": 0,
             "deleted": 0,
             "skipped_fresh": 0,
@@ -271,18 +357,78 @@ def sweep_stale_aiter_locks_if_dead(
         )
         stats["compiler_alive"] = None
         return stats
-    stats = clean_stale_aiter_locks(aiter_jit_dir, stale_minutes=0)
+    stats = clean_stale_aiter_locks(
+        aiter_jit_dir,
+        stale_minutes=AITER_LOCK_STALE_MINUTES,
+    )
     stats["compiler_alive"] = False
     return stats
 
 
+def find_aiter_baton_wait(
+    search_root: Path,
+    *,
+    since_unix: float | None = None,
+    max_files: int = 20,
+    tail_bytes: int = 256 * 1024,
+) -> dict[str, str] | None:
+    """Find bounded log evidence of an aiter process blocked on a FileBaton.
+
+    Only recent benchmark/server logs are inspected and only their tails are
+    read, so classification remains cheap even when an integration workspace
+    contains large logs from multiple attempts.
+    """
+    try:
+        candidates = [
+            path
+            for path in search_root.rglob("*")
+            if path.is_file() and path.name in _BATON_LOG_NAMES
+        ]
+    except OSError:
+        return None
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    candidates.sort(key=_mtime, reverse=True)
+    if since_unix is not None:
+        candidates = [
+            path for path in candidates if _mtime(path) >= since_unix
+        ]
+    marker_lower = _BATON_WAIT_MARKER.lower()
+    for path in candidates[:max_files]:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - tail_bytes))
+                text = handle.read().decode(errors="replace")
+        except OSError:
+            continue
+        marker_index = text.lower().rfind(marker_lower)
+        if marker_index < 0:
+            continue
+        line_end = text.find("\n", marker_index)
+        excerpt_end = len(text) if line_end < 0 else min(len(text), line_end + 512)
+        return {
+            "log_path": str(path),
+            "excerpt": text[marker_index:excerpt_end].strip(),
+        }
+    return None
+
+
 __all__ = [
+    "AITER_CPP_BUILD_PROBE_PATHS",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "clean_stale_aiter_locks",
+    "find_aiter_baton_wait",
     "sweep_stale_aiter_locks_if_dead",
     "_any_live_compiler",
     "_resolve_aiter_jit_dir_dynamic",
+    "_resolve_lock_sweep_dirs",
 ]
