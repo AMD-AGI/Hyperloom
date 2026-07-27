@@ -39,25 +39,31 @@ log = _logging.getLogger(__name__)
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
-    def _current_profile_config_signature(self) -> str:
-        """Return a stable identity for the optimized serving configuration."""
-        current_best = getattr(self.shared_state, "current_best", None) or {}
-        if not isinstance(current_best, dict) or not current_best:
+    @staticmethod
+    def _serving_config_signature(serving_config: Any) -> str:
+        """Stable identity string for a ``serving_config`` sub-dict, or '' when empty.
+
+        Reuses the exact ``serving_config`` shape built by
+        ``SharedState.profile_workload_context`` so the reprofile gate and the
+        recorded-trace workload are normalized identically (no second, drifting
+        copy of the engine/args/env rules).
+        """
+        if not isinstance(serving_config, Mapping) or not serving_config:
             return ""
-        raw_envs = current_best.get("extra_envs") or {}
+        raw_envs = serving_config.get("extra_envs") or {}
         envs = (
             {
                 str(key): str(value)
                 for key, value in raw_envs.items()
                 if str(key).strip()
             }
-            if isinstance(raw_envs, dict)
+            if isinstance(raw_envs, Mapping)
             else {}
         )
         payload = {
-            "engine": str(current_best.get("engine") or "").strip().lower(),
+            "engine": str(serving_config.get("engine") or "").strip().lower(),
             "extra_server_args": str(
-                current_best.get("extra_server_args") or ""
+                serving_config.get("extra_server_args") or ""
             ).strip(),
             "extra_envs": envs,
         }
@@ -69,31 +75,33 @@ class KernelPhase(PhaseHandler):
             separators=(",", ":"),
         )
 
+    def _current_profile_config_signature(self) -> str:
+        """Return a stable identity for the optimized serving configuration."""
+        serving_config = self.shared_state.profile_workload_context().get(
+            "serving_config"
+        )
+        return self._serving_config_signature(serving_config)
+
     def _profile_config_changed(self, signature: str) -> bool:
-        """Whether the latest trace predates the current backend/config."""
+        """Whether the latest trace predates the current backend/config.
+
+        Compares the current serving-config signature against the one implied by
+        the recorded profile workload (``last_profile_workload['serving_config']``,
+        written by the roofline executor and writeback). This is apples-to-apples:
+        it never confuses the plain ``last_profile_args`` string with a config
+        signature, so a trace already profiled under the current config does not
+        spuriously force a kernel-entry reprofile.
+        """
         if not signature:
             return False
-        previous = str(
-            getattr(self.shared_state, "last_profile_args", "") or ""
-        ).strip()
-        if previous == signature:
+        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        if not isinstance(recorded, Mapping) or not recorded:
+            # No workload recorded for the trace: defer to
+            # _profile_workload_changed, which owns the "stale trace with no
+            # workload metadata" decision.
             return False
-        # Backward compatibility for traces recorded before signatures included
-        # env/backend identity: plain args are sufficient only when there are no
-        # additional envs or engine marker in the current signature.
-        current_best = getattr(self.shared_state, "current_best", None) or {}
-        raw_envs = current_best.get("extra_envs") if isinstance(current_best, dict) else {}
-        engine = (
-            str(current_best.get("engine") or "").strip()
-            if isinstance(current_best, dict)
-            else ""
-        )
-        args = (
-            str(current_best.get("extra_server_args") or "").strip()
-            if isinstance(current_best, dict)
-            else ""
-        )
-        return bool(raw_envs or engine or previous != args)
+        previous = self._serving_config_signature(recorded.get("serving_config"))
+        return previous != signature
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
@@ -172,9 +180,10 @@ class KernelPhase(PhaseHandler):
         )
         if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
-            if profile_signature:
-                self.shared_state.last_profile_args = profile_signature
             self.shared_state.last_profile_status = "succeeded"
+            # Record the workload (incl. serving_config) that this trace reflects;
+            # _profile_config_changed derives the config signature from it, so
+            # last_profile_args stays the plain-args field it is everywhere else.
             self.shared_state.last_profile_workload = (
                 self.shared_state.profile_workload_context()
             )

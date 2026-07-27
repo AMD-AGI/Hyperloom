@@ -2520,6 +2520,33 @@ class TestRunGemmTuningHandler:
             {"M": 4096, "N": 34816, "K": 5120}
         ]
 
+    def test_extract_gemm_shapes_tolerates_whitespace_after_comma(self, tmp_path):
+        # TraceLens may render tuples with a space after the comma
+        # ("(1024, 5120)"); the extractor must still parse M/N/K instead of
+        # silently dropping every shape and falling back to config defaults.
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale",
+                            "input_shapes": [
+                                {"shape": "(1024, 5120) fp8<br>(34816, 5120) fp8"}
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 1024, "N": 34816, "K": 5120}
+        ]
+
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
 class TestDefaultKernelBatchParallel:

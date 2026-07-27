@@ -1750,16 +1750,7 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
 
 def _profile_shapes_are_fresh(state: Any) -> bool:
     """Return whether the latest profile matches the active workload/config."""
-    if (
-        str(getattr(state, "last_profile_status", "") or "").strip().lower()
-        != "succeeded"
-    ):
-        return False
-    recorded = getattr(state, "last_profile_workload", None)
-    if not isinstance(recorded, dict) or not recorded:
-        return False
-    expected = state.profile_workload_context()
-    return recorded == expected
+    return bool(state.profile_trace_matches_workload())
 
 
 def _resolve_forge_shapes(
@@ -1867,9 +1858,12 @@ def _extract_gemm_shapes_from_candidates(
             parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
             if len(parts) < 2:
                 continue
-            dim_pattern = _re.compile(r"\((\d+),(\d+)\)")
-            m0 = dim_pattern.match(parts[0])
-            m1 = dim_pattern.match(parts[1])
+            # Tolerate whitespace after the comma ("(1024, 5120)") and any
+            # leading token before the tuple; TraceLens formats vary. .search()
+            # rather than .match() so a leading dtype/name does not defeat it.
+            dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+            m0 = dim_pattern.search(parts[0])
+            m1 = dim_pattern.search(parts[1])
             if not m0 or not m1:
                 continue
             M = int(m0.group(1))
@@ -2045,8 +2039,8 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
                 is_blockscale = True
                 break
     if is_blockscale:
-        if _is_gfx950(gpu_type) and framework.lower() in ("sglang", ""):
-            return "bpreshuffle"
+        if _is_gfx950(gpu_type) and framework.lower() == "sglang":
+            return "blockscale_bpreshuffle"
         return "blockscale"
     return "per_token"
 
@@ -2387,10 +2381,10 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "successful; running a dedicated profile"
         )
         return None
-    profile_workload = getattr(state, "last_profile_workload", None)
     expected_workload = current_workload or state.profile_workload_context()
-    recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
-    if recorded_workload != expected_workload:
+    if not state.profile_trace_matches_workload(expected_workload):
+        profile_workload = getattr(state, "last_profile_workload", None)
+        recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
         mismatches = sorted(
             key
             for key in set(recorded_workload) | set(expected_workload)
