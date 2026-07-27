@@ -223,16 +223,12 @@ class RooflineExecutor:
     last_profile_trace / analysis_md_path for audit.
     """
 
-    def __init__(self, *, shared_state: Any, persist_state: bool = True):
+    def __init__(self, *, shared_state: Any):
         """Initialize the executor with a required SharedState reference.
 
         Args:
             shared_state (Any): The SharedState instance the executor mutates
                 (profile fields, trace_analyze cache). Must not be ``None``.
-            persist_state: Whether lifecycle updates may save the mutated state
-                to the session. Nested shape-capture runs use an isolated copy
-                and disable persistence.
-
         Raises:
             ValueError: If ``shared_state`` is ``None``.
         """
@@ -243,7 +239,6 @@ class RooflineExecutor:
                 "from cli._register_executors"
             )
         self.shared_state = shared_state
-        self.persist_state = persist_state
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the roofline action for the given context.
@@ -275,12 +270,7 @@ class RooflineExecutor:
                 detail="auto-roofline: profile + TraceLens",
             )
             _sd0 = Path(session_dir)
-            if (
-                self.persist_state
-                and _sd0.name
-                and _sd0.is_dir()
-                and (_sd0 / "state.json").exists()
-            ):
+            if _sd0.name and _sd0.is_dir() and (_sd0 / "state.json").exists():
                 self.shared_state.save(_sd0)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle START emit failed", exc_info=True)
@@ -723,12 +713,7 @@ class RooflineExecutor:
                 duration_s=time.monotonic() - _lc_t0,
             )
             sd = Path(session_dir)
-            if (
-                self.persist_state
-                and sd.name
-                and sd.is_dir()
-                and (sd / "state.json").exists()
-            ):
+            if sd.name and sd.is_dir() and (sd / "state.json").exists():
                 self.shared_state.save(sd)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("roofline: lifecycle emit failed", exc_info=True)

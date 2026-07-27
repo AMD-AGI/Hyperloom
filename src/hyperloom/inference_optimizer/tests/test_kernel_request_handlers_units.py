@@ -1181,16 +1181,16 @@ class TestRunGemmTuningHandler:
                 "extra_envs": {
                     "VLLM_ROCM_USE_AITER": "1",
                     "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                    "PYTORCH_TUNABLEOP_ENABLED": "1",
                 }
             },
         )
         captured: dict = {}
 
         class FakeRooflineExecutor:
-            def __init__(self, *, shared_state, persist_state=True):
+            def __init__(self, *, shared_state):
                 captured["init"] = {
                     "shared_state": shared_state,
-                    "persist_state": persist_state,
                 }
 
             async def __call__(self, ctx):
@@ -1252,12 +1252,9 @@ class TestRunGemmTuningHandler:
         assert "steady_state_mode" not in task.params
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
-        assert not any(
-            name.startswith(("HL_TUNABLEOP_", "PYTORCH_TUNABLEOP_"))
-            for name in task.params["extra_envs"]
-        )
-        assert "PYTORCH_TUNABLEOP_ENABLED" in task.params["unset_envs"]
-        assert captured["init"]["persist_state"] is False
+        assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert "PYTORCH_TUNABLEOP_ENABLED" not in task.params["unset_envs"]
+        assert captured["init"]["shared_state"] is state
 
     def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch):
         import gzip
@@ -1283,8 +1280,12 @@ class TestRunGemmTuningHandler:
             precision="fp8",
             model_path="/models/qwen",
             current_best={
-                "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+                "extra_envs": {
+                    "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                    "PYTORCH_TUNABLEOP_ENABLED": "1",
+                },
             },
+            last_baseline={"benchmark_script": "vllm_custom.sh"},
         )
         captured: dict = {}
 
@@ -1296,14 +1297,11 @@ class TestRunGemmTuningHandler:
                 raise AssertionError("block-FP8 profile capture must use RooflineExecutor")
 
         class FakeRooflineExecutor:
-            def __init__(self, *, shared_state, persist_state=True):
+            def __init__(self, *, shared_state):
                 captured["shared_state"] = shared_state
-                captured["persist_state"] = persist_state
 
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
-                captured["shared_state"].current_best["nested_mutation"] = True
-                captured["shared_state"].lifecycle.append({"step": "nested"})
                 return {
                     "status": "succeeded",
                     "steady_state_trace": str(steady_trace),
@@ -1328,17 +1326,18 @@ class TestRunGemmTuningHandler:
         assert result["capture_mode"] == "block_fp8_profile"
         assert result["shape_count"] == 1
         assert result["source_profile_trace"] == str(steady_trace)
-        assert captured["persist_state"] is False
-        assert "nested_mutation" not in state.current_best
-        assert state.lifecycle == []
+        assert captured["shared_state"] is state
         task = captured["task"]
         assert "config_path" not in task.params
         assert "timeout_sec" not in task.params
         assert "analysis_route" not in task.params
         assert "steady_state_mode" not in task.params
         assert "reason" not in task.params
+        assert task.params["benchmark_script"] == "vllm_custom.sh"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
         assert "VLLM_ROCM_USE_AITER" not in task.params["extra_envs"]
+        assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert "PYTORCH_TUNABLEOP_ENABLED" not in task.params["unset_envs"]
         assert "profiler-config.delay_iterations" not in task.params["extra_server_args"]
         assert "profiler-config.max_iterations" not in task.params["extra_server_args"]
 
@@ -1878,6 +1877,138 @@ class TestRunGemmTuningHandler:
         assert result["shape_capture"]["capture_mode"] == "roofline_profile_reuse"
         assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
         assert result["status"] == "ok"
+
+    @pytest.mark.parametrize("stale_reason", ["legacy_metadata", "missing_steady_trace"])
+    def test_vllm_block_fp8_handler_runs_one_standard_roofline_fallback(
+        self,
+        tmp_path,
+        monkeypatch,
+        stale_reason,
+    ):
+        import gzip
+
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
+
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "forge_gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["Qwen3ForCausalLM"],
+                    "hidden_size": 5120,
+                    "intermediate_size": 17408,
+                    "quantization_config": {
+                        "quant_method": "fp8",
+                        "weight_block_size": [128, 128],
+                    },
+                }
+            )
+        )
+        old_trace = tmp_path / "old.trace.json"
+        old_trace.write_text(json.dumps({"traceEvents": []}))
+        old_selected_trace = tmp_path / "old_mixed_steady_state.trace.json"
+        old_selected_trace.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[1, 5120], [34816, 5120]]},
+                        }
+                    ]
+                }
+            )
+        )
+        selected_trace = tmp_path / "decode_only_steady_state.trace.json.gz"
+        with gzip.open(selected_trace, "wt", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[64, 5120], [34816, 5120]]},
+                        }
+                    ]
+                },
+                stream,
+            )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path=str(model),
+            gpu_type="mi325x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(old_trace),
+            last_profile_status="succeeded",
+            last_trace_analyze={
+                "trace_input": str(old_trace),
+                **(
+                    {"steady_state_trace": str(old_selected_trace)}
+                    if stale_reason == "legacy_metadata"
+                    else {}
+                ),
+            },
+            current_best={
+                "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+            },
+        )
+        if stale_reason == "missing_steady_trace":
+            state.last_profile_workload = state.current_profile_workload_context()
+        state.save(tmp_path)
+        roofline_calls = 0
+        captured_input: dict = {}
+
+        class FakeRooflineExecutor:
+            def __init__(self, *, shared_state):
+                self.shared_state = shared_state
+
+            async def __call__(self, ctx):
+                nonlocal roofline_calls
+                roofline_calls += 1
+                return {
+                    "status": "succeeded",
+                    "steady_state_trace": str(selected_trace),
+                }
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured_input.update(json.loads(input_path.read_text()))
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FakeRooflineExecutor)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {"task_id": f"fallback-{stale_reason}"},
+                session_dir=tmp_path,
+            )
+        )
+
+        assert roofline_calls == 1
+        assert captured_input["framework"] == "vllm-aiter"
+        assert json.loads(Path(captured_input["shapes_json"]).read_text()) == [
+            {"K": 5120, "M": 64, "N": 34816}
+        ]
+        assert result["shape_capture"]["capture_mode"] == "block_fp8_profile"
+        assert result["shape_capture"]["source_profile_trace"] == str(selected_trace)
 
     @pytest.mark.parametrize("profile_status", ["failed", ""])
     def test_vllm_block_fp8_rejects_unusable_profile_state(

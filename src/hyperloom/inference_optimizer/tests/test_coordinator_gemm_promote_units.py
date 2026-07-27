@@ -51,6 +51,41 @@ def _coord(tmp_path: Path, **state_kwargs) -> Coordinator:
     return coord
 
 
+def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
+    coord = _coord(tmp_path)
+    coord.shared_state.save(tmp_path)
+    selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
+    persisted = SharedState.load_or_init(tmp_path)
+    persisted.last_profile_trace = str(tmp_path / "profile.trace.json.gz")
+    persisted.last_profile_status = "succeeded"
+    persisted.last_profile_args = "--attention-backend AITER"
+    persisted.last_profile_workload = {"framework": "vllm", "server_args": "--attention-backend AITER"}
+    persisted.last_trace_analyze = {
+        "trace_input": persisted.last_profile_trace,
+        "steady_state_trace": selected_trace,
+    }
+    persisted.roofline_snapshot_id = 3
+    persisted.roofline_snapshots = [{"snapshot_id": 3}]
+    persisted.baseline_eager_fallback = False
+    persisted.save(tmp_path)
+    coord.shared_state.baseline_eager_fallback = True
+
+    coord.phase_kernel._sync_profile_state_after_gemm_roofline(
+        {
+            "shape_capture": {
+                "capture_mode": "block_fp8_profile",
+                "source_profile_trace": selected_trace,
+            }
+        }
+    )
+
+    assert coord.shared_state.last_profile_trace == persisted.last_profile_trace
+    assert coord.shared_state.last_profile_workload == persisted.last_profile_workload
+    assert coord.shared_state.last_trace_analyze == persisted.last_trace_analyze
+    assert coord.shared_state.roofline_snapshot_id == 3
+    assert coord.shared_state.baseline_eager_fallback is False
+
+
 class _Bus:
     def __init__(self) -> None:
         self.messages = []

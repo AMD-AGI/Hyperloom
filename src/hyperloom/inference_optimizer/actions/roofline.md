@@ -47,9 +47,9 @@ contract (see design/roofline-v2.md §6.2).
    profile.
 
 Block-FP8 GEMM shape collection may invoke the same `RooflineExecutor` as an
-isolated fallback when no matching steady-state trace exists. That nested run
-uses a deep-copied `SharedState` and does not persist lifecycle/profile fields
-to the parent session; only its selected steady-state trace is consumed.
+inline fallback when no matching steady-state trace exists. It has the same
+state/lifecycle persistence semantics as any other successful Roofline refresh,
+so later consumers can reuse the selected steady-state trace.
 
 While the Coordinator-enqueued analysis task is in flight, downstream
 dispatches are no longer blocked: actions keep running against the

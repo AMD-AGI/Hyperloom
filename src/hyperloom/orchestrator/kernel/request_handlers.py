@@ -2209,7 +2209,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
     if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
         log.info(
             "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
-            "running a dedicated profile"
+            "running a standard Roofline fallback"
         )
         return None
     profile_workload = getattr(state, "last_profile_workload", None)
@@ -2223,7 +2223,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
         )
         log.info(
             "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
-            "running a dedicated profile",
+            "running a standard Roofline fallback",
             ", ".join(mismatches) or "missing profile workload metadata",
         )
         return None
@@ -2234,7 +2234,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
     if shape_count == 0:
         log.info(
             "vLLM block-FP8 shape capture: Roofline trace %s contains no reusable "
-            "block-FP8 shapes; running a dedicated profile",
+            "block-FP8 shapes; running a standard Roofline fallback",
             source_trace,
         )
         return None
@@ -2399,7 +2399,8 @@ async def _capture_vllm_tunableop_shapes(
     capture_envs = {
         str(key): str(value)
         for key, value in inherited_envs.items()
-        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+        if profile_mode
+        or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
     }
     if not profile_mode:
         try:
@@ -2471,18 +2472,19 @@ async def _capture_vllm_tunableop_shapes(
         capture_unset_envs = [inherited_unset]
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
-    capture_unset_envs.extend(
-        [
-            "HL_TUNABLEOP_MODE",
-            "HL_TUNABLEOP_FILE",
-            "HL_TUNABLEOP_VERBOSE",
-            "PYTORCH_TUNABLEOP_ENABLED",
-            "PYTORCH_TUNABLEOP_TUNING",
-            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-            "PYTORCH_TUNABLEOP_FILENAME",
-        ]
-    )
+    if not profile_mode:
+        capture_unset_envs.extend(
+            [
+                "HL_TUNABLEOP_MODE",
+                "HL_TUNABLEOP_FILE",
+                "HL_TUNABLEOP_VERBOSE",
+                "PYTORCH_TUNABLEOP_ENABLED",
+                "PYTORCH_TUNABLEOP_TUNING",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+                "PYTORCH_TUNABLEOP_FILENAME",
+            ]
+        )
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
@@ -2503,6 +2505,11 @@ async def _capture_vllm_tunableop_shapes(
     }
     if profile_mode:
         task_params["workspace_path"] = str(capture_dir / "tracelens")
+        last_baseline = getattr(state, "last_baseline", None)
+        if isinstance(last_baseline, dict):
+            benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
+            if benchmark_script:
+                task_params["benchmark_script"] = benchmark_script
     else:
         task_params.update(
             {
@@ -2522,8 +2529,11 @@ async def _capture_vllm_tunableop_shapes(
     ctx = RunnerContext(task=task, lease=None)
     import copy
 
-    capture_state = copy.deepcopy(state)
-    capture_state.baseline_eager_fallback = False
+    if profile_mode:
+        capture_state = state
+    else:
+        capture_state = copy.deepcopy(state)
+        capture_state.baseline_eager_fallback = False
     ctx.extra = {
         "shared_state": capture_state,
         "session_dir": session_dir,
@@ -2536,7 +2546,6 @@ async def _capture_vllm_tunableop_shapes(
 
             benchmark_result = await RooflineExecutor(
                 shared_state=capture_state,
-                persist_state=False,
             )(ctx)
         else:
             benchmark_result = await BaselineExecutor(

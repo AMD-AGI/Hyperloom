@@ -168,28 +168,6 @@ async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_nested_roofline_does_not_persist_session_state(tmp_path):
-    persisted = SharedState(session_id="parent")
-    persisted.save(tmp_path)
-    before = (tmp_path / "state.json").read_text(encoding="utf-8")
-    nested = SharedState.load_or_init(tmp_path)
-    ctx = _ctx(tmp_path)
-    p1, p2 = _patch_subs(
-        _profile_success("/tmp/nested.trace.json.gz"),
-        _trace_analyze_success(),
-    )
-
-    with p1, p2:
-        result = await RooflineExecutor(
-            shared_state=nested,
-            persist_state=False,
-        )(ctx)
-
-    assert result["status"] == "succeeded"
-    assert (tmp_path / "state.json").read_text(encoding="utf-8") == before
-
-
-@pytest.mark.asyncio
 async def test_happy_path_increments_snapshot_id_on_re_run(tmp_path):
     """Second roofline run on the same session bumps snapshot_id."""
     state = _state()

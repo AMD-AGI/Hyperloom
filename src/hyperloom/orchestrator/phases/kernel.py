@@ -1140,6 +1140,47 @@ class KernelPhase(PhaseHandler):
             pass
         return False
 
+    def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
+        """Merge a handler-owned Roofline fallback into the live Coordinator state."""
+        shape_capture = result.get("shape_capture") if isinstance(result, dict) else None
+        if not isinstance(shape_capture, dict) or shape_capture.get("capture_mode") != "block_fp8_profile":
+            return
+        source_trace = str(shape_capture.get("source_profile_trace") or "").strip()
+        if not source_trace:
+            return
+        from copy import deepcopy
+
+        from ..state.shared_state import SharedState
+
+        persisted = SharedState.load_or_init(self.session_dir)
+        persisted_trace = str(
+            (persisted.last_trace_analyze or {}).get("steady_state_trace") or ""
+        ).strip()
+        if persisted_trace != source_trace:
+            log.warning(
+                "GEMM Roofline state sync skipped: persisted steady trace %r "
+                "does not match result %r",
+                persisted_trace,
+                source_trace,
+            )
+            return
+        for field_name in (
+            "last_profile_trace",
+            "last_profile_status",
+            "last_profile_args",
+            "last_profile_workload",
+            "last_trace_analyze",
+            "roofline_snapshot_id",
+            "roofline_snapshots",
+            "baseline_eager_fallback",
+            "lifecycle",
+        ):
+            setattr(
+                self.shared_state,
+                field_name,
+                deepcopy(getattr(persisted, field_name)),
+            )
+
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
@@ -1147,6 +1188,7 @@ class KernelPhase(PhaseHandler):
         ``run_gemm_tuning`` requests converge here so forge results never bypass
         per-tuner E2E validation.
         """
+        self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
         # Forge results route to the per-tuner E2E validator when table tuning
         # asked for it OR when the CK block-scale backend switch is eligible.
