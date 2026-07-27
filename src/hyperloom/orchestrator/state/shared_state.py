@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -49,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.profile_args import sanitize_profile_server_args
 
 from . import kernel_decision_settings as _kernel_decision_settings
 
@@ -546,6 +548,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_profile_trace: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
+    # Workload context captured with ``last_profile_trace``; strict matching
+    # prevents consumers from reusing runtime shapes after workload changes.
+    last_profile_workload: dict[str, Any] = field(default_factory=dict)
+    # ``current_best.action`` in effect when ``last_profile_workload`` was
+    # recorded, so the backfill in ``current_profile_workload_context`` can tell
+    # a same-arm reuse from a stale one. Empty on legacy sessions.
+    last_profile_workload_action: str = ""
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
@@ -844,6 +853,195 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
+
+    def profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the normalized workload and runtime identity for a profile trace."""
+        params = overrides if isinstance(overrides, dict) else {}
+        context: dict[str, Any] = {}
+        for name in ("framework", "precision", "model_path"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, "")
+            normalized = str(value or "").strip()
+            if name in ("framework", "precision"):
+                normalized = normalized.lower()
+            elif normalized:
+                path = Path(normalized).expanduser()
+                if path.exists():
+                    try:
+                        normalized = str(path.resolve())
+                    except OSError:
+                        log.debug(
+                            "profile workload path resolution failed for %s; "
+                            "keeping the unresolved path",
+                            path,
+                            exc_info=True,
+                        )
+            context[name] = normalized
+        for name in ("tp", "conc", "isl", "osl", "max_model_len"):
+            value = params.get(name)
+            if value in (None, ""):
+                value = getattr(self, name, 0)
+            try:
+                context[name] = int(value or 0)
+            except (TypeError, ValueError):
+                context[name] = 0
+        raw_server_args = (
+            params.get("extra_server_args")
+            if "extra_server_args" in params
+            else params.get("base_extra_args")
+        )
+        server_args = str(raw_server_args or "").strip()
+        server_args = sanitize_profile_server_args(server_args)
+        try:
+            context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
+        except ValueError:
+            context["server_args"] = " ".join(server_args.split())
+
+        raw_envs = (
+            params.get("extra_envs")
+            if "extra_envs" in params
+            else params.get("base_extra_envs")
+        )
+        if isinstance(raw_envs, dict):
+            context["extra_envs"] = {
+                str(key): str(value)
+                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
+            }
+        else:
+            context["extra_envs"] = {}
+
+        def _normalized_list(base_name: str, direct_name: str) -> list[str]:
+            raw = params.get(direct_name) if direct_name in params else params.get(base_name)
+            values = [raw] if isinstance(raw, str) else list(raw or [])
+            return sorted({str(value).strip() for value in values if str(value).strip()})
+
+        context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
+        context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
+        args_mode = (
+            params.get("args_mode")
+            if "args_mode" in params
+            else params.get("base_args_mode")
+        )
+        context["args_mode"] = str(args_mode or "append").strip().lower()
+        return context
+
+    def record_profile_workload(
+        self,
+        params: dict[str, Any] | None = None,
+        *,
+        arm: str = "",
+    ) -> dict[str, Any]:
+        """Record the workload identity and originating arm for a profile trace.
+
+        Args:
+            params (dict[str, Any] | None): The profile task params the trace
+                was produced with.
+            arm (str): The profiled roofline arm; ``"baseline"`` pins the
+                recorded action, anything else resolves it from
+                ``current_best``.
+
+        Returns:
+            dict[str, Any]: The recorded workload context.
+        """
+        self.last_profile_workload = self.profile_workload_context(params or {})
+        if arm == "baseline":
+            self.last_profile_workload_action = "baseline"
+        else:
+            current_best = self.current_best if isinstance(self.current_best, dict) else {}
+            self.last_profile_workload_action = str(current_best.get("action") or "")
+        self.last_profile_args = str(self.last_profile_workload.get("server_args") or "")
+        return self.last_profile_workload
+
+    def current_profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the profile identity for the active current-best runtime."""
+        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        incoming = overrides if isinstance(overrides, dict) else {}
+        params: dict[str, Any] = {}
+        runtime_keys = {
+            "extra_server_args",
+            "extra_envs",
+            "remove_args",
+            "unset_envs",
+            "args_mode",
+            "base_extra_args",
+            "base_extra_envs",
+            "base_remove_args",
+            "base_unset_envs",
+            "base_args_mode",
+        }
+        has_runtime_override = any(key in current_best for key in runtime_keys) or any(
+            key in incoming for key in runtime_keys
+        )
+        recorded = (
+            self.last_profile_workload
+            if isinstance(self.last_profile_workload, dict)
+            else {}
+        )
+        # A bare baseline/profile ``current_best`` carries no runtime fields, so
+        # the only record of what the server actually ran with is the last
+        # profile. Backfilling it keeps "no override" from reading as an empty
+        # runtime, but only when that profile measured the same arm: a runtime
+        # recorded off a tuned arm would otherwise be reported as still active.
+        recorded_action = str(self.last_profile_workload_action or "").strip()
+        if (
+            not has_runtime_override
+            and current_best.get("action") in {"baseline", "profile"}
+            and recorded
+            # Legacy sessions predate the recorded action; keep reusing them
+            # rather than forcing a reprofile on every run.
+            and recorded_action in {"", "baseline", "profile"}
+        ):
+            params.update(
+                {
+                    "base_extra_args": recorded.get("server_args", ""),
+                    "base_extra_envs": dict(recorded.get("extra_envs") or {}),
+                    "base_remove_args": list(recorded.get("remove_args") or []),
+                    "base_unset_envs": list(recorded.get("unset_envs") or []),
+                    "base_args_mode": recorded.get("args_mode", "append"),
+                }
+            )
+        for source, target in (
+            ("extra_server_args", "base_extra_args"),
+            ("remove_args", "base_remove_args"),
+            ("unset_envs", "base_unset_envs"),
+            ("args_mode", "base_args_mode"),
+        ):
+            if source in current_best:
+                params[target] = current_best[source]
+            if source in incoming:
+                params[target] = incoming[source]
+            if target in incoming:
+                params[target] = incoming[target]
+
+        raw_current_envs = current_best.get("extra_envs")
+        merged_envs = dict(raw_current_envs) if isinstance(raw_current_envs, dict) else {}
+        if isinstance(incoming.get("base_extra_envs"), dict):
+            merged_envs.update(incoming["base_extra_envs"])
+        if isinstance(incoming.get("extra_envs"), dict):
+            merged_envs.update(incoming["extra_envs"])
+        if merged_envs:
+            params["base_extra_envs"] = merged_envs
+
+        for name in (
+            "framework",
+            "precision",
+            "model_path",
+            "tp",
+            "conc",
+            "isl",
+            "osl",
+            "max_model_len",
+        ):
+            if name in incoming:
+                params[name] = incoming[name]
+        return self.profile_workload_context(params)
 
     # Persistence
     @classmethod
@@ -1591,6 +1789,42 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ts=ts,
         )
 
+    def merge_lifecycle_events(self, incoming: Any) -> None:
+        """Union ``incoming`` lifecycle rows into this state, ordered by timestamp.
+
+        Used when a nested run records lifecycle events on its own
+        :class:`SharedState` instance: overwriting would drop whatever the live
+        state recorded in the meantime, so the two logs are unioned instead.
+        Rows are deduplicated on ``(step, status, ts)`` and ``seq`` is renumbered
+        so it stays monotonic, which also makes repeated merges idempotent.
+
+        Args:
+            incoming (Any): Lifecycle rows to merge; ignored unless a non-empty
+                list.
+        """
+        if not isinstance(incoming, list) or not incoming:
+            return
+        from copy import deepcopy
+
+        existing = self.lifecycle if isinstance(self.lifecycle, list) else []
+
+        def _key(row: dict[str, Any]) -> tuple[str, str, str]:
+            return (str(row.get("step")), str(row.get("status")), str(row.get("ts")))
+
+        merged = [row for row in existing if isinstance(row, dict)]
+        seen = {_key(row) for row in merged}
+        for row in incoming:
+            if not isinstance(row, dict) or _key(row) in seen:
+                continue
+            seen.add(_key(row))
+            merged.append(deepcopy(row))
+        merged.sort(key=lambda row: str(row.get("ts") or ""))
+        if len(merged) > _LIFECYCLE_CAP:
+            merged = merged[-_LIFECYCLE_CAP:]
+        for index, row in enumerate(merged):
+            row["seq"] = index
+        self.lifecycle = merged
+
     def increment_crash_count(self, by: int = 1) -> int:
         """Increment the cumulative crash counter and record crash times.
 
@@ -2260,16 +2494,20 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(result, dict):
             return
         trace_input = (payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or ""
+        artifacts = result.get("artifact_paths") or {}
+        if not isinstance(artifacts, dict):
+            artifacts = {}
         candidates_path = result.get("candidates_path") or ""
         if not candidates_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                candidates_path = artifacts.get("kernel_candidates", "") or ""
+            candidates_path = artifacts.get("kernel_candidates", "") or ""
         kernel_roofline_path = result.get("kernel_roofline_path") or ""
         if not kernel_roofline_path:
-            artifacts = result.get("artifact_paths") or {}
-            if isinstance(artifacts, dict):
-                kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+            kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+        steady_state_trace = (
+            result.get("steady_state_trace")
+            or artifacts.get("tracelens_steady_state_trace")
+            or ""
+        )
         summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
@@ -2325,6 +2563,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         ts_iso = _now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
+            "steady_state_trace": str(steady_state_trace),
             "candidates_path": str(candidates_path),
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
