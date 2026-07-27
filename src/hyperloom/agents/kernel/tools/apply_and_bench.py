@@ -298,7 +298,12 @@ def _bench_once(
         d = json.loads(res.read_text())
         # output_throughput is the headline; tpot/itl are decode-latency signals (lower=better).
         out: dict[str, float] = {"output_throughput": float(d["output_throughput"])}
-        for k in ("median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms"):
+        # P99 tail latencies (the --percentile-metrics request already emits them)
+        # alongside the median/mean decode-latency signals.
+        for k in (
+            "median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms",
+            "p99_tpot_ms", "p99_itl_ms", "p99_e2el_ms", "p99_ttft_ms",
+        ):
             if d.get(k) is not None:
                 out[k] = float(d[k])
         return out
@@ -307,55 +312,136 @@ def _bench_once(
         return None
 
 
-def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
+# <20 GiB used => the arm's GPUs are considered clean for the next launch.
+_VRAM_DRAIN_THRESHOLD_MB = 20_000.0
+_VRAM_DRAIN_TIMEOUT_S = 60.0
+
+
+def _reap_vllm_orphans(out_dir: Path | None = None) -> None:
+    """Reap orphaned vLLM engine subprocesses that escape the server's process group.
+
+    vLLM spawns its engine worker as a separate ``VLLM::EngineCore`` (and, under TP,
+    ``VLLM::Worker``) process via multiprocessing ``spawn`` in a *fresh session*, so it
+    lives OUTSIDE the api_server's process group and survives the ``killpg`` above. Left
+    behind, it squats on GPU VRAM (observed >280 GiB) and poisons the next arm's
+    measurement. This is a targeted ``pkill`` of those well-known process names only.
+
+    Best-effort, POSIX-only, never raises into the caller. The ``[V]`` bracket makes the
+    pattern a regex that matches the live ``VLLM::...`` process while NOT matching pkill's
+    own ``argv`` (which contains the literal ``[V]LLM::...``) — otherwise pkill kills
+    itself. Disable with APPLY_BENCH_NO_ORPHAN_REAP=1 on shared multi-tenant hosts.
+    """
+    if os.name != "posix":
+        # os.killpg / pkill are POSIX-only; nothing to do off-POSIX.
+        return
+    if os.environ.get("APPLY_BENCH_NO_ORPHAN_REAP") == "1":
+        return
+    for pat in ("[V]LLM::EngineCore", "[V]LLM::Worker"):
+        try:
+            subprocess.run(["pkill", "-9", "-f", pat], check=False, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            # Reaping is advisory; a missing/failing pkill must never break teardown.
+            if out_dir is not None:
+                _log(out_dir, f"orphan reap skipped (pkill unavailable) for {pat}")
+
+
+def _wait_vram_drain(
+    gpu: str,
+    out_dir: Path | None = None,
+    threshold_mb: float = _VRAM_DRAIN_THRESHOLD_MB,
+    timeout_s: float = _VRAM_DRAIN_TIMEOUT_S,
+) -> float | None:
+    """Poll rocm-smi until the arm's GPUs fall below ``threshold_mb`` used (or timeout).
+
+    Guards the next arm against a slow-releasing (or freshly reaped) server still holding
+    VRAM. Best-effort: returns the last observed used-MiB, or ``None`` when rocm-smi is
+    unavailable (which short-circuits immediately so non-GPU hosts are unaffected). Never
+    raises.
+    """
+    deadline = time.time() + timeout_s
+    used = _gpu_vram_used_mb(gpu)
+    while used is not None and used > threshold_mb and time.time() < deadline:
+        if out_dir is not None:
+            _log(out_dir, f"waiting for VRAM to drain: {used:.0f} MiB used > {threshold_mb:.0f} MiB")
+        time.sleep(3)
+        used = _gpu_vram_used_mb(gpu)
+    # Surface a timeout-without-drain: the next arm launches on a GPU still
+    # holding VRAM (a leaked/renamed worker the reap missed) — exactly the
+    # contamination this guard exists to prevent, so it must not be silent.
+    if used is not None and used > threshold_mb and out_dir is not None:
+        _log(
+            out_dir,
+            f"WARNING: VRAM did not drain below {threshold_mb:.0f} MiB within "
+            f"{timeout_s:.0f}s ({used:.0f} MiB still used); next arm may be contaminated",
+        )
+    return used
+
+
+def _kill_servers(
+    proc: subprocess.Popen | None,
+    backend: str,
+    gpu: str | None = None,
+    out_dir: Path | None = None,
+) -> None:
     """Tear down only the server we spawned (its process group) — never a global sweep.
 
     The server leads its own process group, so ``killpg`` reaps the whole tree without
     touching other tenants: SIGTERM, grace, then SIGKILL survivors. A broad
     ``pkill -f sglang/vllm`` runs only when APPLY_BENCH_PKILL_SWEEP=1.
+
+    vLLM is the exception: its ``VLLM::EngineCore`` / ``VLLM::Worker`` escape the process
+    group (spawned in a fresh session), so for the ``vllm`` backend we additionally reap
+    those orphans by name (:func:`_reap_vllm_orphans`) and, when ``gpu`` is known, wait for
+    VRAM to actually drain before returning — both best-effort and additive.
     """
-    if proc is None:
-        return
-    if os.name == "posix":
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, OSError):
-            pgid = None
-        if pgid is not None:
+    if proc is not None:
+        if os.name == "posix":
             try:
-                os.killpg(pgid, signal.SIGTERM)
+                pgid = os.getpgid(proc.pid)
             except (ProcessLookupError, OSError):
-                # Group already gone.
-                pass
-            for _ in range(15):  # up to ~15s grace for a clean shutdown
-                if proc.poll() is not None:
-                    break
-                time.sleep(1)
+                pgid = None
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    # Group already gone.
+                    pass
+                for _ in range(15):  # up to ~15s grace for a clean shutdown
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(1)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)  # reap survivors
+                except (ProcessLookupError, OSError):
+                    # Whole group already reaped.
+                    pass
+        else:  # non-POSIX: best-effort single-process teardown
             try:
-                os.killpg(pgid, signal.SIGKILL)  # reap survivors
-            except (ProcessLookupError, OSError):
-                # Whole group already reaped.
-                pass
-    else:  # non-POSIX: best-effort single-process teardown
+                proc.terminate()
+                proc.wait(timeout=15)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    proc.kill()
+                except OSError:
+                    # proc already dead.
+                    pass
         try:
-            proc.terminate()
-            proc.wait(timeout=15)
+            proc.wait(timeout=10)
         except (subprocess.TimeoutExpired, OSError):
-            try:
-                proc.kill()
-            except OSError:
-                # proc already dead.
-                pass
-    try:
-        proc.wait(timeout=10)
-    except (subprocess.TimeoutExpired, OSError):
-        # Final reap is best-effort.
-        pass
+            # Final reap is best-effort.
+            pass
     # Explicit single-tenant blunt sweep (off by default).
     if os.environ.get("APPLY_BENCH_PKILL_SWEEP") == "1":
         pat = "sglang.launch_server" if backend == "sglang" else "vllm.entrypoints"
         subprocess.run(["pkill", "-9", "-f", pat], check=False)
+    # vLLM's engine worker escapes the process group — reap it explicitly so it can't
+    # squat VRAM and poison the next arm. (No-op for sglang / off-POSIX.)
+    if backend == "vllm":
+        _reap_vllm_orphans(out_dir)
     time.sleep(5)
+    # Confirm the driver actually released VRAM before the next launch (best-effort).
+    if backend == "vllm" and gpu:
+        _wait_vram_drain(gpu, out_dir)
 
 
 def _spread(xs: list[float]) -> dict[str, float | None]:
@@ -371,6 +457,59 @@ def _spread(xs: list[float]) -> dict[str, float | None]:
         "stdev": statistics.stdev(s) if len(s) >= 2 else 0.0,
         "n": len(s),
     }
+
+
+def _gpu_vram_used_mb(gpu_ids: str) -> float | None:
+    """Best-effort used VRAM (MiB) summed over the arm's GPUs, via rocm-smi.
+
+    Sampled while the server is up (weights + KV cache resident) as a proxy for
+    peak serving VRAM. Returns ``None`` on any probe/parse failure (never raises)
+    so the ABBA result degrades gracefully when rocm-smi is unavailable.
+
+    Requires an explicit GPU scope: with no ``gpu_ids`` it returns ``None`` rather
+    than summing the whole host, which would over-count co-tenant GPUs and make
+    the drain check wait out its timeout on VRAM that isn't this arm's.
+    """
+    wanted = {g.strip() for g in (gpu_ids or "").split(",") if g.strip()}
+    if not wanted:
+        return None
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    total = 0.0
+    found = False
+    for key, info in data.items():
+        idx = "".join(ch for ch in str(key) if ch.isdigit())
+        if wanted and idx not in wanted:
+            continue
+        if not isinstance(info, dict):
+            continue
+        used_key = next(
+            (k for k in info if "used" in k.lower() and ("vram" in k.lower() or "memory" in k.lower())),
+            None,
+        )
+        if used_key is None:
+            continue
+        # Only convert byte-denominated fields (e.g. "VRAM Total Used Memory (B)").
+        # rocm-smi key/unit naming varies across builds; if the matched field is
+        # not clearly in bytes we skip it rather than emit an off-by-1000s MiB
+        # number -- a wrong-but-plausible value is worse than a graceful None.
+        kl = used_key.lower()
+        if "(b)" not in kl and "byte" not in kl:
+            continue
+        try:
+            total += float(str(info[used_key]).strip()) / (1024.0 * 1024.0)  # bytes -> MiB
+            found = True
+        except (ValueError, TypeError):
+            continue
+    return round(total, 1) if found else None
 
 
 def _serve_and_bench(
@@ -391,15 +530,23 @@ def _serve_and_bench(
     seed: int,
 ) -> dict[str, Any]:
     _log(out_dir, f"=== {arm.upper()} arm: launch server ===")
+    # Preclean: reap any orphaned vLLM engine worker left by a prior arm and record the
+    # pre-launch VRAM so a leaked EngineCore squatting memory can't silently skew this arm.
+    if backend == "vllm":
+        _reap_vllm_orphans(out_dir)
+        pre_vram = _wait_vram_drain(gpu, out_dir)
+        if pre_vram is not None:
+            _log(out_dir, f"pre-launch VRAM: {pre_vram:.0f} MiB used")
     proc = _launch_server(backend, model, tp, port, gpu, extra_env, out_dir / f"server_{arm}.log")
     if not _wait_health(proc, port, out_dir):
-        _kill_servers(proc, backend)
+        _kill_servers(proc, backend, gpu, out_dir)
         return {"arm": arm, "status": "server_failed", "reps": [], "median": None}
     # Untimed warmup pass (server JIT-compiles / captures CUDA graphs on first load).
     _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, 0, out_dir, seed)
     _log(out_dir, f"{arm} warmup pass done (discarded)")
     reps_out: list[float] = []  # output_throughput per timed rep
     tpot_out: list[float] = []  # median_tpot_ms per timed rep (decode latency)
+    p99_tpot_out: list[float] = []  # p99_tpot_ms per timed rep (tail decode latency)
     for r in range(1, reps + 1):
         m = _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, r, out_dir, seed)
         tput = m.get("output_throughput") if m else None
@@ -408,7 +555,11 @@ def _serve_and_bench(
             reps_out.append(tput)
             if m.get("median_tpot_ms") is not None:
                 tpot_out.append(m["median_tpot_ms"])
-    _kill_servers(proc, backend)
+            if m.get("p99_tpot_ms") is not None:
+                p99_tpot_out.append(m["p99_tpot_ms"])
+    # Peak serving VRAM (weights + KV cache), sampled before teardown.
+    vram_used_mb = _gpu_vram_used_mb(gpu)
+    _kill_servers(proc, backend, gpu, out_dir)
     tput_spread = _spread(reps_out)
     return {
         "arm": arm,
@@ -418,6 +569,9 @@ def _serve_and_bench(
         "tput_spread": tput_spread,
         "tpot_reps_ms": tpot_out,
         "tpot_spread_ms": _spread(tpot_out),
+        "p99_tpot_reps_ms": p99_tpot_out,
+        "p99_tpot_spread_ms": _spread(p99_tpot_out),
+        "vram_used_mb": vram_used_mb,
     }
 
 
@@ -614,6 +768,12 @@ def apply_and_bench(
     b_tpot = base.get("tpot_spread_ms", {}).get("median")
     p_tpot = patched.get("tpot_spread_ms", {}).get("median")
     tpot_delta_pct = (p_tpot - b_tpot) / b_tpot * 100.0 if (b_tpot and p_tpot) else None
+    # P99 tail decode latency (lower=better) and peak VRAM footprint.
+    b_p99 = (base.get("p99_tpot_spread_ms") or {}).get("median")
+    p_p99 = (patched.get("p99_tpot_spread_ms") or {}).get("median")
+    p99_tpot_delta_pct = (p_p99 - b_p99) / b_p99 * 100.0 if (b_p99 and p_p99) else None
+    b_vram, p_vram = base.get("vram_used_mb"), patched.get("vram_used_mb")
+    vram_delta_mb = (p_vram - b_vram) if (b_vram is not None and p_vram is not None) else None
     result = {
         "status": "ok" if (b_med and p_med) else "patched_failed",
         "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
@@ -630,6 +790,12 @@ def apply_and_bench(
         "tpot_delta_pct": tpot_delta_pct,  # negative = faster decode (good)
         "baseline_tpot_spread_ms": base.get("tpot_spread_ms"),
         "patched_tpot_spread_ms": patched.get("tpot_spread_ms"),
+        "p99_tpot_delta_pct": p99_tpot_delta_pct,  # negative = better tail decode
+        "baseline_p99_tpot_spread_ms": base.get("p99_tpot_spread_ms"),
+        "patched_p99_tpot_spread_ms": patched.get("p99_tpot_spread_ms"),
+        "baseline_vram_used_mb": b_vram,
+        "patched_vram_used_mb": p_vram,
+        "vram_delta_mb": vram_delta_mb,
         "baseline_reps": base.get("reps"),
         "patched_reps": patched.get("reps"),
         "removed_prebuilt_so": removed_so,
