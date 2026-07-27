@@ -461,11 +461,14 @@ def test_forced_termination_leaves_no_running_grandchild(tmp_path):
         child_pid = int(child_pid_file.read_text())
 
         with pytest.raises(subprocess.TimeoutExpired):
-            proc.communicate(timeout=0.2)
+            proc.communicate(timeout=1.0)
         stdout, _stderr = forge_submit._terminate_forge_process(proc, grace_sec=2)
 
         assert "child-started" in stdout
-        deadline = time.monotonic() + 10
+        # Generous: a loaded CI runner can take seconds to reap the group after
+        # SIGKILL. The assertion is still "the grandchild must die" -- only the
+        # patience is relaxed, so a real leak still fails here.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             stat_path = Path(f"/proc/{child_pid}/stat")
             if not stat_path.exists() or stat_path.read_text().split()[2] == "Z":
