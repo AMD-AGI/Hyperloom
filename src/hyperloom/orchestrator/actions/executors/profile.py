@@ -759,6 +759,17 @@ class ProfileExecutor(BaselineExecutor):
             params["extra_server_args"] = merged_args
         else:
             params.pop("extra_server_args", None)
+        base_envs = params.get("base_extra_envs")
+        caller_envs = params.get("extra_envs")
+        merged_envs: dict[str, Any] = {}
+        if isinstance(base_envs, dict):
+            merged_envs.update(base_envs)
+        if isinstance(caller_envs, dict):
+            merged_envs.update(caller_envs)
+        if merged_envs:
+            params["extra_envs"] = merged_envs
+        else:
+            params.pop("extra_envs", None)
         if params.get("base_remove_args") and "remove_args" not in params:
             raw_remove = params.get("base_remove_args")
             params["remove_args"] = [raw_remove] if isinstance(raw_remove, str) else list(raw_remove or [])

@@ -2192,7 +2192,7 @@ def _reuse_vllm_block_fp8_roofline_shapes(
         )
         return None
     profile_workload = getattr(state, "last_profile_workload", None)
-    expected_workload = current_workload or state.profile_workload_context()
+    expected_workload = current_workload or state.current_profile_workload_context()
     recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
     if recorded_workload != expected_workload:
         mismatches = sorted(
@@ -2211,6 +2211,11 @@ def _reuse_vllm_block_fp8_roofline_shapes(
         output_dir=workspace,
     )
     if shape_count == 0:
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline trace %s contains no reusable "
+            "block-FP8 shapes; running a dedicated profile",
+            source_trace,
+        )
         return None
     log.info(
         "vLLM block-FP8 shape capture: reusing %d shape(s) from Roofline trace %s",
@@ -2475,6 +2480,19 @@ async def _capture_vllm_tunableop_shapes(
     if profile_mode:
         if "profiler-config.delay_iterations" not in extra_server_args:
             extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
+        if "profiler-config.max_iterations" not in extra_server_args:
+            try:
+                max_iterations = int(
+                    payload.get("shape_capture_max_iterations")
+                    or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_MAX_ITERATIONS")
+                    or 16
+                )
+            except (TypeError, ValueError):
+                max_iterations = 16
+            max_iterations = max(1, max_iterations)
+            extra_server_args = (
+                f"{extra_server_args} --profiler-config.max_iterations {max_iterations}"
+            ).strip()
         if "torch_profiler_record_shapes" not in extra_server_args:
             extra_server_args = (
                 f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
@@ -2691,7 +2709,7 @@ async def _run_forge_gemm_tuning(
         shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
             state,
             workspace=workspace,
-            current_workload=state.profile_workload_context(payload),
+            current_workload=state.current_profile_workload_context(payload),
         )
         if shape_capture is not None:
             shapes_json = str(shape_capture["shapes_json"])

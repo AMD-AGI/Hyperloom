@@ -1247,6 +1247,7 @@ class TestRunGemmTuningHandler:
         ]
         task = captured["task"]
         assert "--profiler-config.delay_iterations 0" in task.params["extra_server_args"]
+        assert "--profiler-config.max_iterations 16" in task.params["extra_server_args"]
         assert "--profiler-config.torch_profiler_record_shapes True" in task.params["extra_server_args"]
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
@@ -1721,7 +1722,7 @@ class TestRunGemmTuningHandler:
                 },
                 stream,
             )
-        SharedState(
+        state = SharedState(
             precision="fp8",
             framework="vllm",
             model_path=str(model),
@@ -1733,17 +1734,9 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
-            last_profile_workload={
-                "framework": "vllm",
-                "precision": "fp8",
-                "model_path": str(model),
-                "tp": 1,
-                "conc": 64,
-                "isl": 1024,
-                "osl": 1024,
-                "max_model_len": 4096,
-            },
-        ).save(tmp_path)
+        )
+        state.last_profile_workload = state.current_profile_workload_context()
+        state.save(tmp_path)
         captured_input: dict = {}
 
         async def fail_capture(**kwargs):
@@ -1829,16 +1822,7 @@ class TestRunGemmTuningHandler:
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
         )
-        state.last_profile_workload = {
-            "framework": "vllm",
-            "precision": "fp8",
-            "model_path": "/models/qwen",
-            "tp": 1,
-            "conc": 64,
-            "isl": 1024,
-            "osl": 1024,
-            "max_model_len": 4096,
-        }
+        state.last_profile_workload = state.current_profile_workload_context()
         state.last_profile_workload[field] = profile_value
 
         assert (
@@ -1848,6 +1832,103 @@ class TestRunGemmTuningHandler:
             )
             is None
         )
+
+    @pytest.mark.parametrize(
+        ("recorded_runtime", "current_best"),
+        [
+            (
+                {"base_extra_args": "--attention-backend TRITON"},
+                {"extra_server_args": "--attention-backend AITER"},
+            ),
+            (
+                {"base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "0"}},
+                {"extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"}},
+            ),
+            (
+                {"base_remove_args": ["--old-backend"]},
+                {"remove_args": ["--other-backend"]},
+            ),
+            (
+                {"base_unset_envs": ["OLD_BACKEND"]},
+                {"unset_envs": ["OTHER_BACKEND"]},
+            ),
+            (
+                {"base_args_mode": "append"},
+                {"args_mode": "replace"},
+            ),
+        ],
+    )
+    def test_vllm_block_fp8_rejects_roofline_trace_after_backend_change(
+        self,
+        tmp_path,
+        recorded_runtime,
+        current_best,
+    ):
+        roofline_trace = tmp_path / "roofline.trace.json"
+        roofline_trace.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[4149, 5120], [34816, 5120]]},
+                        }
+                    ]
+                }
+            )
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(roofline_trace),
+            last_profile_status="succeeded",
+        )
+        state.last_profile_workload = state.profile_workload_context(recorded_runtime)
+        state.current_best = current_best
+
+        assert (
+            krh._reuse_vllm_block_fp8_roofline_shapes(
+                state,
+                workspace=tmp_path / "gemm",
+                current_workload=state.current_profile_workload_context(),
+            )
+            is None
+        )
+
+    def test_vllm_block_fp8_logs_when_roofline_has_no_shapes(self, tmp_path, caplog):
+        roofline_trace = tmp_path / "roofline.trace.json"
+        roofline_trace.write_text(
+            json.dumps({"traceEvents": [{"name": "vllm::unrelated_op", "args": {}}]})
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            max_model_len=4096,
+            last_profile_trace=str(roofline_trace),
+            last_profile_status="succeeded",
+        )
+        state.last_profile_workload = state.profile_workload_context()
+        caplog.set_level(20, logger=krh.__name__)
+
+        assert (
+            krh._reuse_vllm_block_fp8_roofline_shapes(
+                state,
+                workspace=tmp_path / "gemm",
+            )
+            is None
+        )
+        assert "contains no reusable block-FP8 shapes" in caplog.text
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
         root = tmp_path / "kernel-agent"

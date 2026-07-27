@@ -44,9 +44,19 @@ class KernelPhase(PhaseHandler):
         cur = self._current_tput_from_validated_gain()
         if cur <= 0:
             return
-        # With a measured trace, reprofile only on a material change.
-        if before > 0 and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL:
+        recorded_context = getattr(self.shared_state, "last_profile_workload", None)
+        current_context = self.shared_state.current_profile_workload_context()
+        runtime_changed = bool(recorded_context) and recorded_context != current_context
+        # With a measured trace, reprofile only on a material gain or runtime
+        # context change. Backend/env changes invalidate shapes even at equal tput.
+        if (
+            before > 0
+            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
+            and not runtime_changed
+        ):
             return
+        if runtime_changed:
+            log.info("kernel-entry reprofile: active runtime context changed")
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         try:
             await self.sub.run_task(await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}"))

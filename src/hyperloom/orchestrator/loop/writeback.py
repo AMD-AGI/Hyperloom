@@ -2243,6 +2243,8 @@ class WritebackCollaborator:
             self.shared_state.last_profile_status = "failed"
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+            self.shared_state.last_profile_args = ""
+            self.shared_state.last_profile_workload = {}
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)

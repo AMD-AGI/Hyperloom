@@ -656,6 +656,17 @@ class PreludePhase(PhaseHandler):
                 cb_args = str(cb.get("extra_server_args") or "")
                 if cb_args:
                     params["base_extra_args"] = cb_args
+                cb_envs = cb.get("extra_envs")
+                if isinstance(cb_envs, dict) and cb_envs:
+                    params["base_extra_envs"] = dict(cb_envs)
+                for source, target in (
+                    ("remove_args", "base_remove_args"),
+                    ("unset_envs", "base_unset_envs"),
+                    ("args_mode", "base_args_mode"),
+                ):
+                    value = cb.get(source)
+                    if value not in (None, "", [], ()):
+                        params[target] = value
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own
             # server args (never current_best's) so a later warm-replay can't

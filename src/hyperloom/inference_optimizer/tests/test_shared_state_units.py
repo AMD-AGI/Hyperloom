@@ -398,6 +398,49 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
 
 
+def test_profile_workload_context_normalizes_path_and_runtime_controls(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    alias = tmp_path / "model-alias"
+    alias.symlink_to(model, target_is_directory=True)
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path=str(model),
+        tp=1,
+        conc=64,
+        isl=1024,
+        osl=1024,
+        max_model_len=4096,
+        current_best={
+            "extra_server_args": "  --foo   bar ",
+            "extra_envs": {"B": 2, "A": 1},
+            "remove_args": ["--old-b", "--old-a"],
+            "unset_envs": ["OLD_B", "OLD_A"],
+            "args_mode": "replace",
+        },
+    )
+
+    recorded = state.profile_workload_context(
+        {
+            "model_path": str(alias),
+            "base_extra_args": "--foo bar",
+            "base_extra_envs": {"A": "1", "B": "2"},
+            "base_remove_args": ["--old-a", "--old-b"],
+            "base_unset_envs": ["OLD_A", "OLD_B"],
+            "base_args_mode": "REPLACE",
+        }
+    )
+
+    assert recorded == state.current_profile_workload_context()
+    assert recorded["model_path"] == str(model.resolve())
+    assert recorded["server_args"] == "--foo bar"
+    assert recorded["extra_envs"] == {"A": "1", "B": "2"}
+    assert recorded["remove_args"] == ["--old-a", "--old-b"]
+    assert recorded["unset_envs"] == ["OLD_A", "OLD_B"]
+    assert recorded["args_mode"] == "replace"
+
+
 def test_record_action_failure_basic_fields():
     s = SharedState()
     s.record_action_failure(

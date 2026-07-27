@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -805,7 +806,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self,
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Return the normalized workload identity for a profile trace."""
+        """Return the normalized workload and runtime identity for a profile trace."""
         params = overrides if isinstance(overrides, dict) else {}
         context: dict[str, Any] = {}
         for name in ("framework", "precision", "model_path"):
@@ -815,6 +816,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             normalized = str(value or "").strip()
             if name in ("framework", "precision"):
                 normalized = normalized.lower()
+            elif normalized:
+                path = Path(normalized).expanduser()
+                if path.exists():
+                    try:
+                        normalized = str(path.resolve())
+                    except OSError:
+                        pass
             context[name] = normalized
         for name in ("tp", "conc", "isl", "osl", "max_model_len"):
             value = params.get(name)
@@ -824,7 +832,88 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 context[name] = int(value or 0)
             except (TypeError, ValueError):
                 context[name] = 0
+        raw_server_args = (
+            params.get("base_extra_args")
+            if "base_extra_args" in params
+            else params.get("extra_server_args")
+        )
+        server_args = str(raw_server_args or "").strip()
+        try:
+            context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
+        except ValueError:
+            context["server_args"] = " ".join(server_args.split())
+
+        raw_envs = (
+            params.get("base_extra_envs")
+            if "base_extra_envs" in params
+            else params.get("extra_envs")
+        )
+        if isinstance(raw_envs, dict):
+            context["extra_envs"] = {
+                str(key): str(value)
+                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
+            }
+        else:
+            context["extra_envs"] = {}
+
+        def _normalized_list(base_name: str, direct_name: str) -> list[str]:
+            raw = params.get(base_name) if base_name in params else params.get(direct_name)
+            values = [raw] if isinstance(raw, str) else list(raw or [])
+            return sorted({str(value).strip() for value in values if str(value).strip()})
+
+        context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
+        context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
+        args_mode = (
+            params.get("base_args_mode")
+            if "base_args_mode" in params
+            else params.get("args_mode")
+        )
+        context["args_mode"] = str(args_mode or "append").strip().lower()
         return context
+
+    def current_profile_workload_context(
+        self,
+        overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the profile identity for the active current-best runtime."""
+        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        incoming = overrides if isinstance(overrides, dict) else {}
+        params: dict[str, Any] = {}
+        for source, target in (
+            ("extra_server_args", "base_extra_args"),
+            ("remove_args", "base_remove_args"),
+            ("unset_envs", "base_unset_envs"),
+            ("args_mode", "base_args_mode"),
+        ):
+            if source in current_best:
+                params[target] = current_best[source]
+            if source in incoming:
+                params[target] = incoming[source]
+            if target in incoming:
+                params[target] = incoming[target]
+
+        raw_current_envs = current_best.get("extra_envs")
+        merged_envs = dict(raw_current_envs) if isinstance(raw_current_envs, dict) else {}
+        if isinstance(incoming.get("base_extra_envs"), dict):
+            merged_envs.update(incoming["base_extra_envs"])
+        if isinstance(incoming.get("extra_envs"), dict):
+            merged_envs.update(incoming["extra_envs"])
+        if merged_envs:
+            params["base_extra_envs"] = merged_envs
+
+        for name in (
+            "framework",
+            "precision",
+            "model_path",
+            "tp",
+            "conc",
+            "isl",
+            "osl",
+            "max_model_len",
+        ):
+            if name in incoming:
+                params[name] = incoming[name]
+        return self.profile_workload_context(params)
 
     # Persistence
     @classmethod
