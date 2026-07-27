@@ -1933,6 +1933,82 @@ def _terminate_forge_process(
             return "", ""
 
 
+def _read_forge_best_result(workspace: str) -> dict | None:
+    """Read the published best manifest forge atomically rewrites on every KEEP.
+
+    Anchored to the campaign root under the workspace (not --experiments-dir):
+    resume artifacts always live there, so this file is present and current after
+    a clean finish, a soft budget exhaustion, or a hard kill mid-run.
+    """
+    path = Path(workspace) / "forge_experiments" / "best_result.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _validated_forge_best_result(
+    payload: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+) -> dict | None:
+    """Return normalized evidence only for a published, correctness-passed best.
+
+    Forge publishes this file only after a KEEP whose validation passed and whose
+    commit is already in the workspace history, so it is the authoritative record
+    of what to keep. Re-verify the commit lineage and the speedup here anyway --
+    the file is written by another process and may be stale from an earlier run
+    against a different base.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 1:
+        return None
+    if payload.get("correctness_passed") is not True:
+        return None
+    best_commit = str(payload.get("commit_hash") or "").strip()
+    if not best_commit or best_commit == base_commit:
+        return None
+    exists = _run(
+        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+        timeout=30,
+    )
+    if exists.returncode != 0:
+        return None
+    ancestor = _run(
+        [
+            "git",
+            "-C",
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            best_commit,
+        ],
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        return None
+    try:
+        baseline_ms = float(payload.get("baseline_wall_ms"))
+        best_ms = float(payload.get("best_wall_ms"))
+    except (TypeError, ValueError):
+        return None
+    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+        return None
+    return {
+        "best_commit": best_commit,
+        "baseline_ms": baseline_ms,
+        "best_ms": best_ms,
+        "improved": True,
+        "iteration": payload.get("iteration"),
+        "snr_db": payload.get("snr_db"),
+        "source": "best_result.json",
+    }
+
+
 def _validated_forge_checkpoint(
     checkpoint: dict | None,
     *,
@@ -2505,12 +2581,28 @@ def submit(
             forge_log=forge_log,
             timeout_s=timeout_s,
         )
-        recovery = _validated_forge_checkpoint(
+        # keep/revert is decided from forge's own published best, in descending
+        # order of trust:
+        #   1. best_result.json -- rewritten atomically on every KEEP, gated on
+        #      correctness, and pointing at a commit already in the history. It
+        #      is current whether the loop finished, exhausted its soft budget,
+        #      or was hard-killed, so it is the authoritative record.
+        #   2. the caller-owned checkpoint -- same guarantees, but routed through
+        #      --experiments-dir and only as fresh as the last KEEP callback.
+        #   3. the final-result sidecar / stdout sentinel -- only produced on a
+        #      graceful return, and never sufficient on its own after a kill.
+        published = _validated_forge_best_result(
+            _read_forge_best_result(workspace),
+            workspace=workspace,
+            base_commit=base_commit,
+        )
+        checkpoint_recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,
             workspace=workspace,
             base_commit=base_commit,
             shapes=shapes,
         )
+        recovery = published or checkpoint_recovery
         baseline_ms = loop_outcome.baseline_ms
         best_ms = loop_outcome.best_ms
         improved = loop_outcome.improved
@@ -2521,9 +2613,21 @@ def submit(
             improved = True
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
+        if published is not None and checkpoint_recovery is not None:
+            # Both channels are validated; disagreement means one is stale. The
+            # published manifest wins (it is rewritten per KEEP), but surface it
+            # -- a persistent mismatch is a forge-side bug, not noise.
+            if published["best_commit"] != checkpoint_recovery["best_commit"]:
+                log.warning(
+                    "forge best_result.json (%s) and checkpoint (%s) disagree; "
+                    "keeping the published manifest",
+                    published["best_commit"][:12],
+                    checkpoint_recovery["best_commit"][:12],
+                )
         if loop_outcome.timed_out and recovery is None:
             # A final-result sidecar is not sufficient after forced termination:
-            # only a validated commit checkpoint may produce a passing report.
+            # only a validated commit -- published or checkpointed -- may produce
+            # a passing report.
             baseline_ms = None
             best_ms = None
             improved = False
