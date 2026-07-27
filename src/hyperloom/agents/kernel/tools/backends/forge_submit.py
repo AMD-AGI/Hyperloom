@@ -22,6 +22,7 @@ import site
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import NamedTuple
 
@@ -79,6 +80,14 @@ class ForgeLoopOutcome(NamedTuple):
     error: Exception | None
     timed_out: bool
     checkpoint: dict | None
+
+
+class _WorktreePreparationError(RuntimeError):
+    """A new isolated workspace could not be prepared safely."""
+
+
+class _RetainedWorkspaceCollision(FileExistsError):
+    """The requested workspace path already contains a retained attempt."""
 
 
 def _ensure_forge_on_path() -> str:
@@ -204,6 +213,18 @@ def _default_branch(repo: str) -> str:
     return ""
 
 
+def _new_forge_branch(output_dir: Path, source_file: str) -> str:
+    """Return a valid, unique retained branch name for one Forge attempt."""
+
+    def _component(value: str, fallback: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-")
+        return cleaned or fallback
+
+    session_id = _component(output_dir.parent.name, "session")
+    kernel_id = _component(Path(source_file).stem, "kernel")
+    return f"forge/{session_id}/{kernel_id}-{uuid.uuid4().hex[:12]}"
+
+
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
@@ -222,16 +243,21 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
         return None  # source_file not inside the repo
 
     wt = output_dir / "worktree"
-    # Clean any stale worktree at this path first.
-    if wt.exists():
-        _run(["git", "-C", repo, "worktree", "remove", "--force", str(wt)], timeout=60)
-        shutil.rmtree(wt, ignore_errors=True)
+    # A prior attempt at this path is retained for inspection. Never remove or
+    # reuse it, and never let the caller reinterpret it as a no-git scratch.
+    if wt.exists() or wt.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {wt}")
     _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
 
-    base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+    base = _run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
+    if base.returncode != 0 or not base.stdout.strip():
+        raise _WorktreePreparationError("could not resolve the source repository HEAD")
+    base_commit = base.stdout.strip()
     add = _run(["git", "-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
-        return None
+        raise _WorktreePreparationError(
+            "git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip())
+        )
 
     # Local git identity so IterationLoop commit/revert works.
     _run(["git", "-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
@@ -281,7 +307,7 @@ def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
     output_dir: Path,
-    branch: str,  # noqa: ARG001  (kept for API symmetry with _prepare_worktree)
+    branch: str,
 ) -> tuple[str, str, str] | None:
     """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A).
 
@@ -341,9 +367,10 @@ def _prepare_worktree_nogit(
         copy_subtrees = None
 
     scratch_dir = output_dir / "worktree"
-    # Clean any leftover scratch from a previous (failed) attempt.
-    if scratch_dir.exists():
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir.exists() or scratch_dir.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
+    if not branch or branch in {"main", "master"}:
+        raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
         ignored: list[str] = []
@@ -370,7 +397,7 @@ def _prepare_worktree_nogit(
 
     # Bootstrap a real git repo so IterationLoop's commit/revert works.
     for cmd in [
-        ["git", "-C", str(scratch_dir), "init"],
+        ["git", "-C", str(scratch_dir), "init", "-b", branch],
         ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
         ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
         ["git", "-C", str(scratch_dir), "add", "-A"],
@@ -2356,6 +2383,70 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     return usage, steps
 
 
+def _finalize_forge_workspace(
+    *,
+    inplace: bool,
+    restore_info: dict | None,
+    driver: str,
+    workspace: str,
+    output_dir: Path,
+    branch: str,
+    nogit_scratch: bool,
+) -> None:
+    """Restore live repos, but retain isolated Forge workspaces for inspection."""
+    if inplace:
+        cleanup_errors: list[str] = []
+        campaign_root = Path(workspace) / "forge_experiments"
+        if campaign_root.is_dir():
+            destination = Path(output_dir) / "forge_experiments"
+            try:
+                if destination.exists():
+                    raise FileExistsError(
+                        f"refusing to overwrite preserved campaign: {destination}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(campaign_root), str(destination))
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to preserve in-place campaign artifacts: {error}"
+                )
+        driver_paths: set[Path] = set()
+        try:
+            driver_paths.update(Path(workspace).glob(".forge_driver_*.py"))
+        except OSError as error:
+            cleanup_errors.append(
+                f"failed to enumerate generated in-place drivers: {error}"
+            )
+        if driver:
+            driver_paths.add(Path(driver))
+        for driver_path in driver_paths:
+            if not driver_path.name.startswith(".forge_driver_"):
+                continue
+            try:
+                driver_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to remove generated in-place driver: {error}"
+                )
+        try:
+            _restore_inplace(restore_info)
+        except Exception as error:  # noqa: BLE001 - combine cleanup/restore failures
+            cleanup_errors.append(f"failed to restore in-place repository: {error}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "in-place workspace cleanup failed: " + "; ".join(cleanup_errors)
+            )
+        return
+    log.info(
+        "forge: retaining workspace for inspection: %s (branch=%s, nogit=%s)",
+        workspace,
+        branch,
+        nogit_scratch,
+    )
+
+
 def submit(
     source_file: str,
     prompt_file: Path,
@@ -2424,9 +2515,7 @@ def submit(
             skipped=True,
         )
 
-    session_id = output_dir.parent.name or "forge"
-    kernel_id = Path(source_file).stem
-    branch = f"forge/{session_id}/{kernel_id}"
+    branch = _new_forge_branch(output_dir, source_file)
 
     repo = kernel_repo or _git_toplevel(source_file)
     # Editable-finder packages import the live path via a meta_path finder that
@@ -2435,46 +2524,59 @@ def submit(
     inplace = _needs_inplace(repo)
     restore_info: dict | None = None
     nogit_scratch = False
-    if inplace:
-        prep = _prepare_inplace(source_file, repo, branch)
-        if prep is None:
-            return _normalized(
-                2,
-                "",
-                "forge: editable-finder package but repo is not a usable git checkout; skipping",
-                time.time() - started,
-                skipped=True,
-            )
-        workspace, worktree_kernel, restore_info = prep
-        base_commit = restore_info.get("base_commit") or ""
-    else:
-        wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
-        if wt_info is None:
-            # Non-git source (e.g. pip-installed dist-packages): scaffold an
-            # ephemeral scratch worktree with git init. Disable with
-            # FORGE_DISABLE_NOGIT=1.
-            if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+    try:
+        if inplace:
+            prep = _prepare_inplace(source_file, repo, branch)
+            if prep is None:
                 return _normalized(
                     2,
                     "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                    "forge: editable-finder package but repo is not a usable git checkout; skipping",
                     time.time() - started,
                     skipped=True,
                 )
-            wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+            workspace, worktree_kernel, restore_info = prep
+            base_commit = restore_info.get("base_commit") or ""
+        else:
+            wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
             if wt_info is None:
-                return _normalized(
-                    2,
-                    "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched)",
-                    time.time() - started,
-                    skipped=True,
-                )
-            nogit_scratch = True
-        workspace, worktree_kernel, base_commit = wt_info
+                # Non-git source (e.g. pip-installed dist-packages): scaffold an
+                # isolated scratch worktree with git init. Disable with
+                # FORGE_DISABLE_NOGIT=1.
+                if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+                if wt_info is None:
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                nogit_scratch = True
+            workspace, worktree_kernel, base_commit = wt_info
+    except (_RetainedWorkspaceCollision, _WorktreePreparationError) as error:
+        result = _normalized(
+            2,
+            "",
+            f"forge: workspace preparation skipped safely: {error}",
+            time.time() - started,
+            skipped=True,
+        )
+        result["cli_workspace"] = str(output_dir / "worktree")
+        result["output_dir"] = str(output_dir)
+        return result
 
+    driver = ""
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -2792,12 +2894,14 @@ def submit(
     finally:
         # Never let workspace cleanup failure swallow the forge result dict.
         try:
-            if inplace:
-                _restore_inplace(restore_info)
-            elif nogit_scratch:
-                # Scratch worktree has no branch in any live repo; delete the dir.
-                shutil.rmtree(workspace, ignore_errors=True)
-            else:
-                _remove_worktree(kernel_repo, source_file, workspace, branch)
+            _finalize_forge_workspace(
+                inplace=inplace,
+                restore_info=restore_info,
+                driver=driver,
+                workspace=workspace,
+                output_dir=output_dir,
+                branch=branch,
+                nogit_scratch=nogit_scratch,
+            )
         except Exception:
             log.exception("forge workspace finalization failed")
