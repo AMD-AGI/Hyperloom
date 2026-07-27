@@ -1166,17 +1166,8 @@ class TestRunGemmTuningHandler:
     def test_vllm_block_fp8_profile_capture_extracts_runtime_shapes(self, tmp_path, monkeypatch):
         import gzip
 
-        import yaml
         from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        baseline_config = tmp_path / "baseline.yaml"
-        baseline_config.write_text(
-            "benchmark:\n"
-            "  framework: vllm\n"
-            "  profiler:\n"
-            "    torch_profiler:\n"
-            "      enabled: false\n"
-        )
         state = SharedState(
             framework="vllm",
             model_path="/models/qwen",
@@ -1186,8 +1177,12 @@ class TestRunGemmTuningHandler:
             isl=128,
             osl=16,
             max_model_len=512,
-            baseline_config_path=str(baseline_config),
-            current_best={},
+            current_best={
+                "extra_envs": {
+                    "VLLM_ROCM_USE_AITER": "1",
+                    "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                }
+            },
         )
         captured: dict = {}
 
@@ -1200,8 +1195,6 @@ class TestRunGemmTuningHandler:
 
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
-                config = yaml.safe_load(Path(ctx.task.params["config_path"]).read_text())
-                assert config["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
                 trace_dir = Path(ctx.task.params["output_dir"]) / "tracelens"
                 trace_dir.mkdir(parents=True)
                 trace = {
@@ -1255,8 +1248,8 @@ class TestRunGemmTuningHandler:
         task = captured["task"]
         assert "profiler-config.delay_iterations" not in task.params["extra_server_args"]
         assert "profiler-config.max_iterations" not in task.params["extra_server_args"]
-        assert task.params["analysis_route"] == "deterministic"
-        assert task.params["steady_state_mode"] == "mixed"
+        assert "analysis_route" not in task.params
+        assert "steady_state_mode" not in task.params
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
         assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
         assert not any(
@@ -1272,8 +1265,6 @@ class TestRunGemmTuningHandler:
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
         from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        baseline_config = tmp_path / "baseline.yaml"
-        baseline_config.write_text("benchmark:\n  framework: vllm\n")
         steady_trace = tmp_path / "mixed_steady_state.trace.json.gz"
         with gzip.open(steady_trace, "wt", encoding="utf-8") as stream:
             json.dump(
@@ -1291,7 +1282,9 @@ class TestRunGemmTuningHandler:
             framework="vllm",
             precision="fp8",
             model_path="/models/qwen",
-            baseline_config_path=str(baseline_config),
+            current_best={
+                "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+            },
         )
         captured: dict = {}
 
@@ -1309,6 +1302,8 @@ class TestRunGemmTuningHandler:
 
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
+                captured["shared_state"].current_best["nested_mutation"] = True
+                captured["shared_state"].lifecycle.append({"step": "nested"})
                 return {
                     "status": "succeeded",
                     "steady_state_trace": str(steady_trace),
@@ -1334,9 +1329,16 @@ class TestRunGemmTuningHandler:
         assert result["shape_count"] == 1
         assert result["source_profile_trace"] == str(steady_trace)
         assert captured["persist_state"] is False
+        assert "nested_mutation" not in state.current_best
+        assert state.lifecycle == []
         task = captured["task"]
-        assert task.params["analysis_route"] == "deterministic"
-        assert task.params["steady_state_mode"] == "mixed"
+        assert "config_path" not in task.params
+        assert "timeout_sec" not in task.params
+        assert "analysis_route" not in task.params
+        assert "steady_state_mode" not in task.params
+        assert "reason" not in task.params
+        assert task.params["extra_envs"]["VLLM_ROCM_USE_AITER_LINEAR"] == "1"
+        assert "VLLM_ROCM_USE_AITER" not in task.params["extra_envs"]
         assert "profiler-config.delay_iterations" not in task.params["extra_server_args"]
         assert "profiler-config.max_iterations" not in task.params["extra_server_args"]
 
@@ -1379,24 +1381,21 @@ class TestRunGemmTuningHandler:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        baseline_config = tmp_path / "baseline.yaml"
-        baseline_config.write_text("benchmark:\n  framework: vllm\n")
         state = SharedState(
             framework="vllm",
             model_path="/models/qwen",
-            baseline_config_path=str(baseline_config),
         )
 
-        class FakeBaselineExecutor:
-            def __init__(self, **kwargs):
+        class FakeRooflineExecutor:
+            def __init__(self, *, shared_state, persist_state=True):
                 pass
 
             async def __call__(self, ctx):
                 return {"status": "succeeded"}
 
-        monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FakeRooflineExecutor)
 
         result = asyncio.run(
             krh._capture_vllm_tunableop_shapes(
@@ -1830,7 +1829,10 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
-            last_trace_analyze={"steady_state_trace": str(steady_trace)},
+            last_trace_analyze={
+                "trace_input": str(roofline_trace),
+                "steady_state_trace": str(steady_trace),
+            },
         )
         state.last_profile_workload = state.current_profile_workload_context()
         state.save(tmp_path)
@@ -1877,6 +1879,40 @@ class TestRunGemmTuningHandler:
         assert result["shape_capture"]["source_profile_trace"] == str(steady_trace)
         assert result["status"] == "ok"
 
+    @pytest.mark.parametrize("profile_status", ["failed", ""])
+    def test_vllm_block_fp8_rejects_unusable_profile_state(
+        self,
+        tmp_path,
+        profile_status,
+    ):
+        profile_trace = tmp_path / "profile.trace.json"
+        stale_trace = tmp_path / "stale.trace.json"
+        steady_trace = tmp_path / "mixed_steady_state.trace.json"
+        for path in (profile_trace, stale_trace, steady_trace):
+            path.write_text(json.dumps({"traceEvents": []}))
+        state = SharedState(
+            framework="vllm",
+            precision="fp8",
+            model_path="/models/qwen",
+            last_profile_trace=str(profile_trace),
+            last_profile_status=profile_status or "succeeded",
+            last_trace_analyze={
+                "trace_input": (
+                    str(profile_trace) if profile_status else str(stale_trace)
+                ),
+                "steady_state_trace": str(steady_trace),
+            },
+        )
+        state.last_profile_workload = state.current_profile_workload_context()
+
+        assert (
+            krh._reuse_vllm_block_fp8_roofline_shapes(
+                state,
+                workspace=tmp_path / "gemm",
+            )
+            is None
+        )
+
     @pytest.mark.parametrize(
         ("field", "profile_value"),
         [
@@ -1918,7 +1954,10 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
-            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
+            last_trace_analyze={
+                "trace_input": str(roofline_trace),
+                "steady_state_trace": str(roofline_trace),
+            },
         )
         state.last_profile_workload = state.current_profile_workload_context()
         state.last_profile_workload[field] = profile_value
@@ -1986,7 +2025,10 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
-            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
+            last_trace_analyze={
+                "trace_input": str(roofline_trace),
+                "steady_state_trace": str(roofline_trace),
+            },
         )
         state.last_profile_workload = state.profile_workload_context(recorded_runtime)
         state.current_best = current_best
@@ -2016,7 +2058,10 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(roofline_trace),
             last_profile_status="succeeded",
-            last_trace_analyze={"steady_state_trace": str(roofline_trace)},
+            last_trace_analyze={
+                "trace_input": str(roofline_trace),
+                "steady_state_trace": str(roofline_trace),
+            },
         )
         state.last_profile_workload = state.profile_workload_context()
         caplog.set_level(20, logger=krh.__name__)
@@ -2055,7 +2100,10 @@ class TestRunGemmTuningHandler:
             max_model_len=4096,
             last_profile_trace=str(decode_trace),
             last_profile_status="succeeded",
-            last_trace_analyze={"steady_state_trace": str(decode_trace)},
+            last_trace_analyze={
+                "trace_input": str(decode_trace),
+                "steady_state_trace": str(decode_trace),
+            },
         )
         state.last_profile_workload = state.current_profile_workload_context()
 

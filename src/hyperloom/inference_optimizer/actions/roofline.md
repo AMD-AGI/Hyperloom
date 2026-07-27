@@ -15,6 +15,8 @@ internally invokes two atomic sub-steps in order:
 After both sub-steps succeed, `SharedState` carries:
 
 * `last_profile_trace` — path to the merged trace JSON
+* `last_trace_analyze.steady_state_trace` — the steady-state chunk selected by
+  TraceLens after its normal mode selection / retry policy
 * `last_trace_analyze.analysis_md_path` — path to TraceLens's
   human-readable Markdown report
 * `last_trace_analyze.analysis_md_text` — full text of the report
@@ -32,8 +34,7 @@ contract (see design/roofline-v2.md §6.2).
 ## Who enqueues it
 
 **The Coordinator does — never the LLM.** A roofline (or its
-`--no-enable-roofline` profile-only alternative) is auto-enqueued in
-exactly two places:
+`--no-enable-roofline` profile-only alternative) is auto-enqueued for:
 
 1. **PRELUDE bootstrap** — once after `baseline` lands, to seed the
    first `analysis.md`.
@@ -41,6 +42,14 @@ exactly two places:
    `cur_tput / last_roofline_tput >= 1.10`, where
    `cur_tput = baseline_tput * (1 + cumulative_gain_validated/100)`.
    Compound: 10% → 21% → 33% triggers.
+3. **KERNEL runtime refresh** — before kernel work when validated throughput or
+   the normalized model/workload/backend runtime context differs from the last
+   profile.
+
+Block-FP8 GEMM shape collection may invoke the same `RooflineExecutor` as an
+isolated fallback when no matching steady-state trace exists. That nested run
+uses a deep-copied `SharedState` and does not persist lifecycle/profile fields
+to the parent session; only its selected steady-state trace is consumed.
 
 While the Coordinator-enqueued analysis task is in flight, downstream
 dispatches are no longer blocked: actions keep running against the
@@ -71,11 +80,13 @@ Either sub-step failing causes the whole `roofline` task to fail:
   `last_profile_trace` **is** updated (profile artifact is still
   valuable) but no `last_trace_analyze` cache.
 
-There is no fallback and no retry. A failed roofline does not block
-the next watermark trigger — the Coordinator will enqueue a fresh
-analysis task the next time the +10% threshold is crossed; downstream
-dispatches proceed in degraded mode (specialists / explore run
-without a refreshed `analysis.md`).
+Profile startup retries use the existing bounded Roofline retry policy.
+TraceLens may also re-analyze the same trace once with an alternate
+steady-state mode when its first selected chunk is missing, empty, or
+low-quality. If those bounded retries fail, the roofline fails and does not
+fall back to the raw, non-steady trace. A failed roofline does not block
+downstream dispatch; later Coordinator refresh conditions may enqueue a fresh
+analysis task.
 
 ## Cost / runtime
 

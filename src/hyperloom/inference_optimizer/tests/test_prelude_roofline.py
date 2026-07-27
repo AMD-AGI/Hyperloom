@@ -249,10 +249,28 @@ async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state)
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.current_profile_workload_context()
+    )
 
     await coord._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_legacy_trace_without_runtime_fingerprint(
+    coord: Coordinator,
+):
+    """A pre-upgrade trace without runtime metadata is stale and must be refreshed."""
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.cumulative_gain_validated = 0.0
+    coord.shared_state.last_profile_workload = {}
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
 
 
 @pytest.mark.asyncio

@@ -129,6 +129,67 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypatch):
+    state = _state()
+    state.framework = "vllm"
+    ctx = _ctx(tmp_path)
+    calls = 0
+
+    async def fake_profile(profile_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error": "Capture cuda graph failed",
+            }
+        effective_args = str(profile_ctx.task.params.get("base_extra_args") or "")
+        profile_ctx.task.params["extra_server_args"] = effective_args
+        return _profile_success("/tmp/eager.trace.json.gz")
+
+    async def fake_trace_analyze(payload, *, session_dir):
+        return _trace_analyze_success()
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        fake_profile,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        fake_trace_analyze,
+    )
+
+    result = await RooflineExecutor(shared_state=state)(ctx)
+
+    assert result["status"] == "succeeded"
+    assert calls == 2
+    assert "--enforce-eager" in state.last_profile_workload["server_args"]
+    assert state.last_profile_args == state.last_profile_workload["server_args"]
+
+
+@pytest.mark.asyncio
+async def test_nested_roofline_does_not_persist_session_state(tmp_path):
+    persisted = SharedState(session_id="parent")
+    persisted.save(tmp_path)
+    before = (tmp_path / "state.json").read_text(encoding="utf-8")
+    nested = SharedState.load_or_init(tmp_path)
+    ctx = _ctx(tmp_path)
+    p1, p2 = _patch_subs(
+        _profile_success("/tmp/nested.trace.json.gz"),
+        _trace_analyze_success(),
+    )
+
+    with p1, p2:
+        result = await RooflineExecutor(
+            shared_state=nested,
+            persist_state=False,
+        )(ctx)
+
+    assert result["status"] == "succeeded"
+    assert (tmp_path / "state.json").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
 async def test_happy_path_increments_snapshot_id_on_re_run(tmp_path):
     """Second roofline run on the same session bumps snapshot_id."""
     state = _state()

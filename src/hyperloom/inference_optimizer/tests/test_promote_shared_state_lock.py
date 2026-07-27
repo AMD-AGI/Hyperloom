@@ -234,6 +234,9 @@ async def test_promote_profile_without_task_uses_shared_state_workload(session_d
     state.isl = 1024
     state.osl = 1024
     state.max_model_len = 4096
+    state.current_best = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+    }
 
     await coord._promote_to_shared_state(
         "profile",

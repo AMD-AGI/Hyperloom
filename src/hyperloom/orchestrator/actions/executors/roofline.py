@@ -293,6 +293,7 @@ class RooflineExecutor:
         trace_path = ""
         last_error = ""
         profile_warning: dict[str, Any] | None = None
+        successful_profile_params: dict[str, Any] = {}
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
@@ -360,6 +361,7 @@ class RooflineExecutor:
                         profile_result.get("status"),
                         trace_path,
                     )
+                    successful_profile_params = dict(profile_ctx.task.params or {})
                     break
                 last_phase = "profile"
                 last_error = str(profile_result.get("error") or "profile sub-step failed")
@@ -435,6 +437,7 @@ class RooflineExecutor:
                     attempt,
                     _PROFILE_MAX_ATTEMPTS,
                 )
+            successful_profile_params = dict(profile_ctx.task.params or {})
             break
         else:
             return _failed(
@@ -448,9 +451,11 @@ class RooflineExecutor:
         # snapshot_id from it. The clear happens only on the failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
         self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
-            ctx.task.params or {}
+            successful_profile_params or ctx.task.params or {}
+        )
+        self.shared_state.last_profile_args = str(
+            self.shared_state.last_profile_workload.get("server_args") or ""
         )
 
         # ---- trace_analyze -------------------------------------------------
@@ -470,10 +475,9 @@ class RooflineExecutor:
         else:
             roofline_output_name = "kernel_roofline_current.json"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
-        for key in ("analysis_route", "steady_state_mode", "workspace_path"):
-            value = _task_params.get(key)
-            if value not in (None, ""):
-                ta_payload[key] = value
+        workspace_path = _task_params.get("workspace_path")
+        if workspace_path not in (None, ""):
+            ta_payload["workspace_path"] = workspace_path
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
         if roofline_output_name:
@@ -528,9 +532,8 @@ class RooflineExecutor:
                 "_n26_auto_retry": True,
                 "_n26_retry_from_mode": from_mode,
             }
-            for key in ("analysis_route", "workspace_path"):
-                if key in ta_payload:
-                    ta_payload_retry[key] = ta_payload[key]
+            if "workspace_path" in ta_payload:
+                ta_payload_retry["workspace_path"] = ta_payload["workspace_path"]
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
             if roofline_output_name:
@@ -671,6 +674,17 @@ class RooflineExecutor:
                             ta_payload = cb_payload
                             hot = cb_hot
                             trace_path = cb_trace
+                            successful_profile_params = dict(cb_ctx.task.params or {})
+                            self.shared_state.last_profile_trace = str(cb_trace)
+                            self.shared_state.last_profile_workload = (
+                                self.shared_state.profile_workload_context(
+                                    successful_profile_params
+                                )
+                            )
+                            self.shared_state.last_profile_args = str(
+                                self.shared_state.last_profile_workload.get("server_args")
+                                or ""
+                            )
                         else:
                             log.info(
                                 "roofline: compute-bound re-profile still host-bound "

@@ -441,6 +441,55 @@ def test_profile_workload_context_normalizes_path_and_runtime_controls(tmp_path)
     assert recorded["args_mode"] == "replace"
 
 
+def test_profile_workload_context_prefers_effective_profile_params():
+    state = SharedState(
+        current_best={
+            "extra_server_args": "--enable-torch-compile --attention-backend TRITON",
+        }
+    )
+
+    context = state.profile_workload_context(
+        {
+            "base_extra_args": "--enable-torch-compile --attention-backend TRITON",
+            "extra_server_args": "--attention-backend TRITON",
+            "base_extra_envs": {"BACKEND": "base"},
+            "extra_envs": {"BACKEND": "effective"},
+            "base_remove_args": ["--base-remove"],
+            "remove_args": ["--effective-remove"],
+            "base_unset_envs": ["BASE_ENV"],
+            "unset_envs": ["EFFECTIVE_ENV"],
+            "base_args_mode": "append",
+            "args_mode": "replace",
+        }
+    )
+
+    assert context["server_args"] == "--attention-backend TRITON"
+    assert context["extra_envs"] == {"BACKEND": "effective"}
+    assert context["remove_args"] == ["--effective-remove"]
+    assert context["unset_envs"] == ["EFFECTIVE_ENV"]
+    assert context["args_mode"] == "replace"
+    assert state.current_profile_workload_context()["server_args"] == (
+        "--attention-backend TRITON"
+    )
+
+
+def test_baseline_current_best_reuses_recorded_profile_runtime():
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    state.last_profile_workload = state.profile_workload_context(
+        {
+            "base_extra_args": "--attention-backend AITER",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        }
+    )
+
+    assert state.current_profile_workload_context() == state.last_profile_workload
+
+
 def test_record_action_failure_basic_fields():
     s = SharedState()
     s.record_action_failure(

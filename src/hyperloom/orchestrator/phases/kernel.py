@@ -46,7 +46,7 @@ class KernelPhase(PhaseHandler):
             return
         recorded_context = getattr(self.shared_state, "last_profile_workload", None)
         current_context = self.shared_state.current_profile_workload_context()
-        runtime_changed = bool(recorded_context) and recorded_context != current_context
+        runtime_changed = not recorded_context or recorded_context != current_context
         # With a measured trace, reprofile only on a material gain or runtime
         # context change. Backend/env changes invalidate shapes even at equal tput.
         if (

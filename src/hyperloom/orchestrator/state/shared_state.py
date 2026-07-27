@@ -833,20 +833,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             except (TypeError, ValueError):
                 context[name] = 0
         raw_server_args = (
-            params.get("base_extra_args")
-            if "base_extra_args" in params
-            else params.get("extra_server_args")
+            params.get("extra_server_args")
+            if "extra_server_args" in params
+            else params.get("base_extra_args")
         )
         server_args = str(raw_server_args or "").strip()
+        try:
+            from ..actions.executors.profile import _sanitize_profile_server_args
+
+            server_args = _sanitize_profile_server_args(server_args)
+        except ImportError:
+            pass
         try:
             context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
         except ValueError:
             context["server_args"] = " ".join(server_args.split())
 
         raw_envs = (
-            params.get("base_extra_envs")
-            if "base_extra_envs" in params
-            else params.get("extra_envs")
+            params.get("extra_envs")
+            if "extra_envs" in params
+            else params.get("base_extra_envs")
         )
         if isinstance(raw_envs, dict):
             context["extra_envs"] = {
@@ -857,16 +863,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             context["extra_envs"] = {}
 
         def _normalized_list(base_name: str, direct_name: str) -> list[str]:
-            raw = params.get(base_name) if base_name in params else params.get(direct_name)
+            raw = params.get(direct_name) if direct_name in params else params.get(base_name)
             values = [raw] if isinstance(raw, str) else list(raw or [])
             return sorted({str(value).strip() for value in values if str(value).strip()})
 
         context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
         context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
         args_mode = (
-            params.get("base_args_mode")
-            if "base_args_mode" in params
-            else params.get("args_mode")
+            params.get("args_mode")
+            if "args_mode" in params
+            else params.get("base_args_mode")
         )
         context["args_mode"] = str(args_mode or "append").strip().lower()
         return context
@@ -879,6 +885,40 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         current_best = self.current_best if isinstance(self.current_best, dict) else {}
         incoming = overrides if isinstance(overrides, dict) else {}
         params: dict[str, Any] = {}
+        runtime_keys = {
+            "extra_server_args",
+            "extra_envs",
+            "remove_args",
+            "unset_envs",
+            "args_mode",
+            "base_extra_args",
+            "base_extra_envs",
+            "base_remove_args",
+            "base_unset_envs",
+            "base_args_mode",
+        }
+        has_runtime_override = any(key in current_best for key in runtime_keys) or any(
+            key in incoming for key in runtime_keys
+        )
+        recorded = (
+            self.last_profile_workload
+            if isinstance(self.last_profile_workload, dict)
+            else {}
+        )
+        if (
+            not has_runtime_override
+            and current_best.get("action") in {"baseline", "profile"}
+            and recorded
+        ):
+            params.update(
+                {
+                    "base_extra_args": recorded.get("server_args", ""),
+                    "base_extra_envs": dict(recorded.get("extra_envs") or {}),
+                    "base_remove_args": list(recorded.get("remove_args") or []),
+                    "base_unset_envs": list(recorded.get("unset_envs") or []),
+                    "base_args_mode": recorded.get("args_mode", "append"),
+                }
+            )
         for source, target in (
             ("extra_server_args", "base_extra_args"),
             ("remove_args", "base_remove_args"),
