@@ -335,6 +335,26 @@ def test_build_manifest_with_args(monkeypatch):
     assert m["warm_replay_enabled"] is False
 
 
+def test_build_manifest_shared_provenance_fields(monkeypatch):
+    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0
+    provenance builder (kept in lockstep with the TraceShapeManifest)."""
+    monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
+    monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
+    monkeypatch.setattr(mf, "_detect_image", lambda: None)
+    monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
+    monkeypatch.setattr(mf, "build_provenance", lambda *a, **k: {
+        "gfx_arch": "gfx950", "ep": 8, "graph_mode": "graph_capture",
+        "server_args": ["--tp", "1"], "server_args_hash": "abc123",
+    })
+    m = mf.build_manifest(Path("/tmp/sd"))
+    assert m["schema_version"] == 4
+    assert m["gfx_arch"] == "gfx950"
+    assert m["ep"] == 8
+    assert m["graph_mode"] == "graph_capture"
+    assert m["server_args"] == ["--tp", "1"]
+    assert m["server_args_hash"] == "abc123"
+
+
 def test_build_manifest_snapshots_user_data_path_from_env(monkeypatch, tmp_path):
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
