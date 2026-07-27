@@ -593,9 +593,13 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
 
 
-def test_salvage_ignores_discarded_warmup_and_stops(tmp_path):
-    # Only a discarded warmup round carries a score; parse_eval_results excludes
-    # warmup output, so there is nothing to salvage and the run stops.
+def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
+    """A warmup-round eval is a valid accuracy source, so the run must not stop.
+
+    What a warmup discards is throughput -- the cold-boot window inflates later
+    gains. Accuracy is not timing-sensitive, and the baseline double-run now
+    evaluates only in the warmup round, so this is the sole score available.
+    """
     runs_baseline = tmp_path / "runs" / "baseline"
     _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.9)
     deciding = runs_baseline / "retry2_bootsafe"
@@ -605,7 +609,21 @@ def test_salvage_ignores_discarded_warmup_and_stops(tmp_path):
         "vllm",
         {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)},
     )
-    assert reason == "baseline_accuracy_failed"
+    assert reason == ""
+
+
+def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
+    """The warmup is a fallback, not a substitute: a real round still wins."""
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.10)
+    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.90)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
+
+    parsed = parse_eval_results(runs_baseline, framework="vllm")
+    assert parsed["accuracy"] == pytest.approx(0.90)
 
 
 def test_eval_already_off_does_not_retry(tmp_path):
