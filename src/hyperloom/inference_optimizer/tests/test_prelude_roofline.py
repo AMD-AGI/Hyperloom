@@ -259,7 +259,25 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     coord: Coordinator,
 ):
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
-    coord.shared_state.last_profile_args = "--attention-backend triton"
+    # The latest trace was profiled under a different backend (triton), recorded
+    # in last_profile_workload['serving_config'] exactly as the roofline executor
+    # writes it. last_profile_args stays the plain-args field it is elsewhere.
+    coord.shared_state.last_profile_status = "succeeded"
+    coord.shared_state.last_profile_workload = {
+        "framework": "sglang",
+        "precision": "fp8",
+        "model_path": "/models/qwen",
+        "tp": 1,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "max_model_len": 4096,
+        "serving_config": {
+            "engine": "",
+            "extra_server_args": "--attention-backend triton",
+            "extra_envs": {},
+        },
+    }
     coord.shared_state.current_best = {
         "extra_server_args": "--attention-backend aiter",
         "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
@@ -269,8 +287,13 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     await coord._maybe_reprofile_for_kernel()
 
     assert len(coord.sub.tasks_run) == 1
-    assert '"SGLANG_FP8_BLOCKSCALE_CK_MAX_M":"256"' in (
-        coord.shared_state.last_profile_args
+    # After the reprofile the recorded workload reflects the current config
+    # (aiter + the new env), so the next entry sees no config change.
+    assert (
+        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"][
+            "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
+        ]
+        == "256"
     )
 
     coord.sub = _StubSub(coord.shared_state)
