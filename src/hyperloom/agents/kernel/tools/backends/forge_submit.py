@@ -126,7 +126,12 @@ def _resolve_gpu_target(candidate: dict) -> str:
             return m.group(0)
     except Exception:
         pass
-    return "gfx942"
+    # Honor the "never hard-codes" contract: a wrong default (e.g. gfx942 on a
+    # gfx950 host) silently mis-targets kernel compilation. Fail loudly instead.
+    raise RuntimeError(
+        "Cannot resolve gfx target: set GPU_TARGET/GPU_TYPE or a candidate "
+        "'platform', and ensure rocminfo is available."
+    )
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
