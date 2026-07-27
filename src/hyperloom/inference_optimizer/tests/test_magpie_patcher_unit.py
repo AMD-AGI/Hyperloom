@@ -690,3 +690,34 @@ def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
     # Flag survived (unrecognised shape) but the parser now accepts it.
     assert "--concurrent-requests 64" in (bench / "sglang_mi355x.sh").read_text(encoding="utf-8")
     assert mp._RUN_LM_EVAL_PARSER_SENTINEL in (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+
+
+def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
+    """The one genuinely fatal state: a caller still passes the flag AND
+    run_lm_eval still rejects it.
+
+    This is exactly the shape that killed a run at baseline_accuracy_failed, so
+    it must report False and let the caller escalate rather than proceed into a
+    doomed eval.
+    """
+    magpie = tmp_path / "site-packages"
+    bench = magpie / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True)
+    # A shape the strip cannot rewrite, so the flag survives the patch.
+    (bench / "sglang_mi355x.sh").write_text(
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n',
+        encoding="utf-8",
+    )
+    # A benchmark_lib.sh whose parser cannot be taught the flag either: no
+    # run_lm_eval definition at all, so the belt has nothing to patch.
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text(
+        "# no run_lm_eval here\n", encoding="utf-8"
+    )
+
+    assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is False
+    # The blocker is still reported by the scanner, so callers can name the file.
+    assert [p.name for p in mp.live_eval_concurrency_flag_scripts(str(magpie), None)] == [
+        "sglang_mi355x.sh"
+    ]
