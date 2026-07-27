@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -40,6 +41,29 @@ log = logging.getLogger(__name__)
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
 _FORGE_SHUTDOWN_GRACE_SEC = 30
+
+
+def _forge_e2e_pct(candidate: dict) -> float | None:
+    """Return a finite 0..100 GPU-time share for Forge's E2E projection.
+
+    A task group represents every traced row affected by one source-level patch,
+    so its aggregate share is authoritative. The primary row is only a fallback
+    for legacy candidates without task-group metadata.
+    """
+    group = candidate.get("task_group")
+    if isinstance(group, dict) and group.get("aggregate_gpu_pct") is not None:
+        raw_value = group.get("aggregate_gpu_pct")
+    else:
+        raw_value = candidate.get("gpu_pct")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        return None
+    return value
 
 
 class ForgeLoopOutcome(NamedTuple):
@@ -2013,6 +2037,10 @@ def _run_loop_via_cli(
     experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
+    deadline_unix: float = 0.0,
+    e2e_pct: float | None = None,
+    operator_name: str = "",
+    experience_id: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2027,6 +2055,8 @@ def _run_loop_via_cli(
     """
     import json as _json
 
+    if deadline_unix <= 0:
+        deadline_unix = time.time() + timeout_s
     result_json = experiments_dir.parent / "forge_cli_result.json"
     checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
     for stale_path in (result_json, checkpoint_json):
@@ -2048,11 +2078,11 @@ def _run_loop_via_cli(
     env["GPU_TARGET"] = gpu_target
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
-    # aiter JITs each op from source, so an edit only takes effect on rebuild:
-    # force AITER_REBUILD=1 for aiter kernels. setdefault so an operator
-    # override wins.
+    # KernelForge owns content-addressed AITER cache invalidation. Do not set
+    # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
+    # tree on every driver-process import, causing repeated attention rebuilds.
     if "/aiter/" in (worktree_kernel or ""):
-        env.setdefault("AITER_REBUILD", "1")
+        env.pop("AITER_REBUILD", None)
         # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
         # disabled before the loop imports aiter.
         _ensure_flydsl_aiter_compat()
@@ -2085,6 +2115,10 @@ def _run_loop_via_cli(
         str(experiments_dir),
         "--experiment-id",
         _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        experience_id or experiments_dir.parent.name,
+        "--deadline-unix",
+        str(deadline_unix),
         "--result-json",
         str(result_json),
     ]
@@ -2092,6 +2126,12 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
+    # Forward the kernel's E2E time share so forge-loop's baseline profile can
+    # project a per-kernel end-to-end optimization potential.
+    if e2e_pct is not None:
+        cmd += ["--e2e-pct", str(e2e_pct)]
+    if operator_name:
+        cmd += ["--operator-name", operator_name]
 
     loop_exc = None
     out = ""
@@ -2107,13 +2147,16 @@ def _run_loop_via_cli(
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             timed_out = True
             stdout, stderr = _terminate_forge_process(proc)
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
-            loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
+            loop_exc = RuntimeError(
+                f"forge-loop exceeded absolute deadline after {timeout_s}s"
+            )
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
@@ -2150,6 +2193,12 @@ def _run_loop_via_cli(
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
         improved = bool(parsed.get("improved"))
+        if parsed.get("deadline_expired"):
+            timed_out = True
+            if loop_exc is None:
+                loop_exc = RuntimeError(
+                    "forge-loop reached its graceful absolute deadline"
+                )
     checkpoint = _read_forge_checkpoint(experiments_dir)
     return ForgeLoopOutcome(
         baseline_ms=baseline_ms,
@@ -2462,6 +2511,28 @@ def submit(
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
+        # Forward the task group's aggregate trace GPU-time share as the best
+        # available Amdahl approximation. Absent/invalid -> leave the optional
+        # E2E projection unavailable.
+        e2e_pct = _forge_e2e_pct(candidate)
+        task_group = candidate.get("task_group")
+        aggregate_gpu_pct = (
+            task_group.get("aggregate_gpu_pct")
+            if isinstance(task_group, dict)
+            else None
+        )
+        if (
+            candidate.get("gpu_pct") is not None
+            or aggregate_gpu_pct is not None
+        ) and e2e_pct is None:
+            log.warning(
+                "forge: ignoring invalid GPU-time share for optional E2E "
+                "projection: kernel_id=%s gpu_pct=%r aggregate_gpu_pct=%r",
+                candidate.get("kernel_id", ""),
+                candidate.get("gpu_pct"),
+                aggregate_gpu_pct,
+            )
+
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
@@ -2481,6 +2552,13 @@ def submit(
             experiments_dir=experiments_dir,
             forge_log=forge_log,
             timeout_s=timeout_s,
+            deadline_unix=max(
+                time.time() + 1.0,
+                started + timeout_s,
+            ),
+            e2e_pct=e2e_pct,
+            operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
+            experience_id=output_dir.name,
         )
         recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,
