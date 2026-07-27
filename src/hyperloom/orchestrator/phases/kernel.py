@@ -35,6 +35,12 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# Last-resort location of the aiter checkout inside the standard serving
+# container. Module-level (not an inline literal) so tests can point it at a
+# non-existent path and exercise the "no complete aiter config anywhere" branch
+# on a developer box that happens to have the real checkout mounted.
+_CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
+
 
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
@@ -1334,6 +1340,12 @@ class KernelPhase(PhaseHandler):
         same table from the installed aiter package. Overlay the candidate by the
         untuned schema's dispatch keys and write one self-contained CSV for E2E.
 
+        Implemented on the stdlib ``csv`` module on purpose: this runs in the
+        orchestrator process, which must not carry a hard pandas dependency (it
+        is not declared in ``pyproject.toml`` and is absent from the CI/test
+        environment). Values are carried through as text, so a config round-trips
+        byte-for-byte instead of being re-formatted by a dataframe writer.
+
         Returns the merged file path, or None if merging fails.
         """
         import importlib.util
@@ -1378,7 +1390,7 @@ class KernelPhase(PhaseHandler):
             spec = None
         if spec is not None and spec.origin:
             config_dirs.append(Path(spec.origin).resolve().parent / "configs")
-        config_dirs.append(Path("/sgl-workspace/aiter/aiter/configs"))
+        config_dirs.append(_CONTAINER_AITER_CONFIG_DIR)
         config_dirs.extend(
             sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs"))
         )

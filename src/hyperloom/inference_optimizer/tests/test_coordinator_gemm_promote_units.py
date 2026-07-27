@@ -19,6 +19,7 @@ import pytest
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
+import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -665,9 +666,25 @@ class TestForgeGemmRuntimeConfigMerge:
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
         monkeypatch.setattr("importlib.util.find_spec", lambda _name: None)
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
+        # The merge also probes the baked-in container config dir, which really
+        # exists on an aiter image. Without redirecting it the candidate merges
+        # against those configs and the "no base configs" premise never holds --
+        # so this test passed only where /sgl-workspace/aiter was absent.
+        monkeypatch.setattr(
+            kernel_phase_mod,
+            "_CONTAINER_AITER_CONFIG_DIR",
+            tmp_path / "missing-container-configs",
+        )
         monkeypatch.setenv(
             "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
             str(tmp_path / "missing-runtime-cache"),
+        )
+        # Point the last-resort container config dir at a non-existent path so the
+        # "no complete aiter config anywhere" branch is exercised even on a dev
+        # box that has the real /sgl-workspace/aiter checkout mounted.
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.phases.kernel._CONTAINER_AITER_CONFIG_DIR",
+            tmp_path / "missing-container-aiter-configs",
         )
         result = {
             "backend": "forge",
