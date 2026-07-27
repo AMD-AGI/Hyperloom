@@ -29,26 +29,9 @@ class _BareState:
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     kernel_optimizer: str = "native"
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    last_profile_args: str = ""
-    last_profile_status: str = ""
-    last_profile_workload: dict[str, Any] = field(default_factory=dict)
-    framework: str = "sglang"
-    precision: str = "fp8"
-    model_path: str = "/models/qwen"
-    tp: int = 1
-    conc: int = 64
-    isl: int = 1024
-    osl: int = 1024
-    max_model_len: int = 4096
 
     def save(self, _session_dir: Path | None) -> None:
         pass
-
-    def profile_workload_context(
-        self,
-        overrides: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return SharedState.profile_workload_context(self, overrides)
 
 
 class _StubTaskRegistry:
@@ -87,7 +70,10 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
-    c.shared_state = _BareState()
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        kernel_optimizer="native",
+    )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
@@ -99,6 +85,10 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     """The PRELUDE-bootstrap roofline represents baseline, not current_best."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        "remove_args": ["--old-backend"],
+        "unset_envs": ["OLD_BACKEND"],
+        "args_mode": "replace",
     }
     coord.shared_state.last_baseline = {
         "benchmark_script": "magpie_serving_bench.sh",
@@ -168,6 +158,10 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
     """Watermark roofline still profiles the optimized current_best config."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        "remove_args": ["--old-backend"],
+        "unset_envs": ["OLD_BACKEND"],
+        "args_mode": "replace",
     }
 
     task = asyncio.run(
@@ -176,6 +170,10 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
 
     assert task.params["reason"] == "explore_keep_watermark"
     assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
+    assert task.params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER_LINEAR": "1"}
+    assert task.params["base_remove_args"] == ["--old-backend"]
+    assert task.params["base_unset_envs"] == ["OLD_BACKEND"]
+    assert task.params["base_args_mode"] == "replace"
 
 
 @pytest.mark.asyncio
@@ -215,6 +213,8 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
+    # The reason carries a profile fingerprint suffix so repeated kernel entries
+    # at the same gain stack are distinguishable in the task log.
     assert coord.sub.tasks_run[0].params["reason"].startswith("kernel_entry_g0_")
     assert coord.shared_state.last_roofline_tput == 120.0
 
@@ -249,16 +249,91 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
-    coord.shared_state.last_profile_status = "succeeded"
-    coord.shared_state.last_profile_workload = (
-        coord.shared_state.profile_workload_context()
-    )
     coord.sub = _StubSub(coord.shared_state)
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.current_profile_workload_context()
+    )
 
     await coord._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_legacy_trace_without_runtime_fingerprint(
+    coord: Coordinator,
+):
+    """A pre-upgrade trace without runtime metadata is stale and must be refreshed."""
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.cumulative_gain_validated = 0.0
+    coord.shared_state.last_profile_workload = {}
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_backend_context_changes(coord: Coordinator):
+    """A backend/env change invalidates the prior trace even when throughput is unchanged."""
+    state = coord.shared_state
+    state.framework = "vllm"
+    state.precision = "fp8"
+    state.model_path = "/models/qwen"
+    state.tp = 1
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 1024
+    state.max_model_len = 4096
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    state.cumulative_gain_validated = 0.0
+    state.last_profile_workload = state.profile_workload_context(
+        {"base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "0"}}
+    )
+    state.current_best = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+    }
+    coord.sub = _StubSub(state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.sub.tasks_run[0].params["base_extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_LINEAR": "1"
+    }
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordinator):
+    """No measured trace yet (no snapshot) but a non-zero projected gain still reprofiles so GEAK gets a real trace."""
+    coord.shared_state.roofline_snapshots = []
+    coord.sub = _StubSub(coord.shared_state, landed_tput=150.0)
+    coord.shared_state.cumulative_gain_validated = 50.0  # cur = 150
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.shared_state.last_roofline_tput == 150.0
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
+    """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
+
+    class _RaisingSub:
+        async def run_task(self, _task: Any) -> None:
+            raise RuntimeError("profile crashed")
+
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.sub = _RaisingSub()
+    coord.shared_state.last_roofline_tput = 100.0
+    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != measured 100 → triggers
+
+    await coord._maybe_reprofile_for_kernel()  # must not raise
+
+    assert coord.shared_state.last_roofline_tput == 100.0
 
 
 @pytest.mark.asyncio
@@ -325,34 +400,3 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     coord.sub = _StubSub(coord.shared_state)
     await coord._maybe_reprofile_for_kernel()
     assert coord.sub.tasks_run == []
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_reprofile_runs_without_measured_trace(coord: Coordinator):
-    """No measured trace yet (no snapshot) but a non-zero projected gain still reprofiles so GEAK gets a real trace."""
-    coord.shared_state.roofline_snapshots = []
-    coord.sub = _StubSub(coord.shared_state, landed_tput=150.0)
-    coord.shared_state.cumulative_gain_validated = 50.0  # cur = 150
-
-    await coord._maybe_reprofile_for_kernel()
-
-    assert len(coord.sub.tasks_run) == 1
-    assert coord.shared_state.last_roofline_tput == 150.0
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
-    """A reprofile failure is best-effort: it never propagates and the anchor is left untouched."""
-
-    class _RaisingSub:
-        async def run_task(self, _task: Any) -> None:
-            raise RuntimeError("profile crashed")
-
-    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
-    coord.sub = _RaisingSub()
-    coord.shared_state.last_roofline_tput = 100.0
-    coord.shared_state.cumulative_gain_validated = 20.0  # cur = 120 != measured 100 → triggers
-
-    await coord._maybe_reprofile_for_kernel()  # must not raise
-
-    assert coord.shared_state.last_roofline_tput == 100.0

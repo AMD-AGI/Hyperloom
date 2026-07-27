@@ -524,8 +524,8 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     Args:
         args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
             benchmark/harness paths.
-        candidate (dict[str, Any]): Kernel candidate dict, used for
-            ``source_type`` and benchmark availability.
+        candidate (dict[str, Any]): Kernel candidate dict used for benchmark
+            availability.
 
     Returns:
         tuple[list[str], dict[str, Any]]: The selected backend ladder and a
@@ -536,7 +536,6 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if forge_enabled and not user_backends:
         user_backends = ["forge"]
     benchmark_available = has_benchmark(args, candidate)
-    source_type = str(candidate.get("source_type") or "unknown")
     notes: dict[str, Any] = {
         "user_specified_backends": bool(user_backends),
         "benchmark_available": benchmark_available,
@@ -2330,6 +2329,9 @@ def run_attempt(
                 report = Path(cli_workspace) / "optimization_report.md"
                 if report.exists():
                     backend_paths["partial_report"] = str(report)
+                forge_patch = opt_dir / "forge.patch"
+                if forge_patch.is_file():
+                    backend_paths["forge_patch"] = str(forge_patch)
             # Rescue: surface fresh ~/optimized_versions/ files when the
             # workspace's dir is empty.
             home_opt = Path("/home/user/optimized_versions")
@@ -3125,17 +3127,36 @@ def build_verification(
     if best is not None and artifact_valid:
         bp = best.get("backend_paths") or {}
         winning_patch = ""
-        for key in ("forge_patch", "partial_report", "report"):
+        for key in ("forge_patch", "patch", "partial_report", "report"):
             cand = str(bp.get(key) or "")
             if cand.endswith((".patch", ".diff")):
                 winning_patch = cand
                 break
         if winning_patch and Path(winning_patch).is_file():
             snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            # Prefer the retained forge workspace: it is the live tree the patch
+            # was produced against, so it carries every file the diff touches.
+            # Fall back to the exported artifact copies, which outlive a workspace
+            # that has already been reaped. Both are probed with is_dir() so a
+            # stale path falls through instead of yielding an empty snapshot.
+            snapshot_worktree = None
             forge_workspace = str(bp.get("forge_workspace") or "")
+            if forge_workspace and Path(forge_workspace).is_dir():
+                snapshot_worktree = Path(forge_workspace)
+            else:
+                for root_key in ("output_dir", "cli_workspace"):
+                    output_root = str(bp.get(root_key) or "")
+                    files_root = (
+                        Path(output_root) / "optimized_versions" / "files"
+                        if output_root
+                        else None
+                    )
+                    if files_root is not None and files_root.is_dir():
+                        snapshot_worktree = files_root
+                        break
             snap = build_patch_snapshot(
                 winning_patch,
-                worktree=Path(forge_workspace) if forge_workspace else None,
+                worktree=snapshot_worktree,
                 kernel_repo=kernel_repo,
                 clean_base=kernel_repo,
                 out_dir=snap_out,

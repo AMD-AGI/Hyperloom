@@ -57,6 +57,9 @@ def _trace_analyze_success(*, snapshot_id_in_state: int = 1) -> dict:
         "status": "ok",
         "candidates_path": "/tmp/kc.json",
         "trace_report_path": "/tmp/analysis.md",
+        "artifact_paths": {
+            "tracelens_steady_state_trace": "/tmp/mixed_steady_state.trace.json.gz",
+        },
         "hot_kernels": [],
         "trace_health_warnings": [],
     }
@@ -113,12 +116,55 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     assert state.last_profile_status == "succeeded"
     assert state.last_profile_args == "--mem-fraction-static=0.92"
     assert state.last_profile_workload == state.profile_workload_context(ctx.task.params)
+    assert state.last_trace_analyze["steady_state_trace"] == (
+        "/tmp/mixed_steady_state.trace.json.gz"
+    )
+    assert result["steady_state_trace"] == "/tmp/mixed_steady_state.trace.json.gz"
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
     assert cached["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"
     assert "Executive Summary" in cached["analysis_md_text"]
     assert cached["roofline_snapshot_id"] == 1
     assert cached["roofline_baseline_gain_at_snapshot"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypatch):
+    state = _state()
+    state.framework = "vllm"
+    ctx = _ctx(tmp_path)
+    calls = 0
+
+    async def fake_profile(profile_ctx):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error": "Capture cuda graph failed",
+            }
+        effective_args = str(profile_ctx.task.params.get("base_extra_args") or "")
+        profile_ctx.task.params["extra_server_args"] = effective_args
+        return _profile_success("/tmp/eager.trace.json.gz")
+
+    async def fake_trace_analyze(payload, *, session_dir):
+        return _trace_analyze_success()
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        fake_profile,
+    )
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        fake_trace_analyze,
+    )
+
+    result = await RooflineExecutor(shared_state=state)(ctx)
+
+    assert result["status"] == "succeeded"
+    assert calls == 2
+    assert "--enforce-eager" in state.last_profile_workload["server_args"]
+    assert state.last_profile_args == state.last_profile_workload["server_args"]
 
 
 @pytest.mark.asyncio

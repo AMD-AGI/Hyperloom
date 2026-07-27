@@ -70,6 +70,14 @@ class TestProfileWorkloadContext:
             "isl": 1024,
             "osl": 512,
             "max_model_len": 4096,
+            # The context also carries the runtime identity. This payload sets
+            # none of it, so these normalize to their empty forms -- asserted
+            # explicitly so a silent change to the identity shape fails here.
+            "server_args": "",
+            "extra_envs": {},
+            "remove_args": [],
+            "unset_envs": [],
+            "args_mode": "append",
         }
 
     def test_last_profile_workload_round_trips(self, tmp_path):
@@ -455,6 +463,157 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     s2 = SharedState.load_or_init(tmp_path)
     assert s2.last_profile["task_id"] == "p-1"
     assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
+
+
+def test_profile_workload_context_normalizes_path_and_runtime_controls(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    alias = tmp_path / "model-alias"
+    alias.symlink_to(model, target_is_directory=True)
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path=str(model),
+        tp=1,
+        conc=64,
+        isl=1024,
+        osl=1024,
+        max_model_len=4096,
+        current_best={
+            "extra_server_args": "  --foo   bar ",
+            "extra_envs": {"B": 2, "A": 1},
+            "remove_args": ["--old-b", "--old-a"],
+            "unset_envs": ["OLD_B", "OLD_A"],
+            "args_mode": "replace",
+        },
+    )
+
+    recorded = state.profile_workload_context(
+        {
+            "model_path": str(alias),
+            "base_extra_args": "--foo bar",
+            "base_extra_envs": {"A": "1", "B": "2"},
+            "base_remove_args": ["--old-a", "--old-b"],
+            "base_unset_envs": ["OLD_A", "OLD_B"],
+            "base_args_mode": "REPLACE",
+        }
+    )
+
+    assert recorded == state.current_profile_workload_context()
+    assert recorded["model_path"] == str(model.resolve())
+    assert recorded["server_args"] == "--foo bar"
+    assert recorded["extra_envs"] == {"A": "1", "B": "2"}
+    assert recorded["remove_args"] == ["--old-a", "--old-b"]
+    assert recorded["unset_envs"] == ["OLD_A", "OLD_B"]
+    assert recorded["args_mode"] == "replace"
+
+
+def test_profile_workload_context_prefers_effective_profile_params():
+    state = SharedState(
+        current_best={
+            "extra_server_args": "--enable-torch-compile --attention-backend TRITON",
+        }
+    )
+
+    context = state.profile_workload_context(
+        {
+            "base_extra_args": "--enable-torch-compile --attention-backend TRITON",
+            "extra_server_args": "--attention-backend TRITON",
+            "base_extra_envs": {"BACKEND": "base"},
+            "extra_envs": {"BACKEND": "effective"},
+            "base_remove_args": ["--base-remove"],
+            "remove_args": ["--effective-remove"],
+            "base_unset_envs": ["BASE_ENV"],
+            "unset_envs": ["EFFECTIVE_ENV"],
+            "base_args_mode": "append",
+            "args_mode": "replace",
+        }
+    )
+
+    assert context["server_args"] == "--attention-backend TRITON"
+    assert context["extra_envs"] == {"BACKEND": "effective"}
+    assert context["remove_args"] == ["--effective-remove"]
+    assert context["unset_envs"] == ["EFFECTIVE_ENV"]
+    assert context["args_mode"] == "replace"
+    assert state.current_profile_workload_context()["server_args"] == (
+        "--attention-backend TRITON"
+    )
+
+
+def test_baseline_current_best_reuses_recorded_profile_runtime():
+    """A bare baseline current_best inherits the runtime its profile measured."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    state.record_profile_workload(
+        {
+            "base_extra_args": "--attention-backend AITER",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        }
+    )
+
+    assert state.last_profile_workload_action == "baseline"
+    assert state.current_profile_workload_context() == state.last_profile_workload
+
+
+def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
+    """A runtime measured off a tuned arm must not read as still active."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={
+            "action": "gemm_tuning",
+            "tput": 120.0,
+            "extra_envs": {"AITER_CONFIG_FMOE": "1"},
+        },
+    )
+    state.record_profile_workload(
+        {
+            "base_extra_args": "--attention-backend AITER",
+            "base_extra_envs": {"AITER_CONFIG_FMOE": "1"},
+        }
+    )
+    assert state.last_profile_workload_action == "gemm_tuning"
+
+    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint
+    # must no longer claim the tuned arm's args are in effect.
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    context = state.current_profile_workload_context()
+
+    assert context != state.last_profile_workload
+    assert context["server_args"] == ""
+    assert context["extra_envs"] == {}
+
+
+def test_legacy_session_without_recorded_arm_still_reuses_profile_runtime():
+    """Sessions predating the recorded arm keep reusing instead of reprofiling."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    state.last_profile_workload = state.profile_workload_context(
+        {"base_extra_args": "--attention-backend AITER"}
+    )
+
+    assert state.last_profile_workload_action == ""
+    assert state.current_profile_workload_context() == state.last_profile_workload
+
+
+def test_prelude_roofline_records_baseline_arm_regardless_of_current_best():
+    """A PRELUDE profile measures the baseline arm even if current_best is tuned."""
+    state = SharedState(
+        framework="vllm",
+        current_best={"action": "gemm_tuning", "tput": 120.0},
+    )
+    state.record_profile_workload({"base_extra_args": "--tp 8"}, arm="baseline")
+
+    assert state.last_profile_workload_action == "baseline"
 
 
 def test_record_action_failure_basic_fields():

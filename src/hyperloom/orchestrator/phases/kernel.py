@@ -129,7 +129,17 @@ class KernelPhase(PhaseHandler):
         workload_changed = self._profile_workload_changed()
         if cur <= 0:
             return
-        # With a measured trace, reprofile only on a material change.
+        # With a measured trace, reprofile only on a material gain or a change in
+        # what is being measured. Backend/env changes invalidate shapes even at
+        # equal tput, so a staleness signal is a reason to reprofile: a missed
+        # reprofile silently points GEAK at a bottleneck that no longer exists.
+        #
+        # Staleness is judged from the recorded serving config, NOT from
+        # ``current_profile_workload_context()``: that context derives its
+        # runtime fields from the profile task params while the recorded
+        # ``serving_config`` derives them from ``current_best``, so the two
+        # disagree whenever a profile was recorded without runtime params -- and
+        # the gate would then reprofile on every entry, forever.
         if (
             before > 0
             and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
@@ -137,6 +147,8 @@ class KernelPhase(PhaseHandler):
             and not workload_changed
         ):
             return
+        if config_changed or workload_changed:
+            log.info("kernel-entry reprofile: active runtime context changed")
         snapshots_before = len(
             getattr(self.shared_state, "roofline_snapshots", None) or []
         )
@@ -1617,6 +1629,58 @@ class KernelPhase(PhaseHandler):
             pass
         return False
 
+    def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
+        """Merge a handler-owned Roofline fallback into the live Coordinator state.
+
+        The handler runs its inline Roofline against a throwaway ``SharedState``
+        loaded from disk, so the refreshed profile fields only exist in
+        ``state.json`` until they are merged back here. Any save of the live
+        state between the handler returning and this merge would clobber them,
+        so callers must invoke this before persisting the live state. Repeated
+        calls are idempotent.
+        """
+        shape_capture = result.get("shape_capture") if isinstance(result, dict) else None
+        if not isinstance(shape_capture, dict) or shape_capture.get("capture_mode") != "block_fp8_profile":
+            return
+        source_trace = str(shape_capture.get("source_profile_trace") or "").strip()
+        if not source_trace:
+            return
+        from copy import deepcopy
+
+        from ..state.shared_state import SharedState
+
+        persisted = SharedState.load_or_init(self.session_dir)
+        persisted_trace = str(
+            (persisted.last_trace_analyze or {}).get("steady_state_trace") or ""
+        ).strip()
+        if persisted_trace != source_trace:
+            log.warning(
+                "GEMM Roofline state sync skipped: persisted steady trace %r "
+                "does not match result %r",
+                persisted_trace,
+                source_trace,
+            )
+            return
+        for field_name in (
+            "last_profile_trace",
+            "last_profile_status",
+            "last_profile_args",
+            "last_profile_workload",
+            "last_profile_workload_action",
+            "last_trace_analyze",
+            "roofline_snapshot_id",
+            "roofline_snapshots",
+            "baseline_eager_fallback",
+        ):
+            setattr(
+                self.shared_state,
+                field_name,
+                deepcopy(getattr(persisted, field_name)),
+            )
+        # Lifecycle is append-only telemetry owned by both states; union it so
+        # neither the inline Roofline's rows nor the live state's are dropped.
+        self.shared_state.merge_lifecycle_events(persisted.lifecycle)
+
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.
 
@@ -1624,6 +1688,7 @@ class KernelPhase(PhaseHandler):
         ``run_gemm_tuning`` requests converge here so forge results never bypass
         per-tuner E2E validation.
         """
+        self._sync_profile_state_after_gemm_roofline(result)
         self.shared_state.record_gemm_tuning(result)
         # Forge results route to the per-tuner E2E validator when table tuning
         # asked for it OR when the CK block-scale backend switch is eligible.

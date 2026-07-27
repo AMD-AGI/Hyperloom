@@ -1,8 +1,23 @@
-"""Regression tests for the long-horizon KernelForge CLI integration."""
+"""Regression tests for the long-horizon KernelForge CLI integration.
+
+The forge-loop runs in a hard-killable subprocess, so a long-horizon campaign is
+routinely terminated mid-iteration. Everything here pins the contract that makes
+such a run salvageable rather than wasted:
+
+  * the CLI invocation + isolated process group that the kill relies on,
+  * the two recovery channels submit trusts, in order --
+    ``<workspace>/forge_experiments/best_result.json`` (the published manifest)
+    first, then ``<experiments_dir>/hyperloom.json`` (the caller-owned
+    checkpoint) -- and what happens when they disagree,
+  * the rule that a timed-out run with NO validated recovery discards its
+    measurements and fails, while one WITH a validated recovery returns a
+    salvaged, exportable best commit.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -41,131 +56,88 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     return repo, kernel
 
 
-def test_generated_driver_lives_inside_campaign_workspace(tmp_path):
+def _published_manifest(commit_hash: str, **overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "commit_hash": commit_hash,
+        "correctness_passed": True,
+        "baseline_wall_ms": 3.0,
+        "best_wall_ms": 2.0,
+        "iteration": 2,
+        "snr_db": 42.0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "experiment_id": "hyperloom",
+        "state": "best_committed",
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "baseline_ms": 3.0,
+        "best_ms": 1.5,
+        "validation_passed": True,
+        "case_coverage": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _stub_submit_environment(monkeypatch) -> None:
+    """Neutralize everything submit does outside the loop/recovery contract."""
+    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+
+
+def test_generated_drivers_never_clobber_the_git_workspace(tmp_path):
+    """Both driver generators write under the campaign output dir.
+
+    The workspace is a git worktree of the user's repo, so writing a generated
+    driver into it would either clobber a tracked file of the same name or show
+    up as an agent "edit" in the keep/revert diff.
+    """
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     tracked_driver = workspace / "forge_driver.py"
     tracked_driver.write_text("TRACKED_DRIVER\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
 
-    first = Path(
+    adapter = Path(
         forge_submit._build_driver_adapter(
             "python test.py",
             str(workspace),
-            tmp_path,
-        )
-    )
-    second = Path(
-        forge_submit._build_driver_adapter(
-            "python test.py",
-            str(workspace),
-            tmp_path,
-            inplace=True,
+            output_dir,
         )
     )
     generated = Path(
         forge_submit._autogen_forge_driver(
             {"operation": "gemm"},
             str(workspace / "kernel.py"),
-            workspace,
+            output_dir,
         )
     )
 
-    assert {first.parent, second.parent, generated.parent} == {workspace}
-    assert len({first.name, second.name, generated.name}) == 3
-    assert all(path.name.startswith(".forge_driver_") for path in (first, second, generated))
+    assert {adapter.parent, generated.parent} == {output_dir}
+    assert adapter.name != generated.name
+    assert adapter.is_file() and generated.is_file()
+    # The workspace gained nothing and lost nothing.
+    assert sorted(path.name for path in workspace.iterdir()) == ["forge_driver.py"]
     assert tracked_driver.read_text() == "TRACKED_DRIVER\n"
 
 
-def test_non_inplace_finalization_retains_worktree(tmp_path, monkeypatch):
-    workspace = tmp_path / "worktree"
-    workspace.mkdir()
-    monkeypatch.setattr(
-        forge_submit,
-        "_remove_worktree",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must retain worktree")),
-    )
+def test_inplace_restore_returns_the_original_working_tree_bytes(tmp_path):
+    """In-place mode edits the live repo, so restore must be byte-exact.
 
-    forge_submit._finalize_forge_workspace(
-        inplace=False,
-        restore_info=None,
-        driver="",
-        workspace=str(workspace),
-        output_dir=tmp_path,
-        branch="forge/test",
-        nogit_scratch=False,
-    )
-
-    assert workspace.is_dir()
-
-
-def test_inplace_finalization_moves_campaign_out_of_live_repo(tmp_path, monkeypatch):
-    workspace = tmp_path / "live-repo"
-    campaign = workspace / "forge_experiments"
-    campaign.mkdir(parents=True)
-    (campaign / "run_state.json").write_text("{}")
-    driver = workspace / ".forge_driver_123.py"
-    driver.write_text("pass\n")
-    restored = []
-    monkeypatch.setattr(
-        forge_submit,
-        "_restore_inplace",
-        lambda restore: restored.append(restore),
-    )
-
-    forge_submit._finalize_forge_workspace(
-        inplace=True,
-        restore_info={"repo": str(workspace)},
-        driver=str(driver),
-        workspace=str(workspace),
-        output_dir=tmp_path / "output",
-        branch="forge/test",
-        nogit_scratch=False,
-    )
-
-    assert not campaign.exists()
-    assert not driver.exists()
-    assert (tmp_path / "output" / "forge_experiments" / "run_state.json").is_file()
-    assert restored == [{"repo": str(workspace)}]
-
-
-def test_inplace_finalization_restores_then_raises_on_cleanup_failure(
-    tmp_path,
-    monkeypatch,
-):
-    workspace = tmp_path / "live-repo"
-    campaign = workspace / "forge_experiments"
-    campaign.mkdir(parents=True)
-    driver = workspace / ".forge_driver_failure.py"
-    driver.write_text("pass\n")
-    restored = []
-    monkeypatch.setattr(
-        forge_submit.shutil,
-        "move",
-        lambda *_args: (_ for _ in ()).throw(OSError("move failed")),
-    )
-    monkeypatch.setattr(
-        forge_submit,
-        "_restore_inplace",
-        lambda restore: restored.append(restore),
-    )
-
-    with pytest.raises(RuntimeError, match="in-place workspace cleanup failed"):
-        forge_submit._finalize_forge_workspace(
-            inplace=True,
-            restore_info={"repo": str(workspace)},
-            driver=str(driver),
-            workspace=str(workspace),
-            output_dir=tmp_path / "output",
-            branch="forge/test",
-            nogit_scratch=False,
-        )
-
-    assert restored == [{"repo": str(workspace)}]
-    assert campaign.is_dir()
-    assert not driver.exists()
-
-
-def test_inplace_restore_preserves_original_staged_and_unstaged_diffs(tmp_path):
+    ``_prepare_inplace`` snapshots pre-existing dirty content into a baseline
+    commit, so the index/working-tree split is folded into "unstaged" -- what is
+    guaranteed is that the *content* on disk is identical afterwards, the files
+    are still dirty, and the repo is back on its original branch with no forge
+    temp branch left behind.
+    """
     repo, source = _make_repo(tmp_path)
     binary = repo / "payload.bin"
     binary.write_bytes(b"\x00BASELINE\xff")
@@ -177,11 +149,8 @@ def test_inplace_restore_preserves_original_staged_and_unstaged_diffs(tmp_path):
     _git(repo, "add", "kernel.py", "payload.bin")
     source.write_text("STAGED\nUNSTAGED\n")
     binary.write_bytes(b"\x00STAGED\xffUNSTAGED")
-    staged_before = _git(repo, "diff", "--cached", "--binary", "--full-index")
-    unstaged_before = _git(repo, "diff", "--binary", "--full-index")
-    status_before = _git(repo, "status", "--short")
 
-    branch = "forge/test/inplace-index-restore"
+    branch = "forge/test/inplace-restore"
     prepared = forge_submit._prepare_inplace(str(source), str(repo), branch)
     assert prepared is not None
     workspace, kernel, restore = prepared
@@ -195,14 +164,19 @@ def test_inplace_restore_preserves_original_staged_and_unstaged_diffs(tmp_path):
 
     assert _git(repo, "branch", "--show-current") == "main"
     assert _git(repo, "branch", "--list", branch) == ""
-    assert _git(repo, "diff", "--cached", "--binary", "--full-index") == staged_before
-    assert _git(repo, "diff", "--binary", "--full-index") == unstaged_before
-    assert _git(repo, "status", "--short") == status_before
     assert source.read_text() == "STAGED\nUNSTAGED\n"
     assert binary.read_bytes() == b"\x00STAGED\xffUNSTAGED"
+    # Still dirty -- the developer's uncommitted work was not committed away.
+    status = _git(repo, "status", "--short")
+    assert "kernel.py" in status
+    assert "payload.bin" in status
+    # ... and the index is back at the original HEAD (the pre-forge staged /
+    # unstaged split is deliberately collapsed into unstaged by the baseline
+    # snapshot, so nothing is silently left staged).
+    assert _git(repo, "diff", "--cached") == ""
 
 
-def test_cli_uses_simplified_fresh_campaign_contract(tmp_path, monkeypatch):
+def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -211,6 +185,8 @@ def test_cli_uses_simplified_fresh_campaign_contract(tmp_path, monkeypatch):
     kernel.write_text("pass\n")
     driver.write_text("pass\n")
     program.write_text("# Task\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
     captured = {}
 
     class FakeProcess:
@@ -232,21 +208,44 @@ def test_cli_uses_simplified_fresh_campaign_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
-    result = forge_submit._run_loop_via_cli(
+    deadline = time.time() + 120.0
+    outcome = forge_submit._run_loop_via_cli(
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
         shapes={"primary": {"M": 128}},
-        max_hours=0.25,
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/kernel",
         gpu_target="gfx950",
         fellow="triton-fellow",
         program_md_file=str(program),
+        invocation_spec_file="",
+        experiments_dir=experiments,
         forge_log=tmp_path / "forge.log",
-        timeout_s=30,
+        timeout_s=120,
+        deadline_unix=deadline,
+        experience_id="attempt-1",
     )
 
+    # The loop result is a 7-field outcome; unpacking it as a bare tuple is what
+    # silently broke the recovery channels before.
+    assert forge_submit.ForgeLoopOutcome._fields == (
+        "baseline_ms",
+        "best_ms",
+        "improved",
+        "output",
+        "error",
+        "timed_out",
+        "checkpoint",
+    )
+    assert (outcome.baseline_ms, outcome.best_ms, outcome.improved) == (2.0, 1.0, True)
+    assert outcome.error is None
+    assert outcome.timed_out is False
+    assert outcome.checkpoint is None
+
     command = captured["command"]
-    assert result[:3] == (2.0, 1.0, True)
     assert command[:5] == [
         sys.executable,
         "-m",
@@ -254,98 +253,119 @@ def test_cli_uses_simplified_fresh_campaign_contract(tmp_path, monkeypatch):
         "forge-loop",
         "--kernel",
     ]
-    assert command[command.index("--max-hours") + 1] == "1.0"
-    assert "--program-md-file" in command
-    for removed in (
-        "--max-iters",
-        "--experiments-dir",
-        "--result-json",
-        "--git-branch",
-        "--gpu-target",
-        "--fellow",
-        "--snr-threshold",
-    ):
-        assert removed not in command
+    expected_flags = {
+        "--kernel": str(kernel),
+        "--driver": str(driver),
+        "--workspace": str(workspace),
+        "--shapes-json": json.dumps({"primary": {"M": 128}}),
+        "--snr-threshold": "30.0",
+        "--max-iters": "8",
+        "--max-hours": "1.0",
+        "--git-branch": "forge/session/kernel",
+        "--gpu-target": "gfx950",
+        "--fellow": "triton-fellow",
+        "--experiments-dir": str(experiments),
+        "--experiment-id": "hyperloom",
+        "--experience-id": "attempt-1",
+        "--deadline-unix": str(deadline),
+        "--result-json": str(experiments.parent / "forge_cli_result.json"),
+        "--program-md-file": str(program),
+    }
+    for flag, value in expected_flags.items():
+        assert flag in command, flag
+        assert command[command.index(flag) + 1] == value, flag
+
     assert captured["env"]["GPU_TARGET"] == "gfx950"
-    assert captured["env"]["FORGE_FELLOW"] == "triton-fellow"
     assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+    # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
-    assert captured["communicate_timeout"] == 30
+    assert captured["popen_kwargs"]["stdout"] is subprocess.PIPE
+    assert captured["popen_kwargs"]["stderr"] is subprocess.PIPE
+    assert captured["popen_kwargs"]["cwd"] == str(workspace)
+    # The subprocess wait is bounded by the absolute deadline, not by wall time
+    # already spent before the loop started.
+    assert 100.0 < captured["communicate_timeout"] <= 120.0
 
 
-def test_cli_timeout_recovers_incremental_best_from_workspace(tmp_path, monkeypatch):
+def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
+    """A hard kill must yield THIS run's checkpoint, never a stale one.
+
+    ``_run_loop_via_cli`` clears both recovery artifacts before launching, so a
+    checkpoint returned after a kill can only have been written by the run that
+    was killed.
+    """
     workspace = tmp_path / "worktree"
-    experiments = workspace / "forge_experiments"
-    experiments.mkdir(parents=True)
+    workspace.mkdir()
     kernel = workspace / "kernel.py"
     driver = workspace / "driver.py"
     kernel.write_text("pass\n")
     driver.write_text("pass\n")
-    (experiments / "best_result.json").write_text(
-        json.dumps(
-            {
-                "iteration": 1,
-                "commit_hash": "old-commit",
-                "baseline_wall_ms": 4.0,
-                "best_wall_ms": 3.0,
-                "correctness_passed": True,
-            }
-        )
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    checkpoint_json = experiments / "hyperloom.json"
+    result_json = experiments.parent / "forge_cli_result.json"
+    # Artifacts left behind by a PREVIOUS campaign in the same output dir.
+    checkpoint_json.write_text(
+        json.dumps({"checkpoint": {"best_commit": "stale-commit"}})
     )
-    (experiments / "run_state.json").write_text(
-        json.dumps(
-            {
-                "iteration": 2,
-                "baseline_wall_ms": 3.0,
-                "best": {
-                    "iteration": 2,
-                    "commit_hash": "new-commit",
-                    "wall_ms": 2.0,
-                },
-            }
-        )
-    )
+    result_json.write_text(json.dumps({"baseline_ms": 9.0, "best_ms": 9.0}))
+    fresh = {"schema_version": 1, "state": "best_committed", "best_commit": "fresh"}
 
-    def timeout(command, **_kwargs):
-        return (
-            subprocess.CompletedProcess(
-                command,
-                -signal.SIGKILL,
-                stdout="partial stdout",
-                stderr="partial stderr",
-            ),
-            True,
+    class TimeoutPopen:
+        pid = 43210
+        returncode = None
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(["forge-loop"], timeout)
+
+    def fake_terminate(_proc):
+        # Mirrors the loop's KEEP callback landing before the SIGKILL.
+        checkpoint_json.write_text(
+            json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh})
         )
+        return "partial stdout", "partial stderr"
 
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
-    monkeypatch.setattr(forge_submit, "_run_isolated_process_group", timeout)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
+    monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
 
-    baseline, best, improved, _output, error = forge_submit._run_loop_via_cli(
+    outcome = forge_submit._run_loop_via_cli(
         worktree_kernel=str(kernel),
         driver=str(driver),
         workspace=str(workspace),
         shapes={},
+        snr_threshold=30.0,
+        max_iters=8,
         max_hours=1.0,
+        branch="forge/session/kernel",
         gpu_target="gfx950",
         fellow="triton-fellow",
         program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments,
         forge_log=tmp_path / "forge.log",
         timeout_s=10,
     )
 
-    assert (baseline, best, improved) == (3.0, 2.0, True)
-    assert isinstance(error, forge_submit._ForgeLoopTimeout)
-    selected = forge_submit._freshest_verified_best(workspace)
-    assert selected["source"] == "run_state.json"
-    assert selected["iteration"] == 2
-    assert selected["commit_hash"] == "new-commit"
+    assert outcome.timed_out is True
+    assert isinstance(outcome.error, RuntimeError)
+    assert "10" in str(outcome.error)
+    assert outcome.checkpoint == fresh
+    assert "partial stdout" in outcome.output
+    # The previous run's sidecar was cleared, so its numbers cannot leak in.
+    assert not result_json.exists()
+    assert (outcome.baseline_ms, outcome.best_ms, outcome.improved) == (None, None, False)
 
 
-def test_isolated_process_timeout_terminates_and_kills_process_group(monkeypatch):
-    captured = {}
+def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkeypatch):
+    """SIGTERM, then SIGKILL to the whole group once the grace period expires."""
     signals = []
-    waits = []
+    descendants = [(9001, 4242)]
+    killed = []
 
     class FakeProcess:
         pid = 43210
@@ -363,18 +383,18 @@ def test_isolated_process_timeout_terminates_and_kills_process_group(monkeypatch
                     output="partial stdout",
                     stderr="partial stderr",
                 )
-            if self.communicate_calls == 2:
-                raise subprocess.TimeoutExpired(["forge-loop"], timeout)
             self.returncode = -signal.SIGKILL
             return "partial stdout\nfinal stdout", "partial stderr\nfinal stderr"
 
-    def fake_popen(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        captured["process"] = FakeProcess()
-        return captured["process"]
+        def kill(self):
+            raise AssertionError("killpg succeeded; direct fallback is invalid")
 
-    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+    process = FakeProcess()
+    monkeypatch.setattr(
+        forge_submit,
+        "_descendant_processes",
+        lambda _pid: list(descendants),
+    )
     monkeypatch.setattr(
         forge_submit.os,
         "killpg",
@@ -384,32 +404,28 @@ def test_isolated_process_timeout_terminates_and_kills_process_group(monkeypatch
     )
     monkeypatch.setattr(
         forge_submit,
-        "_wait_for_process_group_exit",
-        lambda process_group, timeout_s: waits.append((process_group, timeout_s)),
+        "_signal_processes",
+        lambda procs, sent_signal: killed.append((list(procs), sent_signal)),
     )
 
-    completed, timed_out = forge_submit._run_isolated_process_group(
-        ["forge-loop"],
-        cwd="/workspace",
-        env={"TEST": "1"},
-        timeout_s=1,
-        termination_grace_s=0.1,
-    )
+    stdout, stderr = forge_submit._terminate_forge_process(process, grace_sec=0.1)
 
-    assert timed_out is True
-    assert completed.stdout == "partial stdout\nfinal stdout"
-    assert completed.stderr == "partial stderr\nfinal stderr"
-    assert captured["kwargs"]["start_new_session"] is True
-    assert captured["kwargs"]["stdout"] is subprocess.PIPE
-    assert captured["kwargs"]["stderr"] is subprocess.PIPE
+    assert stdout == "partial stdout\nfinal stdout"
+    assert stderr == "partial stderr\nfinal stderr"
+    # SIGTERM, SIGKILL once the grace period expires, then a final sweep of the
+    # group after the parent is reaped (a re-parented fellow child would
+    # otherwise survive its parent).
     assert signals == [
-        (captured["process"].pid, signal.SIGTERM),
-        (captured["process"].pid, signal.SIGKILL),
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+        (process.pid, signal.SIGKILL),
     ]
-    assert waits == [(captured["process"].pid, 0.1)]
+    # The escalation also sweeps captured descendants, so a fellow's own
+    # grandchildren cannot outlive the group.
+    assert killed == [(descendants, signal.SIGKILL)]
 
 
-def test_isolated_process_timeout_leaves_no_running_child(tmp_path):
+def test_forced_termination_leaves_no_running_grandchild(tmp_path):
     child_pid_file = tmp_path / "child.pid"
     script = tmp_path / "spawn_child.py"
     script.write_text(
@@ -421,19 +437,30 @@ def test_isolated_process_timeout_leaves_no_running_child(tmp_path):
     )
     child_pid = None
 
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(tmp_path),
+        start_new_session=True,
+    )
     try:
-        completed, timed_out = forge_submit._run_isolated_process_group(
-            [sys.executable, str(script)],
-            cwd=str(tmp_path),
-            env=dict(os.environ),
-            timeout_s=0.5,
-            termination_grace_s=0.2,
-        )
-        assert timed_out is True
-        assert "child-started" in completed.stdout
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if child_pid_file.is_file() and child_pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("spawned child never reported its pid")
         child_pid = int(child_pid_file.read_text())
 
-        deadline = time.monotonic() + 2
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.communicate(timeout=0.2)
+        stdout, _stderr = forge_submit._terminate_forge_process(proc, grace_sec=2)
+
+        assert "child-started" in stdout
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             stat_path = Path(f"/proc/{child_pid}/stat")
             if not stat_path.exists() or stat_path.read_text().split()[2] == "Z":
@@ -449,39 +476,90 @@ def test_isolated_process_timeout_leaves_no_running_child(tmp_path):
                     os.kill(child_pid, signal.SIGKILL)
             except (OSError, IndexError):
                 pass
+        if proc.poll() is None:
+            proc.kill()
 
 
-def test_campaign_best_rejects_same_iteration_commit_mismatch(tmp_path):
-    experiments = tmp_path / "forge_experiments"
-    experiments.mkdir()
-    (experiments / "run_state.json").write_text(
-        json.dumps(
-            {
-                "best": {
-                    "iteration": 2,
-                    "commit_hash": "commit-a",
-                    "wall_ms": 2.0,
-                }
-            }
+def test_disagreeing_recovery_channels_keep_the_published_manifest(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Both channels validated but naming different commits is a forge bug.
+
+    The published manifest is rewritten on every KEEP, the checkpoint only on
+    the last KEEP callback, so the manifest wins -- loudly, never silently.
+    """
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "attempt-disagree"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        base_commit = _git(workspace, "rev-parse", "HEAD")
+        kernel.write_text("PUBLISHED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "published best")
+        published_commit = _git(workspace, "rev-parse", "HEAD")
+        kernel.write_text("CHECKPOINTED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "checkpointed best")
+        checkpointed_commit = _git(workspace, "rev-parse", "HEAD")
+        experiments = workspace / "forge_experiments"
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(published_commit))
         )
-    )
-    (experiments / "best_result.json").write_text(
-        json.dumps(
-            {
-                "iteration": 2,
-                "commit_hash": "commit-b",
-                "baseline_wall_ms": 3.0,
-                "best_wall_ms": 2.0,
-                "correctness_passed": True,
-            }
+        kernel.write_text("UNVALIDATED_MID_ITERATION\n")
+        captured.update(
+            published_commit=published_commit,
+            checkpointed_commit=checkpointed_commit,
         )
-    )
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=_checkpoint(base_commit, checkpointed_commit),
+        )
 
-    with pytest.raises(ValueError, match="conflicting verified best commits"):
-        forge_submit._freshest_verified_best(tmp_path)
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    with caplog.at_level(logging.WARNING, logger=forge_submit.log.name):
+        result = forge_submit.submit(
+            source_file=str(source),
+            prompt_file=prompt,
+            output_dir=output_dir,
+            test_command="python -c 'print(\"allclose: True\")'",
+            source_type="triton",
+            candidate={"platform": "mi355x"},
+            timeout_s=10,
+            kernel_repo=str(repo),
+        )
+
+    assert result["returncode"] == 0
+    assert result["best_commit"] == captured["published_commit"]
+    assert result["best_commit"] != captured["checkpointed_commit"]
+    optimized = output_dir / "optimized_versions" / "v1_forge.py"
+    assert optimized.read_text() == "PUBLISHED_BEST\n"
+    # The warning only fires when BOTH channels validated, which is what makes
+    # this a precedence assertion rather than a "checkpoint was ignored" one.
+    assert "disagree" in caplog.text
+    assert "keeping the published manifest" in caplog.text
 
 
-def test_restore_verified_best_rejects_unavailable_commit(tmp_path):
+def test_checkpoint_naming_an_unavailable_commit_is_rejected(tmp_path):
+    """A checkpoint pointing at a commit that is not in the workspace is junk.
+
+    Trusting it would export the current (unvalidated) worktree under a commit
+    that never existed. Rejection must also leave the workspace untouched.
+    """
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "output"
     output_dir.mkdir()
@@ -495,22 +573,30 @@ def test_restore_verified_best_rejects_unavailable_commit(tmp_path):
     assert prepared is not None
     workspace, kernel, base_commit = prepared
 
-    with pytest.raises(RuntimeError, match="verified best commit lookup failed"):
-        forge_submit._restore_verified_best(
-            workspace,
-            branch,
-            {
-                "iteration": 1,
-                "commit_hash": "f" * 40,
-                "git_branch": branch,
-            },
+    assert (
+        forge_submit._validated_forge_checkpoint(
+            _checkpoint(base_commit, "f" * 40),
+            workspace=workspace,
+            base_commit=base_commit,
+            shapes={},
         )
+        is None
+    )
+    # The same rejection holds for the published-manifest channel.
+    assert (
+        forge_submit._validated_forge_best_result(
+            _published_manifest("f" * 40),
+            workspace=workspace,
+            base_commit=base_commit,
+        )
+        is None
+    )
 
     assert _git(workspace, "rev-parse", "HEAD") == base_commit
     assert Path(kernel).read_text() == "BASELINE\n"
 
 
-def test_submit_timeout_exports_only_verified_commit_and_returns_124(
+def test_submit_timeout_salvages_only_the_validated_best_commit(
     tmp_path,
     monkeypatch,
 ):
@@ -527,41 +613,32 @@ def test_submit_timeout_exports_only_verified_commit_and_returns_124(
         _git(workspace, "add", "-u")
         _git(workspace, "commit", "-m", "verified best")
         best_commit = _git(workspace, "rev-parse", "HEAD")
-        branch = _git(workspace, "branch", "--show-current")
         experiments = workspace / "forge_experiments"
-        experiments.mkdir()
-        (experiments / "run_state.json").write_text(
-            json.dumps(
-                {
-                    "iteration": 2,
-                    "baseline_wall_ms": 3.0,
-                    "git_branch": branch,
-                    "best": {
-                        "iteration": 2,
-                        "commit_hash": best_commit,
-                        "wall_ms": 2.0,
-                    },
-                }
-            )
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(best_commit))
         )
+        # The kill lands mid-iteration, so the working tree holds an unvalidated
+        # candidate that must never reach the exported artifacts.
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
         _git(workspace, "add", "-u")
         captured.update(
             workspace=workspace,
             kernel=kernel,
             best_commit=best_commit,
-            branch=branch,
+            branch=_git(workspace, "branch", "--show-current"),
         )
-        return (
-            3.0,
-            2.0,
-            True,
-            "partial output",
-            forge_submit._ForgeLoopTimeout("timed out"),
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
         )
 
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    _stub_submit_environment(monkeypatch)
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
 
     result = forge_submit.submit(
@@ -576,33 +653,45 @@ def test_submit_timeout_exports_only_verified_commit_and_returns_124(
     )
 
     optimized = output_dir / "optimized_versions" / "v1_forge.py"
-    assert result["returncode"] == 124
+    assert result["returncode"] == 0
+    assert result["timed_out"] is True
+    assert result["salvaged"] is True
+    assert result["best_commit"] == captured["best_commit"]
     assert result["cli_workspace"] == str(output_dir)
-    assert result["forge_workspace"] == str(captured["workspace"])
     assert result["output_dir"] == str(output_dir)
-    assert result["optimized_artifact"] == str(optimized)
+    assert result["checkpoint_path"] == str(
+        output_dir / "forge_experiments" / "hyperloom.json"
+    )
     assert optimized.read_text() == "VERIFIED_BEST\n"
-    assert captured["kernel"].read_text() == "VERIFIED_BEST\n"
-    assert _git(captured["workspace"], "rev-parse", "HEAD") == captured["best_commit"]
-    assert _git(
-        captured["workspace"],
-        "status",
-        "--porcelain",
-        "--untracked-files=no",
-    ) == ""
-    assert captured["workspace"].is_dir()
-    assert _git(repo, "branch", "--list", captured["branch"])
+
+    patch = (output_dir / "optimized_versions" / "forge.patch").read_text()
+    assert "VERIFIED_BEST" in patch
+    assert "UNVERIFIED_MID_ITERATION" not in patch
+    changed = (output_dir / "optimized_versions" / "changed_files.txt").read_text()
+    assert changed.split() == ["kernel.py"]
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[micro_speedup] 1.5000x" in report
+    assert "[correctness] pass" in report
+
+    # Campaign state lives under the output dir, never inside the live repo, and
+    # the disposable worktree + temp branch are torn down afterwards.
+    assert (output_dir / "forge_experiments").is_dir()
+    assert not (repo / "forge_experiments").exists()
+    assert not captured["workspace"].exists()
+    assert _git(repo, "branch", "--list", captured["branch"]) == ""
+    assert source.read_text() == "BASELINE\n"
 
 
-def test_submit_timeout_restore_failure_never_exports_current_workspace(
+def test_submit_timeout_export_failure_writes_no_promotable_artifacts(
     tmp_path,
     monkeypatch,
 ):
+    """A recovery that cannot be exported must not leave a promotable report."""
     repo, source = _make_repo(tmp_path)
-    output_dir = tmp_path / "results" / "attempt-restore-failure"
+    output_dir = tmp_path / "results" / "attempt-export-failure"
     prompt = tmp_path / "prompt.md"
     prompt.write_text("# Optimize\n")
-    captured = {"exports": 0, "reports": 0}
+    captured = {"reports": 0}
 
     def fake_loop(**kwargs):
         workspace = Path(kwargs["workspace"])
@@ -611,51 +700,36 @@ def test_submit_timeout_restore_failure_never_exports_current_workspace(
         _git(workspace, "add", "-u")
         _git(workspace, "commit", "-m", "verified best")
         best_commit = _git(workspace, "rev-parse", "HEAD")
-        branch = _git(workspace, "branch", "--show-current")
         experiments = workspace / "forge_experiments"
-        experiments.mkdir()
-        (experiments / "run_state.json").write_text(
-            json.dumps(
-                {
-                    "iteration": 2,
-                    "baseline_wall_ms": 3.0,
-                    "git_branch": branch,
-                    "best": {
-                        "iteration": 2,
-                        "commit_hash": best_commit,
-                        "wall_ms": 2.0,
-                    },
-                }
-            )
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(best_commit))
         )
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
-        captured["workspace"] = workspace
         captured["kernel"] = kernel
-        return (
-            3.0,
-            2.0,
-            True,
-            "partial output",
-            forge_submit._ForgeLoopTimeout("timed out"),
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
         )
-
-    def forbidden_export(*_args, **_kwargs):
-        captured["exports"] += 1
-        raise AssertionError("unverified workspace must not be exported")
 
     def forbidden_report(*_args, **_kwargs):
         captured["reports"] += 1
         raise AssertionError("failed recovery must not write a promotable report")
 
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    _stub_submit_environment(monkeypatch)
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
     monkeypatch.setattr(
         forge_submit,
-        "_restore_verified_best",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("restore failed")),
+        "_export_best_artifacts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("validated best commit has no exportable source diff")
+        ),
     )
-    monkeypatch.setattr(forge_submit, "_export_best_artifacts", forbidden_export)
     monkeypatch.setattr(forge_submit, "_write_report", forbidden_report)
 
     result = forge_submit.submit(
@@ -669,42 +743,44 @@ def test_submit_timeout_restore_failure_never_exports_current_workspace(
         kernel_repo=str(repo),
     )
 
-    assert result["returncode"] == 124
-    assert "verified best recovery failed" in result["stderr_tail"]
-    assert captured["exports"] == 0
+    assert result["returncode"] == 1
+    assert "no exportable source diff" in result["stderr_tail"]
     assert captured["reports"] == 0
-    assert captured["kernel"].read_text() == "UNVERIFIED_MID_ITERATION\n"
-    assert "optimized_artifact" not in result
-    assert result["artifacts"] == []
+    assert "best_commit" not in result
     assert not (output_dir / "optimization_report.md").exists()
     assert not (output_dir / "optimized_versions").exists()
 
 
-@pytest.mark.parametrize(
-    ("loop_error", "expected_returncode"),
-    [
-        (forge_submit._ForgeLoopTimeout("timed out"), 124),
-        (RuntimeError("loop failed"), 1),
-    ],
-    ids=["timeout", "error"],
-)
-def test_submit_failure_without_verified_best_writes_no_promotable_artifacts(
+def test_submit_timeout_without_validated_recovery_discards_measurements(
     tmp_path,
     monkeypatch,
-    loop_error,
-    expected_returncode,
 ):
+    """No validated commit -> the sidecar's numbers are not evidence.
+
+    After a forced termination only a validated commit may produce a passing
+    report; the loop's self-reported baseline/best are dropped so nothing
+    downstream can promote an unverified kernel.
+    """
     repo, source = _make_repo(tmp_path)
-    output_dir = tmp_path / "results" / f"attempt-{expected_returncode}"
+    output_dir = tmp_path / "results" / "attempt-unrecoverable"
     prompt = tmp_path / "prompt.md"
     prompt.write_text("# Optimize\n")
+    captured = {}
 
     def fake_loop(**kwargs):
+        captured.update(kwargs)
         Path(kwargs["worktree_kernel"]).write_text("UNVERIFIED_MID_ITERATION\n")
-        return 3.0, 2.0, True, "failed output", loop_error
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
+        )
 
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    _stub_submit_environment(monkeypatch)
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
 
     result = forge_submit.submit(
@@ -718,15 +794,27 @@ def test_submit_failure_without_verified_best_writes_no_promotable_artifacts(
         kernel_repo=str(repo),
     )
 
-    assert result["returncode"] == expected_returncode
-    assert result["artifacts"] == []
-    assert result["changed_files"] == []
-    assert "optimized_artifact" not in result
-    assert not (output_dir / "optimization_report.md").exists()
+    assert result["returncode"] == 1
+    assert result["timed_out"] is True
+    assert result["salvaged"] is False
+    assert "timed out without recoverable checkpoint" in result["stderr_tail"]
+    assert "best_commit" not in result
     assert not (output_dir / "optimized_versions").exists()
 
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[micro_speedup]" not in report
+    assert "[correctness] fail" in report
+    # The discarded measurements must not survive even as an informational line.
+    assert "observed timing" not in report
+    assert "3.0000" not in report
 
-def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
+    # forge-loop rejects a soft budget below its own one-hour minimum, so submit
+    # floors --max-hours there while still hard-killing at timeout_s.
+    assert captured["max_hours"] >= forge_submit._FORGE_MIN_BUDGET_SEC / 3600.0
+    assert captured["timeout_s"] == 10
+
+
+def test_submit_loop_error_without_measurement_fails_and_tears_down_worktree(
     tmp_path,
     monkeypatch,
 ):
@@ -737,10 +825,17 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
 
     def fake_loop(**kwargs):
         workspaces.append(Path(kwargs["workspace"]))
-        return 3.0, 2.0, True, "failed", RuntimeError("loop failed")
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=None,
+            best_ms=None,
+            improved=False,
+            output="failed",
+            error=RuntimeError("loop failed"),
+            timed_out=False,
+            checkpoint=None,
+        )
 
-    monkeypatch.setenv("FORGE_BASELINE_GATE", "0")
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    _stub_submit_environment(monkeypatch)
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
 
     results = [
@@ -757,14 +852,82 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
         for attempt in (1, 2)
     ]
 
-    branches = [_git(workspace, "branch", "--show-current") for workspace in workspaces]
     assert [result["returncode"] for result in results] == [1, 1]
-    assert len(set(branches)) == 2
-    assert all(branch.startswith("forge/") for branch in branches)
-    assert all(workspace.is_dir() for workspace in workspaces)
+    assert all("forge cli loop failed" in result["stderr_tail"] for result in results)
+    # Each attempt tears its disposable worktree + temp branch down, so a repeat
+    # run on the same repo is not blocked by the previous one.
+    assert len(workspaces) == 2
+    assert not any(workspace.exists() for workspace in workspaces)
+    assert _git(repo, "branch", "--list") == "* main"
+    assert source.read_text() == "BASELINE\n"
 
 
-def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
+def test_finalization_failure_does_not_swallow_the_forge_result(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Workspace cleanup is best-effort; it must never eat a salvaged result."""
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "attempt-cleanup-failure"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        kernel.write_text("VERIFIED_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "verified best")
+        best_commit = _git(workspace, "rev-parse", "HEAD")
+        experiments = workspace / "forge_experiments"
+        experiments.mkdir(parents=True, exist_ok=True)
+        (experiments / "best_result.json").write_text(
+            json.dumps(_published_manifest(best_commit))
+        )
+        captured["best_commit"] = best_commit
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=3.0,
+            best_ms=2.0,
+            improved=True,
+            output="partial output",
+            error=RuntimeError("forge-loop timed out after 10s"),
+            timed_out=True,
+            checkpoint=None,
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+    monkeypatch.setattr(
+        forge_submit,
+        "_remove_worktree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup failed")),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=forge_submit.log.name):
+        result = forge_submit.submit(
+            source_file=str(source),
+            prompt_file=prompt,
+            output_dir=output_dir,
+            test_command="python -c 'print(\"allclose: True\")'",
+            source_type="triton",
+            candidate={"platform": "mi355x"},
+            timeout_s=10,
+            kernel_repo=str(repo),
+        )
+
+    assert result["returncode"] == 0
+    assert result["salvaged"] is True
+    assert result["best_commit"] == captured["best_commit"]
+    assert (
+        output_dir / "optimized_versions" / "v1_forge.py"
+    ).read_text() == "VERIFIED_BEST\n"
+    assert "forge workspace finalization failed" in caplog.text
+
+
+def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
+    """Non-git sources get a scratch git repo so keep/revert works at all."""
     source_root = tmp_path / "source"
     source_root.mkdir()
     source = source_root / "kernel.py"
@@ -781,63 +944,50 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
     )
 
     assert prepared is not None
-    workspace, _kernel, _base = prepared
-    assert _git(workspace, "branch", "--show-current") == branch
+    workspace, kernel, base_commit = prepared
+    assert Path(workspace) == output_dir / "worktree"
+    assert Path(kernel).read_text() == "pass\n"
+    assert _git(workspace, "rev-parse", "HEAD") == base_commit
+    assert _git(workspace, "log", "--oneline").count("\n") == 0  # single baseline
+    assert _git(workspace, "config", "user.name") == "forge-bot"
+
+    # The scratch repo must support the loop's commit/revert cycle.
+    Path(kernel).write_text("OPTIMIZED\n")
+    _git(workspace, "add", "-u")
+    _git(workspace, "commit", "-m", "iter1")
+    assert _git(workspace, "rev-parse", "HEAD") != base_commit
+    _git(workspace, "reset", "--hard", base_commit)
+    assert Path(kernel).read_text() == "pass\n"
+
+    # The live (non-git) source tree is never converted into a repo.
+    assert not (source_root / ".git").exists()
+    assert source.read_text() == "pass\n"
 
 
-def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
-    tmp_path,
-    monkeypatch,
-):
-    repo, source = _make_repo(tmp_path)
-    output_dir = tmp_path / "results" / "collision"
-    retained = output_dir / "worktree"
-    retained.mkdir(parents=True)
-    marker = retained / "keep.txt"
-    marker.write_text("retained\n")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("# Optimize\n")
-    monkeypatch.setattr(
-        forge_submit,
-        "_prepare_worktree_nogit",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("must not fall through to no-git scratch")
-        ),
-    )
+def test_trace_reads_llm_usage_from_the_cli_sidecar(tmp_path):
+    """The loop runs out-of-process, so its cost is only recoverable on disk."""
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
 
-    result = forge_submit.submit(
-        source_file=str(source),
-        prompt_file=prompt,
-        output_dir=output_dir,
-        test_command="python test.py",
-        source_type="triton",
-        candidate={"platform": "mi355x"},
-        timeout_s=10,
-        kernel_repo=str(repo),
-    )
+    assert forge_submit._forge_trace_from_sidecar(output_dir) == (None, None)
 
-    assert result["returncode"] == 2
-    assert result["skipped"] is True
-    assert marker.read_text() == "retained\n"
-
-
-def test_trace_reads_latest_campaign_experiment(tmp_path):
-    workspace = tmp_path / "worktree"
-    experiments = workspace / "forge_experiments"
-    experiments.mkdir(parents=True)
-    (experiments / "run_state.json").write_text(
-        json.dumps({"last_experiment_id": "segment-2"})
-    )
-    (experiments / "segment-2.json").write_text(
+    (output_dir / "forge_cli_result.json").write_text(
         json.dumps(
             {
-                "experiment_id": "segment-2",
+                "baseline_ms": 3.0,
                 "llm_usage": {"input_tokens": 10, "output_tokens": 3},
+                "steps": {"steps": [{"name": "baseline"}]},
             }
         )
     )
 
-    usage, steps = forge_submit._forge_trace_from_campaign(workspace)
+    usage, steps = forge_submit._forge_trace_from_sidecar(output_dir)
 
     assert usage == {"input_tokens": 10, "output_tokens": 3}
-    assert steps is None
+    assert steps == {"steps": [{"name": "baseline"}]}
+
+    # A usage block with no canonical token counter is not a usage block.
+    (output_dir / "forge_cli_result.json").write_text(
+        json.dumps({"llm_usage": {"calls": 3}, "steps": {}})
+    )
+    assert forge_submit._forge_trace_from_sidecar(output_dir) == (None, None)

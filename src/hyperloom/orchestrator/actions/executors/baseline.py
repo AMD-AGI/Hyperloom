@@ -1394,6 +1394,10 @@ class BaselineExecutor:
                 cg_flag,
                 fw,
             )
+        if effective_extra_server_args or "extra_server_args" in params:
+            # Keep the task envelope aligned with the materialized runtime so
+            # Roofline fingerprints record one-shot eager fallback accurately.
+            params["extra_server_args"] = effective_extra_server_args
 
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)

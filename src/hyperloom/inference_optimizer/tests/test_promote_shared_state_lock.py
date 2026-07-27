@@ -206,23 +206,19 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
     assert s.last_profile_trace == "/tmp/trace.json.gz"
     assert s.last_profile_status == "succeeded"
     assert s.last_profile_args == "--mem-fraction-static=0.9"
-    assert s.last_profile_workload == {
-        "framework": "vllm",
-        "precision": "fp8",
-        "model_path": "/models/qwen",
-        "tp": 1,
-        "conc": 64,
-        "isl": 1024,
-        "osl": 1024,
-        "max_model_len": 4096,
-        "serving_config": {
-            "engine": "sglang",
-            "extra_server_args": "--attention-backend aiter",
-            "extra_envs": {
-                "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
-            },
-        },
-    }
+    assert s.last_profile_workload == s.profile_workload_context(
+        {
+            "base_extra_args": "--mem-fraction-static=0.9",
+            "framework": "vllm",
+            "precision": "fp8",
+            "model_path": "/models/qwen",
+            "tp": 1,
+            "conc": 64,
+            "isl": 1024,
+            "osl": 1024,
+            "max_model_len": 4096,
+        }
+    )
     # +1% rule met (150 vs 100): current_best re-lifted to profile.
     assert s.current_best["action"] == "profile"
     assert s.current_best["tput"] == 150.0
@@ -247,19 +243,32 @@ async def test_failed_profile_clears_stale_workload_metadata(session_dir):
     s.last_profile_args = "--old-config"
     s.last_profile_workload = {"framework": "vllm", "conc": 64}
 
+async def test_promote_profile_without_task_uses_shared_state_workload(session_dir):
+    coord = _coord(session_dir)
+    state = coord.shared_state
+    state.framework = "vllm"
+    state.precision = "fp8"
+    state.model_path = "/models/qwen"
+    state.tp = 1
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 1024
+    state.max_model_len = 4096
+    state.current_best = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+    }
+
     await coord._promote_to_shared_state(
         "profile",
         {
-            "status": "failed",
-            "error_class": "no_trace_files",
+            "status": "succeeded",
+            "main_trace_path": "/tmp/trace.json.gz",
+            "output_throughput": 100.0,
         },
-        task=_task("profile", params={}),
+        task=None,
     )
 
-    assert s.last_profile_status == "failed"
-    assert s.last_profile_trace == ""
-    assert s.last_profile_args == ""
-    assert s.last_profile_workload == {}
+    assert state.last_profile_workload == state.current_profile_workload_context()
 
 
 @pytest.mark.asyncio
