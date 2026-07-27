@@ -696,11 +696,11 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
     assert "[correctness] pass" in report
 
     # Campaign state lives under the output dir, never inside the live repo, and
-    # the disposable worktree + temp branch are torn down afterwards.
+    # the isolated worktree + temp branch are retained afterwards for inspection.
     assert (output_dir / "forge_experiments").is_dir()
     assert not (repo / "forge_experiments").exists()
-    assert not captured["workspace"].exists()
-    assert _git(repo, "branch", "--list", captured["branch"]) == ""
+    assert captured["workspace"].exists()
+    assert _git(repo, "branch", "--list", captured["branch"])
     assert source.read_text() == "BASELINE\n"
 
 
@@ -836,7 +836,7 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
     assert captured["timeout_s"] == 10
 
 
-def test_submit_loop_error_without_measurement_fails_and_tears_down_worktree(
+def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
     tmp_path,
     monkeypatch,
 ):
@@ -874,13 +874,16 @@ def test_submit_loop_error_without_measurement_fails_and_tears_down_worktree(
         for attempt in (1, 2)
     ]
 
+    branches = [_git(workspace, "branch", "--show-current") for workspace in workspaces]
     assert [result["returncode"] for result in results] == [1, 1]
     assert all("forge cli loop failed" in result["stderr_tail"] for result in results)
-    # Each attempt tears its disposable worktree + temp branch down, so a repeat
-    # run on the same repo is not blocked by the previous one.
+    # Each attempt retains its isolated worktree for inspection under its own
+    # output dir, on a unique Forge branch, so a repeat run on the same repo is
+    # never blocked by (or reuses) a prior attempt.
     assert len(workspaces) == 2
-    assert not any(workspace.exists() for workspace in workspaces)
-    assert _git(repo, "branch", "--list") == "* main"
+    assert all(workspace.is_dir() for workspace in workspaces)
+    assert len(set(branches)) == 2
+    assert all(branch.startswith("forge/") for branch in branches)
     assert source.read_text() == "BASELINE\n"
 
 
@@ -923,7 +926,7 @@ def test_finalization_failure_does_not_swallow_the_forge_result(
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
     monkeypatch.setattr(
         forge_submit,
-        "_remove_worktree",
+        "_finalize_forge_workspace",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup failed")),
     )
 
@@ -1156,40 +1159,47 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
     ).read_text() == "VERIFIED_BEST\n"
 
 
-def test_stale_campaign_worktree_is_replaced_by_a_fresh_one(tmp_path):
-    """A leftover directory at the campaign worktree path never blocks a rerun.
+def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    """A retained worktree at the campaign path skips cleanly, never clobbering it.
 
-    ``output_dir/worktree`` is the fixed campaign workspace path, so a crashed
-    predecessor can leave anything there. Preparation force-cleans it and hands
-    back a worktree at the repo's current HEAD -- returning a workspace (rather
-    than None) is also what keeps submit off the no-git scratch fallback.
+    ``output_dir/worktree`` is the fixed campaign workspace path and prior
+    attempts are retained for inspection. A collision must skip safely (rc 2)
+    without deleting the retained attempt and without reinterpreting the path as
+    a no-git scratch workspace.
     """
     repo, source = _make_repo(tmp_path)
-    output_dir = tmp_path / "output"
-    stale = output_dir / "worktree"
-    stale.mkdir(parents=True)
-    (stale / "leftover.txt").write_text("from a crashed run\n")
-    branch = "forge/session/stale-collision"
-
-    prepared = forge_submit._prepare_worktree(
-        str(source),
-        str(repo),
-        output_dir,
-        branch,
+    output_dir = tmp_path / "results" / "collision"
+    retained = output_dir / "worktree"
+    retained.mkdir(parents=True)
+    marker = retained / "keep.txt"
+    marker.write_text("retained\n")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    monkeypatch.setattr(
+        forge_submit,
+        "_prepare_worktree_nogit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not fall through to no-git scratch")
+        ),
     )
 
-    assert prepared is not None
-    workspace, kernel, base_commit = prepared
-    assert Path(workspace) == stale
-    assert not (stale / "leftover.txt").exists()
-    # A real, usable worktree of the live repo at its current HEAD.
-    assert base_commit == _git(repo, "rev-parse", "HEAD")
-    assert _git(workspace, "rev-parse", "HEAD") == base_commit
-    assert _git(workspace, "branch", "--show-current") == branch
-    assert Path(kernel).read_text() == "BASELINE\n"
-    assert str(stale) in _git(repo, "worktree", "list")
-    # The live checkout stayed on its own branch throughout.
-    assert _git(repo, "branch", "--show-current") == "main"
+    result = forge_submit.submit(
+        source_file=str(source),
+        prompt_file=prompt,
+        output_dir=output_dir,
+        test_command="python test.py",
+        source_type="triton",
+        candidate={"platform": "mi355x"},
+        timeout_s=10,
+        kernel_repo=str(repo),
+    )
+
+    assert result["returncode"] == 2
+    assert result["skipped"] is True
+    assert marker.read_text() == "retained\n"
 
 
 def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
@@ -1379,3 +1389,113 @@ def test_trace_reads_llm_usage_from_the_cli_sidecar(tmp_path):
         json.dumps({"llm_usage": {"calls": 3}, "steps": {}})
     )
     assert forge_submit._forge_trace_from_sidecar(output_dir) == (None, None)
+
+
+def test_non_inplace_finalization_retains_worktree(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        forge_submit,
+        "_remove_worktree",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must retain worktree")),
+    )
+
+    forge_submit._finalize_forge_workspace(
+        inplace=False,
+        restore_info=None,
+        driver="",
+        workspace=str(workspace),
+        output_dir=tmp_path,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert workspace.is_dir()
+
+
+def test_inplace_finalization_moves_campaign_out_of_live_repo(tmp_path, monkeypatch):
+    workspace = tmp_path / "live-repo"
+    campaign = workspace / "forge_experiments"
+    campaign.mkdir(parents=True)
+    (campaign / "run_state.json").write_text("{}")
+    driver = workspace / ".forge_driver_123.py"
+    driver.write_text("pass\n")
+    restored = []
+    monkeypatch.setattr(
+        forge_submit,
+        "_restore_inplace",
+        lambda restore: restored.append(restore),
+    )
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info={"repo": str(workspace)},
+        driver=str(driver),
+        workspace=str(workspace),
+        output_dir=tmp_path / "output",
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert not campaign.exists()
+    assert not driver.exists()
+    assert (tmp_path / "output" / "forge_experiments" / "run_state.json").is_file()
+    assert restored == [{"repo": str(workspace)}]
+
+
+def test_inplace_finalization_restores_then_raises_on_cleanup_failure(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "live-repo"
+    campaign = workspace / "forge_experiments"
+    campaign.mkdir(parents=True)
+    driver = workspace / ".forge_driver_failure.py"
+    driver.write_text("pass\n")
+    restored = []
+    monkeypatch.setattr(
+        forge_submit.shutil,
+        "move",
+        lambda *_args: (_ for _ in ()).throw(OSError("move failed")),
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_restore_inplace",
+        lambda restore: restored.append(restore),
+    )
+
+    with pytest.raises(RuntimeError, match="in-place workspace cleanup failed"):
+        forge_submit._finalize_forge_workspace(
+            inplace=True,
+            restore_info={"repo": str(workspace)},
+            driver=str(driver),
+            workspace=str(workspace),
+            output_dir=tmp_path / "output",
+            branch="forge/test",
+            nogit_scratch=False,
+        )
+
+    assert restored == [{"repo": str(workspace)}]
+    assert campaign.is_dir()
+    assert not driver.exists()
+
+
+def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "kernel.py"
+    source.write_text("pass\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    branch = "forge/session/kernel-attempt"
+
+    prepared = forge_submit._prepare_worktree_nogit(
+        str(source),
+        str(source_root),
+        output_dir,
+        branch,
+    )
+
+    assert prepared is not None
+    workspace, _kernel, _base = prepared
+    assert _git(workspace, "branch", "--show-current") == branch
