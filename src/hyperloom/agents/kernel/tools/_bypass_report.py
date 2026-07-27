@@ -29,7 +29,7 @@ from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
-from _bypass_source_resolver import editable_trace_source, resolve_source
+from _bypass_source_resolver import editable_trace_source, resolve_source_metadata
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
@@ -58,6 +58,11 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak"]
+_TRACE_KERNEL_KIND_TAXONOMY = {
+    "flydsl": "flydsl",
+    "tilelang": "tilelang",
+    "triton": "triton",
+}
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
 _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}
@@ -364,10 +369,22 @@ def build_candidates(
         # cpu_op args; (2) op_to_source.json lookup; else unresolved.
         source_file = editable_trace_source(k.get("op_kernel_file", "") or "", k.get("op_kernel_backend", "") or "")
         source_method = "trace_kernel_file" if source_file else "unresolved"
+        trace_kernel_backend = str(k.get("op_kernel_backend") or "").strip().lower()
+        kernel_kind = (
+            _TRACE_KERNEL_KIND_TAXONOMY.get(trace_kernel_backend, "")
+            if source_file
+            else ""
+        )
         if not source_file and op_name:
-            source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
+            source_metadata = resolve_source_metadata(
+                op_name,
+                framework=framework,
+                device_kernel_name=kname,
+            )
+            source_file = source_metadata["source_file"]
             if source_file:
-                source_method = method
+                source_method = source_metadata["method"]
+                kernel_kind = source_metadata["kernel_kind"]
 
         # Real per-arg dims/dtypes from the trace, rendered into the downstream
         # shape-string contract.
@@ -378,9 +395,8 @@ def build_candidates(
         # Benchmark discovery is opt-in; a routable kernel's on-disk
         # test/benchmark can seed downstream harness generation.
         bench_files: list[str] = []
-        kernel_repo = ""
+        kernel_repo = repo_root_from_source(source_file) if source_file else ""
         if discover_benchmarks and kc.reusable and source_file:
-            kernel_repo = repo_root_from_source(source_file)
             bench_files = find_benchmark_files(op_name, source_file)
 
         cand: dict[str, Any] = {
@@ -411,6 +427,7 @@ def build_candidates(
             "framework": framework,
             "source_file": source_file,
             "source_resolution_method": source_method,
+            "kernel_kind": kernel_kind,
             # Prefer the resolved source's extension; fall back to the op-name heuristic.
             "source_type": _source_type_from_path(source_file) or _source_type_for_op(op_name),
             "reusable_native_kernel": kc.reusable,

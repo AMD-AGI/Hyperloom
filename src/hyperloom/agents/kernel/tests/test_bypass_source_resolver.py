@@ -58,6 +58,14 @@ def test_resolve_single_native_source(monkeypatch):
     src, method = resolver.resolve_source("_C::silu_and_mul", framework="vllm")
     assert src == "/opt/aiter/csrc/activation_kernels.cu"
     assert method == "op_to_source"
+    assert resolver.resolve_source_metadata(
+        "_C::silu_and_mul",
+        framework="vllm",
+    ) == {
+        "source_file": "/opt/aiter/csrc/activation_kernels.cu",
+        "method": "op_to_source",
+        "kernel_kind": "aiter_hip",
+    }
 
 
 def test_resolve_strips_phase_suffix(monkeypatch):
@@ -119,6 +127,39 @@ def test_resolve_dispatch_matches_device_kernel(monkeypatch):
     _patch_mapping(monkeypatch, mapping)
     src, method = resolver.resolve_source("op::disp", framework="vllm", device_kernel_name="kernel_B")
     assert src == "/v/b.cu" and method == "op_to_source"
+
+
+def test_resolve_metadata_keeps_matched_dispatch_leaf_kernel_kind(monkeypatch):
+    mapping = {
+        "aiter::gemm_a8w8_blockscale_ck": {
+            "kind": "dispatch",
+            "vllm": {
+                "kernel_hip": {
+                    "kernel_source_path": "/v/hip.cu",
+                    "kernel_kind": "aiter_hip",
+                    "patchable": True,
+                },
+                "kernel_ck": {
+                    "kernel_source_path": "/v/ck.cu",
+                    "kernel_kind": "aiter_ck",
+                    "patchable": True,
+                },
+            },
+        }
+    }
+    _patch_mapping(monkeypatch, mapping)
+
+    metadata = resolver.resolve_source_metadata(
+        "aiter::gemm_a8w8_blockscale_ck",
+        framework="vllm",
+        device_kernel_name="kernel_ck",
+    )
+
+    assert metadata == {
+        "source_file": "/v/ck.cu",
+        "method": "op_to_source",
+        "kernel_kind": "aiter_ck",
+    }
 
 
 def test_resolve_dispatch_unknown_kernel_falls_back(monkeypatch):

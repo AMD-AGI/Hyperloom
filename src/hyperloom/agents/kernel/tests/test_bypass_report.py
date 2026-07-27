@@ -36,6 +36,18 @@ def _analyze(kernels):
     }
 
 
+def _source_metadata(
+    source_file: str,
+    method: str = "op_to_source",
+    kernel_kind: str = "",
+) -> dict[str, str]:
+    return {
+        "source_file": source_file,
+        "method": method,
+        "kernel_kind": kernel_kind,
+    }
+
+
 _KERNELS = [
     {"name": "paged_attention_v1", "op_name": "aten::paged_attn", "gpu_time_us": 300.0, "count": 3},
     {"name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm", "gpu_time_us": 200.0, "count": 2},
@@ -128,7 +140,11 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     # bucket. Force source resolution to fail so the reusable SDPA kernel is
     # guaranteed source-less regardless of the ambient op_to_source table.
     monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
-    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda *a, **k: _source_metadata("", "unresolved"),
+    )
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
     routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
@@ -151,7 +167,11 @@ def test_build_summary_counts(monkeypatch):
     # summary.json mirrors kernel_candidates.json's routable/skipped partition:
     # tasks == routable, skipped == the rest. Resolve the reusable SDPA kernel's
     # source so it is a task; the non-reusable GEMM stays skipped.
-    monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("/src/paged_attn.py", "op_to_source"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda *a, **k: _source_metadata("/src/paged_attn.py"),
+    )
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     summ = report.build_summary(cands, framework="vllm", target_platform="MI300X", generated_at="2026-01-01T00:00:00")
     assert summ["task_count"] == 1
@@ -460,7 +480,7 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
     def _boom(*a, **k):  # pragma: no cover - must not be called
         raise AssertionError("resolve_source must not run when trace kernel_file hits")
 
-    monkeypatch.setattr(report, "resolve_source", _boom)
+    monkeypatch.setattr(report, "resolve_source_metadata", _boom)
     kernels = [
         {
             "name": "triton_silu",
@@ -476,6 +496,7 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/repo/aiter/triton/silu.py"
     assert cand["source_resolution_method"] == "trace_kernel_file"
+    assert cand["kernel_kind"] == "triton"
     # shapes flow through in the downstream contract form (one call, "(dims) dtype").
     assert cand["input_shapes"] == [{"call_num": 1, "shape": "(8,16) bf16"}]
     assert cand["input_dtypes"] == ["c10::BFloat16"]
@@ -535,7 +556,14 @@ def test_unresolved_shape_candidate_has_empty_shapes():
 
 
 def test_source_file_from_op_to_source_when_no_kernel_file(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata(
+            "/opt/aiter/csrc/act.cu",
+            kernel_kind="aiter_hip",
+        ),
+    )
     kernels = [{"name": "act_kernel", "op_name": "_C::silu_and_mul", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/opt/aiter/csrc/act.cu"
@@ -543,7 +571,11 @@ def test_source_file_from_op_to_source_when_no_kernel_file(monkeypatch):
 
 
 def test_source_unresolved_when_both_miss(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata("", "unresolved"),
+    )
     kernels = [{"name": "mystery_kernel", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == ""
@@ -555,7 +587,11 @@ def test_source_unresolved_when_both_miss(monkeypatch):
 
 def test_inductor_kernel_file_rejected_falls_through(monkeypatch):
     # A /tmp inductor kernel_file is not editable; must fall through to lookup.
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata("", "unresolved"),
+    )
     kernels = [
         {
             "name": "triton_poi_fused",
@@ -663,8 +699,12 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     # real dispatchable split, show the source line, and render a Task Groups table.
     monkeypatch.setattr(
         report,
-        "resolve_source",
-        lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source") if op == "aiter::act" else ("", "unresolved"),
+        "resolve_source_metadata",
+        lambda op, **k: (
+            _source_metadata("/opt/aiter/csrc/act.cu", kernel_kind="aiter_hip")
+            if op == "aiter::act"
+            else _source_metadata("", "unresolved")
+        ),
     )
     kernels = [
         {"name": "aiter_act_kernel", "op_name": "aiter::act", "gpu_time_us": 300.0, "count": 3},
@@ -690,7 +730,11 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
 
 
 def test_source_type_from_resolved_source(monkeypatch):
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/x/k.cu", "op_to_source"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata("/x/k.cu"),
+    )
     kernels = [{"name": "aten::x", "op_name": "aten::x", "gpu_time_us": 100.0, "count": 1}]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_type"] == "hip_cpp"  # from .cu extension, not op-name heuristic
@@ -720,7 +764,11 @@ def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monke
     src = repo / "csrc" / "foo_kernel.cu"
     src.write_text("// foo_op\n", encoding="utf-8")
     (repo / "op_tests" / "test_foo.py").write_text("def test():\n    foo_op(x)\n", encoding="utf-8")
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: (str(src), "op_to_source"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata(str(src)),
+    )
     base = [{"name": "triton_foo_kernel", "op_name": "aiter::foo_op", "gpu_time_us": 100.0, "count": 1}]
 
     on = report.build_candidates(
@@ -733,12 +781,20 @@ def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monke
     off = report.build_candidates(_analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X")[
         "hot_kernels"
     ][0]
-    assert off["benchmark_files"] == [] and off["kernel_repo"] == ""
+    assert off["benchmark_files"] == []
+    assert off["kernel_repo"] == str(repo.resolve())
 
 
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
     # Two shapes of one logical operator resolve to one grouped optimization task.
-    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/quant.cu", "op_to_source"))
+    monkeypatch.setattr(
+        report,
+        "resolve_source_metadata",
+        lambda op, **k: _source_metadata(
+            "/opt/aiter/csrc/quant.cu",
+            kernel_kind="aiter_hip",
+        ),
+    )
     kernels = [
         {
             "name": "aiter::quant_kernel_shape_a",

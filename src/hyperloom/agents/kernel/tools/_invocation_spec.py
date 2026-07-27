@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from _io_utils import atomic_write_json
+from _kernel_kb_identity import build_kernel_identities
 from _task_group_contract import CASE_SELECTOR_KEY, task_group_shape_cases
 
 
@@ -545,7 +546,7 @@ def _compact_json(value: Any, *, key: str = "") -> Any:
             for item in value
             if (cleaned := _compact_json(item)) is not _OMIT
         ]
-        if cleaned_items or key == "shape":
+        if cleaned_items or key in {"shape", "kernel_identities"}:
             return cleaned_items
         return _OMIT
     if value is None or value == "":
@@ -691,6 +692,10 @@ def _task_group_contract(
     return {
         "task_group_id": str(group.get("task_group_id") or ""),
         "task_group_key": str(group.get("task_group_key") or ""),
+        "operator_identity": _safe_mapping(
+            group.get("operator_identity"),
+            base_dir=repo_root,
+        ),
         "primary_kernel_id": str(group.get("primary_kernel_id") or ""),
         "kernel_ids": [
             str(item)
@@ -833,6 +838,9 @@ def build_invocation_spec(
         "schema_version": SCHEMA_VERSION,
         "status": "complete" if not missing else "partial",
         "missing_fields": missing,
+        "kb": {
+            "kernel_identities": build_kernel_identities(candidate),
+        },
         "kernel": {
             "kernel_id": str(candidate.get("kernel_id") or ""),
             "name": str(candidate.get("name") or ""),

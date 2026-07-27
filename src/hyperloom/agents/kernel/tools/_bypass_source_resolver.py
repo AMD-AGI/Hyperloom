@@ -139,10 +139,10 @@ def _exists(path: str) -> bool:
         return False
 
 
-def _container_sources(container: dict[str, Any] | None) -> list[str]:
-    """Editable, patchable, absolutized source paths for one container (deduped)."""
-    out: list[str] = []
-    seen: set[str] = set()
+def _container_source_records(container: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Return editable source records while preserving resolver leaf metadata."""
+    records: list[dict[str, str]] = []
+    by_path: dict[str, dict[str, str]] = {}
     for info in (container or {}).values():
         if not isinstance(info, dict) or not info.get("patchable"):
             continue
@@ -150,26 +150,37 @@ def _container_sources(container: dict[str, Any] | None) -> list[str]:
         if not is_editable_source(raw, info.get("kernel_kind")):
             continue
         abs_path = _absolutize(str(raw))
-        if abs_path in seen:
+        kernel_kind = str(info.get("kernel_kind") or "").strip()
+        existing = by_path.get(abs_path)
+        if existing is not None:
+            if existing["kernel_kind"] != kernel_kind:
+                existing["kernel_kind"] = ""
             continue
-        seen.add(abs_path)
-        out.append(abs_path)
-    return out
+        record = {
+            "source_file": abs_path,
+            "kernel_kind": kernel_kind,
+        }
+        records.append(record)
+        by_path[abs_path] = record
+    return records
 
 
-def _select_container_sources(entry: dict[str, Any], framework: str) -> list[str]:
+def _select_container_source_records(
+    entry: dict[str, Any],
+    framework: str,
+) -> list[dict[str, str]]:
     """Pick the editable source list from the better container.
 
     Prefer whichever container is present on disk; otherwise honor the
     ``framework`` hint (only ``vllm`` / ``sglang`` recognized); else default to
     sglang, then vllm.
     """
-    sgl = _container_sources(entry.get("sglang"))
-    vll = _container_sources(entry.get("vllm"))
+    sgl = _container_source_records(entry.get("sglang"))
+    vll = _container_source_records(entry.get("vllm"))
     if not (sgl or vll):
         return []
-    sgl_present = any(_exists(p) for p in sgl)
-    vll_present = any(_exists(p) for p in vll)
+    sgl_present = any(_exists(record["source_file"]) for record in sgl)
+    vll_present = any(_exists(record["source_file"]) for record in vll)
     if sgl_present and not vll_present:
         return sgl
     if vll_present and not sgl_present:
@@ -182,7 +193,11 @@ def _select_container_sources(entry: dict[str, Any], framework: str) -> list[str
     return sgl or vll
 
 
-def _dispatch_sources(entry: dict[str, Any], framework: str, device_kernel_name: str) -> list[str]:
+def _dispatch_source_records(
+    entry: dict[str, Any],
+    framework: str,
+    device_kernel_name: str,
+) -> list[dict[str, str]]:
     """Resolve a ``dispatch`` op: the one kernel whose name matches the trace.
 
     Falls back to container selection when the device kernel name is unknown or
@@ -195,8 +210,53 @@ def _dispatch_sources(entry: dict[str, Any], framework: str, device_kernel_name:
             if isinstance(info, dict) and info.get("patchable"):
                 raw = info.get("kernel_source_path")
                 if is_editable_source(raw, info.get("kernel_kind")):
-                    return [_absolutize(str(raw))]
-    return _select_container_sources(entry, framework)
+                    return [
+                        {
+                            "source_file": _absolutize(str(raw)),
+                            "kernel_kind": str(info.get("kernel_kind") or "").strip(),
+                        }
+                    ]
+    return _select_container_source_records(entry, framework)
+
+
+def resolve_source_metadata(
+    op_name: str,
+    *,
+    framework: str = "",
+    device_kernel_name: str = "",
+) -> dict[str, str]:
+    """Resolve an editable source and its matched leaf metadata."""
+    unresolved = {
+        "source_file": "",
+        "method": "unresolved",
+        "kernel_kind": "",
+    }
+    mapping = _load_mapping()
+    if not mapping or not op_name:
+        return unresolved
+    key = _PHASE_SUFFIX_RE.sub("", op_name)
+    entry = mapping.get(key)
+    if not isinstance(entry, dict):
+        return unresolved
+    kind = str(entry.get("kind") or "single")
+    if kind == "dispatch":
+        records = _dispatch_source_records(entry, framework, device_kernel_name)
+    else:
+        records = _select_container_source_records(entry, framework)
+    if not records:
+        return unresolved
+    selected = next(
+        (
+            record
+            for record in records
+            if _exists(record["source_file"])
+        ),
+        records[0],
+    )
+    return {
+        **selected,
+        "method": "op_to_source",
+    }
 
 
 def resolve_source(
@@ -217,24 +277,12 @@ def resolve_source(
         preferred when several editable sources exist), or ``("", "unresolved")``
         on a dictionary miss / no editable source.
     """
-    mapping = _load_mapping()
-    if not mapping or not op_name:
-        return "", "unresolved"
-    key = _PHASE_SUFFIX_RE.sub("", op_name)
-    entry = mapping.get(key)
-    if not isinstance(entry, dict):
-        return "", "unresolved"
-    kind = str(entry.get("kind") or "single")
-    if kind == "dispatch":
-        sources = _dispatch_sources(entry, framework, device_kernel_name)
-    else:  # single / composite both dedup the selected container's editable src
-        sources = _select_container_sources(entry, framework)
-    if not sources:
-        return "", "unresolved"
-    for p in sources:
-        if _exists(p):
-            return p, "op_to_source"
-    return sources[0], "op_to_source"
+    metadata = resolve_source_metadata(
+        op_name,
+        framework=framework,
+        device_kernel_name=device_kernel_name,
+    )
+    return metadata["source_file"], metadata["method"]
 
 
 def editable_trace_source(kernel_file: str, kernel_kind: str = "") -> str:
@@ -257,4 +305,9 @@ def editable_trace_source(kernel_file: str, kernel_kind: str = "") -> str:
     return kf if is_editable_source(kf, kernel_kind or None) else ""
 
 
-__all__ = ["resolve_source", "editable_trace_source", "is_editable_source"]
+__all__ = [
+    "resolve_source",
+    "resolve_source_metadata",
+    "editable_trace_source",
+    "is_editable_source",
+]
