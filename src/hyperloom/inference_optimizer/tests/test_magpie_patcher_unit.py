@@ -512,3 +512,181 @@ def test_full_flow_covers_inferencex_and_ordering(tmp_path):
     assert "--concurrent-requests" not in (
         ix / "benchmarks" / "vllm_mi355x.sh"
     ).read_text(encoding="utf-8")
+
+
+# ---- regression: run-time eval-concurrency compat (2026-07-27 outage) ------
+# Reproduces the exact failure that killed a Qwen3-8B optimization run:
+# preflight pip-installed Magpie into site-packages and cloned InferenceX
+# WITHOUT ever running the patcher (only install.sh did), so
+# ``Magpie/scripts/benchmark/sglang_mi355x.sh`` kept upstream's
+#     run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
+# Magpie's ``_prepare_benchmark_scripts`` then re-copied that script into
+# ``<inferencex>/benchmarks/`` at run time, InferenceX's ``run_lm_eval``
+# rejected the flag ("Unknown parameter: --concurrent-requests"), the benchmark
+# aborted with no ``results*.json``, and the run stopped with
+# ``baseline_accuracy_failed``.
+_SGLANG_MI355X_FLAGGED = (
+    "#!/bin/bash\n"
+    'if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then\n'
+    '    if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then\n'
+    "        magpie_run_eval_remote_direct || exit $?\n"
+    "    else\n"
+    '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
+    "        append_lm_eval_summary\n"
+    "    fi\n"
+    "fi\n"
+)
+
+
+def _make_sitepackages_magpie(root: Path) -> Path:
+    """Magpie as pip installs it: package root with scripts/benchmark/*.sh."""
+    bench = root / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True, exist_ok=True)
+    (bench / "sglang_mi355x.sh").write_text(_SGLANG_MI355X_FLAGGED, encoding="utf-8")
+    return root
+
+
+def test_ensure_eval_concurrency_compat_strips_sglang_mi355x(tmp_path):
+    """The public run-time entry point removes the flag from the Magpie tree
+    Magpie re-copies from, so the executed copy is clean."""
+    magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+
+    assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is True
+
+    script = (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in script
+    # Concurrency still reaches lm-eval: run_lm_eval resolves it from
+    # EVAL_CONCURRENT_REQUESTS (fallback CONC), which the untouched call keeps.
+    assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in script
+    # The remote-direct shim (which never took the flag) is untouched.
+    assert "magpie_run_eval_remote_direct || exit $?" in script
+
+
+def test_ensure_eval_concurrency_compat_makes_run_lm_eval_tolerant(tmp_path):
+    """Belt for Magpie's run-time re-copy: even if a flagged script slips into
+    ``<inferencex>/benchmarks/``, ``run_lm_eval`` must not abort on it."""
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+
+    assert mp.ensure_eval_concurrency_compat(None, str(ix)) is True
+
+    lib = (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in lib
+    assert '--concurrent-requests|--concurrent_requests) concurrent_requests="$2"' in lib
+    # The catch-all that produced "Unknown parameter: --concurrent-requests" is
+    # now reached only by genuinely unknown flags.
+    assert lib.index("--concurrent-requests|--concurrent_requests") < lib.index('echo "Unknown parameter: $1"')
+
+
+def test_ensure_eval_concurrency_compat_falls_back_to_env(monkeypatch, tmp_path):
+    """With no explicit args the entry point resolves $MAGPIE_PATH / $INFERENCEX_PATH."""
+    magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix))
+
+    assert mp.ensure_eval_concurrency_compat() is True
+
+    assert (
+        "--concurrent-requests"
+        not in (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    )
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+
+
+def test_ensure_eval_concurrency_compat_idempotent(tmp_path):
+    magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+    assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is True
+    first_script = (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    first_lib = (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+
+    assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is True
+
+    assert (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh").read_text(
+        encoding="utf-8"
+    ) == first_script
+    assert (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8") == first_lib
+
+
+def test_ensure_eval_concurrency_compat_reports_unstrippable(tmp_path):
+    """An unrecognised flag shape must report False (callers fail loudly), not
+    silently leave a fatal flag live."""
+    magpie = tmp_path / "site-packages"
+    bench = magpie / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True, exist_ok=True)
+    (bench / "sglang_mi355x.sh").write_text(
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n',
+        encoding="utf-8",
+    )
+    assert mp.ensure_eval_concurrency_compat(str(magpie), None) is False
+
+
+def test_ensure_eval_concurrency_compat_noop_without_trees(monkeypatch, tmp_path):
+    """No Magpie / InferenceX on disk is 'not applicable', not a failure."""
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    assert mp.ensure_eval_concurrency_compat(str(tmp_path / "nope"), str(tmp_path / "nope2")) is True
+
+
+def test_ensure_eval_concurrency_compat_exported():
+    assert "ensure_eval_concurrency_compat" in mp.__all__
+
+
+# ---- live-flag detection: the precise "eval will abort" condition ----------
+def test_live_flag_scan_finds_flagged_caller(tmp_path):
+    magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
+    hits = mp.live_eval_concurrency_flag_scripts(str(magpie), None)
+    assert [p.name for p in hits] == ["sglang_mi355x.sh"]
+
+
+def test_live_flag_scan_ignores_benchmark_lib_parser_case(tmp_path):
+    """benchmark_lib.sh's own arg parser names the flag legitimately."""
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+    lib = ix / "benchmarks" / "benchmark_lib.sh"
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
+    assert "--concurrent-requests" in lib.read_text(encoding="utf-8")
+    assert mp.live_eval_concurrency_flag_scripts(None, str(ix)) == []
+
+
+def test_live_flag_scan_ignores_env_prefixed_patched_form(tmp_path):
+    """The supported rewrite (EVAL_CONCURRENT_REQUESTS=... run_eval) is clean."""
+    bench = tmp_path / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True)
+    (bench / "sglang_mi300x.sh").write_text(
+        mp._RUN_EVAL_PATCHED_BLOCK,
+        encoding="utf-8",
+    )
+    assert mp.live_eval_concurrency_flag_scripts(str(tmp_path), None) == []
+
+
+def test_compat_true_when_only_the_belt_fails(tmp_path):
+    """Regression: a reduced / already-fixed benchmark_lib.sh whose parser block
+    is unrecognised must NOT be reported as blocking. Nothing is actually
+    passing the flag, so accuracy eval runs fine."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text(
+        "run_lm_eval() { : ; }\n", encoding="utf-8"
+    )
+    assert mp._apply_eval_concurrency_fixes(None, str(ix)) is False
+    assert mp.ensure_eval_concurrency_compat(None, str(ix)) is True
+
+
+def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
+    """A flag shape the strip cannot rewrite is harmless once run_lm_eval parses
+    it — the belt is doing its job, so do not block the run."""
+    magpie = tmp_path / "site-packages"
+    bench = magpie / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True)
+    (bench / "sglang_mi355x.sh").write_text(
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n',
+        encoding="utf-8",
+    )
+    ix = _make_inferencex(tmp_path / "ix", vllm=None)
+
+    assert mp.ensure_eval_concurrency_compat(str(magpie), str(ix)) is True
+
+    # Flag survived (unrecognised shape) but the parser now accepts it.
+    assert "--concurrent-requests 64" in (bench / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
