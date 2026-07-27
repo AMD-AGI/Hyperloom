@@ -1414,6 +1414,83 @@ class TestRunGemmTuningHandler:
         assert result["capture_mode"] == "block_fp8_profile"
         assert result["shape_count"] == 0
 
+    def test_extract_block_fp8_shapes_rejects_empty_trace_path(self, tmp_path, monkeypatch):
+        """``Path("")`` normalizes to the CWD; it must never be walked."""
+        stale = tmp_path / "unrelated" / "old_session" / "stale.trace.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[999, 111], [222, 111]]},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        assert krh._extract_vllm_block_fp8_profile_shapes(Path("")) == ("", 0)
+        assert krh._extract_vllm_block_fp8_profile_shapes(Path(".")) == ("", 0)
+
+    def test_vllm_block_fp8_profile_capture_without_trace_ignores_cwd_traces(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A succeeded Roofline with no steady trace must not harvest CWD shapes."""
+        from hyperloom.orchestrator.actions.executors import roofline as roofline_module
+
+        stale = tmp_path / "unrelated" / "old_session" / "stale.trace.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {
+                            "name": "vllm::w8a8_triton_block_scaled_mm_func",
+                            "args": {"Input Dims": [[999, 111], [222, 111]]},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        state = SharedState(framework="vllm", model_path="/models/qwen")
+
+        class FakeRooflineExecutor:
+            def __init__(self, *, shared_state, persist_state=True):
+                pass
+
+            async def __call__(self, ctx):
+                return {"status": "succeeded", "steady_state_trace": ""}
+
+        monkeypatch.setattr(roofline_module, "RooflineExecutor", FakeRooflineExecutor)
+
+        result = asyncio.run(
+            krh._capture_vllm_tunableop_shapes(
+                state=state,
+                session_dir=session_dir,
+                payload={
+                    "task_id": "capture",
+                    "_shape_capture_mode": "block_fp8_profile",
+                },
+                workspace=session_dir / "runs" / "gemm_tuning" / "capture",
+            )
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "shape_capture_failed"
+        assert result["shape_count"] == 0
+        assert "shapes_json" not in result
+
     def test_multi_node_vllm_block_fp8_preserves_existing_no_capture_behavior(self, monkeypatch):
         from hyperloom.orchestrator.actions.executors import _multi_node_env
 

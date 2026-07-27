@@ -551,6 +551,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Workload context captured with ``last_profile_trace``; strict matching
     # prevents consumers from reusing runtime shapes after workload changes.
     last_profile_workload: dict[str, Any] = field(default_factory=dict)
+    # ``current_best.action`` in effect when ``last_profile_workload`` was
+    # recorded, so the backfill in ``current_profile_workload_context`` can tell
+    # a same-arm reuse from a stale one. Empty on legacy sessions.
+    last_profile_workload_action: str = ""
     # Rolling log of PolicyGate denials (newest last, cap 50).
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
@@ -925,6 +929,33 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         context["args_mode"] = str(args_mode or "append").strip().lower()
         return context
 
+    def record_profile_workload(
+        self,
+        params: dict[str, Any] | None = None,
+        *,
+        arm: str = "",
+    ) -> dict[str, Any]:
+        """Record the workload identity and originating arm for a profile trace.
+
+        Args:
+            params (dict[str, Any] | None): The profile task params the trace
+                was produced with.
+            arm (str): The profiled roofline arm; ``"baseline"`` pins the
+                recorded action, anything else resolves it from
+                ``current_best``.
+
+        Returns:
+            dict[str, Any]: The recorded workload context.
+        """
+        self.last_profile_workload = self.profile_workload_context(params or {})
+        if arm == "baseline":
+            self.last_profile_workload_action = "baseline"
+        else:
+            current_best = self.current_best if isinstance(self.current_best, dict) else {}
+            self.last_profile_workload_action = str(current_best.get("action") or "")
+        self.last_profile_args = str(self.last_profile_workload.get("server_args") or "")
+        return self.last_profile_workload
+
     def current_profile_workload_context(
         self,
         overrides: dict[str, Any] | None = None,
@@ -953,10 +984,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             if isinstance(self.last_profile_workload, dict)
             else {}
         )
+        # A bare baseline/profile ``current_best`` carries no runtime fields, so
+        # the only record of what the server actually ran with is the last
+        # profile. Backfilling it keeps "no override" from reading as an empty
+        # runtime, but only when that profile measured the same arm: a runtime
+        # recorded off a tuned arm would otherwise be reported as still active.
+        recorded_action = str(self.last_profile_workload_action or "").strip()
         if (
             not has_runtime_override
             and current_best.get("action") in {"baseline", "profile"}
             and recorded
+            # Legacy sessions predate the recorded action; keep reusing them
+            # rather than forcing a reprofile on every run.
+            and recorded_action in {"", "baseline", "profile"}
         ):
             params.update(
                 {
@@ -1748,6 +1788,42 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             duration_s=duration_s,
             ts=ts,
         )
+
+    def merge_lifecycle_events(self, incoming: Any) -> None:
+        """Union ``incoming`` lifecycle rows into this state, ordered by timestamp.
+
+        Used when a nested run records lifecycle events on its own
+        :class:`SharedState` instance: overwriting would drop whatever the live
+        state recorded in the meantime, so the two logs are unioned instead.
+        Rows are deduplicated on ``(step, status, ts)`` and ``seq`` is renumbered
+        so it stays monotonic, which also makes repeated merges idempotent.
+
+        Args:
+            incoming (Any): Lifecycle rows to merge; ignored unless a non-empty
+                list.
+        """
+        if not isinstance(incoming, list) or not incoming:
+            return
+        from copy import deepcopy
+
+        existing = self.lifecycle if isinstance(self.lifecycle, list) else []
+
+        def _key(row: dict[str, Any]) -> tuple[str, str, str]:
+            return (str(row.get("step")), str(row.get("status")), str(row.get("ts")))
+
+        merged = [row for row in existing if isinstance(row, dict)]
+        seen = {_key(row) for row in merged}
+        for row in incoming:
+            if not isinstance(row, dict) or _key(row) in seen:
+                continue
+            seen.add(_key(row))
+            merged.append(deepcopy(row))
+        merged.sort(key=lambda row: str(row.get("ts") or ""))
+        if len(merged) > _LIFECYCLE_CAP:
+            merged = merged[-_LIFECYCLE_CAP:]
+        for index, row in enumerate(merged):
+            row["seq"] = index
+        self.lifecycle = merged
 
     def increment_crash_count(self, by: int = 1) -> int:
         """Increment the cumulative crash counter and record crash times.

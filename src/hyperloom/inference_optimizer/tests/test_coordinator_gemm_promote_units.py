@@ -18,8 +18,11 @@ import pytest
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
 import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -84,6 +87,137 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     assert coord.shared_state.last_trace_analyze == persisted.last_trace_analyze
     assert coord.shared_state.roofline_snapshot_id == 3
     assert coord.shared_state.baseline_eager_fallback is False
+
+
+def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path):
+    """Neither the live state's nor the inline Roofline's rows may be dropped."""
+    coord = _coord(tmp_path)
+    coord.shared_state.record_lifecycle_event(step="explore", status="END", ts="2026-01-01T00:00:00Z")
+    coord.shared_state.save(tmp_path)
+    # Recorded on the live state only; never persisted before the sync.
+    coord.shared_state.record_lifecycle_event(step="live_only", status="START", ts="2026-01-01T00:00:05Z")
+
+    selected_trace = str(tmp_path / "mixed_steady_state.trace.json.gz")
+    persisted = SharedState.load_or_init(tmp_path)
+    persisted.last_trace_analyze = {"steady_state_trace": selected_trace}
+    persisted.record_lifecycle_event(step="profile", status="END", ts="2026-01-01T00:00:03Z")
+    persisted.save(tmp_path)
+
+    result = {
+        "shape_capture": {
+            "capture_mode": "block_fp8_profile",
+            "source_profile_trace": selected_trace,
+        }
+    }
+    coord.phase_kernel._sync_profile_state_after_gemm_roofline(result)
+
+    rows = coord.shared_state.lifecycle
+    assert [row["step"] for row in rows] == ["explore", "profile", "live_only"]
+    assert [row["seq"] for row in rows] == [0, 1, 2]
+
+    # Re-running the merge must not duplicate rows or shuffle seq.
+    before = list(rows)
+    coord.phase_kernel._sync_profile_state_after_gemm_roofline(result)
+    assert coord.shared_state.lifecycle == before
+
+
+def _silent_backends() -> dict[str, object]:
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(
+            type=IntentType.SEND_MESSAGE,
+            payload={"topic": "heartbeat", "body_md": "ok"},
+        ),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "kernel_agent": MockBackend(silent, name="k"),
+        "critic": MockBackend(silent, name="c"),
+        "robustness": MockBackend(silent, name="r"),
+    }
+
+
+@pytest.fixture
+def coord_session_dir(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    return make_session_dir()
+
+
+@pytest.mark.asyncio
+async def test_intent_router_gemm_roofline_survives_terminal_lifecycle_save(
+    coord_session_dir,
+    monkeypatch,
+):
+    """The lifecycle END save must not clobber the inline Roofline refresh.
+
+    On the intent_router path the terminal lifecycle event persists the live
+    state between the handler returning and the GEMM result being handled, so
+    the refresh has to be merged back before that save.
+    """
+    coord = Coordinator(coord_session_dir, backends=_silent_backends())
+    try:
+        selected_trace = str(coord_session_dir / "mixed_steady_state.trace.json.gz")
+
+        async def fake_handler(payload, *, session_dir):
+            # Mirror the handler-owned inline Roofline: it mutates a throwaway
+            # SharedState loaded from disk and persists it there.
+            state = SharedState.load_or_init(session_dir)
+            state.last_profile_trace = str(session_dir / "profile.trace.json.gz")
+            state.last_profile_status = "succeeded"
+            state.last_profile_workload = {
+                "framework": "vllm",
+                "server_args": "--attention-backend AITER",
+            }
+            state.last_trace_analyze = {
+                "trace_input": state.last_profile_trace,
+                "steady_state_trace": selected_trace,
+            }
+            state.roofline_snapshot_id = 7
+            state.baseline_eager_fallback = False
+            state.save(session_dir)
+            return {
+                "status": "ok",
+                "decision": "REVERT",
+                "backend": "geak",
+                "shape_capture": {
+                    "capture_mode": "block_fp8_profile",
+                    "source_profile_trace": selected_trace,
+                },
+            }
+
+        monkeypatch.setitem(
+            krh_mod.KERNEL_REQUEST_HANDLERS,
+            "run_gemm_tuning",
+            fake_handler,
+        )
+        monkeypatch.setattr(
+            coord.dispatcher,
+            "_sequence_denial_for_request",
+            lambda target, kind: None,
+        )
+        coord.shared_state.baseline_eager_fallback = True
+
+        await coord._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "run_gemm_tuning",
+                    "params": {},
+                },
+            ),
+        )
+
+        assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
+        assert coord.shared_state.last_profile_status == "succeeded"
+        assert coord.shared_state.roofline_snapshot_id == 7
+        assert coord.shared_state.baseline_eager_fallback is False
+        # It must also survive on disk so the next run can reuse the trace.
+        reloaded = SharedState.load_or_init(coord_session_dir)
+        assert reloaded.last_trace_analyze.get("steady_state_trace") == selected_trace
+    finally:
+        await coord.stop()
 
 
 class _Bus:

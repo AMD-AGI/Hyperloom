@@ -2228,6 +2228,10 @@ def _extract_vllm_block_fp8_profile_shapes(
         return "capture_traces" in path.parts
 
     shapes: set[tuple[int, int, int]] = set()
+    # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the
+    # whole process CWD and harvest shapes from unrelated traces.
+    if str(trace_input) in ("", "."):
+        return "", 0
     if trace_input.is_file():
         trace_paths = [] if _is_capture_sidecar(trace_input) else [trace_input]
     elif trace_input.is_dir():
@@ -2658,10 +2662,13 @@ async def _capture_vllm_tunableop_shapes(
         benchmark_result = {}
     if profile_mode:
         steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
-        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
-            Path(steady_state_trace),
-            output_dir=capture_dir,
-        )
+        if steady_state_trace:
+            shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+                Path(steady_state_trace),
+                output_dir=capture_dir,
+            )
+        else:
+            shapes_json, shape_count = "", 0
         if benchmark_result.get("status") == "succeeded" and shape_count > 0:
             return {
                 "status": "ok",

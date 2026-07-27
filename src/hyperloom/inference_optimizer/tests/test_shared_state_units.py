@@ -474,6 +474,56 @@ def test_profile_workload_context_prefers_effective_profile_params():
 
 
 def test_baseline_current_best_reuses_recorded_profile_runtime():
+    """A bare baseline current_best inherits the runtime its profile measured."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={"action": "baseline", "tput": 100.0},
+    )
+    state.record_profile_workload(
+        {
+            "base_extra_args": "--attention-backend AITER",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        }
+    )
+
+    assert state.last_profile_workload_action == "baseline"
+    assert state.current_profile_workload_context() == state.last_profile_workload
+
+
+def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
+    """A runtime measured off a tuned arm must not read as still active."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        current_best={
+            "action": "gemm_tuning",
+            "tput": 120.0,
+            "extra_envs": {"AITER_CONFIG_FMOE": "1"},
+        },
+    )
+    state.record_profile_workload(
+        {
+            "base_extra_args": "--attention-backend AITER",
+            "base_extra_envs": {"AITER_CONFIG_FMOE": "1"},
+        }
+    )
+    assert state.last_profile_workload_action == "gemm_tuning"
+
+    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint
+    # must no longer claim the tuned arm's args are in effect.
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    context = state.current_profile_workload_context()
+
+    assert context != state.last_profile_workload
+    assert context["server_args"] == ""
+    assert context["extra_envs"] == {}
+
+
+def test_legacy_session_without_recorded_arm_still_reuses_profile_runtime():
+    """Sessions predating the recorded arm keep reusing instead of reprofiling."""
     state = SharedState(
         framework="vllm",
         precision="fp8",
@@ -481,13 +531,22 @@ def test_baseline_current_best_reuses_recorded_profile_runtime():
         current_best={"action": "baseline", "tput": 100.0},
     )
     state.last_profile_workload = state.profile_workload_context(
-        {
-            "base_extra_args": "--attention-backend AITER",
-            "base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
-        }
+        {"base_extra_args": "--attention-backend AITER"}
     )
 
+    assert state.last_profile_workload_action == ""
     assert state.current_profile_workload_context() == state.last_profile_workload
+
+
+def test_prelude_roofline_records_baseline_arm_regardless_of_current_best():
+    """A PRELUDE profile measures the baseline arm even if current_best is tuned."""
+    state = SharedState(
+        framework="vllm",
+        current_best={"action": "gemm_tuning", "tput": 120.0},
+    )
+    state.record_profile_workload({"base_extra_args": "--tp 8"}, arm="baseline")
+
+    assert state.last_profile_workload_action == "baseline"
 
 
 def test_record_action_failure_basic_fields():

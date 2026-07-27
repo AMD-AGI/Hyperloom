@@ -1258,7 +1258,15 @@ class KernelPhase(PhaseHandler):
         return False
 
     def _sync_profile_state_after_gemm_roofline(self, result: dict[str, Any]) -> None:
-        """Merge a handler-owned Roofline fallback into the live Coordinator state."""
+        """Merge a handler-owned Roofline fallback into the live Coordinator state.
+
+        The handler runs its inline Roofline against a throwaway ``SharedState``
+        loaded from disk, so the refreshed profile fields only exist in
+        ``state.json`` until they are merged back here. Any save of the live
+        state between the handler returning and this merge would clobber them,
+        so callers must invoke this before persisting the live state. Repeated
+        calls are idempotent.
+        """
         shape_capture = result.get("shape_capture") if isinstance(result, dict) else None
         if not isinstance(shape_capture, dict) or shape_capture.get("capture_mode") != "block_fp8_profile":
             return
@@ -1286,17 +1294,20 @@ class KernelPhase(PhaseHandler):
             "last_profile_status",
             "last_profile_args",
             "last_profile_workload",
+            "last_profile_workload_action",
             "last_trace_analyze",
             "roofline_snapshot_id",
             "roofline_snapshots",
             "baseline_eager_fallback",
-            "lifecycle",
         ):
             setattr(
                 self.shared_state,
                 field_name,
                 deepcopy(getattr(persisted, field_name)),
             )
+        # Lifecycle is append-only telemetry owned by both states; union it so
+        # neither the inline Roofline's rows nor the live state's are dropped.
+        self.shared_state.merge_lifecycle_events(persisted.lifecycle)
 
     async def _handle_gemm_tuning_result(self, result: dict[str, Any]) -> None:
         """Record and post-process a run_gemm_tuning result from any entrypoint.

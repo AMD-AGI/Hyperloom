@@ -569,6 +569,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "stack_fingerprint_meta",
         "baseline_workload_extra",
         "last_profile_workload",
+        "last_profile_workload_action",
         # warm-recipe replay one-shot guard + outcome; LLM cannot edit.
         "warm_replay_attempted",
         "warm_replay_outcome",

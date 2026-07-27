@@ -436,25 +436,25 @@ class RooflineExecutor:
                 sub_result=profile_result,
             )
 
+        # Resolve the profiled arm explicitly so neither the snapshot's ceiling
+        # precision nor the recorded workload relies on a transient current_best
+        # inference: PRELUDE measures the baseline arm; all other reasons
+        # measure current_best.
+        _task_params = ctx.task.params or {}
+        _reason = str(_task_params.get("reason") or "")
+        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
+
         # Inline-promote only the profile fields trace_analyze needs. Do NOT
         # clear last_trace_analyze here: record_trace_analyze derives the next
         # snapshot_id from it. The clear happens only on the failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
-            successful_profile_params or ctx.task.params or {}
-        )
-        self.shared_state.last_profile_args = str(
-            self.shared_state.last_profile_workload.get("server_args") or ""
+        self.shared_state.record_profile_workload(
+            successful_profile_params or ctx.task.params or {},
+            arm=roofline_arm,
         )
 
         # ---- trace_analyze -------------------------------------------------
-        # Pin the snapshot's arm explicitly so the ceiling precision never relies
-        # on a transient current_best inference: PRELUDE measures the baseline
-        # arm; all other reasons measure current_best.
-        _task_params = ctx.task.params or {}
-        _reason = str(_task_params.get("reason") or "")
-        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
         # Route each roofline to its own report so the PRELUDE baseline snapshot
         # is never overwritten: prelude keeps the default file, close_post_opt
         # writes the "after" file, every other reason writes a rolling current one.
@@ -666,14 +666,9 @@ class RooflineExecutor:
                             trace_path = cb_trace
                             successful_profile_params = dict(cb_ctx.task.params or {})
                             self.shared_state.last_profile_trace = str(cb_trace)
-                            self.shared_state.last_profile_workload = (
-                                self.shared_state.profile_workload_context(
-                                    successful_profile_params
-                                )
-                            )
-                            self.shared_state.last_profile_args = str(
-                                self.shared_state.last_profile_workload.get("server_args")
-                                or ""
+                            self.shared_state.record_profile_workload(
+                                successful_profile_params,
+                                arm=roofline_arm,
                             )
                         else:
                             log.info(
