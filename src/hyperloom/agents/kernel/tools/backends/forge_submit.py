@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -40,6 +41,29 @@ log = logging.getLogger(__name__)
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
 _FORGE_SHUTDOWN_GRACE_SEC = 30
+
+
+def _forge_e2e_pct(candidate: dict) -> float | None:
+    """Return a finite 0..100 GPU-time share for Forge's E2E projection.
+
+    A task group represents every traced row affected by one source-level patch,
+    so its aggregate share is authoritative. The primary row is only a fallback
+    for legacy candidates without task-group metadata.
+    """
+    group = candidate.get("task_group")
+    if isinstance(group, dict) and group.get("aggregate_gpu_pct") is not None:
+        raw_value = group.get("aggregate_gpu_pct")
+    else:
+        raw_value = candidate.get("gpu_pct")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        return None
+    return value
 
 
 class ForgeLoopOutcome(NamedTuple):
@@ -2487,15 +2511,27 @@ def submit(
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # Forward the kernel's E2E time share (trace GPU%) so forge-loop's
-        # baseline profile can project this kernel's end-to-end optimization
-        # potential. Absent/invalid -> leave the projection unavailable.
-        e2e_pct: float | None
-        try:
-            _raw_pct = candidate.get("gpu_pct")
-            e2e_pct = float(_raw_pct) if _raw_pct is not None else None
-        except (TypeError, ValueError):
-            e2e_pct = None
+        # Forward the task group's aggregate trace GPU-time share as the best
+        # available Amdahl approximation. Absent/invalid -> leave the optional
+        # E2E projection unavailable.
+        e2e_pct = _forge_e2e_pct(candidate)
+        task_group = candidate.get("task_group")
+        aggregate_gpu_pct = (
+            task_group.get("aggregate_gpu_pct")
+            if isinstance(task_group, dict)
+            else None
+        )
+        if (
+            candidate.get("gpu_pct") is not None
+            or aggregate_gpu_pct is not None
+        ) and e2e_pct is None:
+            log.warning(
+                "forge: ignoring invalid GPU-time share for optional E2E "
+                "projection: kernel_id=%s gpu_pct=%r aggregate_gpu_pct=%r",
+                candidate.get("kernel_id", ""),
+                candidate.get("gpu_pct"),
+                aggregate_gpu_pct,
+            )
 
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
