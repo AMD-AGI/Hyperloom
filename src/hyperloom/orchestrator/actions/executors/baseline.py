@@ -1372,7 +1372,19 @@ class BaselineExecutor:
         """
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
             return
-        if result.get("status") != "succeeded":
+        # A failed status must NOT skip straight past the salvage below. An eval
+        # that dies mid-run (e.g. the server vanishes while lm_eval is working
+        # through its requests) makes run_eval exit non-zero, which fails the
+        # whole round -- exactly the case the sibling-accuracy salvage exists to
+        # rescue. Returning here meant the salvage could only ever run when
+        # nothing had gone wrong, so a perfectly good accuracy measured by the
+        # cold-start guard's first round was discarded and the run stopped.
+        #
+        # Throughput-level failures still fall through harmlessly: they leave no
+        # results*.json for the salvage to find, so it returns None and the
+        # normal stop path continues. Those remain the Coordinator's
+        # ``baseline_failed`` streak logic to handle.
+        if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
         acc = result.get("accuracy")
         if acc is not None and float(acc) > 0.0:
@@ -1748,6 +1760,14 @@ class BaselineExecutor:
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
+            #
+            # No accuracy eval here: accuracy is a property of the model and its
+            # config, not of cold-vs-hot timing, so round 1 already measured the
+            # value round 2 would re-measure identically. Running it twice cost
+            # minutes per baseline and, worse, doubled the window in which a
+            # server death could take the eval down with it -- which is exactly
+            # how a run was lost. Round 1 keeps eval on and remains the accuracy
+            # source; round 2 only needs the hot throughput number.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -1755,6 +1775,7 @@ class BaselineExecutor:
                 cleanup=True,
                 pid_dir=pid_dir,
                 port=port,
+                run_eval=False,
             )
             log.info(
                 "baseline_executor: cold-start guard — measured baseline "
@@ -1875,6 +1896,7 @@ class BaselineExecutor:
         cleanup: bool,
         pid_dir: Path,
         port: int,
+        run_eval: bool = True,
     ) -> Path:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
@@ -1901,6 +1923,8 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             port=port,
         )
+        if not run_eval:
+            bench.setdefault("envs", {})["RUN_EVAL"] = "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
