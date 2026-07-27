@@ -721,3 +721,67 @@ def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
     assert [p.name for p in mp.live_eval_concurrency_flag_scripts(str(magpie), None)] == [
         "sglang_mi355x.sh"
     ]
+
+
+# ---- unreadable files: the patcher must degrade, never crash a run ---------
+def _unreadable(path):
+    """A path that exists but raises OSError on read.
+
+    Uses a directory rather than chmod: these suites run as root, where mode
+    bits do not deny access, so a permission-based fixture would silently not
+    exercise the error branch at all.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_unreadable_caller_script_is_reported_not_raised(tmp_path):
+    """A script the patcher cannot read must fail the pass, not kill preflight."""
+    bench = tmp_path / "site-packages" / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True)
+    _unreadable(bench / "sglang_mi355x.sh")
+
+    assert mp._apply_eval_concurrency_fixes(str(tmp_path / "site-packages"), None) is False
+
+
+def test_unreadable_benchmark_lib_reads_as_intolerant(tmp_path):
+    """Cannot prove the parser accepts the flag -> must assume it does not."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    _unreadable(ix / "benchmarks" / "benchmark_lib.sh")
+
+    assert mp._inferencex_tolerates_eval_flag(str(ix)) is False
+
+
+def test_flag_scan_skips_unreadable_scripts_without_failing(tmp_path):
+    """The scanner reports what it can read; an unreadable entry is not a hit."""
+    bench = tmp_path / "site-packages" / "Magpie" / "scripts" / "benchmark"
+    bench.mkdir(parents=True)
+    _unreadable(bench / "vllm_mi355x.sh")
+    (bench / "sglang_mi355x.sh").write_text(
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n',
+        encoding="utf-8",
+    )
+
+    hits = mp.live_eval_concurrency_flag_scripts(str(tmp_path / "site-packages"), None)
+    assert [p.name for p in hits] == ["sglang_mi355x.sh"]
+
+
+def test_parser_patch_reports_failure_when_the_lib_cannot_be_read(tmp_path):
+    """An unreadable benchmark_lib.sh cannot be taught the flag -> False."""
+    lib = tmp_path / "benchmark_lib.sh"
+    lib.mkdir()  # a directory: read_text raises OSError even as root
+
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is False
+
+
+def test_parser_patch_reports_failure_on_an_unrecognised_parser_block(tmp_path):
+    """No legacy parser block to rewrite -> nothing patched, report False.
+
+    This is the shape that must NOT be mistaken for success: silently returning
+    True here would let a run proceed into an eval the parser still rejects.
+    """
+    lib = tmp_path / "benchmark_lib.sh"
+    lib.write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
+
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is False
