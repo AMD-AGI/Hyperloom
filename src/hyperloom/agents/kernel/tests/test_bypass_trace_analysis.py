@@ -777,3 +777,17 @@ def test_build_manifest_provenance_stub_when_shared_raises(monkeypatch):
 
     monkeypatch.setattr(bta, "_shared_build_provenance", _boom)
     assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "wp1_stub"
+
+
+def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
+    # TP>1 emits bs_16_rank0 / bs_16_rank1 (same shapes, different rank). They
+    # must collapse to ONE bs_16 variant, not two duplicate-labeled shards that
+    # overwrite each other's hash/meta and inflate variant_count.
+    d = tmp_path / "caps"
+    d.mkdir()
+    for f in ("bs_16_rank0.json", "bs_16_rank1.json", "bs_64_rank0.json"):
+        (d / f).write_text("{}", encoding="utf-8")
+    shards = bta._discover_capture_shards(str(d), str(d))
+    labels = sorted(lbl for _p, lbl, _m in shards)
+    assert labels == ["bs_16", "bs_64"]  # bs_16 deduped 2 ranks -> 1
+    assert len(shards) == 2

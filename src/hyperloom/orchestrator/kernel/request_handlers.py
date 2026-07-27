@@ -2836,7 +2836,7 @@ async def _run_forge_gemm_tuning(
         # repoint the env there, and snapshot it so the KEEP survives with the
         # recipe instead of referencing the ephemeral tuner-workspace path.
         _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
-            dict(result["recommended_env"]), model_path=model_path, snapshot_root=workspace
+            dict(result["recommended_env"]), model_path=model_path, session_dir=session_dir
         )
         result.setdefault("extra_envs", _durable_envs)
         if _snap_dir:
@@ -2863,7 +2863,7 @@ async def _run_forge_gemm_tuning(
 
 
 def _persist_forge_gemm_csv_durably(
-    extra_envs: dict, *, model_path: str, snapshot_root: Path
+    extra_envs: dict, *, model_path: str, session_dir: Path
 ) -> tuple[dict, str]:
     """Make a forge GEMM tuned CSV durable + recipe-portable.
 
@@ -2873,6 +2873,11 @@ def _persist_forge_gemm_csv_durably(
     durability: copy the CSV into the serving aiter's ``configs/model_configs/``
     (where aiter loads it), repoint the env there, and snapshot the realized file
     via :func:`snapshot_source_layer` so it travels with the recipe.
+
+    The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
+    durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
+    ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
+    defeat the cross-environment recipe-portability this exists for.
 
     Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
     Returns ``(extra_envs, source_snapshot_dir)``.
@@ -2920,7 +2925,9 @@ def _persist_forge_gemm_csv_durably(
             framework_root=aiter_pkg,
             base_sha=None,
             rel_paths=[rel],
-            dest_dir=Path(snapshot_root) / "src",
+            # Durable, run-cleanup-surviving location (mirrors integrate_patch),
+            # NOT the ephemeral runs/gemm_tuning workspace.
+            dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="forge_gemm_tune",
             extra={"env_key": env_key, "model": slug},
         )

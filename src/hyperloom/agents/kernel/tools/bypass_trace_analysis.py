@@ -255,6 +255,7 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
     ti = Path(trace_input)
     roots.append(ti if ti.is_dir() else ti.parent)
     seen: set[str] = set()
+    seen_labels: set[str] = set()
     exec_cache: dict[Path, dict[str, dict[str, Any]]] = {}
     out: list[tuple[Path, str, str | None]] = []
     for root in roots:
@@ -285,6 +286,14 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
                 m = _VARIANT_RE.match(name)
                 label = m.group(1).lower() if m else cand.stem
                 mode = None
+            # TP>1 emits one capture shard per rank with the SAME variant label
+            # (bs_<batch>[_mode]); the ranks carry identical shapes, so keep only
+            # the first (representative rank). Otherwise duplicate labels
+            # overwrite each other's hash/meta downstream and inflate
+            # variant_count (risking the multi-variant unresolved path).
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
             out.append((cand, label, mode))
     return out
 

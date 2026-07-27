@@ -199,6 +199,26 @@ def test_detect_image_from_marker(monkeypatch):
     assert _prov.detect_image({}) == "myrepo/img:tag"
 
 
+def test_detect_image_probe_false_skips_markers(monkeypatch):
+    # probe=False must be hermetic: no marker reads even if a marker would match
+    # (else provenance becomes host-dependent and non-reproducible for hashing).
+    def _boom(p):
+        raise AssertionError("marker file must not be read when probe=False")
+
+    monkeypatch.setattr(_prov, "_read_first_line", _boom)
+    assert _prov.detect_image({}, probe=False) is None
+
+
+def test_build_provenance_probe_false_image_hermetic(monkeypatch):
+    # build_provenance(probe=False) must not read image markers.
+    def _boom(p):
+        raise AssertionError("marker read under probe=False")
+
+    monkeypatch.setattr(_prov, "_read_first_line", _boom)
+    prov = _prov.build_provenance(None, env={}, probe=False)
+    assert prov["image"] is None
+
+
 def test_stack_fingerprint_reads_rocm_marker(monkeypatch):
     # empty env + probe -> rocm resolves from the /opt/rocm marker file.
     monkeypatch.setattr(_prov, "_read_first_line", lambda p: "6.2.0")

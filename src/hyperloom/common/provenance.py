@@ -189,11 +189,18 @@ def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
     return _env_first(env, *_CODE_REV_ENVS) or ""
 
 
-def detect_image(env: Mapping[str, str]) -> str | None:
-    """Container image from env vars or known marker files; ``None`` otherwise."""
+def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
+    """Container image from env vars or (when ``probe``) known marker files.
+
+    ``probe=False`` skips the host marker-file reads so the result is derived
+    purely from ``args``+``env`` -- matching the hermetic/reproducible contract
+    build_provenance documents for every other detector (gfx/code_rev/stack).
+    """
     val = _env_first(env, *_IMAGE_ENVS)
     if val:
         return val
+    if not probe:
+        return None
     for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
         v = _read_first_line(Path(marker))
         if v:
@@ -265,7 +272,7 @@ def build_provenance(
         "framework": (_arg_first(args, "framework") or _env_first(env, "FRAMEWORK")),
         "code_revision": detect_code_revision(env, probe=probe),
         "stack_fingerprint": detect_stack_fingerprint(env, probe=probe),
-        "image": detect_image(env),
+        "image": detect_image(env, probe=probe),
         # hardware / parallelism / graph
         "gpu_type": (_arg_first(args, "gpu_type") or _env_first(env, "GPU_TYPE")),
         "gfx_arch": detect_gfx_arch(env, probe=probe),
