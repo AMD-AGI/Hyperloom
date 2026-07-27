@@ -123,6 +123,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_context",
         "stack_fingerprint_meta",
         "baseline_workload_extra",
+        "last_profile_workload",
+        "last_profile_workload_action",
         # warm-recipe replay.
         "warm_replay_attempted",
         "warm_replay_outcome",

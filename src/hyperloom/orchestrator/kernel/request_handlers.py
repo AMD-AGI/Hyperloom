@@ -2216,12 +2216,32 @@ def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
     return (m, n, k) if min(m, n, k) > 0 else None
 
 
-def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+def _extract_vllm_block_fp8_profile_shapes(
+    trace_input: Path,
+    *,
+    output_dir: Path | None = None,
+) -> tuple[str, int]:
     """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
     import gzip
 
+    def _is_capture_sidecar(path: Path) -> bool:
+        return "capture_traces" in path.parts
+
     shapes: set[tuple[int, int, int]] = set()
-    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the
+    # whole process CWD and harvest shapes from unrelated traces.
+    if str(trace_input) in ("", "."):
+        return "", 0
+    if trace_input.is_file():
+        trace_paths = [] if _is_capture_sidecar(trace_input) else [trace_input]
+    elif trace_input.is_dir():
+        trace_paths = [
+            path
+            for path in sorted(trace_input.rglob("*.json")) + sorted(trace_input.rglob("*.json.gz"))
+            if not _is_capture_sidecar(path)
+        ]
+    else:
+        return "", 0
     for path in trace_paths:
         try:
             if path.name.endswith(".gz"):
@@ -2240,13 +2260,93 @@ def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]
                 shapes.add(shape)
     if not shapes:
         return "", 0
-    out = capture_dir / "forge_shapes.json"
+    destination = output_dir or (trace_input if trace_input.is_dir() else trace_input.parent)
+    out = destination / "forge_shapes.json"
     payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
     try:
+        destination.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         return "", 0
     return str(out), len(payload)
+
+
+def _reuse_vllm_block_fp8_roofline_shapes(
+    state: Any,
+    *,
+    workspace: Path,
+    current_workload: dict[str, Any] | None = None,
+) -> HandlerResult | None:
+    """Reuse block-FP8 runtime shapes from the latest Roofline profile trace."""
+    last_trace_analyze = getattr(state, "last_trace_analyze", None)
+    if not isinstance(last_trace_analyze, dict):
+        return None
+    source_trace = str(last_trace_analyze.get("steady_state_trace") or "").strip()
+    if not source_trace:
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline has no selected "
+            "steady-state trace; running a standard Roofline fallback"
+        )
+        return None
+    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
+    try:
+        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
+        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
+    except OSError:
+        profile_trace_id = profile_trace
+        analyzed_trace_id = analyzed_trace
+    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
+        log.info(
+            "vLLM block-FP8 shape capture: steady-state trace provenance does "
+            "not match the latest profile; running a standard Roofline fallback"
+        )
+        return None
+    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
+            "running a standard Roofline fallback"
+        )
+        return None
+    profile_workload = getattr(state, "last_profile_workload", None)
+    expected_workload = current_workload or state.current_profile_workload_context()
+    recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
+    if recorded_workload != expected_workload:
+        mismatches = sorted(
+            key
+            for key in set(recorded_workload) | set(expected_workload)
+            if recorded_workload.get(key) != expected_workload.get(key)
+        )
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
+            "running a standard Roofline fallback",
+            ", ".join(mismatches) or "missing profile workload metadata",
+        )
+        return None
+    shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+        Path(source_trace),
+        output_dir=workspace,
+    )
+    if shape_count == 0:
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline trace %s contains no reusable "
+            "block-FP8 shapes; running a standard Roofline fallback",
+            source_trace,
+        )
+        return None
+    log.info(
+        "vLLM block-FP8 shape capture: reusing %d shape(s) from Roofline trace %s",
+        shape_count,
+        source_trace,
+    )
+    return {
+        "status": "ok",
+        "shapes_json": shapes_json,
+        "shape_capture_workspace": str(workspace),
+        "shape_count": shape_count,
+        "capture_mode": "roofline_profile_reuse",
+        "source_profile_trace": source_trace,
+    }
 
 
 def _vllm_dense_shape_capture_required(
@@ -2378,7 +2478,7 @@ async def _capture_vllm_tunableop_shapes(
     profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
 
     config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
-    if not config_path or not Path(config_path).is_file():
+    if not profile_mode and (not config_path or not Path(config_path).is_file()):
         return {
             "status": "failed",
             "decision": "REVERT",
@@ -2388,31 +2488,6 @@ async def _capture_vllm_tunableop_shapes(
             "shape_capture_workspace": str(capture_dir),
         }
 
-    if profile_mode:
-        try:
-            import yaml
-
-            capture_config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            benchmark_config = capture_config.setdefault("benchmark", {})
-            profiler_config = benchmark_config.setdefault("profiler", {})
-            torch_profiler_config = profiler_config.setdefault("torch_profiler", {})
-            torch_profiler_config["enabled"] = True
-            profile_config_path = capture_dir / "block_fp8_profile_config.yaml"
-            profile_config_path.write_text(
-                yaml.safe_dump(capture_config, sort_keys=False),
-                encoding="utf-8",
-            )
-            config_path = str(profile_config_path)
-        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
-            return {
-                "status": "failed",
-                "decision": "REVERT",
-                "requires_e2e_validation": False,
-                "error_class": "shape_capture_failed",
-                "error": f"vLLM block-FP8 profile config failed: {exc}",
-                "shape_capture_workspace": str(capture_dir),
-            }
-
     current_best = getattr(state, "current_best", None)
     current_best = current_best if isinstance(current_best, dict) else {}
     inherited_envs = dict(current_best.get("extra_envs") or {})
@@ -2420,33 +2495,27 @@ async def _capture_vllm_tunableop_shapes(
     capture_envs = {
         str(key): str(value)
         for key, value in inherited_envs.items()
-        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+        if profile_mode
+        or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
     }
-    try:
-        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
-    except ValueError as exc:
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": str(exc),
-            "shape_capture_workspace": str(capture_dir),
-        }
-    capture_envs.update(
-        {
-            "PORT": str(capture_port),
-            "RUN_EVAL": "false",
-        }
-    )
-    if profile_mode:
+    if not profile_mode:
+        try:
+            capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_failed",
+                "error": str(exc),
+                "shape_capture_workspace": str(capture_dir),
+            }
         capture_envs.update(
             {
-                "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                "PORT": str(capture_port),
+                "RUN_EVAL": "false",
             }
         )
-    else:
         capture_envs.update(
             {
                 "HL_TUNABLEOP_MODE": "",
@@ -2494,62 +2563,73 @@ async def _capture_vllm_tunableop_shapes(
         if "extra_server_args" in payload
         else str(current_best.get("extra_server_args") or "")
     )
-    if profile_mode:
-        if "profiler-config.delay_iterations" not in extra_server_args:
-            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
-        if "torch_profiler_record_shapes" not in extra_server_args:
-            extra_server_args = (
-                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
-            ).strip()
     inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
     if isinstance(inherited_unset, str):
         capture_unset_envs = [inherited_unset]
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
-    capture_unset_envs.extend(
-        [
-            "HL_TUNABLEOP_MODE",
-            "HL_TUNABLEOP_FILE",
-            "HL_TUNABLEOP_VERBOSE",
-            "PYTORCH_TUNABLEOP_ENABLED",
-            "PYTORCH_TUNABLEOP_TUNING",
-            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-            "PYTORCH_TUNABLEOP_FILENAME",
-        ]
-    )
+    if not profile_mode:
+        capture_unset_envs.extend(
+            [
+                "HL_TUNABLEOP_MODE",
+                "HL_TUNABLEOP_FILE",
+                "HL_TUNABLEOP_VERBOSE",
+                "PYTORCH_TUNABLEOP_ENABLED",
+                "PYTORCH_TUNABLEOP_TUNING",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+                "PYTORCH_TUNABLEOP_FILENAME",
+            ]
+        )
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
     else:
         capture_remove_args = [str(arg) for arg in inherited_remove]
-    capture_remove_args.append("--port")
+    if not profile_mode:
+        capture_remove_args.append("--port")
+    task_params: dict[str, Any] = {
+        "output_dir": str(capture_dir),
+        "framework": "vllm",
+        "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+        "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+        "extra_server_args": extra_server_args,
+        "extra_envs": capture_envs,
+        "remove_args": capture_remove_args,
+        "unset_envs": capture_unset_envs,
+        "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+    }
+    if profile_mode:
+        task_params["workspace_path"] = str(capture_dir / "tracelens")
+        last_baseline = getattr(state, "last_baseline", None)
+        if isinstance(last_baseline, dict):
+            benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
+            if benchmark_script:
+                task_params["benchmark_script"] = benchmark_script
+    else:
+        task_params.update(
+            {
+                "config_path": config_path,
+                "timeout_sec": timeout_sec,
+                "disable_run_eval": True,
+                "baseline_double_run": False,
+            }
+        )
     task = Task(
         task_id=task_id,
         kind="gemm_shape_capture",
         state="running",
-        params={
-            "config_path": config_path,
-            "output_dir": str(capture_dir),
-            "timeout_sec": timeout_sec,
-            "framework": "vllm",
-            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
-            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
-            "extra_server_args": extra_server_args,
-            "extra_envs": capture_envs,
-            "remove_args": capture_remove_args,
-            "unset_envs": capture_unset_envs,
-            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
-            "disable_run_eval": True,
-            "baseline_double_run": False,
-        },
+        params=task_params,
         idempotency_key=f"{task_id}-run",
     )
     ctx = RunnerContext(task=task, lease=None)
     import copy
 
-    capture_state = copy.copy(state)
-    capture_state.baseline_eager_fallback = False
+    if profile_mode:
+        capture_state = state
+    else:
+        capture_state = copy.deepcopy(state)
+        capture_state.baseline_eager_fallback = False
     ctx.extra = {
         "shared_state": capture_state,
         "session_dir": session_dir,
@@ -2557,10 +2637,17 @@ async def _capture_vllm_tunableop_shapes(
     }
 
     try:
-        benchmark_result = await BaselineExecutor(
-            session_dir=session_dir,
-            shared_state=capture_state,
-        )(ctx)
+        if profile_mode:
+            from ..actions.executors.roofline import RooflineExecutor
+
+            benchmark_result = await RooflineExecutor(
+                shared_state=capture_state,
+            )(ctx)
+        else:
+            benchmark_result = await BaselineExecutor(
+                session_dir=session_dir,
+                shared_state=capture_state,
+            )(ctx)
     except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
         return {
             "status": "failed",
@@ -2574,7 +2661,14 @@ async def _capture_vllm_tunableop_shapes(
     if not isinstance(benchmark_result, dict):
         benchmark_result = {}
     if profile_mode:
-        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
+        if steady_state_trace:
+            shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+                Path(steady_state_trace),
+                output_dir=capture_dir,
+            )
+        else:
+            shapes_json, shape_count = "", 0
         if benchmark_result.get("status") == "succeeded" and shape_count > 0:
             return {
                 "status": "ok",
@@ -2582,6 +2676,7 @@ async def _capture_vllm_tunableop_shapes(
                 "shape_capture_workspace": str(capture_dir),
                 "shape_count": shape_count,
                 "capture_mode": "block_fp8_profile",
+                "source_profile_trace": steady_state_trace,
             }
         benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
         detail = f": {benchmark_error}" if benchmark_error else ""
@@ -2709,6 +2804,16 @@ async def _run_forge_gemm_tuning(
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
     )
+    if block_fp8_profile_capture:
+        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
+            state,
+            workspace=workspace,
+            current_workload=state.current_profile_workload_context(payload),
+        )
+        if shape_capture is not None:
+            shapes_json = str(shape_capture["shapes_json"])
+            untuned_csv = ""
+            block_fp8_profile_capture = False
     tunableop_capture = _vllm_dense_shape_capture_required(
         framework=framework,
         model_path=model_path,
@@ -2812,6 +2917,7 @@ async def _run_forge_gemm_tuning(
                 "shapes_json": shapes_json,
                 "shape_count": shape_capture.get("shape_count"),
                 "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+                "source_profile_trace": shape_capture.get("source_profile_trace"),
             },
         )
 
