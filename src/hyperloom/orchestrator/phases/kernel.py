@@ -1338,7 +1338,10 @@ class KernelPhase(PhaseHandler):
             "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
-            "AITER_CONFIG_GEMM_A4W4_BLOCKSCALE": "a4w4_blockscale_tuned_gemm.csv",
+            # aiter reads fp4/mxfp4 (gfx950-only) configs via AITER_CONFIG_GEMM_A4W4,
+            # not the "_BLOCKSCALE" variant (aiter jit/core.py). Must match KernelForge's
+            # TUNER_ENV_VARS or tuned fp4 GEMM CSVs are silently ignored at serving.
+            "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
             "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
             "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
         }
