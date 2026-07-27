@@ -1346,12 +1346,31 @@ class KernelPhase(PhaseHandler):
         environment). Values are carried through as text, so a config round-trips
         byte-for-byte instead of being re-formatted by a dataframe writer.
 
+        Implemented on the stdlib ``csv`` module on purpose: this runs in the
+        orchestrator process, which must not carry a hard pandas dependency
+        (pandas is not declared in ``pyproject.toml`` and is absent from the
+        ``.[test,ci]`` CI environment -- importing it there raises
+        ``ModuleNotFoundError`` and every candidate is silently rejected).
+        Values are carried through as text, so a config round-trips byte-for-byte
+        instead of being re-formatted by a dataframe writer.
+
         Returns the merged file path, or None if merging fails.
         """
+        import csv
         import importlib.util
+        import math
         import re
 
-        import pandas as pd
+        def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+            with path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = [dict(row) for row in reader]
+            return fieldnames, rows
+
+        def _read_header(path: Path) -> list[str]:
+            with path.open(newline="", encoding="utf-8") as handle:
+                return list(csv.DictReader(handle).fieldnames or [])
 
         candidate_path = Path(candidate_csv_path)
         if not candidate_path.is_file():
@@ -1404,7 +1423,7 @@ class KernelPhase(PhaseHandler):
                 unique_config_dirs.append(config_dir)
 
         try:
-            candidate_df = pd.read_csv(candidate_path)
+            candidate_columns, candidate_rows = _read_csv(candidate_path)
             runtime_cache_dir = Path(
                 os.environ.get(
                     "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
@@ -1448,10 +1467,16 @@ class KernelPhase(PhaseHandler):
                     None,
                 )
 
-            source_frames = [pd.read_csv(path) for path in source_paths]
-            all_columns = list(source_frames[0].columns)
-            for frame in [*source_frames[1:], candidate_df]:
-                for column in frame.columns:
+            source_columns: list[list[str]] = []
+            source_row_sets: list[list[dict[str, str]]] = []
+            for path in source_paths:
+                columns, rows = _read_csv(path)
+                source_columns.append(columns)
+                source_row_sets.append(rows)
+
+            all_columns = list(source_columns[0])
+            for columns in [*source_columns[1:], candidate_columns]:
+                for column in columns:
                     if column not in all_columns:
                         insert_at = (
                             all_columns.index("tflops")
@@ -1459,42 +1484,41 @@ class KernelPhase(PhaseHandler):
                             else len(all_columns)
                         )
                         all_columns.insert(insert_at, column)
-            fill_defaults = {"xbf16": 0, "run_1stage": 0, "ksplit": 0}
-            normalized_frames = []
-            for frame in source_frames:
-                normalized = frame.copy()
-                for column in all_columns:
-                    if column not in normalized.columns:
-                        normalized[column] = fill_defaults.get(column, 0)
-                normalized_frames.append(normalized[all_columns])
-            for column in all_columns:
-                if column not in candidate_df.columns:
-                    candidate_df[column] = fill_defaults.get(column, 0)
-            candidate_df = candidate_df[all_columns]
-            runtime_df = pd.concat(normalized_frames, ignore_index=True)
+            fill_defaults = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
+
+            def _normalize(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+                normalized = []
+                for row in rows:
+                    new_row = {}
+                    for column in all_columns:
+                        value = row.get(column)
+                        if value is None:
+                            value = fill_defaults.get(column, "0")
+                        new_row[column] = value
+                    normalized.append(new_row)
+                return normalized
+
+            runtime_rows: list[dict[str, str]] = []
+            for rows in source_row_sets:
+                runtime_rows.extend(_normalize(rows))
+            candidate_rows = _normalize(candidate_rows)
 
             key_cols: list[str] = []
             if source_config_dir is not None:
                 untuned_path = source_config_dir / f"{untuned_stem}.csv"
                 if untuned_path.is_file():
-                    untuned_columns = list(pd.read_csv(untuned_path, nrows=0).columns)
+                    untuned_columns = _read_header(untuned_path)
                     key_cols.extend(
                         column
                         for column in untuned_columns
-                        if column in runtime_df.columns and column in candidate_df.columns
+                        if column in all_columns
                     )
             if not key_cols:
                 key_cols.extend(
-                    column
-                    for column in ("M", "N", "K")
-                    if column in runtime_df.columns and column in candidate_df.columns
+                    column for column in ("M", "N", "K") if column in all_columns
                 )
             for column in ("gfx", "cu_num", "_tag"):
-                if (
-                    column in runtime_df.columns
-                    and column in candidate_df.columns
-                    and column not in key_cols
-                ):
+                if column in all_columns and column not in key_cols:
                     key_cols.append(column)
             if not key_cols:
                 log.warning(
@@ -1503,11 +1527,19 @@ class KernelPhase(PhaseHandler):
                 )
                 return None
 
-            def _deduplicate_dispatch_rows(frame, label: str):
-                duplicate_mask = frame.duplicated(subset=key_cols, keep=False)
-                if not duplicate_mask.any():
-                    return frame
-                if "us" not in frame.columns:
+            def _dispatch_key(row: dict[str, str]) -> tuple[str, ...]:
+                return tuple(row.get(column, "") for column in key_cols)
+
+            def _deduplicate_dispatch_rows(
+                rows: list[dict[str, str]], label: str
+            ) -> list[dict[str, str]] | None:
+                counts: dict[tuple[str, ...], int] = {}
+                for row in rows:
+                    key = _dispatch_key(row)
+                    counts[key] = counts.get(key, 0) + 1
+                if not any(count > 1 for count in counts.values()):
+                    return rows
+                if "us" not in all_columns:
                     log.warning(
                         "forge gemm E2E: %s has duplicate dispatch keys for %s "
                         "but no 'us' column to select the fastest row",
@@ -1515,55 +1547,57 @@ class KernelPhase(PhaseHandler):
                         env_var,
                     )
                     return None
-                rank_column = "__hyperloom_dispatch_us"
-                ranked = frame.copy()
-                ranked[rank_column] = pd.to_numeric(
-                    ranked["us"],
-                    errors="coerce",
-                )
-                deduplicated = (
-                    ranked.sort_values(
-                        rank_column,
-                        kind="stable",
-                        na_position="last",
-                    )
-                    .drop_duplicates(subset=key_cols, keep="first")
-                    .drop(columns=[rank_column])
-                )
+
+                def _us(row: dict[str, str]) -> float:
+                    try:
+                        return float(row.get("us", ""))
+                    except (TypeError, ValueError):
+                        return math.inf
+
+                # Keep the fastest (smallest us) row per dispatch key; ties keep
+                # the first row seen (stable), NaN-like values sort last.
+                best: dict[tuple[str, ...], dict[str, str]] = {}
+                order: list[tuple[str, ...]] = []
+                for row in rows:
+                    key = _dispatch_key(row)
+                    if key not in best:
+                        best[key] = row
+                        order.append(key)
+                    elif _us(row) < _us(best[key]):
+                        best[key] = row
+                deduplicated = [best[key] for key in order]
                 log.info(
                     "forge gemm E2E: removed %d duplicate %s row(s) for %s",
-                    len(frame) - len(deduplicated),
+                    len(rows) - len(deduplicated),
                     label,
                     env_var,
                 )
                 return deduplicated
 
-            runtime_df = _deduplicate_dispatch_rows(runtime_df, "runtime config")
-            candidate_df = _deduplicate_dispatch_rows(candidate_df, "candidate")
-            if runtime_df is None or candidate_df is None:
+            runtime_rows = _deduplicate_dispatch_rows(runtime_rows, "runtime config")
+            candidate_rows = _deduplicate_dispatch_rows(candidate_rows, "candidate")
+            if runtime_rows is None or candidate_rows is None:
                 return None
 
             # Drop rows from runtime that the candidate improves, then concat.
-            candidate_keys = candidate_df[key_cols].drop_duplicates()
-            merged = runtime_df.merge(
-                candidate_keys, on=key_cols, how="left", indicator=True
-            )
-            kept_from_runtime = merged[merged["_merge"] == "left_only"].drop(
-                columns=["_merge"]
-            )
-            merged_df = pd.concat(
-                [kept_from_runtime, candidate_df], ignore_index=True
-            )
+            candidate_keys = {_dispatch_key(row) for row in candidate_rows}
+            kept_from_runtime = [
+                row for row in runtime_rows if _dispatch_key(row) not in candidate_keys
+            ]
+            merged_rows = kept_from_runtime + candidate_rows
 
             merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
-            merged_df.to_csv(merged_path, index=False)
+            with merged_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=all_columns)
+                writer.writeheader()
+                writer.writerows(merged_rows)
             log.info(
                 "forge gemm E2E: merged %d candidate rows into %d rows from %d "
                 "aiter config file(s) -> %d total (%s)",
-                len(candidate_df),
-                len(runtime_df),
+                len(candidate_rows),
+                len(runtime_rows),
                 len(source_paths),
-                len(merged_df),
+                len(merged_rows),
                 merged_path,
             )
             return str(merged_path)
