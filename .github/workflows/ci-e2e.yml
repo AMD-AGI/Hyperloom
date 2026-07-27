@@ -163,8 +163,16 @@ jobs:
         id: run
         env:
           E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          # HLD facade base (pulse-service). The script appends
+          # /api/v1/orchestration/workloads and the facade routes
+          # infra_type=kubernetes to the `robust-k8s` platform.
           E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
-          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          # Force the robust-k8s target. Unset secrets below fall back to the
+          # validated defaults baked into ci-e2e-dispatch.sh.
+          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE || 'kubernetes' }}
+          IMAGE: ${{ secrets.CI_E2E_IMAGE }}
+          NAMESPACE: ${{ secrets.CI_E2E_NAMESPACE }}
+          WORKSPACE: ${{ secrets.CI_E2E_WORKSPACE }}
           MODEL: ${{ secrets.CI_E2E_MODEL }}
           MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
           MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}

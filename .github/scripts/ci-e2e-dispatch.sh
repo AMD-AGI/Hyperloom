@@ -7,9 +7,14 @@
 # Requires: bash, curl, jq on the (self-hosted, in-network) runner.
 #
 # Inputs (env):
-#   E2E_API_BASE      run API base url                 (required)
+#   E2E_API_BASE      HLD facade base url              (required; pulse-service)
 #   E2E_API_KEY       API key                          (required)
-#   E2E_INFRA_TYPE    infra type for the submission    (required)
+#   E2E_INFRA_TYPE    infra type for the submission    (default kubernetes -> robust-k8s)
+#   IMAGE             container image (k8s RequireImage)(default validated vllm-rocm image)
+#   NAMESPACE         k8s namespace for the Job        (default control-plan-hyperloom-ci)
+#   WORKSPACE         scheduling workspace             (default control-plan-hyperloom-ci)
+#   FRAMEWORK/PREC/GPU_TYPE/TARGET_GAIN/EP/BACKEND/EXTRA_ENV/HYPERLOOM_LOCAL_KB_ROOT
+#                     hyperloom optimizer params       (validated robust-k8s defaults)
 #   MODEL             HF repo id                       (default Qwen/Qwen3-0.6B)
 #   MODEL_CLASS       dense|moe_mla|moe_swa|moe_mla_nsa|"" (default dense; "" -> auto-infer)
 #   GPUS              physical GPUs per replica        (default 1)
@@ -44,9 +49,27 @@ MAX_HOURS="${MAX_HOURS:-0.5}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-30}"
 POLL_MAX="${POLL_MAX:-120}"
 
+# robust-k8s target. The HLD facade (E2E_API_BASE + /api/v1/orchestration/workloads)
+# routes infra_type=kubernetes to the `robust-k8s` platform (crusoe robust-api). The
+# kubernetes path needs a top-level image + namespace, plus the hyperloom optimizer
+# params the run was validated with. Every value stays overridable via the matching
+# CI_E2E_* secret/env; an unset secret ("") falls back to the validated default.
+E2E_INFRA_TYPE="${E2E_INFRA_TYPE:-kubernetes}"
+IMAGE="${IMAGE:-harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.24.0}"
+NAMESPACE="${NAMESPACE:-control-plan-hyperloom-ci}"
+WORKSPACE="${WORKSPACE:-control-plan-hyperloom-ci}"
+FRAMEWORK="${FRAMEWORK:-vllm}"
+PREC="${PREC:-bf16}"
+GPU_TYPE="${GPU_TYPE:-MI355X}"
+TARGET_GAIN="${TARGET_GAIN:-500.0}"
+EP="${EP:-1}"
+BACKEND="${BACKEND:-python}"
+HL_MODEL_BASE="${HL_MODEL_BASE:-${MODEL_BASE:-/shared_nfs/hyperloom/models}}"
+EXTRA_ENV="${EXTRA_ENV:-HF_HOME=/shared_nfs/hyperloom/huggingface HF_HUB_CACHE=/shared_nfs/hyperloom/huggingface/hub HF_DATASETS_CACHE=/shared_nfs/hyperloom/huggingface/datasets}"
+HYPERLOOM_LOCAL_KB_ROOT="${HYPERLOOM_LOCAL_KB_ROOT:-/shared_nfs/hyperloom/ci-recipe-kb/slurm/kb}"
+
 : "${E2E_API_BASE:?E2E_API_BASE is required}"
 : "${E2E_API_KEY:?E2E_API_KEY is required}"
-: "${E2E_INFRA_TYPE:?E2E_INFRA_TYPE is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
 API="${E2E_API_BASE%/}/api/v1/orchestration/workloads"
 
@@ -172,22 +195,33 @@ ${actions}"
 
 # ---- submit ---------------------------------------------------------------
 params="$(jq -n \
-  --arg repo_id "$MODEL" --arg tp "$TP" --arg mh "$MAX_HOURS" \
+  --arg repo_id "$MODEL" --arg tp "$TP" --arg ep "$EP" --arg mh "$MAX_HOURS" \
   --arg ref "$HEAD_REF" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
-  --arg mc "$MODEL_CLASS" --arg mbase "${MODEL_BASE:-}" \
-  '{REPO_ID:$repo_id, TP:$tp, MAX_HOURS:$mh,
+  --arg mc "$MODEL_CLASS" --arg mbase "$HL_MODEL_BASE" \
+  --arg fw "$FRAMEWORK" --arg prec "$PREC" --arg gtype "$GPU_TYPE" \
+  --arg tgain "$TARGET_GAIN" --arg backend "$BACKEND" --arg xenv "$EXTRA_ENV" \
+  '{REPO_ID:$repo_id, TP:$tp, EP:$ep, MAX_HOURS:$mh,
+    FRAMEWORK:$fw, PREC:$prec, GPU_TYPE:$gtype, TARGET_GAIN:$tgain, BACKEND:$backend,
     HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir}
    + (if $mc == "" then {} else {MODEL_CLASS:$mc} end)
-   + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)')"
+   + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)
+   + (if $xenv == "" then {} else {EXTRA_ENV:$xenv} end)')"
 body="$(jq -n \
   --arg name "ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
   --arg uname "${CI_E2E_USER_NAME:-}" --arg itype "$E2E_INFRA_TYPE" \
+  --arg image "$IMAGE" --arg ns "$NAMESPACE" --arg ws "$WORKSPACE" \
+  --arg kbroot "$HYPERLOOM_LOCAL_KB_ROOT" \
   --argjson gpus "$GPUS" --argjson params "$params" \
   '{name:$name, infra_type:$itype, kind:"hyperloom", replicas:1,
-    gpu_per_replica:$gpus, template:{params:$params, env:{HL_CI_E2E:"1"}}}
+    gpu_per_replica:$gpus,
+    template:{params:$params,
+              env:({HL_CI_E2E:"1"} + (if $kbroot == "" then {} else {HYPERLOOM_LOCAL_KB_ROOT:$kbroot} end))}}
+   + (if $image == "" then {} else {image:$image} end)
+   + (if $ns == "" then {} else {namespace:$ns} end)
+   + (if $ws == "" then {} else {workspace:$ws} end)
    + (if $uname == "" then {} else {user_name:$uname} end)')"
 
-echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
+echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF gpus=$GPUS tp=$TP max_hours=$MAX_HOURS infra=$E2E_INFRA_TYPE ns=$NAMESPACE image=$IMAGE"
 resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
   "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
 code="$(printf '%s' "$resp" | tail -n1)"
