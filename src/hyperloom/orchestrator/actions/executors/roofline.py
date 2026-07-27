@@ -229,7 +229,6 @@ class RooflineExecutor:
         Args:
             shared_state (Any): The SharedState instance the executor mutates
                 (profile fields, trace_analyze cache). Must not be ``None``.
-
         Raises:
             ValueError: If ``shared_state`` is ``None``.
         """
@@ -284,6 +283,7 @@ class RooflineExecutor:
         trace_path = ""
         last_error = ""
         profile_warning: dict[str, Any] | None = None
+        successful_profile_params: dict[str, Any] = {}
         # Track the last failure kind so the no-trace contract is preserved
         # (profile_no_trace_failed) instead of collapsing into profile_failed.
         last_phase = "profile"
@@ -351,6 +351,7 @@ class RooflineExecutor:
                         profile_result.get("status"),
                         trace_path,
                     )
+                    successful_profile_params = dict(profile_ctx.task.params or {})
                     break
                 last_phase = "profile"
                 last_error = str(profile_result.get("error") or "profile sub-step failed")
@@ -426,6 +427,7 @@ class RooflineExecutor:
                     attempt,
                     _PROFILE_MAX_ATTEMPTS,
                 )
+            successful_profile_params = dict(profile_ctx.task.params or {})
             break
         else:
             return _failed(
@@ -434,23 +436,25 @@ class RooflineExecutor:
                 sub_result=profile_result,
             )
 
+        # Resolve the profiled arm explicitly so neither the snapshot's ceiling
+        # precision nor the recorded workload relies on a transient current_best
+        # inference: PRELUDE measures the baseline arm; all other reasons
+        # measure current_best.
+        _task_params = ctx.task.params or {}
+        _reason = str(_task_params.get("reason") or "")
+        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
+
         # Inline-promote only the profile fields trace_analyze needs. Do NOT
         # clear last_trace_analyze here: record_trace_analyze derives the next
         # snapshot_id from it. The clear happens only on the failure path below.
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_status = "succeeded"
-        self.shared_state.last_profile_args = str((ctx.task.params or {}).get("base_extra_args") or "")
-        self.shared_state.last_profile_workload = self.shared_state.profile_workload_context(
-            ctx.task.params or {}
+        self.shared_state.record_profile_workload(
+            successful_profile_params or ctx.task.params or {},
+            arm=roofline_arm,
         )
 
         # ---- trace_analyze -------------------------------------------------
-        # Pin the snapshot's arm explicitly so the ceiling precision never relies
-        # on a transient current_best inference: PRELUDE measures the baseline
-        # arm; all other reasons measure current_best.
-        _task_params = ctx.task.params or {}
-        _reason = str(_task_params.get("reason") or "")
-        roofline_arm = "baseline" if _reason == "prelude_initial" else "current_best"
         # Route each roofline to its own report so the PRELUDE baseline snapshot
         # is never overwritten: prelude keeps the default file, close_post_opt
         # writes the "after" file, every other reason writes a rolling current one.
@@ -461,6 +465,9 @@ class RooflineExecutor:
         else:
             roofline_output_name = "kernel_roofline_current.json"
         ta_payload: dict[str, Any] = {"trace_input": str(trace_path)}
+        workspace_path = _task_params.get("workspace_path")
+        if workspace_path not in (None, ""):
+            ta_payload["workspace_path"] = workspace_path
         if roofline_arm:
             ta_payload["roofline_arm"] = roofline_arm
         if roofline_output_name:
@@ -515,6 +522,8 @@ class RooflineExecutor:
                 "_n26_auto_retry": True,
                 "_n26_retry_from_mode": from_mode,
             }
+            if "workspace_path" in ta_payload:
+                ta_payload_retry["workspace_path"] = ta_payload["workspace_path"]
             if roofline_arm:
                 ta_payload_retry["roofline_arm"] = roofline_arm
             if roofline_output_name:
@@ -655,6 +664,12 @@ class RooflineExecutor:
                             ta_payload = cb_payload
                             hot = cb_hot
                             trace_path = cb_trace
+                            successful_profile_params = dict(cb_ctx.task.params or {})
+                            self.shared_state.last_profile_trace = str(cb_trace)
+                            self.shared_state.record_profile_workload(
+                                successful_profile_params,
+                                arm=roofline_arm,
+                            )
                         else:
                             log.info(
                                 "roofline: compute-bound re-profile still host-bound "
@@ -703,6 +718,7 @@ class RooflineExecutor:
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": str(trace_path),
+            "steady_state_trace": cached.get("steady_state_trace", ""),
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile_result.get("workspace"),

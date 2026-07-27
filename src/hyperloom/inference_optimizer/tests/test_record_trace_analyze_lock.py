@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``SharedState.record_trace_analyze``: 14-key dict,
+"""Behavior-lock tests for ``SharedState.record_trace_analyze``: 15-key dict,
 snapshot_id wrap-on-clear, capped history with anchor, and swallowed history failures."""
 
 from __future__ import annotations
@@ -21,13 +21,14 @@ def _record(state: SharedState, trace: str) -> None:
     )
 
 
-def test_written_dict_has_fourteen_keys() -> None:
-    """Docstring says "11-field" but the code actually writes 14 keys."""
+def test_written_dict_has_fifteen_keys() -> None:
+    """The canonical trace-analysis record includes the selected steady-state trace."""
     state = SharedState()
     _record(state, "x")
-    assert len(state.last_trace_analyze) == 14
+    assert len(state.last_trace_analyze) == 15
     assert set(state.last_trace_analyze) == {
         "trace_input",
+        "steady_state_trace",
         "candidates_path",
         "kernel_roofline_path",
         "hot_kernels_top15",
