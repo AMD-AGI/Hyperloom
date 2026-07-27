@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.profile_args import sanitize_profile_server_args
 
 from . import kernel_decision_settings as _kernel_decision_settings
 
@@ -869,7 +870,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     try:
                         normalized = str(path.resolve())
                     except OSError:
-                        pass
+                        log.debug(
+                            "profile workload path resolution failed for %s; "
+                            "keeping the unresolved path",
+                            path,
+                            exc_info=True,
+                        )
             context[name] = normalized
         for name in ("tp", "conc", "isl", "osl", "max_model_len"):
             value = params.get(name)
@@ -885,12 +891,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else params.get("base_extra_args")
         )
         server_args = str(raw_server_args or "").strip()
-        try:
-            from ..actions.executors.profile import _sanitize_profile_server_args
-
-            server_args = _sanitize_profile_server_args(server_args)
-        except ImportError:
-            pass
+        server_args = sanitize_profile_server_args(server_args)
         try:
             context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
         except ValueError:

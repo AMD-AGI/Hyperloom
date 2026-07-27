@@ -27,13 +27,13 @@ import gzip
 import logging
 import os
 import tempfile
-import shlex
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from hyperloom.common.io import safe_mtime
+from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -57,55 +57,6 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # Min fraction of ``cpu_op`` events carrying ``Input Dims`` for a healthy
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
-
-_PROFILE_UNSAFE_BOOL_FLAGS = frozenset(
-    {
-        "--enable-torch-compile",
-    }
-)
-_PROFILE_UNSAFE_VALUE_FLAGS = frozenset(
-    {
-        "--torch-compile-max-bs",
-    }
-)
-
-
-def _sanitize_profile_server_args(args: str) -> str:
-    """Drop server flags known to conflict with profiler/shape discovery.
-
-    Tokenize with ``posix=False`` and re-join with spaces so embedded JSON
-    values (e.g. ``--speculative-config {"method":"deepseek_mtp",...}``)
-    survive verbatim rather than having their inner quotes stripped.
-
-    Args:
-        args: Raw server-args string to sanitize.
-
-    Returns:
-        The args string with profiler-unsafe flags (and their values) removed.
-    """
-    raw = str(args or "").strip()
-    if not raw:
-        return ""
-    try:
-        tokens = shlex.split(raw, posix=False)
-    except ValueError:
-        tokens = raw.split()
-    out: list[str] = []
-    skip_next = False
-    for token in tokens:
-        if skip_next:
-            skip_next = False
-            continue
-        if token in _PROFILE_UNSAFE_BOOL_FLAGS:
-            continue
-        if token in _PROFILE_UNSAFE_VALUE_FLAGS:
-            skip_next = True
-            continue
-        if any(token.startswith(f"{flag}=") for flag in _PROFILE_UNSAFE_VALUE_FLAGS):
-            continue
-        out.append(token)
-    return " ".join(out)
-
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
     """Stream-decompress ``path`` for ``substring``, reading at most
