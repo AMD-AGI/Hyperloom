@@ -33,18 +33,33 @@ class KernelStackPhase(PhaseHandler):
         drained = 0
         max_drain = 10
         while drained < max_drain:
-            kid = state.next_pending_keep_kernel_id()
-            if not kid:
+            pending_records = state.pending_kernel_integration_records()
+            if not pending_records:
                 break
+            pending = pending_records[0]
+            kid = str(pending.get("kernel_id") or "")
+            integration_id = str(pending.get("integration_id") or "")
             log.info(
-                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s (drained %d so far)",
+                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s "
+                "integration_id=%s (drained %d so far)",
                 kid,
+                integration_id,
                 drained,
             )
             try:
                 base = float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0)
                 result = await integrate_handler(
-                    {"kernel_id": kid, "base_tput": base},
+                    {
+                        "kernel_id": kid,
+                        "integration_id": integration_id,
+                        "task_group_key": str(
+                            pending.get("task_group_key") or ""
+                        ),
+                        "identity_route": str(
+                            pending.get("identity_route") or ""
+                        ),
+                        "base_tput": base,
+                    },
                     session_dir=self.session_dir,
                 )
                 if isinstance(result, dict) and result.get("status") != "skipped":
@@ -60,8 +75,27 @@ class KernelStackPhase(PhaseHandler):
                 )
                 if state.rejected_kernel_ids is None:
                     state.rejected_kernel_ids = []
-                if kid not in state.rejected_kernel_ids:
+                pending_task_key = str(pending.get("task_key") or "")
+                if (
+                    not pending_task_key
+                    and kid not in state.rejected_kernel_ids
+                ):
                     state.rejected_kernel_ids.append(kid)
+                attempt = (state.kernel_opt_attempts or {}).get(kid)
+                if isinstance(attempt, dict):
+                    attempt["rejected_reason"] = "integrate_dispatch_exception"
+                stable_attempt = (state.kernel_opt_task_attempts or {}).get(
+                    pending_task_key
+                )
+                if isinstance(stable_attempt, dict):
+                    stable_attempt["rejected_reason"] = (
+                        "integrate_dispatch_exception"
+                    )
+                queued = (state.pending_kernel_integrations or {}).get(
+                    integration_id
+                )
+                if isinstance(queued, dict):
+                    queued["status"] = "dispatch_failed"
                 state.save(self.session_dir)
             drained += 1
         if drained >= max_drain:
@@ -519,17 +553,24 @@ class KernelStackPhase(PhaseHandler):
         never while one is in flight. Idempotent.
         """
         state = self.shared_state
-        pending_kids = state.pending_keep_kernel_ids()
-        if not pending_kids:
+        pending_records = state.pending_kernel_integration_records()
+        if not pending_records:
             return
 
         # Per-kernel in-flight guard, keyed on recorded integrate-attempt count.
         if not hasattr(self, "_auto_integrate_attempt_marks"):
             self._coord._auto_integrate_attempt_marks: dict[str, int] = {}
 
-        for kid in pending_kids:
-            recorded = state.integrate_attempt_count_for_kernel(kid)
-            mark = self._auto_integrate_attempt_marks.get(kid)
+        for pending in pending_records:
+            kid = str(pending.get("kernel_id") or "")
+            integration_id = str(pending.get("integration_id") or "")
+            dispatch_key = integration_id or kid
+            recorded = (
+                state.integrate_attempt_count_for_integration(integration_id)
+                if integration_id
+                else state.integrate_attempt_count_for_kernel(kid)
+            )
+            mark = self._auto_integrate_attempt_marks.get(dispatch_key)
             if mark is not None and recorded <= mark:
                 # A prior integrate for this kernel is still in flight.
                 continue
@@ -547,9 +588,16 @@ class KernelStackPhase(PhaseHandler):
                     {
                         "kind": "integrate",
                         "kernel_id": kid,
+                        "integration_id": integration_id,
+                        "task_group_key": str(
+                            pending.get("task_group_key") or ""
+                        ),
+                        "identity_route": str(
+                            pending.get("identity_route") or ""
+                        ),
                         "source": "auto_integrate_after_kernel_opt",
                     },
                     priority=2,
                 )
             )
-            self._auto_integrate_attempt_marks[kid] = recorded
+            self._auto_integrate_attempt_marks[dispatch_key] = recorded

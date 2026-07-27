@@ -977,8 +977,14 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.rejected_kernel_ids = []
     coord.shared_state.save = MagicMock()
-    pending_queue = ["k001", "k002"]
-    coord.shared_state.next_pending_keep_kernel_id = lambda: pending_queue.pop(0) if pending_queue else ""
+    pending_queue = [
+        {"kernel_id": "k001", "integration_id": "integration-1"},
+        {"kernel_id": "k002", "integration_id": "integration-2"},
+    ]
+    coord.shared_state.pending_kernel_integration_records = (
+        lambda: [pending_queue.pop(0)] if pending_queue else []
+    )
+    coord._record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 
     from hyperloom.orchestrator.loop.coordinator import Coordinator

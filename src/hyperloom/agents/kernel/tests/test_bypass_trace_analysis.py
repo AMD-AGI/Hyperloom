@@ -678,3 +678,116 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
     assert "optimization_priority" in rows[0] and "suggestion" in rows[0]
     srows = list(csv.DictReader(io.StringIO(Path(spath).read_text())))
     assert srows and "kernel_category" in srows[0]
+
+
+# --- _maybe_build_shape_manifest: enabled-path coverage (WP-1) --------------
+import argparse as _argparse  # noqa: E402
+
+
+def _mk_args(**kw):
+    base = dict(trace_input="t", capture_folder="", analysis_mode="decode", precision="fp8")
+    base.update(kw)
+    return _argparse.Namespace(**base)
+
+
+def test_maybe_build_shape_manifest_enabled_caps_and_writes(tmp_path, monkeypatch):
+    # enabled + numeric MAX_CAPTURES cap + main_trace hash + ok shard + write.
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", "1")
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", "1")
+    shards = [(tmp_path / "a.json", "bs_1", "decode"), (tmp_path / "b.json", "bs_2", "decode")]
+    monkeypatch.setattr(bta, "_discover_capture_shards", lambda *a: shards)
+    monkeypatch.setattr(bta, "_sha256_file", lambda p: "hash")
+    monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: {"status": "ok"})
+    monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {"src": "stub"})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [{"m": 1}], "warnings": []})
+    res = bta._maybe_build_shape_manifest(
+        _mk_args(), {"trace_file": "main.json"}, tmp_path, generated_at="2026-01-01"
+    )
+    assert res["status"] == "ok"
+    assert res["variant_count"] == 1  # 2 shards capped to 1
+    assert res["row_count"] == 1
+    assert (tmp_path / "trace_shape_manifest.json").is_file()
+
+
+def test_maybe_build_shape_manifest_bad_max_caps_and_skips_bad_shard(tmp_path, monkeypatch):
+    # non-numeric MAX_CAPTURES -> 0 (no cap); a non-ok shard is skipped.
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", "on")
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", "notanumber")
+    shards = [(tmp_path / "a.json", "bs_1", "decode"), (tmp_path / "b.json", "bs_2", "prefill")]
+    monkeypatch.setattr(bta, "_discover_capture_shards", lambda *a: shards)
+    monkeypatch.setattr(bta, "_sha256_file", lambda p: "h")
+    _seq = iter([{"status": "ok"}, {"status": "error"}])
+    monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: next(_seq))
+    monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [], "warnings": ["w"]})
+    res = bta._maybe_build_shape_manifest(
+        _mk_args(analysis_mode=None), {"trace_file": ""}, tmp_path, generated_at="t0"
+    )
+    assert res["status"] == "ok"
+    assert res["variant_count"] == 1  # second (non-ok) shard skipped
+    assert res["warnings"] == ["w"]
+
+
+def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
+    # any failure -> {"status": "error: ..."}; never raises.
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", "1")
+
+    def _boom(*a, **k):
+        raise RuntimeError("disk gone")
+
+    monkeypatch.setattr(bta, "_discover_capture_shards", _boom)
+    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+    assert res["status"].startswith("error:")
+    assert "RuntimeError" in res["status"]
+
+
+def test_maybe_build_shape_manifest_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+    assert res == {"status": "disabled"}
+    assert not (tmp_path / "trace_shape_manifest.json").exists()
+
+
+def _prov_args(**kw):
+    base = dict(
+        model_name="m", model_path="/p", framework="vllm", target_platform="mi355x",
+        precision="fp8", trace_input="t", capture_folder="", analysis_mode="decode",
+    )
+    base.update(kw)
+    return _argparse.Namespace(**base)
+
+
+def test_build_manifest_provenance_shared_path(monkeypatch):
+    monkeypatch.setattr(
+        bta, "_shared_build_provenance", lambda args, env, probe: {"_provenance_source": "shared"}
+    )
+    assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "shared"
+
+
+def test_build_manifest_provenance_stub_when_shared_absent(monkeypatch):
+    monkeypatch.setattr(bta, "_shared_build_provenance", None)
+    out = bta._build_manifest_provenance(_prov_args())
+    assert out["_provenance_source"] == "wp1_stub"
+    assert out["model_name"] == "m" and out["dtype"] == "fp8"
+
+
+def test_build_manifest_provenance_stub_when_shared_raises(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("shared blew up")
+
+    monkeypatch.setattr(bta, "_shared_build_provenance", _boom)
+    assert bta._build_manifest_provenance(_prov_args())["_provenance_source"] == "wp1_stub"
+
+
+def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
+    # TP>1 emits bs_16_rank0 / bs_16_rank1 (same shapes, different rank). They
+    # must collapse to ONE bs_16 variant, not two duplicate-labeled shards that
+    # overwrite each other's hash/meta and inflate variant_count.
+    d = tmp_path / "caps"
+    d.mkdir()
+    for f in ("bs_16_rank0.json", "bs_16_rank1.json", "bs_64_rank0.json"):
+        (d / f).write_text("{}", encoding="utf-8")
+    shards = bta._discover_capture_shards(str(d), str(d))
+    labels = sorted(lbl for _p, lbl, _m in shards)
+    assert labels == ["bs_16", "bs_64"]  # bs_16 deduped 2 ranks -> 1
+    assert len(shards) == 2

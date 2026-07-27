@@ -357,7 +357,7 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.shared_state.last_fusion_integrate == {}
 
     @pytest.mark.asyncio
-    async def test_run_forge_fusion_after_gemm_handles_handler_exception(self, tmp_path, monkeypatch):
+    async def test_run_forge_fusion_handles_handler_exception(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -367,7 +367,7 @@ class TestPromoteFusionIntegrateKeep:
 
         monkeypatch.setattr(krh_mod, "run_fusion_handler", _raise)
 
-        await phase._run_forge_fusion_after_gemm()
+        await phase._run_forge_fusion()
 
         assert coord.shared_state.last_fusion["decision"] == "REVERT"
         assert coord.shared_state.last_fusion["error_class"] == "RuntimeError"

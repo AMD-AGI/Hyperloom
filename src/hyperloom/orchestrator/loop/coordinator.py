@@ -513,6 +513,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_framework": ("phases.framework", "FrameworkPhase"),
         "router": ("loop.intent_router", "IntentRouter"),
         "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
+        "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
         "writeback": ("loop.writeback", "WritebackCollaborator"),
         "dispatcher": ("loop.dispatcher", "DispatcherCollaborator"),
         "proposals": ("loop.proposals", "ProposalsCollaborator"),
@@ -1010,7 +1011,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_discover_enablement_candidate_refs": "phase_framework",
         "_maybe_enqueue_enablement_specialist": "phase_framework",
         "_maybe_record_enablement_human_review": "phase_framework",
+        "_enablement_round_silently_finished": "phase_framework",
         "_maybe_rearm_enablement": "phase_framework",
+        "_maybe_escalate_to_targeted_build": "phase_framework",
+        "_maybe_enqueue_specialist_requested_build": "phase_framework",
+        "_maybe_route_build_outcomes": "phase_framework",
+        "_enqueue_build_launch_probe": "phase_framework",
         "_maybe_rearm_authored_lane": "phase_framework",
         "_enqueue_author_specialist": "phase_framework",
         "_drain_apply_fail_retry_pending": "phase_framework",
@@ -1151,6 +1157,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_run_maintenance_tick": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
         "_maybe_checkpoint_orchestration": "maintenance",
+        "enqueue_targeted_build": "build_lifecycle",
+        "_maybe_pump_targeted_build": "build_lifecycle",
+        "_maybe_reap_targeted_build": "build_lifecycle",
     }
 
     def __getattr__(self, name: str):
@@ -1273,6 +1282,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from .maintenance import MaintenanceCollaborator
 
         return self._collaborator("_maintenance", MaintenanceCollaborator)
+
+    @property
+    def build_lifecycle(self):
+        from .build_lifecycle import BuildLifecycleCollaborator
+
+        return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``.
@@ -1581,6 +1596,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_framework_agent_phase_safely(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
+                    # Off-loop targeted-build pump + reaper (each guarded; never
+                    # blocks the tick — the build runs in its own process group).
+                    try:
+                        await self._maybe_reap_targeted_build(tick=tick_n)
+                        await self._maybe_pump_targeted_build(tick=tick_n)
+                    except Exception:  # noqa: BLE001
+                        log.exception("targeted-build tick raised")
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()

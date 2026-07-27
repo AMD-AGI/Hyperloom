@@ -314,6 +314,20 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 
 ## Call Order
 
+> **STOP — are you running the `optimize` CLI?** If the task runs
+> `python -m hyperloom.inference_optimizer.cli optimize --nodes N>=2
+> --mn-backend rayjob ...` (i.e. you were handed `optimize`-style FLAGS
+> like `--target-gain` / `--max-hours` / `--isl/--osl/--conc`), then
+> **`optimize` performs this ENTIRE Call Order internally** — it
+> provisions/reuses the RayJob, bootstraps, and restarts the server per
+> round. In that mode **run `optimize` ONLY**; do **NOT** also run a
+> standalone `create-rayjob` / `init-env` / `restart-server` first or
+> alongside it. Doing so provisions a SECOND RayJob (the standalone CLI
+> and `optimize`'s in-process provisioning may resolve different state
+> files and each create their own workload), wasting a full node set and
+> deadlocking scheduling. The manual steps below are ONLY for driving the
+> RayJob lifecycle *without* `optimize`.
+
 1. **`create-rayjob`** — once. Persists `rayjob_id` before polling
    (overlapping retries never spawn a second RayJob), then fills
    `head_pod_ip` / `service_url` once phase is `Running`.

@@ -136,7 +136,7 @@ def test_any_live_compiler_skips_dead_procs(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_sweep_skips_when_compiler_alive(monkeypatch, tmp_path):
     layout = _make_aiter_tree(tmp_path)
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda: True)
+    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda *_args: True)
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["skipped_live"] is True
     assert stats["deleted"] == 0
@@ -144,23 +144,22 @@ def test_sweep_skips_when_compiler_alive(monkeypatch, tmp_path):
     assert layout["fresh_lock"].exists()
 
 
-def test_sweep_deletes_all_locks_when_dead(monkeypatch, tmp_path):
+def test_sweep_deletes_stale_locks_when_dead(monkeypatch, tmp_path):
     layout = _make_aiter_tree(tmp_path)
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda: False)
+    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda *_args: False)
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["compiler_alive"] is False
-    # stale_minutes=0 ⇒ even the fresh lock is reaped.
-    assert stats["deleted"] == 3
-    assert stats["skipped_fresh"] == 0
+    assert stats["deleted"] == 2
+    assert stats["skipped_fresh"] == 1
     assert not layout["stale_lock"].exists()
-    assert not layout["fresh_lock"].exists()
+    assert layout["fresh_lock"].exists()
     assert not layout["ninja_lock"].exists()
     assert layout["non_lock"].exists()
 
 
 def test_sweep_unknown_falls_back_to_mtime_gate(monkeypatch, tmp_path):
     layout = _make_aiter_tree(tmp_path)
-    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda: None)
+    monkeypatch.setattr(_aiter_jit, "_any_live_compiler", lambda *_args: None)
     stats = _aiter_jit.sweep_stale_aiter_locks_if_dead(aiter_jit_dir=tmp_path)
     assert stats["compiler_alive"] is None
     # mtime gate (5 min) ⇒ only >30-min-old locks go; fresh lock survives.

@@ -32,6 +32,7 @@ def variant_fingerprint(
     remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
     args_mode: str = "append",
+    runtime_override: dict[str, Any] | None = None,
 ) -> str:
     """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
 
@@ -45,6 +46,8 @@ def variant_fingerprint(
         remove_args: Base/server args to remove before appending this variant.
         unset_envs: Inherited env names to unset before applying this variant.
         args_mode: ``"append"`` or ``"replace"``.
+        runtime_override: Attempt runtime override; folded into the hash only
+            when non-empty so plain variants keep their historical fingerprint.
 
     Returns:
         str: The 16-char content fingerprint of the pair.
@@ -55,6 +58,7 @@ def variant_fingerprint(
         remove_args=remove_args,
         unset_envs=unset_envs,
         args_mode=args_mode,
+        runtime_override=runtime_override,
     )
 
 
@@ -125,6 +129,9 @@ class GridVariant:
         mode = str(args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
         self.note = note
+        # Optional runtime override; injected into materialized YAML benchmark.envs
+        # by _build_variant_yaml so the server subprocess resolves the attempt runtime.
+        self.runtime_override: dict[str, str] = {}
 
     @property
     def fingerprint(self) -> str:
@@ -140,6 +147,7 @@ class GridVariant:
             remove_args=self.remove_args,
             unset_envs=self.unset_envs,
             args_mode=self.args_mode,
+            runtime_override=getattr(self, "runtime_override", None) or None,
         )
 
 

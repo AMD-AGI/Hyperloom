@@ -361,6 +361,7 @@ def run_benchmark(
             extra_args=extra_args,
             profile_dir=profile_dir,
             python_exe=sys.executable,
+            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
@@ -439,6 +440,7 @@ def _run_server_phase(
             extra_args=extra_args,
             profile_dir=profile_dir,
             python_exe=sys.executable,
+            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
@@ -586,6 +588,7 @@ def _run_lifecycle_all(
             extra_args=extra_args,
             profile_dir=profile_dir,
             python_exe=sys.executable,
+            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)

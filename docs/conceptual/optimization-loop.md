@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -117,6 +117,84 @@ For each candidate:
    `session_breakdown.json`.
 
 The LLM doesn't own a separate framework role in the current runtime.
+
+### Enablement escalation ladder
+
+When a `(model, backend)` combination cannot launch, enablement repairs it
+along two axes. **Diagnosis (once):** work out which capability layer is
+missing — read the failure signature, the model's `config.json` architecture,
+the framework's supported-architecture registry and installed version, and
+upstream (whether the capability already exists and in which version/PR). That
+picks the entry rung. **Climb (as needed):** start at the lowest plausible rung
+and go up only when the current rung cannot make it boot; after each cleared
+boot failure, re-diagnose the new (deeper) failure and pick a rung again
+(serial enablement — progress is stacked). A model whose architecture is
+already supported but merely un-wired needs only the cheap top rungs; a
+genuinely-new architecture climbs higher.
+
+The full rendered methodology (the advisory "ladder book") is the canonical
+text, built by `build_enablement_ladder_book` in
+`hyperloom.agents.framework.enablement_ops` and injected into the enablement
+authoring specialist's prompt. The rungs, in increasing complexity:
+
+0. **Rung 0 — diagnose / capability-gap localization.** Read-only:
+   classify the failure, read `config.json`, check the supported-arch registry
+   and version, and look up upstream. Output: the missing layer and the entry
+   rung.
+1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
+   only a serve flag / env / tokenizer-mode / trivial registration alias is
+   missing. No new code or dependencies.
+2. **Rung 2 — in-tree source patch.** A unified diff against the installed
+   source tree: register the arch, a small forward/config/tokenizer bridge, or
+   backport a merged PR. Pure Python, no compile.
+3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
+   wheel, an editable checkout at a ref, or a local source tree) into an
+   isolated per-attempt venv. That venv is activated only through the
+   per-variant YAML benchmark envs; the Coordinator never mutates its own
+   process environment to point at an attempt runtime.
+4. **Rung 4 — source localization.** Localize a merged-PR or vendored
+   closure into the source tree. A change that touches compiled or
+   build-backend files cannot be satisfied by a plain source edit, so it
+   defers to Rung 5.
+5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
+   (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
+   coordinator tick loop on a dedicated single-slot build lane: each build
+   is spawned detached and reaped across later ticks against a wall-clock
+   budget, so a long compile never blocks the loop. Auto-escalation into
+   Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
+   environment variable (see
+   [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+
+### Runnable gate (earned KEEP)
+
+A verified build does not KEEP on artifact verification alone. After a
+build's artifacts verify, the Coordinator runs a launch probe: it boots the
+actual model with the built runtime through the same runnable-decision gate
+the authored-patch lane uses. Only a runtime that actually launches — and
+passes minimal correctness — earns KEEP. Otherwise the build reverts, or, if
+the boot advanced past the original failure to a new or deeper gap, the loop
+advances to the next round to repair that gap.
+
+### Discovery-driven build refs
+
+Candidate PR refs discovered by the framework-agent feed directly into the
+build: a PR reference becomes a checkout of that PR's head, not just a
+released-tag autoselect. This makes support that exists only in an
+unreleased PR or branch reachable. When a discovered PR ref drives the
+build, the source PR URL is recorded as build provenance in the session
+breakdown's `installed_versions` map (`source_pr_url`); see the
+[`enablement` section](../reference/session-breakdown.md#enablement--targeted-build--attempt-runtime-summary).
+
+### Novelty and crash safety
+
+- **Novelty-ledger stall gate.** Repeated identical build attempts — same
+  component, ref, GPU arch, and build command — are treated as a stall and
+  revert. A novel attempt, or a time-based failure such as a timeout,
+  advances instead, so the loop keeps making forward progress rather than
+  looping on an identical failing build.
+- **Crash / resume.** An in-flight build is tracked by a durable sentinel,
+  so a crash or resume reclaims the running build or cleans up the orphaned
+  one rather than leaking it.
 
 ## EXPLORE
 

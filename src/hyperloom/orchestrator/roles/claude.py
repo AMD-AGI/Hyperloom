@@ -285,8 +285,14 @@ class ClaudeBackend:
         """
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
-        if self.raw_completion:
-            max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
+        # Claude Code counts the model's own text/tool messages as turns, so a
+        # literal max_turns=1 trips ("Reached maximum number of turns (1)")
+        # before the model can emit any tool call or intent — newer bundled CLI
+        # builds raise this as an error rather than returning a partial result.
+        # Callers that pass max_turns=1 to mean "one agentic step" (e.g. the
+        # specialist runner's per-turn loop) therefore need headroom. Apply the
+        # raw-completion floor to every mode, not just raw_completion.
+        max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
         resume_session = self._session_id if self.conversational else None
         options = self._build_options(
             tools=tools or [],
@@ -630,10 +636,16 @@ class ClaudeBackend:
                 if isinstance(msg_usage, dict) and msg_usage:
                     last_usage = dict(msg_usage)
         except Exception as exc:
-            # SDK may raise "error result: success" on max-turns exit; keep any
-            # intents already collected.
+            # The SDK raises on a terminal ResultMessage with is_error=True. Two
+            # such subtypes are NON-fatal turn boundaries, not real failures, and
+            # any intents/text already streamed must be kept:
+            #   * "error result: success"                    (older max-turns-on-success)
+            #   * "Reached maximum number of turns (N)"       (newer CLI: hitting the
+            #     per-call max_turns cap mid-agentic-loop — expected when a caller
+            #     runs a bounded step; the collected partial turn is still usable)
             err_str = str(exc)
-            if "error result: success" in err_str:
+            _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
+            if _non_fatal:
                 if intents:
                     log.warning(
                         "claude SDK raised '%s' but %d intents already collected; returning partial results",
