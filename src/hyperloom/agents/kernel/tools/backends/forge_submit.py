@@ -2425,7 +2425,7 @@ def _finalize_forge_workspace(
             try:
                 driver_path.unlink()
             except FileNotFoundError:
-                pass
+                pass  # already gone -- nothing to clean up
             except OSError as error:
                 cleanup_errors.append(
                     f"failed to remove generated in-place driver: {error}"

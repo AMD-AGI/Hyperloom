@@ -497,7 +497,7 @@ def test_forced_termination_leaves_no_running_grandchild(tmp_path):
             try:
                 os.kill(child_pid, signal.SIGKILL)
             except OSError:
-                pass
+                pass  # child already reaped between the check and the kill
         if proc.poll() is None:
             proc.kill()
 
