@@ -421,10 +421,6 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         cortex_kb=None,
         knowledge_plane=None,
     )
-    # Shrink wait timeouts so the idle dispatcher doesn't hang on prod defaults.
-    coord.CLOSE_REPORT_TIMEOUT_SEC = 0.1
-    coord.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC = 0.1
-
     # Seed state at SWEEP boundary.
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [
