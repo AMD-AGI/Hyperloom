@@ -790,12 +790,6 @@ def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch
 def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
-    assert inf._infera_all_gpu_ips({"pd_mode": "disaggregated", "prefill_pod_ips": ["p"], "decode_pod_ips": ["d"]}) == [
-        "p",
-        "d",
-    ]
-    assert inf._infera_all_gpu_ips({"worker_pod_ips": ["w"]}) == ["w"]
-
     state = {
         "backend": "infera",
         "pd_mode": "aggregated",

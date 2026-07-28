@@ -229,7 +229,6 @@ class RayExecutionBackend:
 
     def __init__(self) -> None:
         self._ensured = False
-        self._started = False
 
     def ensure(self, num_gpus: int | None = None, log_path: Path | None = None) -> None:
         """Ensure a Ray cluster is up and this process is connected.
@@ -253,7 +252,7 @@ class RayExecutionBackend:
         if resolved is None:
             env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
             resolved = int(env_n) if env_n.isdigit() else None
-        self._started = ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
+        ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
         quiet_ray_init(num_gpus=resolved, log_path=log_path)
         self._ensured = True
 
@@ -463,7 +462,6 @@ def mark_ray_backend_unhealthy() -> None:
         pass
     if _BACKEND is not None:
         _BACKEND._ensured = False
-        _BACKEND._started = False
 
 
 __all__ = [
