@@ -21,6 +21,7 @@ import shutil
 import site
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -876,13 +877,63 @@ def _validate_test_command_argv_like(test_command: str) -> str:
     return cmd
 
 
-def _build_driver_adapter(test_command: str, worktree: str, output_dir: Path) -> str:
+# Staged when the driver is delegated to forge-loop's task preparer. The CLI
+# resolves --driver against --workspace and requires an existing file before
+# prep runs (``preflight_task`` -> ``prepare_task_sync`` repairs it in place),
+# so the placeholder must exist and must fail preflight loudly rather than be
+# mistaken for a conforming measurement driver.
+_TASK_PREPARER_PLACEHOLDER = '''#!/usr/bin/env python3
+"""Placeholder driver — forge-loop's task preparer authors the real one."""
+import sys
+
+sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
+'''
+
+
+def _write_generated_driver(workspace: str | Path, content: str) -> str:
+    """Atomically allocate a unique hidden driver inside ``workspace``.
+
+    The long-horizon forge-loop CLI resolves ``--driver`` relative to
+    ``--workspace`` and rejects anything outside it, so generated drivers must
+    live in the workspace rather than in the attempt output dir. The
+    ``.forge_driver_`` prefix is the contract ``_finalize_forge_workspace``
+    uses to clean these up after an in-place run.
+    """
+    workspace_path = Path(workspace)
+    fd, raw_path = tempfile.mkstemp(
+        prefix=".forge_driver_",
+        suffix=".py",
+        dir=str(workspace_path),
+        text=True,
+    )
+    path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(content)
+        path.chmod(0o755)
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return str(path)
+
+
+def _build_driver_adapter(
+    test_command: str,
+    worktree: str,
+    output_dir: Path,
+    *,
+    inplace: bool = False,
+) -> str:
     """Write the driver-adapter script and return its path."""
     test_command = _validate_test_command_argv_like(test_command)
-    adapter = output_dir / "forge_driver_adapter.py"
-    adapter.write_text(_ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree))
-    adapter.chmod(0o755)
-    return str(adapter)
+    del output_dir, inplace  # The long-horizon CLI requires the driver inside workspace.
+    return _write_generated_driver(
+        worktree,
+        _ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree),
+    )
 
 
 # Auto-generated Forge-native driver for harness-less candidates. Imports the
@@ -1321,7 +1372,12 @@ main()
 '''
 
 
-def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path, inplace: bool = False) -> str | None:
+def _autogen_forge_driver(
+    candidate: dict,
+    worktree_kernel: str,
+    workspace_dir: Path,
+    inplace: bool = False,
+) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
@@ -1330,39 +1386,33 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
       - activation (silu/gelu/relu/act_and_mul) -> elementwise driver + torch ref.
       - attention (mha/prefill/decode) -> compile-only driver (no golden ref).
       - HIP C++ (.cuh/.cu/.hip) fallback -> compile-only driver (hipcc -c).
+    The driver is written inside ``workspace_dir`` because the long-horizon
+    forge-loop CLI rejects a ``--driver`` outside ``--workspace``.
     Returns the driver path, or None when the op has no usable template.
     """
     op = str(candidate.get("operation") or "").lower()
     hint = (op + " " + str(candidate.get("name") or "") + " " + worktree_kernel).lower()
-    drv = output_dir / "forge_autogen_driver.py"
     is_compiled_source = worktree_kernel.lower().endswith((".cuh", ".cu", ".hip", ".cpp"))
+    content: str | None = None
     if "moe" in hint:
         if not inplace:
             return None
-        drv.write_text(_AUTOGEN_MOE_DRIVER)
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+        content = _AUTOGEN_MOE_DRIVER
+    elif any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
+        content = _AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel)
     # Activation driver uses importlib — only valid for .py kernel files;
     # compiled sources with activation names use compile-only instead.
-    if any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in _ATTENTION_OP_HINTS):
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+    elif any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
+        content = _AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel)
+    elif any(t in hint for t in _ATTENTION_OP_HINTS):
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
     # HIP C++ fallback: compiled files with no op-template match still get a
     # compile-only driver so hip-fellow can iterate and verify compilation.
-    if is_compiled_source:
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    return None
+    elif is_compiled_source:
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
+    if content is None:
+        return None
+    return _write_generated_driver(workspace_dir, content)
 
 
 def _shapes_from_candidate(candidate: dict) -> dict:
@@ -2400,10 +2450,27 @@ def _finalize_forge_workspace(
         if campaign_root.is_dir():
             destination = Path(output_dir) / "forge_experiments"
             try:
-                if destination.exists():
-                    raise FileExistsError(
-                        f"refusing to overwrite preserved campaign: {destination}"
+                # ``--experiments-dir`` already points at (and mkdir's) this
+                # path, so an empty destination is the normal case and must not
+                # abort cleanup. Only a destination holding real artifacts is
+                # preserved, by moving the workspace campaign beside it.
+                if destination.is_dir() and not any(destination.iterdir()):
+                    destination.rmdir()
+                elif destination.exists():
+                    preserved = destination
+                    suffix = 1
+                    while preserved.exists():
+                        preserved = destination.with_name(
+                            f"{destination.name}_workspace_{suffix}"
+                        )
+                        suffix += 1
+                    log.warning(
+                        "forge: %s already holds campaign artifacts; preserving the "
+                        "in-place campaign at %s instead",
+                        destination,
+                        preserved,
                     )
+                    destination = preserved
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(campaign_root), str(destination))
             except OSError as error:
@@ -2603,7 +2670,7 @@ def submit(
                     "forge: grouped multi-shape invocation spec is missing or incomplete",
                     time.time() - started,
                 )
-            driver = str(output_dir / "forge_task_driver.py")
+            driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             log.info(
                 "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
                 len(grouped_cases),
@@ -2611,7 +2678,7 @@ def submit(
             )
         elif test_command:
             try:
-                driver = _build_driver_adapter(test_command, workspace, output_dir)
+                driver = _build_driver_adapter(test_command, workspace, output_dir, inplace=inplace)
                 driver_from_adapter = True
                 log.info("forge driver: harness adapter from test_command")
             except (OSError, ValueError) as exc:
@@ -2619,18 +2686,18 @@ def submit(
                     "forge driver: harness adapter failed (%s); trying autogen before task-preparer",
                     exc,
                 )
-                driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                driver = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
                 if driver is not None:
                     log.info("forge driver: autogen fallback -> %s", driver)
                 else:
-                    driver = str(output_dir / "forge_task_driver.py")
+                    driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
                     log.warning(
                         "forge driver: adapter and autogen unavailable; delegating missing driver %s "
                         "to forge-loop task-preparer",
                         driver,
                     )
         else:
-            driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+            driver = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
             if driver is None:
                 log.warning(
                     "forge driver: autogen failed for op=%r kernel=%s; delegating missing "
@@ -2638,7 +2705,7 @@ def submit(
                     candidate.get("operation"),
                     worktree_kernel,
                 )
-                driver = str(output_dir / "forge_task_driver.py")
+                driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             else:
                 log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
@@ -2649,7 +2716,7 @@ def submit(
         if driver_from_adapter and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
             gate_ok, gate_detail = _baseline_correctness_ok(driver, workspace, gpu_target, timeout_s)
             if not gate_ok:
-                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
                 if autogen_fallback:
                     log.info(
                         "forge driver: harness gate failed (%s), falling back to autogen driver -> %s",
