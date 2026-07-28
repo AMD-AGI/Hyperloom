@@ -2276,6 +2276,25 @@ def run_attempt(
 
     backend_paths: dict[str, str] = {}
     if not args.dry_run:
+        if isinstance(result, dict):
+            forge_workspace = str(result.get("forge_workspace") or "")
+            if forge_workspace:
+                backend_paths["forge_workspace"] = forge_workspace
+            artifacts = result.get("artifacts")
+            if isinstance(artifacts, list):
+                forge_patch = next(
+                    (
+                        str(path)
+                        for path in artifacts
+                        if str(path).endswith(("forge.patch", ".diff"))
+                    ),
+                    "",
+                )
+                if forge_patch:
+                    backend_paths["forge_patch"] = forge_patch
+            changed_files = result.get("changed_files")
+            if isinstance(changed_files, list):
+                backend_paths["forge_changed_files"] = json.dumps(changed_files)
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
@@ -3115,17 +3134,26 @@ def build_verification(
                 break
         if winning_patch and Path(winning_patch).is_file():
             snap_out = (run_dir or Path(winning_patch).parent) / f"{best.get('attempt_id', 'attempt')}_deploy_snapshot"
+            # Prefer the retained forge workspace: it is the live tree the patch
+            # was produced against, so it carries every file the diff touches.
+            # Fall back to the exported artifact copies, which outlive a workspace
+            # that has already been reaped. Both are probed with is_dir() so a
+            # stale path falls through instead of yielding an empty snapshot.
             snapshot_worktree = None
-            for root_key in ("output_dir", "cli_workspace"):
-                output_root = str(bp.get(root_key) or "")
-                files_root = (
-                    Path(output_root) / "optimized_versions" / "files"
-                    if output_root
-                    else None
-                )
-                if files_root is not None and files_root.is_dir():
-                    snapshot_worktree = files_root
-                    break
+            forge_workspace = str(bp.get("forge_workspace") or "")
+            if forge_workspace and Path(forge_workspace).is_dir():
+                snapshot_worktree = Path(forge_workspace)
+            else:
+                for root_key in ("output_dir", "cli_workspace"):
+                    output_root = str(bp.get(root_key) or "")
+                    files_root = (
+                        Path(output_root) / "optimized_versions" / "files"
+                        if output_root
+                        else None
+                    )
+                    if files_root is not None and files_root.is_dir():
+                        snapshot_worktree = files_root
+                        break
             snap = build_patch_snapshot(
                 winning_patch,
                 worktree=snapshot_worktree,
@@ -3231,7 +3259,7 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "PARTIAL", "reasons": reasons}
     if verification["micro_speedup"] <= 1.0:
         return {"decision": "REVERT", "reasons": ["microbench did not improve"]}
-    KEEP_THRESHOLD = 1.05
+    KEEP_THRESHOLD = 1.10
     if verification["micro_speedup"] < KEEP_THRESHOLD:
         reasons.append(f"speedup {verification['micro_speedup']:.3f}x below KEEP threshold {KEEP_THRESHOLD:.2f}x")
     if verification["e2e_gain_pct"] is not None and verification["e2e_gain_pct"] < 0:

@@ -321,13 +321,22 @@ def parse_eval_results(
     result_files: list[Path] = []
     for pattern in search_paths:
         result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
-    # Never grade a discarded warmup round: grid/baseline warmups nest throwaway
-    # eval output under a named warmup slot. When the search root sits above such
-    # a slot, the recursive glob would otherwise also match the discarded eval.
-    # Drop nested warmup results using a workspace-relative check so a parse
-    # rooted AT the warmup slot itself still finds its own output.
+    # Prefer a non-warmup round, but fall back to the warmup's eval rather than
+    # reporting no accuracy at all.
+    #
+    # What a warmup discards is THROUGHPUT: the first benchmark window after a
+    # cold boot pays one-time costs that would inflate later gains. Accuracy is
+    # not timing-sensitive -- it is a property of the model and its config, so a
+    # warmup-round eval measures exactly what a measured-round eval would. The
+    # baseline double-run now deliberately evaluates only in the warmup round
+    # (once, not twice), which makes that file the sole accuracy source; dropping
+    # it unconditionally discarded a perfectly good score and stopped the run.
+    #
+    # The workspace-relative check keeps a parse rooted AT the warmup slot
+    # finding its own output.
     discarded_warmup_dirs = {"warmup_round", "mn_warmup"}
-    result_files = [p for p in result_files if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)]
+    measured = [p for p in result_files if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)]
+    result_files = measured or result_files
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 

@@ -500,6 +500,131 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "expected_error"),
+    [
+        (
+            "gfx942,304,64,7168,5120,ck,0,0,0,placeholder,0,0,0\n",
+            "no_target_gpu_rows",
+        ),
+        (
+            "gfx950,256,64,7168,5120,ck,0,0,0,placeholder,0,0,0\n",
+            "target_gpu_rows_not_runtime_ready",
+        ),
+    ],
+)
+async def test_executor_rejects_inapplicable_aiter_model_config(
+    tmp_path: Path,
+    monkeypatch,
+    row: str,
+    expected_error: str,
+):
+    """A non-runnable model-config seed must never reach the E2E benchmark."""
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-placeholder"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "a8w8_blockscale_tuned_gemm_qwen3_14b.csv"
+    artifact.write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
+        + row,
+        encoding="utf-8",
+    )
+    target = tmp_path / "fw" / "aiter" / "configs" / "model_configs" / artifact.name
+    target.parent.mkdir(parents=True)
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "proposal_set": [],
+                "patches_written": [],
+                "artifacts_written": [
+                    {
+                        "source": artifact.name,
+                        "target": str(target),
+                        "kind": "model_config",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def _should_not_benchmark(**_kwargs):
+        raise AssertionError("an inapplicable placeholder artifact reached the benchmark")
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
+    state = SimpleNamespace(
+        gpu_type="mi355x",
+        current_best={},
+        baseline_accuracy=0.0,
+        get_specialist_patch_verdict=lambda _sid: "approve",
+    )
+    task = Task(
+        task_id="t-int-placeholder",
+        kind="integrate_patch",
+        state="queued",
+        params={"specialist_task_id": "t-spec-placeholder"},
+        idempotency_key="t-int-placeholder",
+        requires_lanes=tuple(),
+    )
+    result = await executor(RunnerContext(task=task, lease=None, extra={"shared_state": state}))
+
+    assert result["status"] == "apply_failed"
+    assert result["error_class"] == "artifact_not_runtime_ready"
+    assert result["artifact_errors"][0]["error"] == expected_error
+    assert result["artifact_errors"][0]["expected_gfx"] == "gfx950"
+    assert result["artifact_errors"][0]["expected_cu_num"] == "256"
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-tuned"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "a8w8_blockscale_tuned_gemm_qwen3_14b.csv"
+    artifact.write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
+        "gfx950,256,64,7168,5120,ck,8,0,14.2,tuned_kernel,64.6,700.0,0.0\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "fw" / "aiter" / "configs" / "model_configs" / artifact.name
+    target.parent.mkdir(parents=True)
+    (workspace / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "proposal_set": [],
+                "patches_written": [],
+                "artifacts_written": [
+                    {
+                        "source": artifact.name,
+                        "target": str(target),
+                        "kind": "model_config",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = await IntegratePatchExecutor(session_dir=session_dir)(
+        _make_ctx(
+            "t-int-tuned",
+            {
+                "specialist_task_id": "t-spec-tuned",
+                "gpu_type": "mi355x",
+                "apply_only": True,
+            },
+        )
+    )
+
+    assert result["status"] == "applied_no_bench"
+    assert target.read_text(encoding="utf-8") == artifact.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     """config_changes-only (no patches) still proceeds under apply_only=True."""
     session_dir = tmp_path / "session"

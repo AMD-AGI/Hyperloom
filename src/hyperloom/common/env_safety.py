@@ -62,6 +62,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "CODEX_MODEL",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
+        "FORGE_PATH",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
@@ -81,6 +82,8 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
         "KERNEL_AGENT_ENV",
+        "KERNEL_AGENT_ROOT",
+        "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "NO_PROXY",
@@ -98,10 +101,12 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
 
 DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "AITER_",
+    "FORGE_",
     "GEAK_",
     "HF_",
     "HYPERLOOM_",
     "INFERENCE_OPTIMIZER_",
+    "KERNEL_OPT_",
     "SGLANG_",
     "VLLM_",
 )
@@ -110,6 +115,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
         "GEAK_CLAUDE_MODEL",
         "GEAK_E2E_RUNNER",
@@ -128,6 +134,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         "KERNEL_AGENT_ROOT",
+        "KERNEL_OPT_BACKEND_ORDER",
         "MAGPIE_PATH",
         "MAGPIE_PYTHON",
         "OPENAI_API_KEY",
