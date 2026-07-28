@@ -674,8 +674,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     # Their lifecycle is independent of trace-local kernel ordinals.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
-    # Cross-round params/backends/sweep aggregation (cap 10); legacy rows folded into the unified winners_history on resume.
-    params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
     # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
@@ -687,9 +685,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed); kept only for resume + report.py back-compat, never written.
-    last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
-    remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
+    # Legacy session_steward slots (steward removed); kept only for resume back-compat, never written.
     steward_continuation_used: bool = False
     steward_infra_failures_by_round: dict[str, int] = field(
         default_factory=dict,
@@ -745,10 +741,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log (cap 20) for dynamic idea generation.
-    backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
-    # Synergy combo keys already tested this session; prevents re-running combinations.
-    synergy_attempted: list[str] = field(default_factory=list)
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
@@ -1033,13 +1025,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return Path(session_dir) / "state.json"
 
     @classmethod
-    def load_or_init(
-        cls,
-        session_dir: Path,
-        *,
-        legacy_action_scores: str = "drop",
-        migration_mode: str = "strict",
-    ) -> "SharedState":
+    def load_or_init(cls, session_dir: Path) -> "SharedState":
         """Load existing ``state.json`` or return a fresh blank instance.
 
         Reads and migrates the persisted state via :meth:`from_dict` when
@@ -1060,23 +1046,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         else:
             with path.open(encoding="utf-8") as f:
                 raw = json.load(f)
-            inst = cls.from_dict(
-                raw,
-                legacy_action_scores=legacy_action_scores,
-                migration_mode=migration_mode,
-            )
+            inst = cls.from_dict(raw)
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
 
     @classmethod
-    def from_dict(
-        cls,
-        raw: dict[str, Any],
-        *,
-        legacy_action_scores: str = "drop",
-        migration_mode: str = "strict",
-    ) -> "SharedState":
+    def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
         """Construct a :class:`SharedState` from a raw mapping, migrating it.
 
         Acts as the unified migration entry point: an absent
@@ -1092,8 +1068,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
-        needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
-        migration_events: list[str] = []
 
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
@@ -1130,113 +1104,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     task_key,
                     migrated,
                 )
-            migration_events.append(
-                "migrated kernel optimization attempts to stable task identities"
-            )
-        # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
-        _legacy_drop_fields = (
-            "action_scores",
-            "score_violation",
-            "cooldown_until_tick",
-            "locked_reason",
-            "ucb_bonus",
-            "aging_bonus",
-            "score_mult",
-            "effective_score",
-            "last_action_score_snapshot",
-            "last_select_kernels",
-        )
-        legacy_seen: list[tuple[str, int]] = []
-        for legacy in _legacy_drop_fields:
-            if legacy in raw:
-                payload = raw.get(legacy)
-                size = len(payload) if isinstance(payload, (dict, list, str)) else 1
-                legacy_seen.append((legacy, int(size)))
-            filtered.pop(legacy, None)
-        if legacy_seen:
-            mode = str(legacy_action_scores or "drop").strip().lower()
-            import logging as _logging
-
-            log = _logging.getLogger(__name__)
-            summary = ", ".join(f"{k}={n}" for k, n in legacy_seen)
-            migration_events.append(f"§3.9 dropped scoreboard fields ({summary})")
-            if mode == "warn":
-                log.warning(
-                    "v0.8 §3.9: dropped legacy scoreboard fields from "
-                    "state.json (%s). set "
-                    "--legacy-action-scores=drop to silence this.",
-                    summary,
-                )
-            else:
-                log.info(
-                    "v0.8 §3.9: dropped legacy scoreboard fields from state.json (%s).",
-                    summary,
-                )
-        # Normalize the unified ``explore_search`` ledger at load; winners/synergy history folded in.
+        # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
-            backend_winners_history=filtered.get("backend_winners_history"),
-            params_winner_history=filtered.get("params_winner_history"),
-            synergy_attempted=filtered.get("synergy_attempted"),
         )
 
-        # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
-        if needs_migration and raw:
-            mode = str(migration_mode or "strict").strip().lower()
-            fact_layer_keys = (
-                "baseline_tput",
-                "baseline_cold_tput",
-                "baseline_hot_tput",
-                "baseline_accuracy",
-                "current_best",
-                "cumulative_gain",
-                "cumulative_gain_validated",
-                "optimization_stack",
-                "reference_server_args",
-                "reference_envs",
-                "last_remaining_gaps_assessment",
-                "remaining_gaps_assessments",
-            )
-            missing: list[str] = []
-            for key in fact_layer_keys:
-                if key in raw and key not in filtered:
-                    missing.append(key)
-            if missing:
-                import logging as _logging
-
-                log = _logging.getLogger(__name__)
-                fmt = (
-                    "v0.8 §3.10: fact-layer field(s) %s present in "
-                    "state.json but not loaded into SharedState "
-                    "(Inv-10.1 violation)."
-                )
-                if mode == "lenient":
-                    log.warning(
-                        fmt + " --migration-mode=lenient → continuing.",
-                        ", ".join(missing),
-                    )
-                else:
-                    log.error(fmt, ", ".join(missing))
-                    raise ValueError(
-                        f"v0.8 §3.10 strict migration failed: fact-layer "
-                        f"field(s) {missing!r} lost. Re-run with "
-                        f"--migration-mode=lenient to continue."
-                    )
-
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
-
-        # Operator-visible migration summary.
-        if needs_migration:
-            import logging as _logging
-
-            log = _logging.getLogger(__name__)
-            event_str = "; ".join(migration_events) or "(no field changes)"
-            log.info(
-                "v0.8 §3.10: state.json migrated v%d → v%d. Events: %s",
-                incoming_version,
-                LATEST_STATE_SCHEMA_VERSION,
-                event_str,
-            )
 
         return cls(**filtered)
 
@@ -1244,25 +1117,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _build_explore_search(
         *,
         existing: Any,
-        backend_winners_history: Any,
-        params_winner_history: Any,
-        synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Shape the unified ``explore_search`` ledger at load time; folds live history so resume preserves cross-round aggregation.
+        """Shape the unified ``explore_search`` ledger at load time.
 
         Args:
             existing (Any): The persisted ``explore_search`` dict (or any
                 value; non-dicts are treated as empty).
-            backend_winners_history (Any): Legacy backend-winners rows folded
-                into the unified ``winners_history``.
-            params_winner_history (Any): Legacy params-winner rows folded into
-                the unified ``winners_history``.
-            synergy_attempted (Any): Legacy synergy combos folded (deduped)
-                into ``synergy_attempted``.
 
         Returns:
             dict[str, Any]: The normalized ``explore_search`` ledger with all
-                required keys defaulted and live history folded in.
+                required keys defaulted and history normalized.
         """
         from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
 
@@ -1278,13 +1142,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})
 
-        # winners_history: fold live history + prior rows, sorted by (round_id, ts).
+        # winners_history: normalize persisted rows, sorted by (round_id, ts).
         wh: list[dict[str, Any]] = []
-        for source_list in (
-            backend_winners_history,
-            params_winner_history,
-            existing.get("winners_history") or [],
-        ):
+        for source_list in (existing.get("winners_history") or [],):
             if not isinstance(source_list, list):
                 continue
             for entry in source_list:
@@ -1325,7 +1185,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
-        # synergy_attempted: fold live field + executor-side additions, deduped.
+        # synergy_attempted: normalize executor-side combos, deduped.
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
@@ -1347,7 +1207,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 return parts if parts else None
             return None
 
-        for source in (synergy_attempted, existing.get("synergy_attempted") or []):
+        for source in (existing.get("synergy_attempted") or [],):
             if not isinstance(source, list):
                 continue
             for c in source:
@@ -2916,29 +2776,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         entry_gain_pct = gain_pct(tput, base)
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
-
-    def seed_stack_from_current_best(self) -> None:
-        """Backfill stack for old sessions that only had current_best."""
-        if self.optimization_stack or not isinstance(self.current_best, dict):
-            return
-        variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_server_args")
-        if not variant and not extra_args:
-            return
-        self.optimization_stack = [
-            {
-                "action": self.current_best.get("action", "unknown"),
-                "variant_name": variant or "legacy_current_best",
-                "extra_server_args": extra_args or "",
-                "extra_envs": dict(self.current_best.get("extra_envs") or {}),
-                "tput": self.current_best.get("tput"),
-                "workspace": self.current_best.get("workspace"),
-                "source": "seeded_from_current_best",
-            }
-        ]
-        # Keep gain_per_stack_entry aligned with optimization_stack (None == unknown gain for seeded entries).
-        if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            self.gain_per_stack_entry.extend([None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry)))
 
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
