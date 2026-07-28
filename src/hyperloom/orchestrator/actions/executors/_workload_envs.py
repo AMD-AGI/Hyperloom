@@ -64,7 +64,10 @@ log = logging.getLogger(__name__)
 _GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
 
 
-_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
+# Value is optional so a bare, value-less flag (an operator typo, or a flag
+# left dangling at end-of-string) is stripped too rather than surviving into a
+# retry that is supposed to launch without it.
+_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
 
 # Profile-phase capture defaults. Trace size scales with captured decode steps;
 # an oversized capture serializes too slowly and kills the engine. 128 steps is
