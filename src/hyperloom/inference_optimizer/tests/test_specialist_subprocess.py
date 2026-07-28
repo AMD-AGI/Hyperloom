@@ -750,7 +750,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 
 # ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
 class _FakeGpuSpecialistLease:
-    """Fake GpuSpecialistLease: start() writes done.json + log, then 'exits'."""
+    """Fake GpuSpecialistLease: start_async() writes done.json + log, then 'exits'."""
 
     def __init__(self, workspace: Path):
         self._workspace = workspace
@@ -775,12 +775,6 @@ class _FakeGpuSpecialistLease:
 
     def pending_seconds(self) -> float:
         return 0.0
-
-    def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
-        self.start_async(cmd, env=env, cwd=cwd, log_path=log_path)
-        pid = self.poll_started()
-        assert pid is not None
-        return pid
 
     def is_alive(self) -> bool:
         return self.alive

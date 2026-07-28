@@ -43,13 +43,15 @@ async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
     """The factory-built classifier must resolve a config for every registry
     slot: entries the factory omits (e.g. cluster_fault) fall back to the
     registry default, so nothing is left unconfigured."""
-    from hyperloom.agents.robustness.signals import signal_registry_config_attrs
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    expected_slots = {spec.config_attr for spec in _SIGNAL_REGISTRY if spec.config_attr}
 
     config = Config(session_dir=tmp_path, robustness_server_url="")
     bundle = build_reactor_components(config)
     try:
         resolved = bundle.components.classifier.signal_configs
-        assert set(resolved) == set(signal_registry_config_attrs())
+        assert set(resolved) == expected_slots
         # Every distinct registry slot resolved to an instance (no None).
         assert all(cfg is not None for cfg in resolved.values())
     finally:
