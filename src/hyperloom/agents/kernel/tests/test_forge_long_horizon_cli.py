@@ -119,7 +119,6 @@ def test_generated_drivers_stage_in_the_workspace_without_clobbering(tmp_path):
         forge_submit._build_driver_adapter(
             "python test.py",
             str(workspace),
-            output_dir,
         )
     )
     generated = Path(
