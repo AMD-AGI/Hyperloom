@@ -189,6 +189,9 @@ def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
         },
         # fp4 with a non-MX group size.
         {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size=16))},
+        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer
+        # 32, so a string value is not a valid MX-FP4 config either.
+        {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size="32"))},
         # Statically quantized activations are not the W4A4 dynamic scheme.
         {
             "quant_method": "quark",

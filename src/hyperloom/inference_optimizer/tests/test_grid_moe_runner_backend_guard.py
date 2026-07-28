@@ -111,6 +111,28 @@ def test_variant_authored_backend_dropped_for_aiter_only_model(tmp_path, quark_m
     assert "--moe-runner-backend" not in args
 
 
+def test_inherited_backend_dropped_for_online_int4fp8_variant(tmp_path, plain_moe_model):
+    args = _variant_args(
+        tmp_path,
+        model=plain_moe_model,
+        base_extra_args="--moe-runner-backend triton",
+        variant_args="--quantization quark_int4fp8_moe",
+    )
+    assert "--moe-runner-backend" not in args
+    assert "--quantization quark_int4fp8_moe" in args
+
+
+def test_inherited_backend_dropped_for_online_dynamic_mxfp4_variant(tmp_path, plain_moe_model):
+    args = _variant_args(
+        tmp_path,
+        model=plain_moe_model,
+        base_extra_args="--moe-runner-backend triton",
+        variant_args="--quantization mxfp4",
+    )
+    assert "--moe-runner-backend" not in args
+    assert "--quantization mxfp4" in args
+
+
 def test_backend_kept_for_ordinary_moe_model(tmp_path, plain_moe_model):
     args = _variant_args(
         tmp_path,
