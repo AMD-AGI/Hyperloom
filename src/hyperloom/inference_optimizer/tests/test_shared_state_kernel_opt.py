@@ -430,10 +430,10 @@ def test_record_kernel_opt_max_failures_env_override(state: SharedState, monkeyp
 
 
 def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
-    from hyperloom.orchestrator.state.shared_state import (
+    from hyperloom.orchestrator.state.kernel_decision_settings import (
         _DEFAULT_KERNEL_OPT_MAX_FAILURES,
-        resolve_kernel_opt_max_failures,
     )
+    from hyperloom.orchestrator.state.shared_state import resolve_kernel_opt_max_failures
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
     assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
