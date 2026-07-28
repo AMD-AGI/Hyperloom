@@ -12,15 +12,19 @@ from __future__ import annotations
 import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
 
 
-class _Executor(baseline_mod.BaselineExecutor):
-    """Bare instance: these are pure classification helpers, no ctx needed."""
+def _bare_executor() -> baseline_mod.BaselineExecutor:
+    """A ctx-less BaselineExecutor for exercising its pure helpers.
 
-    def __init__(self):  # noqa: D107 - deliberately skips the real __init__
-        pass
+    These tests only touch classification/config helpers that never read
+    instance state, so we build the instance with ``object.__new__`` and skip
+    the real (ctx-hungry) ``__init__`` -- rather than subclassing with a no-op
+    constructor, which trips CodeQL's missing-super-init check.
+    """
+    return object.__new__(baseline_mod.BaselineExecutor)
 
 
 def test_error_text_carrying_a_run_eval_marker_is_eval_rooted():
-    ex = _Executor()
+    ex = _bare_executor()
     assert ex._is_eval_rooted_failure(
         {"error": "...\nERROR: run_eval failed with exit code 1\n"}
     ) is True
@@ -28,28 +32,28 @@ def test_error_text_carrying_a_run_eval_marker_is_eval_rooted():
 
 def test_the_rejected_flag_itself_counts_as_eval_rooted():
     """The flag message is the shape that killed real runs; it must classify."""
-    ex = _Executor()
+    ex = _bare_executor()
     assert ex._is_eval_rooted_failure(
         {"error": "Unknown parameter: --concurrent-requests"}
     ) is True
 
 
 def test_marker_in_a_nonfatal_warning_still_classifies():
-    ex = _Executor()
+    ex = _bare_executor()
     assert ex._is_eval_rooted_failure(
         {"error": "", "nonfatal_warnings": ["run_eval failed with exit code 1"]}
     ) is True
 
 
 def test_an_ordinary_benchmark_failure_is_not_eval_rooted():
-    ex = _Executor()
+    ex = _bare_executor()
     assert ex._is_eval_rooted_failure(
         {"error": "CUDA out of memory", "nonfatal_warnings": ["slow start"]}
     ) is False
 
 
 def test_empty_result_is_not_eval_rooted_and_does_not_raise():
-    ex = _Executor()
+    ex = _bare_executor()
     assert ex._is_eval_rooted_failure({}) is False
 
 
@@ -76,7 +80,7 @@ def test_measure_round_config_disables_eval(tmp_path):
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"RUN_EVAL": "true", "CONC": 64}}}),
         encoding="utf-8",
     )
-    ex = _Executor()
+    ex = _bare_executor()
 
     warm = ex._write_lifecycle_config(
         base, tmp_path / "warmup", cleanup=False, pid_dir=tmp_path, port=41713
