@@ -109,13 +109,19 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     The demo passes explicit EXPLORE/SWEEP caps because disabled phase shares are
     redistributed onto the remaining work phases. A lone EXPLORE=0.95 override
     would combine with defaults to over-budget after redistribution.
+
+    The two literals below MUST stay in lockstep with the flags documented in
+    ``examples/hyperloom-qwen3-8b-3h/SKILL.md``: they are chosen so the demo's
+    overrides plus the *defaults* for the phases it does not override still sum
+    to exactly 1.0. EXPLORE moved 0.46 -> 0.39 when KERNEL's default share went
+    0.28 -> 0.35 (and SWEEP's 0.12 -> 0.05).
     """
     args = _parse_optimize(
         [
             "--max-hours",
             "3",
             "--max-minutes-explore-pct",
-            "0.46",
+            "0.39",
             "--max-minutes-sweep-pct",
             "0.01",
             "--no-framework-agent",
@@ -136,8 +142,8 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == pytest.approx(0.03)
     assert out["CLOSE"] == pytest.approx(0.02)
-    assert out["EXPLORE"] == pytest.approx(0.9297872340425532)
-    assert out["SWEEP"] == pytest.approx(0.02021276595744681)
+    assert out["EXPLORE"] == pytest.approx(0.92625)
+    assert out["SWEEP"] == pytest.approx(0.02375)
     assert sum(out.values()) == pytest.approx(1.0)
 
 

@@ -172,6 +172,13 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.current_best = {
+        "action": "explore",
+        "engine": "sglang",
+        "tput": 100.0,
+        "extra_server_args": "--attention-backend aiter",
+        "extra_envs": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"},
+    }
 
     await coord._promote_to_shared_state(
         "profile",
@@ -215,6 +222,11 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
     # +1% rule met (150 vs 100): current_best re-lifted to profile.
     assert s.current_best["action"] == "profile"
     assert s.current_best["tput"] == 150.0
+    assert s.current_best["engine"] == "sglang"
+    assert s.current_best["extra_server_args"] == "--attention-backend aiter"
+    assert s.current_best["extra_envs"] == {
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
+    }
     # Audit row.
     assert s.last_profile["decision"] == "promoted"
     assert s.last_profile["status"] == "succeeded"

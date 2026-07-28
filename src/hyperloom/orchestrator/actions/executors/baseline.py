@@ -59,6 +59,7 @@ from ._workload_envs import (
     materialize_config_with_envs,
 )
 from ._inferencex_patcher import ensure_benchmark_lib_eval_dest_patched
+from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -1077,6 +1078,18 @@ class BaselineExecutor:
         previously left this to ProfileExecutor only, so pure baseline runs
         never got the redirect. Best-effort; never blocks the run.
 
+        Also re-asserts the eval-concurrency compatibility fixes. Magpie's
+        ``_prepare_benchmark_scripts`` re-copies its own generic ``*.sh``
+        scripts into ``<inferencex>/benchmarks/`` on EVERY run, and
+        :func:`_ensure_local_inferencex` re-mirrors that checkout from scratch
+        on every run, so an install-time-only patch does not survive: a Magpie
+        installed by ``preflight`` (which never ran the patcher) re-introduces
+        ``run_eval ... --concurrent-requests $CONC`` into the copy that
+        actually executes, and InferenceX's ``run_lm_eval`` aborts the whole
+        benchmark with ``Unknown parameter: --concurrent-requests``. Applying
+        the fixes here — after materialization pins the exact checkout, before
+        launch — closes that window without an install re-run.
+
         ProfileExecutor overrides this to additionally validate the
         NUM_PROMPTS / PROFILE_EXTRA_BODY patches (and short-circuit on failure).
 
@@ -1098,6 +1111,43 @@ class BaselineExecutor:
                     ix_root,
                     exc,
                 )
+        # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
+        # be removed AND this run is meant to execute lm-eval: the benchmark is
+        # guaranteed to abort in run_lm_eval, and the accuracy gate then stops
+        # the whole session. Surfacing it here costs seconds instead of a full
+        # doomed server boot + benchmark.
+        if not _materialized_run_eval_disabled(config_path):
+            try:
+                compat_ok = ensure_eval_concurrency_compat(inferencex_dir=ix_root or None)
+            except Exception as exc:  # noqa: BLE001 — never mask as a silent skip
+                log.error(
+                    "baseline_executor: eval-concurrency compat patch raised for %s: %s",
+                    ix_root,
+                    exc,
+                )
+                compat_ok = False
+            if not compat_ok:
+                msg = (
+                    "accuracy eval cannot run: the redundant "
+                    "'--concurrent-requests' flag could not be removed from the "
+                    "Magpie benchmark scripts (MAGPIE_PATH="
+                    f"{os.environ.get('MAGPIE_PATH', '') or '<unset>'}) and/or "
+                    "InferenceX's run_lm_eval arg parser could not be made to "
+                    f"tolerate it (inferencex={ix_root or '<unset>'}). "
+                    "InferenceX resolves eval concurrency from "
+                    "EVAL_CONCURRENT_REQUESTS (fallback CONC); the flag is "
+                    "rejected as 'Unknown parameter: --concurrent-requests' and "
+                    "aborts the benchmark before any results*.json is written. "
+                    "Fix the run_eval line (or re-run install.sh against the "
+                    "Magpie tree that is actually imported at run time) — do "
+                    "NOT work around this with RUN_EVAL=false."
+                )
+                log.error("baseline_executor: %s", msg)
+                return {
+                    "status": "failed",
+                    "error_class": "eval_concurrency_flag_unpatchable",
+                    "error": msg,
+                }
         return None
 
     @staticmethod
@@ -1167,6 +1217,19 @@ class BaselineExecutor:
         result is tagged ``accuracy_source="eval_unavailable"`` and carries a
         ``eval_failed_fallback_no_accuracy`` warning.
 
+        **The salvage retry is skipped for a genuine ``baseline`` task.** A
+        baseline's job is to establish the accuracy reference, so
+        :meth:`_maybe_stop_on_missing_baseline_accuracy` halts the run whenever
+        eval was expected and produced nothing — including after this very
+        fallback (the fallback forces ``RUN_EVAL=false`` but eval was still
+        expected and still broke). Running the retry there therefore burns a
+        second full server boot + benchmark to produce a result that is
+        guaranteed to be discarded, and delays the operator's error by minutes.
+        Fail fast instead: record the same ``baseline_accuracy_failed`` stop
+        immediately. The retry is kept for non-baseline kinds (e.g.
+        ``replay_warm_recipe``), which do not establish the quality reference
+        and for which a throughput-only result IS usable.
+
         Args:
             ctx (RunnerContext): The runner context carrying ``task.params``
                 (config / model / timeout knobs) and ``extra`` (workspace).
@@ -1188,6 +1251,23 @@ class BaselineExecutor:
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+                log.error(
+                    "baseline_executor: failure is eval-rooted (InferenceX "
+                    "run_eval aborted the benchmark) on a genuine baseline, "
+                    "whose whole purpose is to establish the accuracy "
+                    "reference. NOT retrying with RUN_EVAL=false: a "
+                    "throughput-only baseline cannot satisfy the accuracy gate, "
+                    "so the retry would burn a second full benchmark and the "
+                    "run would stop anyway. Stopping now — fix the accuracy "
+                    "eval (see the benchmark stdout/stderr for the run_eval "
+                    "error) rather than disabling RUN_EVAL."
+                )
+                result.setdefault("nonfatal_warnings", [])
+                result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
+                result["accuracy_source"] = "eval_unavailable"
+                self._request_eval_rooted_baseline_stop(ctx, result)
+                return result
             log.warning(
                 "baseline_executor: failure looks eval-rooted (InferenceX "
                 "run_eval aborted the benchmark); retrying once with "
@@ -1202,6 +1282,64 @@ class BaselineExecutor:
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    def _request_eval_rooted_baseline_stop(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+    ) -> None:
+        """Halt the run for an eval-rooted baseline failure, fail-fast path.
+
+        :meth:`_maybe_stop_on_missing_baseline_accuracy` only inspects
+        ``succeeded`` results (a plain throughput failure is the Coordinator's
+        ``baseline_failed`` streak business). An eval-rooted *failure* on a
+        genuine baseline is a different animal: the accuracy reference can
+        never be established, so it must produce the same
+        ``baseline_accuracy_failed`` stop the post-fallback path used to
+        produce — just minutes earlier and without the wasted re-benchmark.
+
+        A sibling attempt may already have measured a valid accuracy (the
+        cold-start guard and the Coordinator's retries each get their own
+        ``runs/baseline/<attempt>`` dir), so the same salvage the succeeded
+        path uses is attempted first.
+
+        Args:
+            ctx (RunnerContext): The runner context (task kind + shared_state).
+            result (dict): The failed baseline result dict, mutated in place
+                when a sibling accuracy is salvaged.
+        """
+        from ._accuracy_gate import request_baseline_accuracy_stop
+
+        params = ctx.task.params or {}
+        framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
+        if salvaged is not None:
+            acc_val = float(salvaged["accuracy"])
+            result["accuracy"] = acc_val
+            result["accuracy_task"] = salvaged.get("task", "gsm8k")
+            result["accuracy_metric"] = salvaged.get("metric", "")
+            result["accuracy_source"] = salvaged.get("source_file", "")
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+            if shared_state is not None:
+                try:
+                    shared_state.baseline_accuracy = acc_val
+                except Exception:  # noqa: BLE001 — salvage must never break baseline
+                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            log.warning(
+                "baseline_executor: eval-rooted baseline failure, but salvaged "
+                "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
+                "not stopping the run",
+                acc_val,
+                salvaged.get("source_file", ""),
+            )
+            return
+        request_baseline_accuracy_stop(
+            shared_state,
+            context=f"baseline:{framework or 'unknown'}:eval_aborted",
+        )
 
     def _maybe_stop_on_missing_baseline_accuracy(
         self,
@@ -1234,7 +1372,19 @@ class BaselineExecutor:
         """
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
             return
-        if result.get("status") != "succeeded":
+        # A failed status must NOT skip straight past the salvage below. An eval
+        # that dies mid-run (e.g. the server vanishes while lm_eval is working
+        # through its requests) makes run_eval exit non-zero, which fails the
+        # whole round -- exactly the case the sibling-accuracy salvage exists to
+        # rescue. Returning here meant the salvage could only ever run when
+        # nothing had gone wrong, so a perfectly good accuracy measured by the
+        # cold-start guard's first round was discarded and the run stopped.
+        #
+        # Throughput-level failures still fall through harmlessly: they leave no
+        # results*.json for the salvage to find, so it returns None and the
+        # normal stop path continues. Those remain the Coordinator's
+        # ``baseline_failed`` streak logic to handle.
+        if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
         acc = result.get("accuracy")
         if acc is not None and float(acc) > 0.0:
@@ -1610,6 +1760,14 @@ class BaselineExecutor:
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
+            #
+            # No accuracy eval here: accuracy is a property of the model and its
+            # config, not of cold-vs-hot timing, so round 1 already measured the
+            # value round 2 would re-measure identically. Running it twice cost
+            # minutes per baseline and, worse, doubled the window in which a
+            # server death could take the eval down with it -- which is exactly
+            # how a run was lost. Round 1 keeps eval on and remains the accuracy
+            # source; round 2 only needs the hot throughput number.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -1617,6 +1775,7 @@ class BaselineExecutor:
                 cleanup=True,
                 pid_dir=pid_dir,
                 port=port,
+                run_eval=False,
             )
             log.info(
                 "baseline_executor: cold-start guard — measured baseline "
@@ -1737,6 +1896,7 @@ class BaselineExecutor:
         cleanup: bool,
         pid_dir: Path,
         port: int,
+        run_eval: bool = True,
     ) -> Path:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
@@ -1763,6 +1923,8 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             port=port,
         )
+        if not run_eval:
+            bench.setdefault("envs", {})["RUN_EVAL"] = "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
