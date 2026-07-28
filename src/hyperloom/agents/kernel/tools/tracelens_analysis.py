@@ -3217,26 +3217,6 @@ def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
 _OTHER_BUCKET_MIN_GPU_PCT_ENV = "HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT"
 _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT = 10.0
 
-# Raw/normalized category labels that mean "TraceLens did not roofline this op"
-# (no P-item block). Compared case-insensitively against both the raw category
-# and normalize_upstream_category() output.
-_OTHER_LIKE_CATEGORIES = frozenset(
-    {
-        "",
-        "other",
-        "others",
-        "misc",
-        "miscellaneous",
-        "uncategorized",
-        "uncategorised",
-        "unknown",
-        "n/a",
-        "na",
-        "none",
-        "null",
-    }
-)
-
 # Per-op ranking sidecars in preference order, relative to the skill output dir.
 _OPS_RANKING_CSV_RELPATHS = (
     "ops_summary.csv",

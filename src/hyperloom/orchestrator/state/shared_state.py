@@ -68,27 +68,6 @@ _now_iso = _kernel_decision_settings._now_iso
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
-# Cached lazy handle to ``..kernel.request_handlers``. A top-level import would
-# resurrect a circular import (request_handlers imports SharedState), so the
-# kernel forwarding shims below resolve the module through this getter and cache
-# it after the first call.
-_RH = None
-
-
-def _request_handlers():
-    """Return (and cache) the ``..kernel.request_handlers`` module.
-
-    Deferred to first use to avoid the circular import between
-    ``request_handlers`` and this module.
-    """
-    global _RH
-    if _RH is None:
-        from ..kernel import request_handlers as _m
-
-        _RH = _m
-    return _RH
-
-
 def _first_positive_tput(d: Any) -> float:
     """Return the first positive ``tput``/``output_throughput`` from a dict.
 

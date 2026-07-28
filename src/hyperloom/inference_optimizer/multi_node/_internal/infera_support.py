@@ -27,7 +27,6 @@ _INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
 
 # Substrings that mark a pod as the Infera worker (LWS) role vs the frontend.
 _WORKER_PODID_HINTS = ("worker", "-lws-", "lws-")
-_FRONTEND_PODID_HINTS = ("frontend",)
 
 
 def ssh_role_port_offset(role: str) -> int:

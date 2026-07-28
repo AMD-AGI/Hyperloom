@@ -3598,15 +3598,17 @@ def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
     nested templates are handled; an all-template name falls back to the
     original so a group key never collapses to empty."""
-    assert tlr._normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
-    assert tlr._normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"
-    assert tlr._normalize_operation_key("foo<bar<baz>>") == "foo"
+    from hyperloom.agents.kernel.tools._task_group_contract import normalize_operation_key
+
+    assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
+    assert normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"
+    assert normalize_operation_key("foo<bar<baz>>") == "foo"
     # Distinct base names must remain distinct after normalization.
-    assert tlr._normalize_operation_key("a<x>") != tlr._normalize_operation_key("b<x>")
+    assert normalize_operation_key("a<x>") != normalize_operation_key("b<x>")
     # No templates: returned verbatim (Q1 base names never change).
-    assert tlr._normalize_operation_key("vllm::rocm_unquantized_gemm") == "vllm::rocm_unquantized_gemm"
+    assert normalize_operation_key("vllm::rocm_unquantized_gemm") == "vllm::rocm_unquantized_gemm"
     # Degenerate all-template name: keep original rather than an empty key.
-    assert tlr._normalize_operation_key("<all>") == "<all>"
+    assert normalize_operation_key("<all>") == "<all>"
 
 
 def test_is_native_source_detects_device_extensions():
