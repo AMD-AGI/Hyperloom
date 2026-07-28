@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .. import gpu_types as _gpu_types
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
@@ -255,6 +256,17 @@ _STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
 _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
 _AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
+
+# Quark PTQ MX-FP4 (W4A4) MoE is implemented in sglang only on its aiter MoE
+# runner; every other backend leaves the scheme without a ``runner`` attribute
+# and the server dies on the first forward pass.
+_NATIVE_MOE_RUNNER_QUANT_METHODS = frozenset({"quark"})
+
+# MX group size, mirroring sglang's ``QuarkConfig._is_mx_fp4`` validation.
+_MX_FP4_GROUP_SIZE = 32
+
+# sglang resolves a layer's quant config from these, most specific first.
+_QUARK_LAYER_CONFIG_KEYS = ("layer_quant_config", "layer_type_quant_config")
 
 # Quant methods with a real vLLM/sglang loader. Anything else declared in
 # config.json is a private/third-party format that fails in engine init.
@@ -668,6 +680,111 @@ def _model_is_moe(model_path: str) -> bool:
         if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
             return True
     return False
+
+
+def _is_quark_mx_fp4_entry(entry: Any) -> bool:
+    """Whether one Quark layer-config entry is the MX-FP4 (W4A4) scheme.
+
+    Mirrors sglang's ``QuarkConfig._is_mx_fp4``: weights and activations both
+    fp4, per-group with group size 32 and e8m0 scales, weights statically and
+    activations dynamically quantized. Keeping the predicate identical to
+    upstream is what makes the gate trustworthy -- a looser string match would
+    both miss real checkpoints and fire on nvfp4 ones.
+
+    Args:
+        entry (Any): A Quark config entry with ``weight`` / ``input_tensors``.
+
+    Returns:
+        bool: ``True`` when the entry describes the MX-FP4 scheme.
+    """
+    if not isinstance(entry, dict):
+        return False
+    weight = entry.get("weight")
+    inputs = entry.get("input_tensors")
+    if not isinstance(weight, dict) or not isinstance(inputs, dict):
+        return False
+    for spec in (weight, inputs):
+        if spec.get("dtype") != "fp4" or spec.get("qscheme") != "per_group":
+            return False
+        if spec.get("group_size") != _MX_FP4_GROUP_SIZE:
+            return False
+        if spec.get("scale_format") != "e8m0":
+            return False
+    return weight.get("is_dynamic") is not True and inputs.get("is_dynamic") is not False
+
+
+def _model_moe_runner_requires_aiter(model_path: str) -> bool:
+    """Best-effort detect a MoE quant scheme that only the aiter runner serves.
+
+    A Quark PTQ MX-FP4 MoE checkpoint (e.g. Qwen3.5-397B-A17B-MXFP4) is only
+    wired up on sglang's aiter MoE runner. Forcing ``--moe-runner-backend
+    triton`` builds the scheme without a ``runner`` attribute, so the first
+    forward pass raises ``AttributeError`` and the server dies during
+    cuda-graph capture. Callers use this to skip the AMD triton injection and
+    let sglang pick the backend itself.
+
+    Any entry may decide it: sglang resolves a MoE layer's config from
+    ``layer_quant_config`` / ``layer_type_quant_config`` before falling back to
+    ``global_quant_config``, and a mixed checkpoint can carry MX-FP4 experts
+    next to fp8 attention. Checks the top level and a nested ``text_config``.
+    Soft-degrades to False on any missing / unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when the checkpoint carries a Quark MX-FP4 MoE scheme.
+    """
+    if not model_path:
+        return False
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        qc = cfg.get("quantization_config")
+        if not isinstance(qc, dict):
+            continue
+        if str(qc.get("quant_method") or "").strip().lower() not in _NATIVE_MOE_RUNNER_QUANT_METHODS:
+            continue
+        entries: list[Any] = [qc.get("global_quant_config")]
+        for key in _QUARK_LAYER_CONFIG_KEYS:
+            per_layer = qc.get(key)
+            if isinstance(per_layer, dict):
+                entries.extend(per_layer.values())
+        if any(_is_quark_mx_fp4_entry(entry) for entry in entries):
+            return True
+    return False
+
+
+def _model_declared_quant_method(model_path: str) -> str:
+    """Return the checkpoint's declared ``quant_method``, lowercased.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        str: The declared quant method, or ``""`` when absent/unreadable.
+    """
+    if not model_path:
+        return ""
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return ""
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        qc = cfg.get("quantization_config")
+        if isinstance(qc, dict):
+            method = str(qc.get("quant_method") or "").strip().lower()
+            if method:
+                return method
+    return ""
 
 
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:

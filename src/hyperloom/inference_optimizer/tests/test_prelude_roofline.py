@@ -213,7 +213,9 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
-    assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry_g0"
+    # The reason carries a profile fingerprint suffix so repeated kernel entries
+    # at the same gain stack are distinguishable in the task log.
+    assert coord.sub.tasks_run[0].params["reason"].startswith("kernel_entry_g0_")
     assert coord.shared_state.last_roofline_tput == 120.0
 
 
@@ -332,3 +334,69 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     await coord._maybe_reprofile_for_kernel()  # must not raise
 
     assert coord.shared_state.last_roofline_tput == 100.0
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_workload_changed_at_same_tput(
+    coord: Coordinator,
+):
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.conc = 64
+    coord.shared_state.last_profile_status = "succeeded"
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.profile_workload_context()
+    )
+    coord.shared_state.conc = 128
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.shared_state.last_profile_workload["conc"] == 128
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
+    coord: Coordinator,
+):
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    # The latest trace was profiled under a different backend (triton), recorded
+    # in last_profile_workload['serving_config'] exactly as the roofline executor
+    # writes it. last_profile_args stays the plain-args field it is elsewhere.
+    coord.shared_state.last_profile_status = "succeeded"
+    coord.shared_state.last_profile_workload = {
+        "framework": "sglang",
+        "precision": "fp8",
+        "model_path": "/models/qwen",
+        "tp": 1,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 1024,
+        "max_model_len": 4096,
+        "serving_config": {
+            "engine": "",
+            "extra_server_args": "--attention-backend triton",
+            "extra_envs": {},
+        },
+    }
+    coord.shared_state.current_best = {
+        "extra_server_args": "--attention-backend aiter",
+        "extra_envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
+    }
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    # After the reprofile the recorded workload reflects the current config
+    # (aiter + the new env), so the next entry sees no config change.
+    assert (
+        coord.shared_state.last_profile_workload["serving_config"]["extra_envs"][
+            "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
+        ]
+        == "256"
+    )
+
+    coord.sub = _StubSub(coord.shared_state)
+    await coord._maybe_reprofile_for_kernel()
+    assert coord.sub.tasks_run == []

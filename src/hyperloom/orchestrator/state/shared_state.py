@@ -895,7 +895,60 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             else params.get("base_args_mode")
         )
         context["args_mode"] = str(args_mode or "append").strip().lower()
+
+        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        raw_envs = current_best.get("extra_envs") or {}
+        extra_envs = (
+            {
+                str(key): str(value)
+                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
+                if str(key).strip()
+            }
+            if isinstance(raw_envs, dict)
+            else {}
+        )
+        serving_config = {
+            "engine": str(current_best.get("engine") or "").strip().lower(),
+            "extra_server_args": str(
+                current_best.get("extra_server_args") or ""
+            ).strip(),
+            "extra_envs": extra_envs,
+        }
+        if any(
+            (
+                serving_config["engine"],
+                serving_config["extra_server_args"],
+                extra_envs,
+            )
+        ):
+            context["serving_config"] = serving_config
         return context
+
+    def profile_trace_matches_workload(
+        self,
+        expected: dict[str, Any] | None = None,
+    ) -> bool:
+        """Whether the recorded profile trace is fresh for a target workload.
+
+        Single source of truth for the "latest profile succeeded AND its recorded
+        workload matches the active (or given) workload" freshness rule shared by
+        the forge shape resolvers and the kernel-entry reprofile gate. Returns
+        ``False`` when the last profile did not succeed or recorded no workload.
+        """
+        if (
+            str(getattr(self, "last_profile_status", "") or "").strip().lower()
+            != "succeeded"
+        ):
+            return False
+        recorded = getattr(self, "last_profile_workload", None)
+        if not isinstance(recorded, dict) or not recorded:
+            return False
+        target = (
+            expected
+            if isinstance(expected, dict) and expected
+            else self.profile_workload_context()
+        )
+        return recorded == target
 
     def record_profile_workload(
         self,
@@ -1259,7 +1312,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 from hyperloom.inference_optimizer.reference_script import render_reference_script
 
                 text = render_reference_script(
-                    framework=os.environ.get("FRAMEWORK", "sglang"),
+                    framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
