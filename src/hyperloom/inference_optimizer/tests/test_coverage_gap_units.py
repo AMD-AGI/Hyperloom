@@ -1264,8 +1264,9 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import gbrain_page_client as gbrain
+    from hyperloom.common import jsonio
 
-    assert list(gbrain._iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
+    assert list(jsonio.iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
         {"id": "1", "result": {"ok": True}}
     ]
     assert gbrain._select_mcp_response('data: {"id":"0","result":{"fallback":true}}\n\n', want_id="missing") == {

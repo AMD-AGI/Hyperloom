@@ -40,38 +40,51 @@ _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
-def _resolve_critic_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else the in-tree package), or ``None``.
+def _resolve_agent_root(agent: str) -> Path | None:
+    """Return an agent skill root (``$<AGENT>_AGENT_ROOT`` else the in-tree package), or ``None``.
+
+    Args:
+        agent (str): Agent package name under ``hyperloom/agents`` (e.g.
+            ``"critic"``), which also names the ``<AGENT>_AGENT_ROOT`` env.
 
     Returns:
-        Path | None: The validated critic-agent root, or ``None`` when no
-            candidate contains ``runtime/cli.py``.
+        Path | None: The validated agent root, or ``None`` when no candidate
+            contains ``runtime/cli.py``.
     """
-    override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
+    override = os.environ.get(f"{agent.upper()}_AGENT_ROOT", "").strip()
     if override:
         p = Path(override).expanduser()
         return p if (p / "runtime" / "cli.py").is_file() else None
     from ..session.paths import PACKAGE_ROOT
 
-    candidate = PACKAGE_ROOT.parent / "agents" / "critic"
+    candidate = PACKAGE_ROOT.parent / "agents" / agent
     return candidate if (candidate / "runtime" / "cli.py").is_file() else None
 
 
-def _validate_critic_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m hyperloom.agents.critic.runtime.cli --help`` doesn't work.
+def _validate_agent_runtime(root: Path, *, agent: str) -> None:
+    """Fail fast (SystemExit) if ``python -m hyperloom.agents.<agent>.runtime.cli --help`` doesn't work.
+
+    Shared by the critic and robustness preflights: both probe their runtime
+    module's ``--help`` with ``cwd=root`` and abort on any launch failure or
+    non-zero exit, differing only in which agent package and env/flag names
+    appear in the operator-facing message.
 
     Args:
-        root (Path): The critic-agent skill root to validate.
+        root (Path): The agent skill root to validate.
+        agent (str): Agent package name under ``hyperloom.agents`` (e.g.
+            ``"critic"``), which also names the ``<AGENT>_AGENT_*`` env vars
+            and the ``--<agent>-mock`` bypass flag.
 
     Raises:
         SystemExit: With code 2 when the runtime cannot start or exits
             non-zero.
     """
-    cmd = [sys.executable, "-m", "hyperloom.agents.critic.runtime.cli", "--help"]
+    module = f"hyperloom.agents.{agent}.runtime.cli"
+    cmd = [sys.executable, "-m", module, "--help"]
     # Probe cost is import-bound and can spike on a loaded pod; allow an env
     # override so a slow-but-healthy runtime is not misdiagnosed as broken.
     try:
-        _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
+        _probe_timeout = float(os.environ.get(f"{agent.upper()}_AGENT_PROBE_TIMEOUT_SEC", "90"))
     except (TypeError, ValueError):
         _probe_timeout = 90.0
     try:
@@ -84,93 +97,25 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
-            f"ERROR: critic-agent runtime sanity check failed: {exc!r}\n"
+            f"ERROR: {agent}-agent runtime sanity check failed: {exc!r}\n"
             f"  cwd={root}\n"
             f"  cmd={' '.join(cmd)}\n"
-            f"Either fix CRITIC_AGENT_ROOT, check the "
-            f"src/hyperloom/agents/critic/ install, or pass --critic-mock to "
-            f"bypass critic-agent.",
+            f"Either fix {agent.upper()}_AGENT_ROOT, check the "
+            f"src/hyperloom/agents/{agent}/ install, or pass --{agent}-mock to "
+            f"bypass {agent}-agent.",
             file=sys.stderr,
         )
         sys.exit(2)
     if proc.returncode != 0:
         print(
-            f"ERROR: hyperloom.agents.critic.runtime.cli --help exited rc={proc.returncode}\n"
-            f"  cwd={root}\n"
-            f"  stderr={proc.stderr.strip()[:500]}",
+            f"ERROR: {module} --help exited rc={proc.returncode}\n  cwd={root}\n  stderr={proc.stderr.strip()[:500]}",
             file=sys.stderr,
         )
         sys.exit(2)
 
 
-# Robustness-agent runtime location resolution; mirrors the critic-agent helpers.
+# Robustness-agent runtime location resolution; mirrors the critic-agent env.
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
-
-
-def _resolve_robustness_agent_root() -> Path | None:
-    """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else the in-tree package), or ``None``.
-
-    Returns:
-        Path | None: The validated robustness-agent root, or ``None`` when no
-            candidate contains the expected ``runtime/cli.py`` module.
-    """
-    override = os.environ.get(_ROBUSTNESS_AGENT_ROOT_ENV, "").strip()
-    if override:
-        p = Path(override).expanduser()
-        return p if (p / "runtime" / "cli.py").is_file() else None
-    from ..session.paths import PACKAGE_ROOT
-
-    candidate = PACKAGE_ROOT.parent / "agents" / "robustness"
-    cli_module = candidate / "runtime" / "cli.py"
-    return candidate if cli_module.is_file() else None
-
-
-def _validate_robustness_agent_runtime(root: Path) -> None:
-    """Fail fast if ``python -m hyperloom.agents.robustness.runtime.cli --help`` doesn't work.
-
-    Runs the runtime's ``--help`` with ``cwd=root``. Any launch failure or
-    non-zero exit prints an operator-facing message and aborts.
-
-    Args:
-        root (Path): The robustness-agent skill root to validate.
-
-    Raises:
-        SystemExit: With code 2 when the runtime cannot start or exits non-zero.
-    """
-    cmd = [sys.executable, "-m", "hyperloom.agents.robustness.runtime.cli", "--help"]
-    # Probe cost is import-bound and can spike on a loaded pod; allow an env
-    # override so a slow-but-healthy runtime is not misdiagnosed as broken.
-    try:
-        _probe_timeout = float(os.environ.get("ROBUSTNESS_AGENT_PROBE_TIMEOUT_SEC", "90"))
-    except (TypeError, ValueError):
-        _probe_timeout = 90.0
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=_probe_timeout,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"ERROR: robustness-agent runtime sanity check failed: {exc!r}\n"
-            f"  cwd={root}\n"
-            f"  cmd={' '.join(cmd)}\n"
-            f"Either fix ROBUSTNESS_AGENT_ROOT, check the "
-            f"src/hyperloom/agents/robustness/ install, or pass "
-            f"--robustness-mock to bypass.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if proc.returncode != 0:
-        print(
-            f"ERROR: hyperloom.agents.robustness.runtime.cli --help exited rc={proc.returncode}\n"
-            f"  cwd={root}\n"
-            f"  stderr={proc.stderr.strip()[:500]}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
 
 # Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
