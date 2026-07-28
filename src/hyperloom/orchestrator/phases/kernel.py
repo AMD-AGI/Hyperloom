@@ -6,6 +6,7 @@ GEMM-tuning keep/promote, and watermark-roofline gating."""
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import logging as _logging
 import os
@@ -34,39 +35,176 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# Last-resort location of the aiter checkout inside the standard serving
+# container. Module-level (not an inline literal) so tests can point it at a
+# non-existent path and exercise the "no complete aiter config anywhere" branch
+# on a developer box that happens to have the real checkout mounted.
+_CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
+
 
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+
+    @staticmethod
+    def _serving_config_signature(serving_config: Any) -> str:
+        """Stable identity string for a ``serving_config`` sub-dict, or '' when empty.
+
+        Reuses the exact ``serving_config`` shape built by
+        ``SharedState.profile_workload_context`` so the reprofile gate and the
+        recorded-trace workload are normalized identically (no second, drifting
+        copy of the engine/args/env rules).
+        """
+        if not isinstance(serving_config, Mapping) or not serving_config:
+            return ""
+        raw_envs = serving_config.get("extra_envs") or {}
+        envs = (
+            {
+                str(key): str(value)
+                for key, value in raw_envs.items()
+                if str(key).strip()
+            }
+            if isinstance(raw_envs, Mapping)
+            else {}
+        )
+        payload = {
+            "engine": str(serving_config.get("engine") or "").strip().lower(),
+            "extra_server_args": str(
+                serving_config.get("extra_server_args") or ""
+            ).strip(),
+            "extra_envs": envs,
+        }
+        if not any((payload["engine"], payload["extra_server_args"], envs)):
+            return ""
+        return "hyperloom-profile-config:" + json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _current_profile_config_signature(self) -> str:
+        """Return a stable identity for the optimized serving configuration."""
+        serving_config = self.shared_state.profile_workload_context().get(
+            "serving_config"
+        )
+        return self._serving_config_signature(serving_config)
+
+    def _profile_config_changed(self, signature: str) -> bool:
+        """Whether the latest trace predates the current backend/config.
+
+        Compares the current serving-config signature against the one implied by
+        the recorded profile workload (``last_profile_workload['serving_config']``,
+        written by the roofline executor and writeback). This is apples-to-apples:
+        it never confuses the plain ``last_profile_args`` string with a config
+        signature, so a trace already profiled under the current config does not
+        spuriously force a kernel-entry reprofile.
+        """
+        if not signature:
+            return False
+        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        if not isinstance(recorded, Mapping) or not recorded:
+            # No workload recorded for the trace: defer to
+            # _profile_workload_changed, which owns the "stale trace with no
+            # workload metadata" decision.
+            return False
+        previous = self._serving_config_signature(recorded.get("serving_config"))
+        return previous != signature
+
+    def _profile_workload_changed(self) -> bool:
+        """Whether the latest trace predates the active serving workload."""
+        status = str(
+            getattr(self.shared_state, "last_profile_status", "") or ""
+        ).strip().lower()
+        if status and status != "succeeded":
+            return True
+        recorded = getattr(self.shared_state, "last_profile_workload", None)
+        expected = self.shared_state.profile_workload_context()
+        if not isinstance(recorded, dict) or not recorded:
+            return bool(
+                getattr(self.shared_state, "last_profile_trace", "")
+                or getattr(self.shared_state, "last_trace_analyze", None)
+                or getattr(self.shared_state, "roofline_snapshots", None)
+            )
+        return recorded != expected
 
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
+        profile_signature = self._current_profile_config_signature()
+        config_changed = self._profile_config_changed(profile_signature)
+        workload_changed = self._profile_workload_changed()
         if cur <= 0:
             return
-        recorded_context = getattr(self.shared_state, "last_profile_workload", None)
-        current_context = self.shared_state.current_profile_workload_context()
-        runtime_changed = not recorded_context or recorded_context != current_context
-        # With a measured trace, reprofile only on a material gain or runtime
-        # context change. Backend/env changes invalidate shapes even at equal tput.
+        # With a measured trace, reprofile only on a material gain or a change in
+        # what is being measured. Backend/env changes invalidate shapes even at
+        # equal tput, so a staleness signal is a reason to reprofile: a missed
+        # reprofile silently points GEAK at a bottleneck that no longer exists.
+        #
+        # Staleness is judged from the recorded serving config, NOT from
+        # ``current_profile_workload_context()``: that context derives its
+        # runtime fields from the profile task params while the recorded
+        # ``serving_config`` derives them from ``current_best``, so the two
+        # disagree whenever a profile was recorded without runtime params -- and
+        # the gate would then reprofile on every entry, forever.
         if (
             before > 0
             and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
-            and not runtime_changed
+            and not config_changed
+            and not workload_changed
         ):
             return
-        if runtime_changed:
+        if config_changed or workload_changed:
             log.info("kernel-entry reprofile: active runtime context changed")
+        snapshots_before = len(
+            getattr(self.shared_state, "roofline_snapshots", None) or []
+        )
+        snapshot_id_before = int(
+            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
+        )
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
+        profile_identity = json.dumps(
+            {
+                "config": profile_signature,
+                "target_tput": round(float(cur), 6),
+                "workload": self.shared_state.profile_workload_context(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        profile_fingerprint = hashlib.sha256(
+            profile_identity.encode("utf-8")
+        ).hexdigest()[:12]
         try:
-            await self.sub.run_task(await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}"))
+            await self.sub.run_task(
+                await self._enqueue_internal_analysis_task(
+                    reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+                )
+            )
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
-        if after > 0 and after != before:
+        snapshots_after = len(
+            getattr(self.shared_state, "roofline_snapshots", None) or []
+        )
+        snapshot_id_after = int(
+            getattr(self.shared_state, "roofline_snapshot_id", 0) or 0
+        )
+        snapshot_landed = (
+            after != before
+            or snapshots_after != snapshots_before
+            or snapshot_id_after != snapshot_id_before
+        )
+        if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
+            self.shared_state.last_profile_status = "succeeded"
+            # Record the workload (incl. serving_config) that this trace reflects;
+            # _profile_config_changed derives the config signature from it, so
+            # last_profile_args stays the plain-args field it is everywhere else.
+            self.shared_state.last_profile_workload = (
+                self.shared_state.profile_workload_context()
+            )
             self.shared_state.save(self.session_dir)
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
@@ -1174,6 +1312,286 @@ class KernelPhase(PhaseHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _merge_gemm_candidate_with_runtime(
+        self, env_var: str, candidate_csv_path: str
+    ) -> str | None:
+        """Merge a GEMM candidate CSV with the runtime config.
+
+        aiter's complete config is the merged superset of its top-level table and
+        all matching ``model_configs/*.csv`` tables. The candidate CSV only has
+        the shapes the tuner improved. Using it alone as the env override drops
+        all other shapes' tuned entries, causing regression.
+
+        Prefer the live ``/tmp/aiter_configs`` table when it exists. That cache is
+        normally removed with the serving process, so fall back to rebuilding the
+        same table from the installed aiter package. Overlay the candidate by the
+        untuned schema's dispatch keys and write one self-contained CSV for E2E.
+
+        Implemented on the stdlib ``csv`` module on purpose: this runs in the
+        orchestrator process, which must not carry a hard pandas dependency (it
+        is not declared in ``pyproject.toml`` and is absent from the CI/test
+        environment). Values are carried through as text, so a config round-trips
+        byte-for-byte instead of being re-formatted by a dataframe writer.
+
+        Implemented on the stdlib ``csv`` module on purpose: this runs in the
+        orchestrator process, which must not carry a hard pandas dependency
+        (pandas is not declared in ``pyproject.toml`` and is absent from the
+        ``.[test,ci]`` CI environment -- importing it there raises
+        ``ModuleNotFoundError`` and every candidate is silently rejected).
+        Values are carried through as text, so a config round-trips byte-for-byte
+        instead of being re-formatted by a dataframe writer.
+
+        Returns the merged file path, or None if merging fails.
+        """
+        import csv
+        import importlib.util
+        import math
+        import re
+
+        def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+            with path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = [dict(row) for row in reader]
+            return fieldnames, rows
+
+        def _read_header(path: Path) -> list[str]:
+            with path.open(newline="", encoding="utf-8") as handle:
+                return list(csv.DictReader(handle).fieldnames or [])
+
+        candidate_path = Path(candidate_csv_path)
+        if not candidate_path.is_file():
+            return None
+
+        env_var_to_tuned_name = {
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "a8w8_blockscale_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": "a8w8_bpreshuffle_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_A8W8": "a8w8_tuned_gemm.csv",
+            # aiter reads fp4/mxfp4 (gfx950-only) configs via AITER_CONFIG_GEMM_A4W4,
+            # not the "_BLOCKSCALE" variant (aiter jit/core.py). Must match KernelForge's
+            # TUNER_ENV_VARS or tuned fp4 GEMM CSVs are silently ignored at serving.
+            "AITER_CONFIG_GEMM_A4W4": "a4w4_blockscale_tuned_gemm.csv",
+            "AITER_CONFIG_GEMM_BF16": "bf16_tuned_gemm.csv",
+            "AITER_CONFIG_FMOE": "tuned_fmoe.csv",
+        }
+        runtime_filename = env_var_to_tuned_name.get(env_var)
+        if not runtime_filename:
+            return None
+        tuned_stem = Path(runtime_filename).stem
+        untuned_stem = (
+            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
+            if re.search(r"(?:_)?tuned$", tuned_stem)
+            else tuned_stem.replace("tuned", "untuned")
+        )
+
+        config_dirs: list[Path] = []
+        explicit_root = os.environ.get("AITER_ROOT_DIR", "").strip()
+        if explicit_root:
+            root = Path(explicit_root)
+            config_dirs.extend((root / "aiter" / "configs", root / "configs"))
+        try:
+            spec = importlib.util.find_spec("aiter")
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None and spec.origin:
+            config_dirs.append(Path(spec.origin).resolve().parent / "configs")
+        config_dirs.append(_CONTAINER_AITER_CONFIG_DIR)
+        config_dirs.extend(
+            sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs"))
+        )
+
+        seen_dirs: set[str] = set()
+        unique_config_dirs: list[Path] = []
+        for config_dir in config_dirs:
+            key = str(config_dir)
+            if key not in seen_dirs and config_dir.is_dir():
+                seen_dirs.add(key)
+                unique_config_dirs.append(config_dir)
+
+        try:
+            candidate_columns, candidate_rows = _read_csv(candidate_path)
+            runtime_cache_dir = Path(
+                os.environ.get(
+                    "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
+                    "/tmp/aiter_configs",
+                )
+            )
+            runtime_path = runtime_cache_dir / runtime_filename
+            source_paths: list[Path] = []
+            source_config_dir: Path | None = None
+            if runtime_path.is_file():
+                source_paths = [runtime_path]
+            else:
+                for config_dir in unique_config_dirs:
+                    base_path = config_dir / runtime_filename
+                    model_paths = sorted(
+                        path
+                        for path in (config_dir / "model_configs").glob(
+                            f"*{tuned_stem}*.csv"
+                        )
+                        if path.is_file() and "untuned" not in path.name
+                    )
+                    paths = ([base_path] if base_path.is_file() else []) + model_paths
+                    if paths:
+                        source_paths = paths
+                        source_config_dir = config_dir
+                        break
+            if not source_paths:
+                log.warning(
+                    "forge gemm E2E: no complete aiter config found for %s; "
+                    "candidate-only validation would be unsafe",
+                    env_var,
+                )
+                return None
+            if source_config_dir is None:
+                source_config_dir = next(
+                    (
+                        config_dir
+                        for config_dir in unique_config_dirs
+                        if (config_dir / f"{untuned_stem}.csv").is_file()
+                    ),
+                    None,
+                )
+
+            source_columns: list[list[str]] = []
+            source_row_sets: list[list[dict[str, str]]] = []
+            for path in source_paths:
+                columns, rows = _read_csv(path)
+                source_columns.append(columns)
+                source_row_sets.append(rows)
+
+            all_columns = list(source_columns[0])
+            for columns in [*source_columns[1:], candidate_columns]:
+                for column in columns:
+                    if column not in all_columns:
+                        insert_at = (
+                            all_columns.index("tflops")
+                            if "tflops" in all_columns
+                            else len(all_columns)
+                        )
+                        all_columns.insert(insert_at, column)
+            fill_defaults = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
+
+            def _normalize(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+                normalized = []
+                for row in rows:
+                    new_row = {}
+                    for column in all_columns:
+                        value = row.get(column)
+                        if value is None:
+                            value = fill_defaults.get(column, "0")
+                        new_row[column] = value
+                    normalized.append(new_row)
+                return normalized
+
+            runtime_rows: list[dict[str, str]] = []
+            for rows in source_row_sets:
+                runtime_rows.extend(_normalize(rows))
+            candidate_rows = _normalize(candidate_rows)
+
+            key_cols: list[str] = []
+            if source_config_dir is not None:
+                untuned_path = source_config_dir / f"{untuned_stem}.csv"
+                if untuned_path.is_file():
+                    untuned_columns = _read_header(untuned_path)
+                    key_cols.extend(
+                        column
+                        for column in untuned_columns
+                        if column in all_columns
+                    )
+            if not key_cols:
+                key_cols.extend(
+                    column for column in ("M", "N", "K") if column in all_columns
+                )
+            for column in ("gfx", "cu_num", "_tag"):
+                if column in all_columns and column not in key_cols:
+                    key_cols.append(column)
+            if not key_cols:
+                log.warning(
+                    "forge gemm E2E: cannot derive dispatch keys for %s",
+                    env_var,
+                )
+                return None
+
+            def _dispatch_key(row: dict[str, str]) -> tuple[str, ...]:
+                return tuple(row.get(column, "") for column in key_cols)
+
+            def _deduplicate_dispatch_rows(
+                rows: list[dict[str, str]], label: str
+            ) -> list[dict[str, str]] | None:
+                counts: dict[tuple[str, ...], int] = {}
+                for row in rows:
+                    key = _dispatch_key(row)
+                    counts[key] = counts.get(key, 0) + 1
+                if not any(count > 1 for count in counts.values()):
+                    return rows
+                if "us" not in all_columns:
+                    log.warning(
+                        "forge gemm E2E: %s has duplicate dispatch keys for %s "
+                        "but no 'us' column to select the fastest row",
+                        label,
+                        env_var,
+                    )
+                    return None
+
+                def _us(row: dict[str, str]) -> float:
+                    try:
+                        return float(row.get("us", ""))
+                    except (TypeError, ValueError):
+                        return math.inf
+
+                # Keep the fastest (smallest us) row per dispatch key; ties keep
+                # the first row seen (stable), NaN-like values sort last.
+                best: dict[tuple[str, ...], dict[str, str]] = {}
+                order: list[tuple[str, ...]] = []
+                for row in rows:
+                    key = _dispatch_key(row)
+                    if key not in best:
+                        best[key] = row
+                        order.append(key)
+                    elif _us(row) < _us(best[key]):
+                        best[key] = row
+                deduplicated = [best[key] for key in order]
+                log.info(
+                    "forge gemm E2E: removed %d duplicate %s row(s) for %s",
+                    len(rows) - len(deduplicated),
+                    label,
+                    env_var,
+                )
+                return deduplicated
+
+            runtime_rows = _deduplicate_dispatch_rows(runtime_rows, "runtime config")
+            candidate_rows = _deduplicate_dispatch_rows(candidate_rows, "candidate")
+            if runtime_rows is None or candidate_rows is None:
+                return None
+
+            # Drop rows from runtime that the candidate improves, then concat.
+            candidate_keys = {_dispatch_key(row) for row in candidate_rows}
+            kept_from_runtime = [
+                row for row in runtime_rows if _dispatch_key(row) not in candidate_keys
+            ]
+            merged_rows = kept_from_runtime + candidate_rows
+
+            merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
+            with merged_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=all_columns)
+                writer.writeheader()
+                writer.writerows(merged_rows)
+            log.info(
+                "forge gemm E2E: merged %d candidate rows into %d rows from %d "
+                "aiter config file(s) -> %d total (%s)",
+                len(candidate_rows),
+                len(runtime_rows),
+                len(source_paths),
+                len(merged_rows),
+                merged_path,
+            )
+            return str(merged_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("forge gemm E2E: merge failed (%s); rejecting candidate", exc)
+            return None
+
     def _ck_blockscale_switch_eligible(self, result: dict[str, Any]) -> bool:
         """Whether the fp8 block-scale CK backend switch should be E2E-validated.
 
@@ -1520,16 +1938,29 @@ class KernelPhase(PhaseHandler):
                 continue
             if t.get("status") != "ok":
                 continue
-            if int(t.get("improved_shapes") or 0) <= 0:
+            if not bool(t.get("candidate")) and int(t.get("improved_shapes") or 0) <= 0:
                 continue
             env_var = str(t.get("env_var") or "").strip()
             env_value = str(t.get("env_value") or "").strip()
+            raw_envs = t.get("env_vars") or {}
+            envs = (
+                {
+                    str(key): str(value)
+                    for key, value in raw_envs.items()
+                    if str(key).strip() and str(value).strip()
+                }
+                if isinstance(raw_envs, dict)
+                else {}
+            )
             if env_var and env_value:
+                envs.setdefault(env_var, env_value)
+            if envs:
                 candidates.append(
                     {
                         "tuner": t.get("tuner") or "unknown",
                         "env_var": env_var,
                         "env_value": env_value,
+                        "envs": envs,
                         "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
                     }
                 )
@@ -1543,6 +1974,7 @@ class KernelPhase(PhaseHandler):
                         "tuner": "ck_blockscale_backend_switch",
                         "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
                         "env_value": "256",
+                        "envs": {"SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "256"},
                         "micro_speedup": 1.0,
                     }
                 )
@@ -1570,7 +2002,45 @@ class KernelPhase(PhaseHandler):
 
         for cand in candidates:
             tuner_name = cand["tuner"]
-            env = {cand["env_var"]: cand["env_value"]}
+            # Merge candidate CSV with the runtime config so that shapes NOT in
+            # the candidate keep their existing tuned entries. Without this, the
+            # E2E validation would run with ONLY the candidate's shapes tuned,
+            # causing regression on all other shapes that lose their config.
+            env = dict(cand["envs"])
+            merge_failure_reason = ""
+            merge_failure_env = ""
+            for env_var, env_value in list(env.items()):
+                if not env_var.startswith("AITER_CONFIG"):
+                    continue
+                if not Path(env_value).is_file():
+                    merge_failure_reason = "candidate_artifact_missing"
+                    merge_failure_env = env_var
+                    break
+                merged_path = self._merge_gemm_candidate_with_runtime(
+                    env_var,
+                    env_value,
+                )
+                if merged_path:
+                    env[env_var] = merged_path
+                else:
+                    merge_failure_reason = "complete_aiter_config_unavailable"
+                    merge_failure_env = env_var
+                    break
+            if merge_failure_reason:
+                log.error(
+                    "forge gemm E2E: refusing aiter candidate for %s (%s: %s)",
+                    tuner_name,
+                    merge_failure_env,
+                    merge_failure_reason,
+                )
+                reverted.append(
+                    {
+                        **cand,
+                        "reason": merge_failure_reason,
+                        "failed_env_var": merge_failure_env,
+                    }
+                )
+                continue
             extra_server_args = (
                 "--moe-runner-backend aiter"
                 if tuner_name == "fmoe_ck"
@@ -1626,12 +2096,22 @@ class KernelPhase(PhaseHandler):
             if decision == "KEEP" and new_tput > running_tput:
                 stacked_envs.update(env)
                 running_tput = new_tput
-                kept.append({**cand, "tput": new_tput, "gain_pct": gain_pct})
+                kept.append(
+                    {
+                        **cand,
+                        "envs": dict(env),
+                        "tput": new_tput,
+                        "gain_pct": gain_pct,
+                    }
+                )
 
                 entry = {
                     "action": "gemm_tuning",
                     "variant_name": f"forge_{tuner_name}",
-                    "tuned_file": cand["env_value"],
+                    "tuned_file": (
+                        env.get(cand["env_var"])
+                        or next(iter(env.values()), "")
+                    ),
                     "gain_pct": gain_pct,
                     "tput": new_tput,
                     "workspace": result.get("workspace"),
