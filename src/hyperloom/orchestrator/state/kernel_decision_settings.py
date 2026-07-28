@@ -43,7 +43,7 @@ _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
 # Hot-kernel report gate: reusable hot kernels >= this GPU share need a
 # kernel_opt attempt/rejection before ``report``.
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 10.0
 
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5

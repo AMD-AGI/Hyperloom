@@ -172,6 +172,13 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.current_best = {
+        "action": "explore",
+        "engine": "sglang",
+        "tput": 100.0,
+        "extra_server_args": "--attention-backend aiter",
+        "extra_envs": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"},
+    }
 
     await coord._promote_to_shared_state(
         "profile",
@@ -180,20 +187,80 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
             "main_trace_path": "/tmp/trace.json.gz",
             "output_throughput": 150.0,
         },
-        task=_task("profile", params={"base_extra_args": "--mem-fraction-static=0.9"}),
+        task=_task(
+            "profile",
+            params={
+                "base_extra_args": "--mem-fraction-static=0.9",
+                "framework": "vllm",
+                "precision": "fp8",
+                "model_path": "/models/qwen",
+                "tp": 1,
+                "conc": 64,
+                "isl": 1024,
+                "osl": 1024,
+                "max_model_len": 4096,
+            },
+        ),
     )
 
     assert s.last_profile_trace == "/tmp/trace.json.gz"
     assert s.last_profile_status == "succeeded"
     assert s.last_profile_args == "--mem-fraction-static=0.9"
+    assert s.last_profile_workload == s.profile_workload_context(
+        {
+            "base_extra_args": "--mem-fraction-static=0.9",
+            "framework": "vllm",
+            "precision": "fp8",
+            "model_path": "/models/qwen",
+            "tp": 1,
+            "conc": 64,
+            "isl": 1024,
+            "osl": 1024,
+            "max_model_len": 4096,
+        }
+    )
     # +1% rule met (150 vs 100): current_best re-lifted to profile.
     assert s.current_best["action"] == "profile"
     assert s.current_best["tput"] == 150.0
+    assert s.current_best["engine"] == "sglang"
+    assert s.current_best["extra_server_args"] == "--attention-backend aiter"
+    assert s.current_best["extra_envs"] == {
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/tuned.csv"
+    }
     # Audit row.
     assert s.last_profile["decision"] == "promoted"
     assert s.last_profile["status"] == "succeeded"
     assert s.last_profile["extras"]["trace_path"] == "/tmp/trace.json.gz"
     assert s.last_profile["extras"]["profile_args"] == "--mem-fraction-static=0.9"
+
+
+@pytest.mark.asyncio
+async def test_promote_profile_without_task_uses_shared_state_workload(session_dir):
+    coord = _coord(session_dir)
+    state = coord.shared_state
+    state.framework = "vllm"
+    state.precision = "fp8"
+    state.model_path = "/models/qwen"
+    state.tp = 1
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 1024
+    state.max_model_len = 4096
+    state.current_best = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+    }
+
+    await coord._promote_to_shared_state(
+        "profile",
+        {
+            "status": "succeeded",
+            "main_trace_path": "/tmp/trace.json.gz",
+            "output_throughput": 100.0,
+        },
+        task=None,
+    )
+
+    assert state.last_profile_workload == state.current_profile_workload_context()
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,11 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
   entries are kept out of `PYTHONPATH`, preventing main-environment Torch packages
   from shadowing isolated vLLM environments. TraceLens patching and dependency
   discovery also support isolated vLLM/AITER installations more reliably.
+  Block-FP8 Forge tuning reuses a successful workload- and backend-matched
+  TraceLens-selected steady-state Roofline trace instead of launching a duplicate profile.
+  Sessions created before this metadata was introduced safely perform one
+  standard Roofline shape capture because their existing traces cannot be
+  verified.
 
 - **GEAK-first kernel optimization**: GEAK is now the default owner of the complete
   KERNEL phase. Forge remains an explicit opt-in and runs only when

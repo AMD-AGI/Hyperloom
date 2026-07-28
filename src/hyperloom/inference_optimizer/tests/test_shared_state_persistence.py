@@ -325,6 +325,22 @@ def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
     assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
 
 
+def test_save_current_setting_prefers_persisted_framework(tmp_path, monkeypatch):
+    """A resumed session must not inherit an unrelated process framework."""
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    sd = tmp_path / "session"
+    sd.mkdir()
+    state = SharedState(session_id="t", model_name="m", model_path="/x/m")
+    state.framework = "vllm"
+    state.current_best = {"extra_server_args": "--kv-cache-dtype fp8", "extra_envs": {}}
+
+    state.save(sd)
+
+    text = (sd / "current_setting.sh").read_text(encoding="utf-8")
+    assert "vllm serve" in text
+    assert "sglang.launch_server" not in text
+
+
 def test_save_no_current_setting_when_no_best(tmp_path):
     """No current_best → no current_setting.sh (0-degrade)."""
     sd = tmp_path / "session"

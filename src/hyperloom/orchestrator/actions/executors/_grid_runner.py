@@ -90,6 +90,7 @@ from ._grid_server_args import (
     _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     inject_sglang_moe_runner_backend as inject_sglang_moe_runner_backend,
+    moe_runner_requires_aiter as moe_runner_requires_aiter,
     apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides,
 )
 from ._grid_variant_filter import (
@@ -601,6 +602,22 @@ def _build_variant_yaml(
         remove_args=getattr(variant, "remove_args", []),
         args_mode=getattr(variant, "args_mode", "append"),
     )
+    # A grid variant never injects a MoE runner backend itself, but it does
+    # inherit one -- from the baseline recipe it was seeded with, or from an
+    # explicitly authored variant. On a model only the aiter runner can serve,
+    # that inherited flag is a guaranteed crash on the first forward pass, and
+    # the grid has no retry to salvage it, so drop it here.
+    if combined and _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
+        from ._workload_envs import _remove_moe_runner_backend_arg
+
+        if extra_args_env == "EXTRA_SGLANG_ARGS" and moe_runner_requires_aiter(combined, model_path):
+            log.warning(
+                "grid: dropping inherited --moe-runner-backend for variant %s: "
+                "this checkpoint's MoE quant scheme is only implemented on the "
+                "aiter runner and would crash on the first forward pass.",
+                variant.name,
+            )
+            combined = _remove_moe_runner_backend_arg(combined)
     if combined:
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs:
@@ -2039,6 +2056,7 @@ __all__ = [
     "DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND",
     "_SGLANG_MOE_RUNNER_BACKEND_FLAG",
     "_SGLANG_MOE_RUNNER_BACKEND_RE",
+    "moe_runner_requires_aiter",
     "inject_sglang_moe_runner_backend",
     "resolve_skip_spec",
     "_parse_skip_spec",

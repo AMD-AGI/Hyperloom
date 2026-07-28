@@ -1207,6 +1207,41 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
     assert "--quantization fp8" in merged
 
 
+def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
+    """A refreshed Roofline must launch with the backend env selected by Explore."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def _fake_parent(self, ctx):
+        captured.update(ctx.task.params)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    task = SimpleNamespace(
+        params={
+            "base_extra_envs": {
+                "VLLM_ROCM_USE_AITER": "1",
+                "SHARED": "base",
+            },
+            "extra_envs": {
+                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                "SHARED": "caller",
+            },
+        },
+        task_id="t-profile-envs",
+    )
+    ctx = SimpleNamespace(task=task, extra={"workspace": str(tmp_path / "ws")})
+
+    result = asyncio.run(ProfileExecutor()(ctx))
+
+    assert result["status"] == "succeeded"
+    assert captured["extra_envs"] == {
+        "VLLM_ROCM_USE_AITER": "1",
+        "VLLM_ROCM_USE_AITER_LINEAR": "1",
+        "SHARED": "caller",
+    }
+
+
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
@@ -2927,7 +2962,9 @@ def _write_candidates_json(tmp_path, payload):
 
 def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
     """Two reusable kernels in the same task_group dispatch as ONE candidate (the primary), with the full group attached."""
-    # Rows must carry gpu_pct >= 3.0 to pass the default hot-kernel gate.
+    # Rows must carry gpu_pct >= 10.0 to pass the default hot-kernel gate. Both
+    # group members are above it on purpose: the collapse must be what drops
+    # k002, not the gate.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -2946,7 +2983,7 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
                     "source_file": "/sgl-workspace/aiter/rmsnorm.py",
                     "reusable_native_kernel": True,
                     "duration_us": 50.0,
-                    "gpu_pct": 8.0,
+                    "gpu_pct": 11.0,
                 },
                 {
                     "kernel_id": "k003",
@@ -2954,7 +2991,7 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
                     "source_file": "/sgl-workspace/aiter/other.py",
                     "reusable_native_kernel": True,
                     "duration_us": 30.0,
-                    "gpu_pct": 4.5,
+                    "gpu_pct": 10.5,
                 },
             ],
             "task_groups": [
@@ -2988,7 +3025,8 @@ def test_batch_kernel_candidates_collapses_task_group_to_primary(tmp_path):
 
 def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_path):
     """When the group's primary_kernel_id is non-reusable, dispatch falls back to the first reusable member instead of dropping the group."""
-    # Rows must carry gpu_pct >= 3.0 to be retained by the dispatcher.
+    # Rows must carry gpu_pct >= 10.0 to be retained by the dispatcher, so the
+    # fallback member is above the gate and can only be dropped by the rejection.
     candidates_path = _write_candidates_json(
         tmp_path,
         {
@@ -3007,7 +3045,7 @@ def test_batch_kernel_candidates_falls_back_when_primary_is_non_reusable(tmp_pat
                     "source_file": "/sgl-workspace/aiter/foo.py",
                     "reusable_native_kernel": True,
                     "duration_us": 50.0,
-                    "gpu_pct": 5.5,
+                    "gpu_pct": 12.5,
                 },
             ],
             "task_groups": [
@@ -3809,15 +3847,19 @@ def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
     session_dir,
     _candidates_factory,
 ):
-    """``_batch_kernel_candidates`` default (3.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback."""
+    """``_batch_kernel_candidates`` default (10.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback.
+
+    k006/k008 straddle the shared ``_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`` (10.0) by a
+    hair, so the two gates drifting apart in either direction fails this test.
+    """
     cpath = _candidates_factory(
         [
             {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k006", "gpu_pct": 1.3, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-            {"kernel_id": "k008", "gpu_pct": 3.13, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+            {"kernel_id": "k006", "gpu_pct": 9.87, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+            {"kernel_id": "k008", "gpu_pct": 10.13, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
         ]
     )
-    # Default 3.0 filters out k006 (1.3) but keeps k001 (38) and k008 (3.13).
+    # Default 10.0 filters out k006 (9.87) but keeps k001 (38) and k008 (10.13).
     out = krh._batch_kernel_candidates(
         {"candidates_path": cpath},
         session_dir=session_dir,

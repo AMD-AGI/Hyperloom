@@ -405,10 +405,10 @@ def test_cli_correctness_override(tmp_path):
 
 
 def test_speedup_just_above_gate_keeps(tmp_path):
-    """A 1.07x speedup clears the 1.05x KEEP gate."""
+    """A 1.12x speedup clears the 1.10x KEEP gate."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
-        _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),
+        _args(correctness_passed=True, micro_speedup=1.12, e2e_gain_pct=0.5, accuracy_passed=True),
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
@@ -416,10 +416,10 @@ def test_speedup_just_above_gate_keeps(tmp_path):
 
 
 def test_speedup_below_gate_needs_review(tmp_path):
-    """A 1.03x speedup (improvement but under the 1.05x gate) routes to NEEDS_REVIEW, not KEEP."""
+    """A 1.07x speedup (improvement but under the 1.10x gate) routes to NEEDS_REVIEW, not KEEP."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
-        _args(correctness_passed=True, micro_speedup=1.03, e2e_gain_pct=0.5, accuracy_passed=True),
+        _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
@@ -996,6 +996,135 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
         out_dir=tmp_path / "snap",
     )
     assert res is None
+
+
+def test_verification_uses_forge_patch_for_multifile_bundle(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "kernel.py").write_text("def kernel():\n    return 1\n")
+    (base / "helper.py").write_text("HELPER = 1\n")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/kernel.py b/kernel.py\n"
+        "--- a/kernel.py\n"
+        "+++ b/kernel.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def kernel():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+        "diff --git a/helper.py b/helper.py\n"
+        "--- a/helper.py\n"
+        "+++ b/helper.py\n"
+        "@@ -1 +1 @@\n"
+        "-HELPER = 1\n"
+        "+HELPER = 2\n"
+    )
+    primary = tmp_path / "v1_forge.py"
+    primary.write_text("def kernel():\n    return 2\n")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "kernel.py").write_text(primary.read_text())
+    (worktree / "helper.py").write_text("HELPER = 2\n")
+    attempt = {
+        "status": "completed",
+        "attempt_id": "forge-multifile",
+        "backend": "forge",
+        "optimized_path": str(primary),
+        "backend_paths": {
+            "forge_patch": str(patch),
+            "forge_workspace": str(worktree),
+        },
+    }
+
+    verification = ko.build_verification(
+        _args(
+            source_file=str(base / "kernel.py"),
+            kernel_repo=str(base),
+            correctness_passed=True,
+            micro_speedup=1.2,
+            accuracy_passed=True,
+        ),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    bundle = verification["best_artifact_bundle"]
+    assert bundle["type"] == "patch_snapshot"
+    assert set(bundle["write_paths"]) == {"kernel.py", "helper.py"}
+
+
+def test_forge_patch_builds_multifile_deploy_bundle(tmp_path):
+    repo = tmp_path / "aiter"
+    mirror = repo / "csrc" / "kernels" / "attention_ragged.cu"
+    runtime = repo / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
+    mirror.parent.mkdir(parents=True)
+    runtime.parent.mkdir(parents=True)
+    old_mirror = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void original_kernel() {}\n'
+    )
+    new_mirror = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void optimized_kernel() {}\n'
+    )
+    mirror.write_text(old_mirror, encoding="utf-8")
+    runtime.write_text("OLD_RUNTIME\n", encoding="utf-8")
+    artifact = tmp_path / "v1_forge.cu"
+    artifact.write_text(new_mirror, encoding="utf-8")
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.10x\n",
+        encoding="utf-8",
+    )
+    files_root = tmp_path / "optimized_versions" / "files"
+    final_mirror = files_root / "csrc" / "kernels" / "attention_ragged.cu"
+    final_runtime = files_root / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
+    final_mirror.parent.mkdir(parents=True)
+    final_runtime.parent.mkdir(parents=True)
+    final_mirror.write_text(new_mirror, encoding="utf-8")
+    final_runtime.write_text("NEW_RUNTIME\n", encoding="utf-8")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/csrc/kernels/attention_ragged.cu "
+        "b/csrc/kernels/attention_ragged.cu\n"
+        "--- a/csrc/kernels/attention_ragged.cu\n"
+        "+++ b/csrc/kernels/attention_ragged.cu\n"
+        "@@ -1,2 +1,2 @@\n"
+        " #include <hip/hip_runtime.h>\n"
+        '-extern "C" void original_kernel() {}\n'
+        '+extern "C" void optimized_kernel() {}\n'
+        "diff --git a/csrc/cpp_itfs/pa/pa_kernels.cuh "
+        "b/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "--- a/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "+++ b/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "@@ -1 +1 @@\n-OLD_RUNTIME\n+NEW_RUNTIME\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "attempt_id": "forge-attention",
+        "backend": "forge",
+        "status": "completed",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "partial_latest_optimized": str(artifact),
+            "partial_report": str(report),
+            "forge_patch": str(patch),
+            "output_dir": str(tmp_path),
+        },
+    }
+
+    verification = ko.build_verification(
+        _args(source_file=str(mirror), kernel_repo=str(repo)),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    bundle = verification["best_artifact_bundle"]
+    assert bundle["type"] == "patch_snapshot"
+    assert set(bundle["write_paths"]) == {
+        "csrc/kernels/attention_ragged.cu",
+        "csrc/cpp_itfs/pa/pa_kernels.cuh",
+    }
 
 
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must

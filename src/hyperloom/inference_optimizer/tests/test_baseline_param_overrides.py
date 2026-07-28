@@ -24,12 +24,14 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 _CLI_STUB = SimpleNamespace(
     _load_model_max_position_embeddings=lambda _model: 32768,
     _model_has_dual_chunk_attention=lambda _model: False,
     _model_is_moe=lambda _model: False,
+    _model_moe_runner_requires_aiter=lambda _model: False,
     _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
 )
 
@@ -512,6 +514,50 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     assert bench["benchmark_script"] == "sglang_mi300x.sh"
     assert bench["runner_type"] == "mi300x"
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
+
+
+def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(
+        base,
+        benchmark_script="vllm_mi300x.sh",
+        framework="vllm",
+    )
+    output_dir = tmp_path / "ws"
+    shared_state = SharedState(
+        baseline_eager_fallback=True,
+        model_path="/models/qwen",
+    )
+    shared_state.save(tmp_path)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "framework": "vllm",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert "--enforce-eager" in ctx.task.params["extra_server_args"]
+    assert shared_state.baseline_eager_fallback is False
 
 
 def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):

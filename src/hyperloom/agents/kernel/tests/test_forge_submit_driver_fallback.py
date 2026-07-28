@@ -84,13 +84,26 @@ def _submit_with_stubbed_loop(
     return result, captured
 
 
+def _assert_staged_placeholder(driver: str, workspace: Path) -> None:
+    """The delegated driver is a staged placeholder the preparer repairs.
+
+    forge-loop resolves ``--driver`` against ``--workspace`` and requires the
+    file to exist before ``preflight_task`` runs, so delegation stages a hidden
+    placeholder in the workspace instead of naming a path outside it.
+    """
+    path = Path(driver)
+    assert path.parent == workspace
+    assert path.name.startswith(".forge_driver_")
+    assert path.is_file()
+    assert "task-preparer placeholder" in path.read_text()
+
+
 def test_missing_autogen_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
     result, captured = _submit_with_stubbed_loop(monkeypatch, tmp_path)
 
     assert result["returncode"] == 0
     assert result["skipped"] is False
-    assert captured["driver"].endswith("forge_task_driver.py")
-    assert not Path(captured["driver"]).exists()
+    _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
 
 
 def test_adapter_and_autogen_failure_reaches_task_preparer(monkeypatch, tmp_path):
@@ -102,7 +115,7 @@ def test_adapter_and_autogen_failure_reaches_task_preparer(monkeypatch, tmp_path
 
     assert result["returncode"] == 0
     assert result["skipped"] is False
-    assert captured["driver"].endswith("forge_task_driver.py")
+    _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
 
 
 def test_compile_only_driver_reaches_forge_loop_task_preparer(monkeypatch, tmp_path):
@@ -185,8 +198,7 @@ def test_grouped_multi_shape_task_requires_one_prepared_driver(monkeypatch, tmp_
     )
 
     assert result["returncode"] == 0
-    assert captured["driver"].endswith("forge_task_driver.py")
-    assert not Path(captured["driver"]).exists()
+    _assert_staged_placeholder(captured["driver"], tmp_path / "repo")
     assert captured["shapes"]["validation"] == selectors
 
 

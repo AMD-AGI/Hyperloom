@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -20,7 +21,9 @@ import shutil
 import site
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import NamedTuple
 
@@ -39,7 +42,33 @@ if _TOOLS_DIR_INSERTED:
 log = logging.getLogger(__name__)
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
+# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
+# runtime budget rather than running a non-productive campaign.
+_FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
+
+
+def _forge_e2e_pct(candidate: dict) -> float | None:
+    """Return a finite 0..100 GPU-time share for Forge's E2E projection.
+
+    A task group represents every traced row affected by one source-level patch,
+    so its aggregate share is authoritative. The primary row is only a fallback
+    for legacy candidates without task-group metadata.
+    """
+    group = candidate.get("task_group")
+    if isinstance(group, dict) and group.get("aggregate_gpu_pct") is not None:
+        raw_value = group.get("aggregate_gpu_pct")
+    else:
+        raw_value = candidate.get("gpu_pct")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        return None
+    return value
 
 
 class ForgeLoopOutcome(NamedTuple):
@@ -52,6 +81,14 @@ class ForgeLoopOutcome(NamedTuple):
     error: Exception | None
     timed_out: bool
     checkpoint: dict | None
+
+
+class _WorktreePreparationError(RuntimeError):
+    """A new isolated workspace could not be prepared safely."""
+
+
+class _RetainedWorkspaceCollision(FileExistsError):
+    """The requested workspace path already contains a retained attempt."""
 
 
 def _ensure_forge_on_path() -> str:
@@ -126,7 +163,12 @@ def _resolve_gpu_target(candidate: dict) -> str:
             return m.group(0)
     except Exception:
         pass
-    return "gfx942"
+    # Honor the "never hard-codes" contract: a wrong default (e.g. gfx942 on a
+    # gfx950 host) silently mis-targets kernel compilation. Fail loudly instead.
+    raise RuntimeError(
+        "Cannot resolve gfx target: set GPU_TARGET/GPU_TYPE or a candidate "
+        "'platform', and ensure rocminfo is available."
+    )
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
@@ -172,6 +214,18 @@ def _default_branch(repo: str) -> str:
     return ""
 
 
+def _new_forge_branch(output_dir: Path, source_file: str) -> str:
+    """Return a valid, unique retained branch name for one Forge attempt."""
+
+    def _component(value: str, fallback: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-")
+        return cleaned or fallback
+
+    session_id = _component(output_dir.parent.name, "session")
+    kernel_id = _component(Path(source_file).stem, "kernel")
+    return f"forge/{session_id}/{kernel_id}-{uuid.uuid4().hex[:12]}"
+
+
 def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
@@ -190,16 +244,21 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
         return None  # source_file not inside the repo
 
     wt = output_dir / "worktree"
-    # Clean any stale worktree at this path first.
-    if wt.exists():
-        _run(["git", "-C", repo, "worktree", "remove", "--force", str(wt)], timeout=60)
-        shutil.rmtree(wt, ignore_errors=True)
+    # A prior attempt at this path is retained for inspection. Never remove or
+    # reuse it, and never let the caller reinterpret it as a no-git scratch.
+    if wt.exists() or wt.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {wt}")
     _run(["git", "-C", repo, "worktree", "prune"], timeout=60)
 
-    base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+    base = _run(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], timeout=30)
+    if base.returncode != 0 or not base.stdout.strip():
+        raise _WorktreePreparationError("could not resolve the source repository HEAD")
+    base_commit = base.stdout.strip()
     add = _run(["git", "-C", repo, "worktree", "add", "-b", branch, str(wt), "HEAD"], timeout=120)
     if add.returncode != 0:
-        return None
+        raise _WorktreePreparationError(
+            "git worktree creation failed: " + (add.stderr.strip() or add.stdout.strip())
+        )
 
     # Local git identity so IterationLoop commit/revert works.
     _run(["git", "-C", str(wt), "config", "user.name", "forge-bot"], timeout=30)
@@ -249,7 +308,7 @@ def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
     output_dir: Path,
-    branch: str,  # noqa: ARG001  (kept for API symmetry with _prepare_worktree)
+    branch: str,
 ) -> tuple[str, str, str] | None:
     """Ephemeral git-scaffold scratch worktree for non-git source trees (scheme A).
 
@@ -309,9 +368,10 @@ def _prepare_worktree_nogit(
         copy_subtrees = None
 
     scratch_dir = output_dir / "worktree"
-    # Clean any leftover scratch from a previous (failed) attempt.
-    if scratch_dir.exists():
-        shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir.exists() or scratch_dir.is_symlink():
+        raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
+    if not branch or branch in {"main", "master"}:
+        raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
         ignored: list[str] = []
@@ -338,7 +398,7 @@ def _prepare_worktree_nogit(
 
     # Bootstrap a real git repo so IterationLoop's commit/revert works.
     for cmd in [
-        ["git", "-C", str(scratch_dir), "init"],
+        ["git", "-C", str(scratch_dir), "init", "-b", branch],
         ["git", "-C", str(scratch_dir), "config", "user.name", "forge-bot"],
         ["git", "-C", str(scratch_dir), "config", "user.email", "forge-bot@local"],
         ["git", "-C", str(scratch_dir), "add", "-A"],
@@ -817,13 +877,59 @@ def _validate_test_command_argv_like(test_command: str) -> str:
     return cmd
 
 
-def _build_driver_adapter(test_command: str, worktree: str, output_dir: Path) -> str:
+# Staged when the driver is delegated to forge-loop's task preparer. The CLI
+# resolves --driver against --workspace and requires an existing file before
+# prep runs (``preflight_task`` -> ``prepare_task_sync`` repairs it in place),
+# so the placeholder must exist and must fail preflight loudly rather than be
+# mistaken for a conforming measurement driver.
+_TASK_PREPARER_PLACEHOLDER = '''#!/usr/bin/env python3
+"""Placeholder driver — forge-loop's task preparer authors the real one."""
+import sys
+
+sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
+'''
+
+
+def _write_generated_driver(workspace: str | Path, content: str) -> str:
+    """Atomically allocate a unique hidden driver inside ``workspace``.
+
+    The long-horizon forge-loop CLI resolves ``--driver`` relative to
+    ``--workspace`` and rejects anything outside it, so generated drivers must
+    live in the workspace rather than in the attempt output dir. The
+    ``.forge_driver_`` prefix is the contract ``_finalize_forge_workspace``
+    uses to clean these up after an in-place run.
+    """
+    workspace_path = Path(workspace)
+    fd, raw_path = tempfile.mkstemp(
+        prefix=".forge_driver_",
+        suffix=".py",
+        dir=str(workspace_path),
+        text=True,
+    )
+    path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(content)
+        path.chmod(0o755)
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return str(path)
+
+
+def _build_driver_adapter(
+    test_command: str,
+    worktree: str,
+) -> str:
     """Write the driver-adapter script and return its path."""
     test_command = _validate_test_command_argv_like(test_command)
-    adapter = output_dir / "forge_driver_adapter.py"
-    adapter.write_text(_ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree))
-    adapter.chmod(0o755)
-    return str(adapter)
+    return _write_generated_driver(
+        worktree,
+        _ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree),
+    )
 
 
 # Auto-generated Forge-native driver for harness-less candidates. Imports the
@@ -1262,7 +1368,12 @@ main()
 '''
 
 
-def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path, inplace: bool = False) -> str | None:
+def _autogen_forge_driver(
+    candidate: dict,
+    worktree_kernel: str,
+    workspace_dir: Path,
+    inplace: bool = False,
+) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
@@ -1271,39 +1382,33 @@ def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Pat
       - activation (silu/gelu/relu/act_and_mul) -> elementwise driver + torch ref.
       - attention (mha/prefill/decode) -> compile-only driver (no golden ref).
       - HIP C++ (.cuh/.cu/.hip) fallback -> compile-only driver (hipcc -c).
+    The driver is written inside ``workspace_dir`` because the long-horizon
+    forge-loop CLI rejects a ``--driver`` outside ``--workspace``.
     Returns the driver path, or None when the op has no usable template.
     """
     op = str(candidate.get("operation") or "").lower()
     hint = (op + " " + str(candidate.get("name") or "") + " " + worktree_kernel).lower()
-    drv = output_dir / "forge_autogen_driver.py"
     is_compiled_source = worktree_kernel.lower().endswith((".cuh", ".cu", ".hip", ".cpp"))
+    content: str | None = None
     if "moe" in hint:
         if not inplace:
             return None
-        drv.write_text(_AUTOGEN_MOE_DRIVER)
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+        content = _AUTOGEN_MOE_DRIVER
+    elif any(t in hint for t in ("gemm", "matmul", "_mm", "linear")) and not is_compiled_source:
+        content = _AUTOGEN_GEMM_DRIVER.format(kernel_file=worktree_kernel)
     # Activation driver uses importlib — only valid for .py kernel files;
     # compiled sources with activation names use compile-only instead.
-    if any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
-        drv.write_text(_AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    if any(t in hint for t in _ATTENTION_OP_HINTS):
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
+    elif any(t in hint for t in _ACTIVATION_OP_HINTS) and not is_compiled_source:
+        content = _AUTOGEN_ACTIVATION_DRIVER.format(kernel_file=worktree_kernel)
+    elif any(t in hint for t in _ATTENTION_OP_HINTS):
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
     # HIP C++ fallback: compiled files with no op-template match still get a
     # compile-only driver so hip-fellow can iterate and verify compilation.
-    if is_compiled_source:
-        drv.write_text(_AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel))
-        drv.chmod(0o755)
-        return str(drv)
-    return None
+    elif is_compiled_source:
+        content = _AUTOGEN_COMPILE_ONLY_DRIVER.format(kernel_file=worktree_kernel)
+    if content is None:
+        return None
+    return _write_generated_driver(workspace_dir, content)
 
 
 def _shapes_from_candidate(candidate: dict) -> dict:
@@ -1925,6 +2030,82 @@ def _terminate_forge_process(
             return "", ""
 
 
+def _read_forge_best_result(workspace: str) -> dict | None:
+    """Read the published best manifest forge atomically rewrites on every KEEP.
+
+    Anchored to the campaign root under the workspace (not --experiments-dir):
+    resume artifacts always live there, so this file is present and current after
+    a clean finish, a soft budget exhaustion, or a hard kill mid-run.
+    """
+    path = Path(workspace) / "forge_experiments" / "best_result.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _validated_forge_best_result(
+    payload: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+) -> dict | None:
+    """Return normalized evidence only for a published, correctness-passed best.
+
+    Forge publishes this file only after a KEEP whose validation passed and whose
+    commit is already in the workspace history, so it is the authoritative record
+    of what to keep. Re-verify the commit lineage and the speedup here anyway --
+    the file is written by another process and may be stale from an earlier run
+    against a different base.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 1:
+        return None
+    if payload.get("correctness_passed") is not True:
+        return None
+    best_commit = str(payload.get("commit_hash") or "").strip()
+    if not best_commit or best_commit == base_commit:
+        return None
+    exists = _run(
+        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+        timeout=30,
+    )
+    if exists.returncode != 0:
+        return None
+    ancestor = _run(
+        [
+            "git",
+            "-C",
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            best_commit,
+        ],
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        return None
+    try:
+        baseline_ms = float(payload.get("baseline_wall_ms"))
+        best_ms = float(payload.get("best_wall_ms"))
+    except (TypeError, ValueError):
+        return None
+    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+        return None
+    return {
+        "best_commit": best_commit,
+        "baseline_ms": baseline_ms,
+        "best_ms": best_ms,
+        "improved": True,
+        "iteration": payload.get("iteration"),
+        "snr_db": payload.get("snr_db"),
+        "source": "best_result.json",
+    }
+
+
 def _validated_forge_checkpoint(
     checkpoint: dict | None,
     *,
@@ -2013,6 +2194,10 @@ def _run_loop_via_cli(
     experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
+    deadline_unix: float = 0.0,
+    e2e_pct: float | None = None,
+    operator_name: str = "",
+    experience_id: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2027,6 +2212,8 @@ def _run_loop_via_cli(
     """
     import json as _json
 
+    if deadline_unix <= 0:
+        deadline_unix = time.time() + timeout_s
     result_json = experiments_dir.parent / "forge_cli_result.json"
     checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
     for stale_path in (result_json, checkpoint_json):
@@ -2048,11 +2235,11 @@ def _run_loop_via_cli(
     env["GPU_TARGET"] = gpu_target
     # Fellow stability defaults scoped to this child env only.
     _apply_fellow_env(env)
-    # aiter JITs each op from source, so an edit only takes effect on rebuild:
-    # force AITER_REBUILD=1 for aiter kernels. setdefault so an operator
-    # override wins.
+    # KernelForge owns content-addressed AITER cache invalidation. Do not set
+    # AITER_REBUILD globally: cpp_itfs interprets it by deleting the whole build
+    # tree on every driver-process import, causing repeated attention rebuilds.
     if "/aiter/" in (worktree_kernel or ""):
-        env.setdefault("AITER_REBUILD", "1")
+        env.pop("AITER_REBUILD", None)
         # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
         # disabled before the loop imports aiter.
         _ensure_flydsl_aiter_compat()
@@ -2085,6 +2272,10 @@ def _run_loop_via_cli(
         str(experiments_dir),
         "--experiment-id",
         _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        experience_id or experiments_dir.parent.name,
+        "--deadline-unix",
+        str(deadline_unix),
         "--result-json",
         str(result_json),
     ]
@@ -2092,6 +2283,12 @@ def _run_loop_via_cli(
         cmd += ["--program-md-file", str(program_md_file)]
     if invocation_spec_file and Path(invocation_spec_file).is_file():
         cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
+    # Forward the kernel's E2E time share so forge-loop's baseline profile can
+    # project a per-kernel end-to-end optimization potential.
+    if e2e_pct is not None:
+        cmd += ["--e2e-pct", str(e2e_pct)]
+    if operator_name:
+        cmd += ["--operator-name", operator_name]
 
     loop_exc = None
     out = ""
@@ -2107,13 +2304,16 @@ def _run_loop_via_cli(
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             timed_out = True
             stdout, stderr = _terminate_forge_process(proc)
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
-            loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
+            loop_exc = RuntimeError(
+                f"forge-loop exceeded absolute deadline after {timeout_s}s"
+            )
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
@@ -2150,6 +2350,12 @@ def _run_loop_via_cli(
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
         improved = bool(parsed.get("improved"))
+        if parsed.get("deadline_expired"):
+            timed_out = True
+            if loop_exc is None:
+                loop_exc = RuntimeError(
+                    "forge-loop reached its graceful absolute deadline"
+                )
     checkpoint = _read_forge_checkpoint(experiments_dir)
     return ForgeLoopOutcome(
         baseline_ms=baseline_ms,
@@ -2223,6 +2429,87 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     return usage, steps
 
 
+def _finalize_forge_workspace(
+    *,
+    inplace: bool,
+    restore_info: dict | None,
+    driver: str,
+    workspace: str,
+    output_dir: Path,
+    branch: str,
+    nogit_scratch: bool,
+) -> None:
+    """Restore live repos, but retain isolated Forge workspaces for inspection."""
+    if inplace:
+        cleanup_errors: list[str] = []
+        campaign_root = Path(workspace) / "forge_experiments"
+        if campaign_root.is_dir():
+            destination = Path(output_dir) / "forge_experiments"
+            try:
+                # ``--experiments-dir`` already points at (and mkdir's) this
+                # path, so an empty destination is the normal case and must not
+                # abort cleanup. Only a destination holding real artifacts is
+                # preserved, by moving the workspace campaign beside it.
+                if destination.is_dir() and not any(destination.iterdir()):
+                    destination.rmdir()
+                elif destination.exists():
+                    preserved = destination
+                    suffix = 1
+                    while preserved.exists():
+                        preserved = destination.with_name(
+                            f"{destination.name}_workspace_{suffix}"
+                        )
+                        suffix += 1
+                    log.warning(
+                        "forge: %s already holds campaign artifacts; preserving the "
+                        "in-place campaign at %s instead",
+                        destination,
+                        preserved,
+                    )
+                    destination = preserved
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(campaign_root), str(destination))
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to preserve in-place campaign artifacts: {error}"
+                )
+        driver_paths: set[Path] = set()
+        try:
+            driver_paths.update(Path(workspace).glob(".forge_driver_*.py"))
+        except OSError as error:
+            cleanup_errors.append(
+                f"failed to enumerate generated in-place drivers: {error}"
+            )
+        if driver:
+            driver_paths.add(Path(driver))
+        for driver_path in driver_paths:
+            if not driver_path.name.startswith(".forge_driver_"):
+                continue
+            try:
+                driver_path.unlink()
+            except FileNotFoundError:
+                pass  # already gone -- nothing to clean up
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to remove generated in-place driver: {error}"
+                )
+        try:
+            _restore_inplace(restore_info)
+        except Exception as error:  # noqa: BLE001 - combine cleanup/restore failures
+            cleanup_errors.append(f"failed to restore in-place repository: {error}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "in-place workspace cleanup failed: " + "; ".join(cleanup_errors)
+            )
+        return
+    log.info(
+        "forge: retaining workspace for inspection: %s (branch=%s, nogit=%s)",
+        workspace,
+        branch,
+        nogit_scratch,
+    )
+
+
 def submit(
     source_file: str,
     prompt_file: Path,
@@ -2291,9 +2578,7 @@ def submit(
             skipped=True,
         )
 
-    session_id = output_dir.parent.name or "forge"
-    kernel_id = Path(source_file).stem
-    branch = f"forge/{session_id}/{kernel_id}"
+    branch = _new_forge_branch(output_dir, source_file)
 
     repo = kernel_repo or _git_toplevel(source_file)
     # Editable-finder packages import the live path via a meta_path finder that
@@ -2302,46 +2587,59 @@ def submit(
     inplace = _needs_inplace(repo)
     restore_info: dict | None = None
     nogit_scratch = False
-    if inplace:
-        prep = _prepare_inplace(source_file, repo, branch)
-        if prep is None:
-            return _normalized(
-                2,
-                "",
-                "forge: editable-finder package but repo is not a usable git checkout; skipping",
-                time.time() - started,
-                skipped=True,
-            )
-        workspace, worktree_kernel, restore_info = prep
-        base_commit = restore_info.get("base_commit") or ""
-    else:
-        wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
-        if wt_info is None:
-            # Non-git source (e.g. pip-installed dist-packages): scaffold an
-            # ephemeral scratch worktree with git init. Disable with
-            # FORGE_DISABLE_NOGIT=1.
-            if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+    try:
+        if inplace:
+            prep = _prepare_inplace(source_file, repo, branch)
+            if prep is None:
                 return _normalized(
                     2,
                     "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                    "forge: editable-finder package but repo is not a usable git checkout; skipping",
                     time.time() - started,
                     skipped=True,
                 )
-            wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+            workspace, worktree_kernel, restore_info = prep
+            base_commit = restore_info.get("base_commit") or ""
+        else:
+            wt_info = _prepare_worktree(source_file, kernel_repo, output_dir, branch)
             if wt_info is None:
-                return _normalized(
-                    2,
-                    "",
-                    "forge: kernel_repo is not a clean git checkout or source_file "
-                    "not tracked; skipping (live repo untouched)",
-                    time.time() - started,
-                    skipped=True,
-                )
-            nogit_scratch = True
-        workspace, worktree_kernel, base_commit = wt_info
+                # Non-git source (e.g. pip-installed dist-packages): scaffold an
+                # isolated scratch worktree with git init. Disable with
+                # FORGE_DISABLE_NOGIT=1.
+                if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
+                if wt_info is None:
+                    return _normalized(
+                        2,
+                        "",
+                        "forge: kernel_repo is not a clean git checkout or source_file "
+                        "not tracked; skipping (live repo untouched)",
+                        time.time() - started,
+                        skipped=True,
+                    )
+                nogit_scratch = True
+            workspace, worktree_kernel, base_commit = wt_info
+    except (_RetainedWorkspaceCollision, _WorktreePreparationError) as error:
+        result = _normalized(
+            2,
+            "",
+            f"forge: workspace preparation skipped safely: {error}",
+            time.time() - started,
+            skipped=True,
+        )
+        result["cli_workspace"] = str(output_dir / "worktree")
+        result["output_dir"] = str(output_dir)
+        return result
 
+    driver = ""
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -2368,7 +2666,7 @@ def submit(
                     "forge: grouped multi-shape invocation spec is missing or incomplete",
                     time.time() - started,
                 )
-            driver = str(output_dir / "forge_task_driver.py")
+            driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             log.info(
                 "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
                 len(grouped_cases),
@@ -2376,7 +2674,7 @@ def submit(
             )
         elif test_command:
             try:
-                driver = _build_driver_adapter(test_command, workspace, output_dir)
+                driver = _build_driver_adapter(test_command, workspace)
                 driver_from_adapter = True
                 log.info("forge driver: harness adapter from test_command")
             except (OSError, ValueError) as exc:
@@ -2384,18 +2682,18 @@ def submit(
                     "forge driver: harness adapter failed (%s); trying autogen before task-preparer",
                     exc,
                 )
-                driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                driver = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
                 if driver is not None:
                     log.info("forge driver: autogen fallback -> %s", driver)
                 else:
-                    driver = str(output_dir / "forge_task_driver.py")
+                    driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
                     log.warning(
                         "forge driver: adapter and autogen unavailable; delegating missing driver %s "
                         "to forge-loop task-preparer",
                         driver,
                     )
         else:
-            driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+            driver = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
             if driver is None:
                 log.warning(
                     "forge driver: autogen failed for op=%r kernel=%s; delegating missing "
@@ -2403,7 +2701,7 @@ def submit(
                     candidate.get("operation"),
                     worktree_kernel,
                 )
-                driver = str(output_dir / "forge_task_driver.py")
+                driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
             else:
                 log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
@@ -2414,7 +2712,7 @@ def submit(
         if driver_from_adapter and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
             gate_ok, gate_detail = _baseline_correctness_ok(driver, workspace, gpu_target, timeout_s)
             if not gate_ok:
-                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, Path(workspace), inplace=inplace)
                 if autogen_fallback:
                     log.info(
                         "forge driver: harness gate failed (%s), falling back to autogen driver -> %s",
@@ -2462,9 +2760,46 @@ def submit(
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
+        # Forward the task group's aggregate trace GPU-time share as the best
+        # available Amdahl approximation. Absent/invalid -> leave the optional
+        # E2E projection unavailable.
+        e2e_pct = _forge_e2e_pct(candidate)
+        task_group = candidate.get("task_group")
+        aggregate_gpu_pct = (
+            task_group.get("aggregate_gpu_pct")
+            if isinstance(task_group, dict)
+            else None
+        )
+        if (
+            candidate.get("gpu_pct") is not None
+            or aggregate_gpu_pct is not None
+        ) and e2e_pct is None:
+            log.warning(
+                "forge: ignoring invalid GPU-time share for optional E2E "
+                "projection: kernel_id=%s gpu_pct=%r aggregate_gpu_pct=%r",
+                candidate.get("kernel_id", ""),
+                candidate.get("gpu_pct"),
+                aggregate_gpu_pct,
+            )
+
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
+        # forge-loop rejects --max-hours below its own MIN_MAX_HOURS (1.0) with a
+        # click BadParameter (exit 2) that reads like a forge crash and leaves no
+        # checkpoint to salvage. Floor the soft budget at that minimum so the
+        # campaign always starts; timeout_s still bounds the hard kill, and any
+        # KEEP committed before it is recoverable from the checkpoint.
+        if timeout_s < _FORGE_MIN_BUDGET_SEC:
+            log.warning(
+                "forge budget %.0f min is below the %d-min minimum forge-loop "
+                "accepts; running with --max-hours %.1f and hard-killing at "
+                "%.0f min (raise --budget-minutes to avoid a truncated run)",
+                timeout_s / 60.0,
+                _FORGE_MIN_BUDGET_SEC // 60,
+                _FORGE_MIN_BUDGET_SEC / 3600.0,
+                timeout_s / 60.0,
+            )
         loop_outcome = _run_loop_via_cli(
             worktree_kernel=worktree_kernel,
             driver=driver,
@@ -2472,7 +2807,7 @@ def submit(
             shapes=shapes,
             snr_threshold=snr_threshold,
             max_iters=max_iters,
-            max_hours=max(0.05, timeout_s / 3600.0),
+            max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
             branch=branch,
             gpu_target=gpu_target,
             fellow=fellow,
@@ -2481,13 +2816,36 @@ def submit(
             experiments_dir=experiments_dir,
             forge_log=forge_log,
             timeout_s=timeout_s,
+            deadline_unix=max(
+                time.time() + 1.0,
+                started + timeout_s,
+            ),
+            e2e_pct=e2e_pct,
+            operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
+            experience_id=output_dir.name,
         )
-        recovery = _validated_forge_checkpoint(
+        # keep/revert is decided from forge's own published best, in descending
+        # order of trust:
+        #   1. best_result.json -- rewritten atomically on every KEEP, gated on
+        #      correctness, and pointing at a commit already in the history. It
+        #      is current whether the loop finished, exhausted its soft budget,
+        #      or was hard-killed, so it is the authoritative record.
+        #   2. the caller-owned checkpoint -- same guarantees, but routed through
+        #      --experiments-dir and only as fresh as the last KEEP callback.
+        #   3. the final-result sidecar / stdout sentinel -- only produced on a
+        #      graceful return, and never sufficient on its own after a kill.
+        published = _validated_forge_best_result(
+            _read_forge_best_result(workspace),
+            workspace=workspace,
+            base_commit=base_commit,
+        )
+        checkpoint_recovery = _validated_forge_checkpoint(
             loop_outcome.checkpoint,
             workspace=workspace,
             base_commit=base_commit,
             shapes=shapes,
         )
+        recovery = published or checkpoint_recovery
         baseline_ms = loop_outcome.baseline_ms
         best_ms = loop_outcome.best_ms
         improved = loop_outcome.improved
@@ -2498,9 +2856,21 @@ def submit(
             improved = True
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
+        if published is not None and checkpoint_recovery is not None:
+            # Both channels are validated; disagreement means one is stale. The
+            # published manifest wins (it is rewritten per KEEP), but surface it
+            # -- a persistent mismatch is a forge-side bug, not noise.
+            if published["best_commit"] != checkpoint_recovery["best_commit"]:
+                log.warning(
+                    "forge best_result.json (%s) and checkpoint (%s) disagree; "
+                    "keeping the published manifest",
+                    published["best_commit"][:12],
+                    checkpoint_recovery["best_commit"][:12],
+                )
         if loop_outcome.timed_out and recovery is None:
             # A final-result sidecar is not sufficient after forced termination:
-            # only a validated commit checkpoint may produce a passing report.
+            # only a validated commit -- published or checkpointed -- may produce
+            # a passing report.
             baseline_ms = None
             best_ms = None
             improved = False
@@ -2585,10 +2955,16 @@ def submit(
     except Exception as exc:  # noqa: BLE001
         return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
     finally:
-        if inplace:
-            _restore_inplace(restore_info)
-        elif nogit_scratch:
-            # Scratch worktree has no branch in any live repo; delete the dir.
-            shutil.rmtree(workspace, ignore_errors=True)
-        else:
-            _remove_worktree(kernel_repo, source_file, workspace, branch)
+        # Never let workspace cleanup failure swallow the forge result dict.
+        try:
+            _finalize_forge_workspace(
+                inplace=inplace,
+                restore_info=restore_info,
+                driver=driver,
+                workspace=workspace,
+                output_dir=output_dir,
+                branch=branch,
+                nogit_scratch=nogit_scratch,
+            )
+        except Exception:
+            log.exception("forge workspace finalization failed")

@@ -170,6 +170,9 @@ async def test_promote_profile_succeeded_records_trace(coord: Coordinator) -> No
 
 @pytest.mark.asyncio
 async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
+    coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
+    coord.shared_state.last_profile_args = "--old-backend"
+    coord.shared_state.last_profile_workload = {"framework": "vllm"}
     await coord._promote_to_shared_state(
         "profile",
         {
@@ -178,6 +181,9 @@ async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
         },
     )
     assert coord.shared_state.last_profile_status == "failed"
+    assert coord.shared_state.last_profile_trace == ""
+    assert coord.shared_state.last_profile_args == ""
+    assert coord.shared_state.last_profile_workload == {}
 
 
 @pytest.mark.asyncio

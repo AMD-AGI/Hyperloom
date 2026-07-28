@@ -1686,12 +1686,15 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
+    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
         if precision == "fp8" and quant_type.lower() == "auto":
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1718,7 +1721,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
             quant_type = "per_token"
         else:
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1731,7 +1735,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
         model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-        quant_type = _resolve_fp8_quant_type(model_path)
+        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
 
 
@@ -1740,35 +1745,66 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
 
     Priority: current_best workspace (matches the resolved server args)
     → baseline workspace → most recent server.log under runs/.
+
+    The server log is written by the benchmark server at startup and lives in
+    the warmup_round benchmark directory (where the server process was first
+    launched). When ``current_best.workspace`` points to the measure_round
+    benchmark directory (one level sibling), the log is not there — so we also
+    check sibling ``warmup_round/`` dirs and walk up to the parent run
+    directory.
     """
-    # current_best workspace — matches the resolved runtime args.
+    def _find_server_log_near(workspace_str: str) -> str | None:
+        if not workspace_str:
+            return None
+        ws = Path(workspace_str)
+        # Direct hit (server started in this exact dir).
+        if (ws / "server.log").is_file():
+            return str(ws / "server.log")
+        # Sibling warmup_round — benchmark dirs sit under
+        # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
+        parent = ws.parent  # e.g. measure_round/
+        if parent.name in ("warmup_round", "measure_round"):
+            run_hash_dir = parent.parent
+        else:
+            run_hash_dir = parent
+        warmup = run_hash_dir / "warmup_round"
+        if warmup.is_dir():
+            candidates: list[tuple[float, str]] = []
+            for child in warmup.iterdir():
+                sl = child / "server.log"
+                if sl.is_file():
+                    try:
+                        candidates.append((sl.stat().st_mtime, str(sl)))
+                    except OSError:
+                        continue
+            if candidates:
+                candidates.sort(reverse=True)
+                return candidates[0][1]
+        return None
+
     current_best = getattr(state, "current_best", None) or {}
     if isinstance(current_best, dict):
-        cb_workspace = str(current_best.get("workspace") or "").strip()
-        if cb_workspace:
-            log_path = Path(cb_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Baseline workspace — the initial server run.
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
-        bl_workspace = last_baseline.get("workspace") or ""
-        if bl_workspace:
-            log_path = Path(bl_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(last_baseline.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Fallback: check known run subdirs (bounded, not recursive glob).
+    # Fallback: check known run subdirs with sufficient depth for the nested
+    # layout ({phase}/{hash}/{warmup_round|measure_round}/{bench_dir}/server.log).
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
         best: Path | None = None
         best_mtime: float = 0.0
-        for sub in ("baseline", "explore", "gemm_tuning"):
+        for sub in ("baseline", "explore", "gemm_tuning", "roofline"):
             sub_dir = runs_dir / sub
             if not sub_dir.is_dir():
                 continue
-            for log in sub_dir.glob("*/server.log"):
+            for log in sub_dir.glob("**/server.log"):
                 try:
                     mt = log.stat().st_mtime
                 except OSError:
@@ -1804,13 +1840,29 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _resolve_forge_shapes(state, session_dir: Path) -> str:
+def _profile_shapes_are_fresh(state: Any) -> bool:
+    """Return whether the latest profile matches the active workload/config."""
+    return bool(state.profile_trace_matches_workload())
+
+
+def _resolve_forge_shapes(
+    state,
+    session_dir: Path,
+    *,
+    require_fresh_profile: bool = False,
+) -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
     Only passes files that match this schema; incompatible formats are
     silently skipped so forge falls back to config.json shape derivation.
     """
+    if require_fresh_profile and not _profile_shapes_are_fresh(state):
+        log.info(
+            "Forge GEMM shapes: latest TraceLens profile does not match the "
+            "active workload/config; ignoring its shape artifacts"
+        )
+        return ""
     last_trace = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(last_trace, dict):
         return ""
@@ -1841,7 +1893,94 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
+    # Final fallback: extract the GEMM shapes observed by the latest TraceLens
+    # analysis. Older traces can describe a backend that is no longer active.
+    extracted = _extract_gemm_shapes_from_candidates(
+        str(last_trace.get("candidates_path") or ""),
+        session_dir,
+    )
+    if extracted:
+        return extracted
+
     return ""
+
+
+def _extract_gemm_shapes_from_candidates(
+    candidates_path_str: str, session_dir: Path
+) -> str:
+    """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
+
+    Parses the TraceLens shape format "(M,K) fp8<br>(N,K) fp8<br>..." to derive
+    the actual GEMM dimensions observed during serving. Writes a forge-compatible
+    shapes JSON beside the candidates file and returns its path.
+    """
+    import json as _json
+    import re as _re
+
+    if not candidates_path_str:
+        return ""
+    cand_file = Path(candidates_path_str)
+    if not cand_file.is_file():
+        return ""
+
+    try:
+        data = _json.loads(cand_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+
+    hot_kernels = data.get("hot_kernels", [])
+    if not isinstance(hot_kernels, list):
+        return ""
+
+    shapes: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    for kernel in hot_kernels:
+        name = str(kernel.get("name", ""))
+        if "gemm" not in name.lower():
+            continue
+        input_shapes = kernel.get("input_shapes", [])
+        if not isinstance(input_shapes, list):
+            continue
+        for entry in input_shapes:
+            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
+            if not shape_str:
+                continue
+            # Parse "(M,K) dtype<br>(N,K) dtype<br>..." — first two tensors give M,N,K
+            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+            if len(parts) < 2:
+                continue
+            # Tolerate whitespace after the comma ("(1024, 5120)") and any
+            # leading token before the tuple; TraceLens formats vary. .search()
+            # rather than .match() so a leading dtype/name does not defeat it.
+            dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+            m0 = dim_pattern.search(parts[0])
+            m1 = dim_pattern.search(parts[1])
+            if not m0 or not m1:
+                continue
+            M = int(m0.group(1))
+            K = int(m0.group(2))
+            N = int(m1.group(1))
+            key = (M, N, K)
+            if key not in seen:
+                seen.add(key)
+                shapes.append({"M": M, "N": N, "K": K})
+
+    if not shapes:
+        return ""
+
+    out_path = cand_file.parent / "traced_gemm_shapes.json"
+    try:
+        out_path.write_text(_json.dumps(shapes, indent=2), encoding="utf-8")
+    except OSError:
+        return ""
+
+    log.info(
+        "extracted %d unique GEMM shapes from kernel_candidates.json -> %s",
+        len(shapes),
+        out_path,
+    )
+    return str(out_path)
 
 
 # Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the
@@ -1849,11 +1988,24 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
 _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
     "auto": "a8w8_blockscale_untuned_gemm.csv",
     "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "block_scale": "a8w8_blockscale_untuned_gemm.csv",
+    "a8w8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "fp8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
     "per_token": "a8w8_untuned_gemm.csv",
     "per_tensor": "a8w8_untuned_gemm.csv",
+    "a8w8": "a8w8_untuned_gemm.csv",
+    "w8a8": "a8w8_untuned_gemm.csv",
+    "w8a8_fp8": "a8w8_untuned_gemm.csv",
+    "fp8_w8a8": "a8w8_untuned_gemm.csv",
     "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "a8w8_bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "a8w8_blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "blockscale+bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
     "fp4": "a4w4_blockscale_untuned_gemm.csv",
     "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4_blockscale": "a4w4_blockscale_untuned_gemm.csv",
 }
 
 
@@ -1941,15 +2093,19 @@ def _model_hidden_size(model_path: str) -> int | None:
     return None
 
 
-def _resolve_fp8_quant_type(model_path: str) -> str:
+def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str = "") -> str:
     """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
-    - ``blockscale`` only when the checkpoint ships block-quantized weights
-      (``config.json`` ``quantization_config.weight_block_size`` or a block-style
-      ``quant_method``) -- the a8w8 blockscale GEMM path.
+    - ``blockscale_bpreshuffle`` when the checkpoint uses block-quantized
+      weights AND the target GPU is gfx950 (MI355X) AND framework is sglang --
+      sglang/aiter automatically upgrades blockscale to the bpreshuffle kernel
+      on CDNA4. vLLM does NOT use this path (it reads
+      AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
+    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
+      on vllm, or when GPU type is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
       ``--quantization fp8`` (the a8w8 per-token path).
     - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
@@ -1959,22 +2115,51 @@ def _resolve_fp8_quant_type(model_path: str) -> str:
     data = _read_model_config(model_path)
     if data is None:
         return "auto"
-    # Check both the top-level config and a nested ``text_config`` (multimodal
-    # checkpoints sometimes carry the quantization_config there), mirroring
-    # ``_model_hidden_size``.
     candidates: list[dict] = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
+    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                return "blockscale"
+                is_blockscale = True
+                break
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                return "blockscale"
+                is_blockscale = True
+                break
+    if is_blockscale:
+        if _is_gfx950(gpu_type) and framework.lower() == "sglang":
+            return "blockscale_bpreshuffle"
+        return "blockscale"
     return "per_token"
+
+
+_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
+
+
+def _is_gfx950(gpu_type: str) -> bool:
+    """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
+    key = (gpu_type or "").strip().lower()
+    if key in _GFX950_GPU_TYPES:
+        return True
+    if not key or key == "auto":
+        return _is_gfx950_rocminfo()
+    return False
+
+
+@functools.lru_cache(maxsize=1)
+def _is_gfx950_rocminfo() -> bool:
+    """Cached rocminfo probe for gfx950 arch."""
+    try:
+        out = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        return "gfx950" in out.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
@@ -1998,12 +2183,13 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
 
 
 def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str, model_path: str = "") -> str:
-    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+    """Find an aiter untuned-GEMM CSV in a specialist worktree.
 
-    Dense fp8/fp4 forge tuners skip themselves unless real GEMM shapes are
-    supplied. Specialist runs write these to
+    Specialist runs may materialize or modify these files under
     ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv``; this
     resolver picks the newest non-empty CSV matching the resolved quant type.
+    Because an unchanged checkout can also contain static upstream rows, this is
+    a fallback behind explicit benchmark input and the latest runtime profile.
 
     When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
     the model are rejected so forge derives per-model shapes from ``config.json``.
@@ -2014,12 +2200,13 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
 
     fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
     if fname is None:
-        if precision == "fp8":
-            fname = "a8w8_blockscale_untuned_gemm.csv"
-        elif precision in ("fp4", "mxfp4"):
-            fname = "a4w4_blockscale_untuned_gemm.csv"
-        else:
-            return ""
+        log.warning(
+            "Forge GEMM shapes: unknown quant_type=%r for precision=%r; "
+            "not guessing an untuned CSV",
+            quant_type,
+            precision,
+        )
+        return ""
 
     from hyperloom.inference_optimizer.session.session_paths import runs_root
 
@@ -2216,12 +2403,32 @@ def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
     return (m, n, k) if min(m, n, k) > 0 else None
 
 
-def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+def _extract_vllm_block_fp8_profile_shapes(
+    trace_input: Path,
+    *,
+    output_dir: Path | None = None,
+) -> tuple[str, int]:
     """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
     import gzip
 
+    def _is_capture_sidecar(path: Path) -> bool:
+        return "capture_traces" in path.parts
+
     shapes: set[tuple[int, int, int]] = set()
-    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the
+    # whole process CWD and harvest shapes from unrelated traces.
+    if str(trace_input) in ("", "."):
+        return "", 0
+    if trace_input.is_file():
+        trace_paths = [] if _is_capture_sidecar(trace_input) else [trace_input]
+    elif trace_input.is_dir():
+        trace_paths = [
+            path
+            for path in sorted(trace_input.rglob("*.json")) + sorted(trace_input.rglob("*.json.gz"))
+            if not _is_capture_sidecar(path)
+        ]
+    else:
+        return "", 0
     for path in trace_paths:
         try:
             if path.name.endswith(".gz"):
@@ -2240,13 +2447,93 @@ def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]
                 shapes.add(shape)
     if not shapes:
         return "", 0
-    out = capture_dir / "forge_shapes.json"
+    destination = output_dir or (trace_input if trace_input.is_dir() else trace_input.parent)
+    out = destination / "forge_shapes.json"
     payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
     try:
+        destination.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         return "", 0
     return str(out), len(payload)
+
+
+def _reuse_vllm_block_fp8_roofline_shapes(
+    state: Any,
+    *,
+    workspace: Path,
+    current_workload: dict[str, Any] | None = None,
+) -> HandlerResult | None:
+    """Reuse block-FP8 runtime shapes from the latest Roofline profile trace."""
+    last_trace_analyze = getattr(state, "last_trace_analyze", None)
+    if not isinstance(last_trace_analyze, dict):
+        return None
+    source_trace = str(last_trace_analyze.get("steady_state_trace") or "").strip()
+    if not source_trace:
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline has no selected "
+            "steady-state trace; running a standard Roofline fallback"
+        )
+        return None
+    profile_trace = str(getattr(state, "last_profile_trace", "") or "").strip()
+    analyzed_trace = str(last_trace_analyze.get("trace_input") or "").strip()
+    try:
+        profile_trace_id = str(Path(profile_trace).expanduser().resolve(strict=False))
+        analyzed_trace_id = str(Path(analyzed_trace).expanduser().resolve(strict=False))
+    except OSError:
+        profile_trace_id = profile_trace
+        analyzed_trace_id = analyzed_trace
+    if not profile_trace or not analyzed_trace or profile_trace_id != analyzed_trace_id:
+        log.info(
+            "vLLM block-FP8 shape capture: steady-state trace provenance does "
+            "not match the latest profile; running a standard Roofline fallback"
+        )
+        return None
+    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+        log.info(
+            "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
+            "running a standard Roofline fallback"
+        )
+        return None
+    profile_workload = getattr(state, "last_profile_workload", None)
+    expected_workload = current_workload or state.current_profile_workload_context()
+    recorded_workload = profile_workload if isinstance(profile_workload, dict) else {}
+    if recorded_workload != expected_workload:
+        mismatches = sorted(
+            key
+            for key in set(recorded_workload) | set(expected_workload)
+            if recorded_workload.get(key) != expected_workload.get(key)
+        )
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline workload mismatch (%s); "
+            "running a standard Roofline fallback",
+            ", ".join(mismatches) or "missing profile workload metadata",
+        )
+        return None
+    shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+        Path(source_trace),
+        output_dir=workspace,
+    )
+    if shape_count == 0:
+        log.info(
+            "vLLM block-FP8 shape capture: Roofline trace %s contains no reusable "
+            "block-FP8 shapes; running a standard Roofline fallback",
+            source_trace,
+        )
+        return None
+    log.info(
+        "vLLM block-FP8 shape capture: reusing %d shape(s) from Roofline trace %s",
+        shape_count,
+        source_trace,
+    )
+    return {
+        "status": "ok",
+        "shapes_json": shapes_json,
+        "shape_capture_workspace": str(workspace),
+        "shape_count": shape_count,
+        "capture_mode": "roofline_profile_reuse",
+        "source_profile_trace": source_trace,
+    }
 
 
 def _vllm_dense_shape_capture_required(
@@ -2378,7 +2665,7 @@ async def _capture_vllm_tunableop_shapes(
     profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
 
     config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
-    if not config_path or not Path(config_path).is_file():
+    if not profile_mode and (not config_path or not Path(config_path).is_file()):
         return {
             "status": "failed",
             "decision": "REVERT",
@@ -2388,31 +2675,6 @@ async def _capture_vllm_tunableop_shapes(
             "shape_capture_workspace": str(capture_dir),
         }
 
-    if profile_mode:
-        try:
-            import yaml
-
-            capture_config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            benchmark_config = capture_config.setdefault("benchmark", {})
-            profiler_config = benchmark_config.setdefault("profiler", {})
-            torch_profiler_config = profiler_config.setdefault("torch_profiler", {})
-            torch_profiler_config["enabled"] = True
-            profile_config_path = capture_dir / "block_fp8_profile_config.yaml"
-            profile_config_path.write_text(
-                yaml.safe_dump(capture_config, sort_keys=False),
-                encoding="utf-8",
-            )
-            config_path = str(profile_config_path)
-        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
-            return {
-                "status": "failed",
-                "decision": "REVERT",
-                "requires_e2e_validation": False,
-                "error_class": "shape_capture_failed",
-                "error": f"vLLM block-FP8 profile config failed: {exc}",
-                "shape_capture_workspace": str(capture_dir),
-            }
-
     current_best = getattr(state, "current_best", None)
     current_best = current_best if isinstance(current_best, dict) else {}
     inherited_envs = dict(current_best.get("extra_envs") or {})
@@ -2420,33 +2682,27 @@ async def _capture_vllm_tunableop_shapes(
     capture_envs = {
         str(key): str(value)
         for key, value in inherited_envs.items()
-        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+        if profile_mode
+        or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
     }
-    try:
-        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
-    except ValueError as exc:
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": str(exc),
-            "shape_capture_workspace": str(capture_dir),
-        }
-    capture_envs.update(
-        {
-            "PORT": str(capture_port),
-            "RUN_EVAL": "false",
-        }
-    )
-    if profile_mode:
+    if not profile_mode:
+        try:
+            capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+        except ValueError as exc:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_failed",
+                "error": str(exc),
+                "shape_capture_workspace": str(capture_dir),
+            }
         capture_envs.update(
             {
-                "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                "PORT": str(capture_port),
+                "RUN_EVAL": "false",
             }
         )
-    else:
         capture_envs.update(
             {
                 "HL_TUNABLEOP_MODE": "",
@@ -2494,62 +2750,73 @@ async def _capture_vllm_tunableop_shapes(
         if "extra_server_args" in payload
         else str(current_best.get("extra_server_args") or "")
     )
-    if profile_mode:
-        if "profiler-config.delay_iterations" not in extra_server_args:
-            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
-        if "torch_profiler_record_shapes" not in extra_server_args:
-            extra_server_args = (
-                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
-            ).strip()
     inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
     if isinstance(inherited_unset, str):
         capture_unset_envs = [inherited_unset]
     else:
         capture_unset_envs = [str(key) for key in inherited_unset]
-    capture_unset_envs.extend(
-        [
-            "HL_TUNABLEOP_MODE",
-            "HL_TUNABLEOP_FILE",
-            "HL_TUNABLEOP_VERBOSE",
-            "PYTORCH_TUNABLEOP_ENABLED",
-            "PYTORCH_TUNABLEOP_TUNING",
-            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
-            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
-            "PYTORCH_TUNABLEOP_FILENAME",
-        ]
-    )
+    if not profile_mode:
+        capture_unset_envs.extend(
+            [
+                "HL_TUNABLEOP_MODE",
+                "HL_TUNABLEOP_FILE",
+                "HL_TUNABLEOP_VERBOSE",
+                "PYTORCH_TUNABLEOP_ENABLED",
+                "PYTORCH_TUNABLEOP_TUNING",
+                "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+                "PYTORCH_TUNABLEOP_FILENAME",
+            ]
+        )
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
     if isinstance(inherited_remove, str):
         capture_remove_args = [inherited_remove]
     else:
         capture_remove_args = [str(arg) for arg in inherited_remove]
-    capture_remove_args.append("--port")
+    if not profile_mode:
+        capture_remove_args.append("--port")
+    task_params: dict[str, Any] = {
+        "output_dir": str(capture_dir),
+        "framework": "vllm",
+        "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+        "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+        "extra_server_args": extra_server_args,
+        "extra_envs": capture_envs,
+        "remove_args": capture_remove_args,
+        "unset_envs": capture_unset_envs,
+        "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+    }
+    if profile_mode:
+        task_params["workspace_path"] = str(capture_dir / "tracelens")
+        last_baseline = getattr(state, "last_baseline", None)
+        if isinstance(last_baseline, dict):
+            benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
+            if benchmark_script:
+                task_params["benchmark_script"] = benchmark_script
+    else:
+        task_params.update(
+            {
+                "config_path": config_path,
+                "timeout_sec": timeout_sec,
+                "disable_run_eval": True,
+                "baseline_double_run": False,
+            }
+        )
     task = Task(
         task_id=task_id,
         kind="gemm_shape_capture",
         state="running",
-        params={
-            "config_path": config_path,
-            "output_dir": str(capture_dir),
-            "timeout_sec": timeout_sec,
-            "framework": "vllm",
-            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
-            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
-            "extra_server_args": extra_server_args,
-            "extra_envs": capture_envs,
-            "remove_args": capture_remove_args,
-            "unset_envs": capture_unset_envs,
-            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
-            "disable_run_eval": True,
-            "baseline_double_run": False,
-        },
+        params=task_params,
         idempotency_key=f"{task_id}-run",
     )
     ctx = RunnerContext(task=task, lease=None)
     import copy
 
-    capture_state = copy.copy(state)
-    capture_state.baseline_eager_fallback = False
+    if profile_mode:
+        capture_state = state
+    else:
+        capture_state = copy.deepcopy(state)
+        capture_state.baseline_eager_fallback = False
     ctx.extra = {
         "shared_state": capture_state,
         "session_dir": session_dir,
@@ -2557,10 +2824,17 @@ async def _capture_vllm_tunableop_shapes(
     }
 
     try:
-        benchmark_result = await BaselineExecutor(
-            session_dir=session_dir,
-            shared_state=capture_state,
-        )(ctx)
+        if profile_mode:
+            from ..actions.executors.roofline import RooflineExecutor
+
+            benchmark_result = await RooflineExecutor(
+                shared_state=capture_state,
+            )(ctx)
+        else:
+            benchmark_result = await BaselineExecutor(
+                session_dir=session_dir,
+                shared_state=capture_state,
+            )(ctx)
     except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
         return {
             "status": "failed",
@@ -2574,7 +2848,14 @@ async def _capture_vllm_tunableop_shapes(
     if not isinstance(benchmark_result, dict):
         benchmark_result = {}
     if profile_mode:
-        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
+        if steady_state_trace:
+            shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+                Path(steady_state_trace),
+                output_dir=capture_dir,
+            )
+        else:
+            shapes_json, shape_count = "", 0
         if benchmark_result.get("status") == "succeeded" and shape_count > 0:
             return {
                 "status": "ok",
@@ -2582,6 +2863,7 @@ async def _capture_vllm_tunableop_shapes(
                 "shape_capture_workspace": str(capture_dir),
                 "shape_count": shape_count,
                 "capture_mode": "block_fp8_profile",
+                "source_profile_trace": steady_state_trace,
             }
         benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
         detail = f": {benchmark_error}" if benchmark_error else ""
@@ -2679,19 +2961,29 @@ async def _run_forge_gemm_tuning(
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available (normalize inline JSON to a real file).
+    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
+    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
+    # Forge's config-derived fallback. A specialist checkout is not sufficient
+    # evidence that its static CSV came from the active benchmark. vLLM instead
+    # requires native TunableOp rows or a workload-matched block-FP8 profile.
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    if not shapes_json:
-        shapes_json = _resolve_forge_shapes(state, session_dir)
-
-    # Dense fp8/fp4 tuners need real GEMM shapes; without a shapes JSON fall back
-    # to the aiter untuned-GEMM CSVs the specialist phase recorded.
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
         # Guard against inline content / stale paths.
         untuned_csv = ""
-    if not untuned_csv and not shapes_json:
-        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
+    if not shapes_json and not untuned_csv and framework != "vllm":
+        shapes_json = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+        )
+        if not shapes_json:
+            untuned_csv = _resolve_forge_untuned_csv(
+                session_dir,
+                precision,
+                quant_type,
+                model_path,
+            )
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(
@@ -2709,6 +3001,16 @@ async def _run_forge_gemm_tuning(
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
     )
+    if block_fp8_profile_capture:
+        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
+            state,
+            workspace=workspace,
+            current_workload=state.current_profile_workload_context(payload),
+        )
+        if shape_capture is not None:
+            shapes_json = str(shape_capture["shapes_json"])
+            untuned_csv = ""
+            block_fp8_profile_capture = False
     tunableop_capture = _vllm_dense_shape_capture_required(
         framework=framework,
         model_path=model_path,
@@ -2812,6 +3114,7 @@ async def _run_forge_gemm_tuning(
                 "shapes_json": shapes_json,
                 "shape_count": shape_capture.get("shape_count"),
                 "capture_mode": shape_capture.get("capture_mode", "tunableop"),
+                "source_profile_trace": shape_capture.get("source_profile_trace"),
             },
         )
 
@@ -2831,7 +3134,16 @@ async def _run_forge_gemm_tuning(
     micro = str(result.get("micro_decision") or "").strip().lower()
     if micro == "candidate" and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
-        result.setdefault("extra_envs", dict(result["recommended_env"]))
+        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
+        # source-layer snapshot): copy it into the serving aiter config dir,
+        # repoint the env there, and snapshot it so the KEEP survives with the
+        # recipe instead of referencing the ephemeral tuner-workspace path.
+        _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
+            dict(result["recommended_env"]), model_path=model_path, session_dir=session_dir
+        )
+        result.setdefault("extra_envs", _durable_envs)
+        if _snap_dir:
+            result.setdefault("source_snapshot", _snap_dir)
         # Derive best_speedup from tuners_run when absent.
         if "best_speedup" not in result:
             best = 1.0
@@ -2851,6 +3163,81 @@ async def _run_forge_gemm_tuning(
         result.setdefault("status", "failed")
 
     return result
+
+
+def _persist_forge_gemm_csv_durably(
+    extra_envs: dict, *, model_path: str, session_dir: Path
+) -> tuple[dict, str]:
+    """Make a forge GEMM tuned CSV durable + recipe-portable.
+
+    The forge KEEP references the tuned CSV by its ephemeral tuner-workspace path,
+    so a recipe replayed after the workspace is gone (or on another box) loses the
+    tuning and aiter falls back to its default config. Mirror integrate_patch's
+    durability: copy the CSV into the serving aiter's ``configs/model_configs/``
+    (where aiter loads it), repoint the env there, and snapshot the realized file
+    via :func:`snapshot_source_layer` so it travels with the recipe.
+
+    The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
+    durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
+    ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
+    defeat the cross-environment recipe-portability this exists for.
+
+    Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
+    Returns ``(extra_envs, source_snapshot_dir)``.
+    """
+    env_key = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+    src_csv = str(extra_envs.get(env_key) or "").strip()
+    if not src_csv or not Path(src_csv).is_file():
+        return extra_envs, ""
+
+    # Step 1 -- commit the durable copy + env repoint. This is what makes the
+    # KEEP survive: the CSV lands in aiter's default config dir and the env
+    # points there instead of the ephemeral tuner workspace.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("aiter")
+        if spec is None or not spec.origin:
+            return extra_envs, ""
+        aiter_pkg = Path(spec.origin).resolve().parent
+        slug = (
+            "".join(c if (c.isalnum() or c in "._-") else "_" for c in Path(model_path).name)
+            .strip("_")
+            .lower()
+            or "model"
+        )
+        rel = f"configs/model_configs/a8w8_blockscale_tuned_gemm_{slug}.csv"
+        dst = aiter_pkg / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_csv, dst)
+        updated = dict(extra_envs)
+        updated[env_key] = str(dst)
+    except Exception:  # noqa: BLE001 — durability is best-effort; never break the KEEP
+        log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
+        return extra_envs, ""
+
+    # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
+    # snapshot failure must NOT discard the copy + repoint committed above (the
+    # tuned CSV already lives in aiter's config dir and the env already points
+    # at it), so this runs in its own guard and only affects the returned dir.
+    snap_dir = ""
+    try:
+        from ..source_snapshot import snapshot_source_layer
+
+        snap = snapshot_source_layer(
+            framework_root=aiter_pkg,
+            base_sha=None,
+            rel_paths=[rel],
+            # Durable, run-cleanup-surviving location (mirrors integrate_patch),
+            # NOT the ephemeral runs/gemm_tuning workspace.
+            dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
+            provenance="forge_gemm_tune",
+            extra={"env_key": env_key, "model": slug},
+        )
+        snap_dir = str((snap or {}).get("snapshot_dir") or "")
+    except Exception:  # noqa: BLE001 — snapshot is best-effort; the repoint above stands
+        log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
+    return updated, snap_dir
 
 
 async def _run_geak_gemm_tuning(

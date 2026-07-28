@@ -1,0 +1,234 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Unit tests for the shared provenance builder (hyperloom.common.provenance).
+
+All hermetic: env is injected as a dict and ``probe=False`` disables every
+subprocess/package/marker probe, so no ROCm/git/pkg presence is assumed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+from hyperloom.common.provenance import (
+    PROVENANCE_SOURCE,
+    build_provenance,
+    detect_gfx_arch,
+    server_args_hash,
+)
+
+
+def _ns(**kw):
+    return argparse.Namespace(**kw)
+
+
+def test_env_only_mapping():
+    env = {
+        "FRAMEWORK": "sglang",
+        "GPU_TYPE": "MI355X",
+        "HYPERLOOM_GFX_ARCH": "gfx950",
+        "HYPERLOOM_GRAPH_MODE": "graph_capture",
+        "TP": "1",
+        "EP": "8",
+        "PRECISION": "bf16",
+        "CONC": "64",
+        "ISL": "1024",
+        "OSL": "1024",
+        "MAX_MODEL_LEN": "2048",
+    }
+    p = build_provenance(args=None, env=env, probe=False)
+    assert p["framework"] == "sglang"
+    assert p["gpu_type"] == "MI355X"
+    assert p["gfx_arch"] == "gfx950"
+    assert p["graph_mode"] == "graph_capture"
+    assert p["tp"] == 1 and p["ep"] == 8
+    assert p["dtype"] == "bf16"
+    assert p["concurrency"] == 64
+    assert p["isl"] == 1024 and p["osl"] == 1024 and p["max_model_len"] == 2048
+
+
+def test_args_override_env():
+    env = {"FRAMEWORK": "sglang", "GPU_TYPE": "MI300X", "TP": "8", "ISL": "512"}
+    args = _ns(
+        framework="vllm",
+        gpu_type="MI355X",
+        tp=1,
+        ep=4,
+        isl=1024,
+        osl=2048,
+        precision="fp8",
+        graph_mode="eager",
+        model="/models/DeepSeek-V4-Flash",
+        model_display_name="DeepSeek-V4-Flash",
+    )
+    p = build_provenance(args=args, env=env, probe=False)
+    assert p["framework"] == "vllm"
+    assert p["gpu_type"] == "MI355X"
+    assert p["tp"] == 1 and p["ep"] == 4
+    assert p["isl"] == 1024 and p["osl"] == 2048
+    assert p["dtype"] == "fp8"
+    assert p["graph_mode"] == "eager"
+    assert p["model_path"] == "/models/DeepSeek-V4-Flash"
+    assert p["model_name"] == "DeepSeek-V4-Flash"
+
+
+def test_model_name_falls_back_to_basename():
+    args = _ns(model="/shared_nfs/models/Qwen3-14B")
+    p = build_provenance(args=args, env={}, probe=False)
+    assert p["model_path"] == "/shared_nfs/models/Qwen3-14B"
+    assert p["model_name"] == "Qwen3-14B"
+
+
+def test_missing_degrades_to_none_never_raises():
+    p = build_provenance(args=None, env={}, probe=False)
+    for key in ("model_name", "model_path", "framework", "gpu_type", "gfx_arch", "graph_mode",
+                "tp", "ep", "dtype", "concurrency", "isl", "osl", "max_model_len"):
+        assert p[key] is None
+    assert p["stack_fingerprint"] == {"rocm": "unknown", "aiter": "unknown", "sglang": "unknown", "vllm": "unknown"}
+    assert p["server_args"] == []
+    assert p["server_args_hash"] == ""
+    assert p["code_revision"] == ""
+    assert p["image"] is None
+
+
+def test_gfx_env_normalized_and_fallback():
+    # A decorated arch string is normalized to the bare gfx token.
+    assert detect_gfx_arch({"HYPERLOOM_GFX_ARCH": "gfx950:sramecc+:xnack-"}, probe=False) == "gfx950"
+    # Priority falls back to PYTORCH_ROCM_ARCH.
+    assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}, probe=False) == "gfx942"
+    # No env + no probe -> None (never shells out to rocminfo).
+    assert detect_gfx_arch({}, probe=False) is None
+
+
+def test_server_args_hash_stable_and_sensitive():
+    a = ["--tp", "1", "--quant", "fp8"]
+    b = ["--tp", "1", "--quant", "fp8"]
+    c = ["--tp", "8", "--quant", "fp8"]
+    assert server_args_hash(a) == server_args_hash(b)
+    assert server_args_hash(a) != server_args_hash(c)
+    assert server_args_hash([]) == ""
+
+
+def test_server_args_from_env_string_tokenized():
+    p = build_provenance(args=None, env={"SERVER_ARGS": "--tp 1 --mem-fraction 0.9"}, probe=False)
+    assert p["server_args"] == ["--tp", "1", "--mem-fraction", "0.9"]
+    assert p["server_args_hash"]  # non-empty
+
+
+def test_server_args_from_args_list_preferred_over_env():
+    args = _ns(server_args=["--x", "1"])
+    p = build_provenance(args=args, env={"SERVER_ARGS": "--y 2"}, probe=False)
+    assert p["server_args"] == ["--x", "1"]
+
+
+def test_source_tag_default_and_custom():
+    assert build_provenance(env={}, probe=False)["_provenance_source"] == PROVENANCE_SOURCE
+    assert build_provenance(env={}, probe=False, source="wp1_stub")["_provenance_source"] == "wp1_stub"
+
+
+def test_int_coercion_rejects_garbage():
+    p = build_provenance(env={"ISL": "abc", "TP": " 4 ", "OSL": ""}, probe=False)
+    assert p["isl"] is None
+    assert p["tp"] == 4
+    assert p["osl"] is None
+
+
+def test_stack_fingerprint_from_env():
+    env = {"ROCM_VERSION": "6.5.0", "AITER_COMMIT": "abc123", "SGLANG_VERSION": "0.5.12"}
+    p = build_provenance(env=env, probe=False)
+    fp = p["stack_fingerprint"]
+    assert fp["rocm"] == "6.5.0"
+    assert fp["aiter"] == "abc123"
+    assert fp["sglang"] == "0.5.12"
+    assert fp["vllm"] == "unknown"
+
+
+def test_json_serializable():
+    p = build_provenance(args=_ns(model="/m/x", framework="sglang"), env={"TP": "1"}, probe=False)
+    json.dumps(p)
+
+
+# --- probe/marker branch coverage (WP-0) -----------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+import hyperloom.common.provenance as _prov  # noqa: E402
+
+
+def test_gfx_arch_probe_via_rocminfo(monkeypatch):
+    # empty env -> falls through to the rocminfo subprocess probe.
+    monkeypatch.setattr(
+        _prov.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="  Name:  gfx950  \n"),
+    )
+    assert detect_gfx_arch({}, probe=True) == "gfx950"
+
+
+def test_gfx_arch_probe_subprocess_absent(monkeypatch):
+    def _boom(*a, **k):
+        raise FileNotFoundError("rocminfo not installed")
+
+    monkeypatch.setattr(_prov.subprocess, "run", _boom)
+    assert detect_gfx_arch({}, probe=True) is None
+
+
+def test_gfx_arch_probe_nonzero_returncode(monkeypatch):
+    monkeypatch.setattr(
+        _prov.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="")
+    )
+    assert detect_gfx_arch({}, probe=True) is None
+
+
+def test_read_first_line(tmp_path):
+    f = tmp_path / "v.txt"
+    f.write_text("\n\n  first real line \nsecond\n", encoding="utf-8")
+    assert _prov._read_first_line(f) == "first real line"
+    # non-existent path degrades to "" (never raises)
+    assert _prov._read_first_line(tmp_path / "nope.txt") == ""
+
+
+def test_detect_image_none_when_absent(monkeypatch):
+    # no image env vars and no marker files -> None (markers absent on runner).
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "")
+    assert _prov.detect_image({}) is None
+
+
+def test_detect_image_from_marker(monkeypatch):
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "myrepo/img:tag")
+    assert _prov.detect_image({}) == "myrepo/img:tag"
+
+
+def test_detect_image_probe_false_skips_markers(monkeypatch):
+    # probe=False must be hermetic: no marker reads even if a marker would match
+    # (else provenance becomes host-dependent and non-reproducible for hashing).
+    def _boom(p):
+        raise AssertionError("marker file must not be read when probe=False")
+
+    monkeypatch.setattr(_prov, "_read_first_line", _boom)
+    assert _prov.detect_image({}, probe=False) is None
+
+
+def test_build_provenance_probe_false_image_hermetic(monkeypatch):
+    # build_provenance(probe=False) must not read image markers.
+    def _boom(p):
+        raise AssertionError("marker read under probe=False")
+
+    monkeypatch.setattr(_prov, "_read_first_line", _boom)
+    prov = _prov.build_provenance(None, env={}, probe=False)
+    assert prov["image"] is None
+
+
+def test_stack_fingerprint_reads_rocm_marker(monkeypatch):
+    # empty env + probe -> rocm resolves from the /opt/rocm marker file.
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "6.2.0")
+    fp = _prov.detect_stack_fingerprint({}, probe=True)
+    assert fp["rocm"] == "6.2.0"
+
+
+def test_code_revision_falls_back_when_git_absent(monkeypatch):
+    def _boom(*a, **k):
+        raise FileNotFoundError("git not installed")
+
+    monkeypatch.setattr(_prov.subprocess, "run", _boom)
+    assert _prov.detect_code_revision({"HYPERLOOM_CODE_REVISION": "envrev"}, probe=True) == "envrev"
