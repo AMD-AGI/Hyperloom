@@ -22,6 +22,23 @@ def test_allows_speculative_config_json():
     sas.validate_server_args('--speculative-config {"method":"deepseek_mtp"}')
 
 
+def test_allows_speculative_draft_model_path():
+    # Regression: a legitimate tuning flag ending in ``-path`` must not be
+    # rejected by the broad suffix guard (eagle3 speculative-decoding sweep).
+    sas.validate_server_args(
+        "--speculative-algorithm EAGLE3 "
+        "--speculative-draft-model-path /wekafs/models/draft "
+        "--speculative-num-steps 3"
+    )
+    assert not sas.is_denied_server_flag("--speculative-draft-model-path")
+
+
+def test_explicit_deny_still_wins_over_suffix_exemption():
+    # Hard-denied flags must never be re-enabled via the exemption path.
+    assert sas.is_denied_server_flag("--model-path")
+    assert sas.is_denied_server_flag("--adapter-model-path")
+
+
 @pytest.mark.parametrize(
     "args",
     [

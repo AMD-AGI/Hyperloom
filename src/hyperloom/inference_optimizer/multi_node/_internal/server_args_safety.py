@@ -37,6 +37,18 @@ _DENIED_FLAG_SUFFIXES: tuple[str, ...] = (
     "-path",
 )
 
+# Legitimate optimization knobs that happen to end with a denied suffix.
+# These are exempt from the suffix heuristic but stay subject to the explicit
+# deny list above, so a hard-blocked flag can never be re-enabled here. The
+# suffix rule is a broad guard against filesystem/model injection; flags listed
+# here are known tuning parameters (e.g. the speculative-decoding draft model)
+# that the optimizer must be allowed to sweep.
+_SUFFIX_EXEMPT_CLI_FLAGS: frozenset[str] = frozenset(
+    {
+        "--speculative-draft-model-path",
+    }
+)
+
 
 def is_denied_server_flag(flag: str) -> bool:
     """Return whether a single CLI flag token is denied at the fan-out boundary.
@@ -45,13 +57,18 @@ def is_denied_server_flag(flag: str) -> bool:
         flag: A ``--flag`` token (``flag=value`` callers must split first).
 
     Returns:
-        bool: True when the flag is an explicit deny or matches a denied suffix.
+        bool: True when the flag is an explicit deny or matches a denied suffix
+        without being an allowlisted exemption.
     """
     name = (flag or "").strip()
     if not name.startswith("--"):
         return False
+    # Explicit deny always wins (defense in depth over the exemption list).
     if name in _DENIED_CLI_FLAGS:
         return True
+    # Allow known-safe tuning flags before applying the broad suffix guard.
+    if name in _SUFFIX_EXEMPT_CLI_FLAGS:
+        return False
     return any(name.endswith(suffix) for suffix in _DENIED_FLAG_SUFFIXES)
 
 
