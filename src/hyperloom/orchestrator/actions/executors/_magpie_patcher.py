@@ -724,12 +724,6 @@ def ensure_eval_concurrency_compat(
     are (re)asserted against the trees that will really run. Cheap and
     idempotent: scripts already clean are skipped without a write.
 
-    Args:
-        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH``.
-        inferencex_dir: InferenceX root override (pass the *effective* /
-            mirrored checkout, not the pristine source); falls back to
-            ``$INFERENCEX_PATH``.
-
     Returns ``False`` **only** for the genuinely fatal state: a caller script
     still invokes ``run_eval`` with the flag AND InferenceX's ``run_lm_eval``
     would reject it. A defence-in-depth patch that merely could not be applied
