@@ -97,12 +97,16 @@ def _stub_submit_environment(monkeypatch) -> None:
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
-def test_generated_drivers_never_clobber_the_git_workspace(tmp_path):
-    """Both driver generators write under the campaign output dir.
+def test_generated_drivers_stage_in_the_workspace_without_clobbering(tmp_path):
+    """Both driver generators write a hidden, unique driver into the workspace.
 
-    The workspace is a git worktree of the user's repo, so writing a generated
-    driver into it would either clobber a tracked file of the same name or show
-    up as an agent "edit" in the keep/revert diff.
+    ``campaign_config._relative_file`` rejects a ``--driver`` outside
+    ``--workspace``, so a generated driver parked in the attempt output dir
+    kills every forge-loop run with "driver must be inside workspace". Staging
+    it in the workspace is therefore mandatory, and the ``.forge_driver_``
+    mkstemp naming is what keeps that safe: a unique hidden name can never
+    clobber a tracked file, ``git diff`` of tracked paths keeps it out of the
+    keep/revert patch, and ``_finalize_forge_workspace`` deletes it by prefix.
     """
     workspace = tmp_path / "worktree"
     workspace.mkdir()
@@ -122,16 +126,97 @@ def test_generated_drivers_never_clobber_the_git_workspace(tmp_path):
         forge_submit._autogen_forge_driver(
             {"operation": "gemm"},
             str(workspace / "kernel.py"),
-            output_dir,
+            workspace,
         )
     )
 
-    assert {adapter.parent, generated.parent} == {output_dir}
+    assert {adapter.parent, generated.parent} == {workspace}
+    assert adapter.name.startswith(".forge_driver_")
+    assert generated.name.startswith(".forge_driver_")
     assert adapter.name != generated.name
     assert adapter.is_file() and generated.is_file()
-    # The workspace gained nothing and lost nothing.
-    assert sorted(path.name for path in workspace.iterdir()) == ["forge_driver.py"]
+    # The tracked file is untouched and the attempt dir stays clean.
     assert tracked_driver.read_text() == "TRACKED_DRIVER\n"
+    assert list(output_dir.iterdir()) == []
+    assert sorted(path.name for path in workspace.iterdir()) == sorted(
+        ["forge_driver.py", adapter.name, generated.name]
+    )
+
+
+def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
+    """In-place cleanup deletes every ``.forge_driver_*`` it staged."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    tracked = workspace / "kernel.py"
+    tracked.write_text("TRACKED\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    driver = Path(forge_submit._write_generated_driver(workspace, "print('drive')\n"))
+    stray = Path(forge_submit._write_generated_driver(workspace, "print('stray')\n"))
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver=str(driver),
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert not driver.exists()
+    assert not stray.exists()
+    assert tracked.read_text() == "TRACKED\n"
+
+
+def test_finalize_keeps_both_campaigns_when_the_destination_is_populated(tmp_path):
+    """A populated ``forge_experiments`` no longer aborts in-place cleanup.
+
+    ``--experiments-dir`` points at ``output_dir/forge_experiments`` and mkdir's
+    it, so the destination always exists; only real artifacts force a rename.
+    """
+    workspace = tmp_path / "repo"
+    (workspace / "forge_experiments").mkdir(parents=True)
+    (workspace / "forge_experiments" / "best_result.json").write_text("{}\n")
+    output_dir = tmp_path / "attempt"
+    (output_dir / "forge_experiments").mkdir(parents=True)
+    (output_dir / "forge_experiments" / "campaign.json").write_text("{}\n")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert (output_dir / "forge_experiments" / "campaign.json").is_file()
+    assert (output_dir / "forge_experiments_workspace_1" / "best_result.json").is_file()
+    assert not (workspace / "forge_experiments").exists()
+
+
+def test_finalize_reuses_an_empty_destination_for_the_campaign(tmp_path):
+    """The common case: the mkdir'd empty destination receives the campaign."""
+    workspace = tmp_path / "repo"
+    (workspace / "forge_experiments").mkdir(parents=True)
+    (workspace / "forge_experiments" / "best_result.json").write_text("{}\n")
+    output_dir = tmp_path / "attempt"
+    (output_dir / "forge_experiments").mkdir(parents=True)
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(workspace),
+        output_dir=output_dir,
+        branch="forge/test",
+        nogit_scratch=False,
+    )
+
+    assert (output_dir / "forge_experiments" / "best_result.json").is_file()
+    assert not (workspace / "forge_experiments").exists()
 
 
 def test_inplace_restore_returns_the_original_working_tree_bytes(tmp_path):
@@ -993,10 +1078,13 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
     """An in-place campaign must leave the developer's checkout as it found it.
 
     In-place mode hands forge the *live* repo as its workspace, so every
-    campaign-owned path -- ``--experiments-dir``, the generated driver, the CLI
-    sidecar -- is addressed at the output dir up front rather than written into
-    the checkout and relocated afterwards. Pin both halves: what the loop is
-    handed points outside the repo, and after the run the repo's tracked state,
+    campaign-owned path that can live outside it -- ``--experiments-dir``, the
+    CLI sidecar -- is addressed at the output dir up front. The generated
+    driver is the one exception: the long-horizon CLI resolves ``--driver``
+    relative to ``--workspace`` and rejects anything outside it, so it is
+    staged in the checkout under a hidden ``.forge_driver_`` name and removed
+    during finalization. Pin both halves: what the loop is handed points at the
+    output dir (driver aside), and after the run the repo's tracked state,
     branch and temp-branch set are exactly what they were before forge started.
     """
     repo, source = _make_repo(tmp_path)
@@ -1061,7 +1149,9 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
     assert result["best_commit"] == captured["best_commit"]
     # Every campaign-owned path the loop was handed lives under the output dir.
     assert captured["experiments_dir"] == output_dir / "forge_experiments"
-    assert captured["driver"].parent == output_dir
+    # The driver is the CLI-mandated exception: inside the workspace, hidden.
+    assert captured["driver"].parent == repo
+    assert captured["driver"].name.startswith(".forge_driver_")
     assert result["checkpoint_path"] == str(
         output_dir / "forge_experiments" / "hyperloom.json"
     )
@@ -1077,10 +1167,12 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
     assert source.read_text() == "BASELINE\n"
     assert (repo / "forge_driver.py").read_text() == "TRACKED_DRIVER\n"
     assert _git(repo, "status", "--short", "--untracked-files=no") == ""
-    # No generated driver or CLI sidecar was ever written into the checkout.
+    # No generated driver or CLI sidecar was left behind in the checkout.
     assert not (repo / "forge_driver_adapter.py").exists()
     assert not (repo / "forge_task_driver.py").exists()
     assert not (repo / "forge_cli_result.json").exists()
+    assert not captured["driver"].exists()
+    assert list(repo.glob(".forge_driver_*.py")) == []
 
 
 def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
