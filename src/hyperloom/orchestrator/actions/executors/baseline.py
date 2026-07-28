@@ -264,6 +264,14 @@ def _classify_subprocess_error(
 
 BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
+
+# Slack the subprocess keeps beyond the server-ready budget: Magpie's launcher
+# adds its own 180s grace on top of ``server_ready_timeout_s``, then the client
+# benchmark and teardown still have to run. Without this the outer timeout can
+# fire while the server is legitimately still booting, which reports the far
+# less actionable ``timeout`` / ``subprocess_nonzero`` instead of a real
+# server-boot failure.
+BASELINE_POST_READY_MARGIN_SEC = 1800
 # COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
 # re-exported below for callers/tests that import them from this module.
 
@@ -1030,7 +1038,7 @@ class BaselineExecutor:
                 self.default_timeout_sec,
                 cold_cap,
             )
-            return cold_cap
+            return self._apply_server_ready_floor(cold_cap, params)
         if cache["probe_status"] == "found":
             log.info(
                 "baseline_executor: WARM start — aiter jit/build/ at %s has %d .so, %d MB. Using default timeout=%ds.",
@@ -1039,7 +1047,7 @@ class BaselineExecutor:
                 cache["size_mb"],
                 self.default_timeout_sec,
             )
-            return self.default_timeout_sec
+            return self._apply_server_ready_floor(self.default_timeout_sec, params)
         log.warning(
             "baseline_executor: aiter jit cache not located "
             "(probe_status=%s). Using default timeout=%ds. Cold-start "
@@ -1047,7 +1055,41 @@ class BaselineExecutor:
             cache["probe_status"],
             self.default_timeout_sec,
         )
-        return self.default_timeout_sec
+        return self._apply_server_ready_floor(self.default_timeout_sec, params)
+
+    def _apply_server_ready_floor(self, timeout_sec: int, params: dict[str, Any]) -> int:
+        """Raise ``timeout_sec`` so it cannot preempt the server-boot budget.
+
+        The lifecycle ``server_ready_timeout_s`` scales with checkpoint size,
+        so on very large models it can exceed the aiter-probe-derived
+        subprocess cap. When that happens the subprocess is killed while the
+        server is still loading weights and the failure is misreported as a
+        benchmark timeout.
+
+        Args:
+            timeout_sec: The probe-derived subprocess timeout.
+            params: Task params, consulted for ``model_path``.
+
+        Returns:
+            ``timeout_sec``, or the server-ready budget plus
+            :data:`BASELINE_POST_READY_MARGIN_SEC` when that is larger.
+        """
+        model_path = str(params.get("model_path") or os.environ.get("MODEL_PATH") or "").strip()
+        ready_sec = _lifecycle.resolve_server_ready_timeout(model_path)
+        floor = ready_sec + BASELINE_POST_READY_MARGIN_SEC
+        if floor <= timeout_sec:
+            return timeout_sec
+        log.warning(
+            "baseline_executor: raising timeout %ds -> %ds so it stays above "
+            "the server-boot budget (server_ready_timeout_s=%ds + %ds margin) "
+            "for %s.",
+            timeout_sec,
+            floor,
+            ready_sec,
+            BASELINE_POST_READY_MARGIN_SEC,
+            model_path or "<unset model path>",
+        )
+        return floor
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
