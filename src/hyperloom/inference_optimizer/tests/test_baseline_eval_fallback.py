@@ -363,9 +363,14 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
     assert state.stop_reason == "baseline_accuracy_failed"
 
 
-def test_baseline_operator_disabled_eval_does_not_stop(tmp_path):
-    """When the operator explicitly disables the serving eval, accuracy is
-    intentionally off: a missing accuracy result must NOT stop the run."""
+def test_baseline_operator_disabled_eval_still_stops(tmp_path):
+    """Disabling the serving eval on a genuine baseline is not an opt-out.
+
+    A baseline exists to establish the accuracy reference, so turning the eval
+    off does not make a missing accuracy acceptable -- it only means the
+    reference was never measured. The run halts either way, which is what makes
+    ``disable_run_eval`` useless as a way around the accuracy gate.
+    """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -399,7 +404,7 @@ def test_baseline_operator_disabled_eval_does_not_stop(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert state.stop_reason == ""
+    assert state.stop_reason == "baseline_accuracy_failed"
 
 
 def test_baseline_eval_failure_fallback_stops_run(tmp_path):
@@ -459,16 +464,20 @@ class _StopRecorder:
         return value
 
 
-def _stop_ctx(framework: str, recorder) -> SimpleNamespace:
-    task = SimpleNamespace(task_id="t-bl", kind="baseline", params={"framework": framework})
+def _stop_ctx(framework: str, recorder, params: dict | None = None) -> SimpleNamespace:
+    task = SimpleNamespace(
+        task_id="t-bl",
+        kind="baseline",
+        params={"framework": framework, **(params or {})},
+    )
     return SimpleNamespace(task=task, extra={"shared_state": recorder})
 
 
-def _stopped(framework: str, result: dict) -> str:
+def _stopped(framework: str, result: dict, *, params: dict | None = None) -> str:
     """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
     executor = BaselineExecutor()
     rec = _StopRecorder()
-    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec, params), result)
     return rec.stop_reason
 
 
@@ -498,12 +507,24 @@ def test_stop_serving_zero_accuracy():
     assert reason == "baseline_accuracy_failed"
 
 
-def test_no_stop_serving_operator_disabled_via_config():
-    # Finding: YAML/reference-env RUN_EVAL=false folds into run_eval_disabled;
-    # operator opt-out must NOT stop even without disable_run_eval param.
+def test_stop_serving_operator_disabled_via_config():
+    # A YAML/reference-env RUN_EVAL=false folds into run_eval_disabled, but a
+    # genuine baseline has no opt-out: turning the eval off does not make a
+    # missing accuracy reference acceptable, so the run still stops.
     reason = _stopped(
         "sglang",
         {"status": "succeeded", "run_eval_disabled": True},
+    )
+    assert reason == "baseline_accuracy_failed"
+
+
+def test_no_stop_when_quality_ref_exempt():
+    # Synthetic kernel-lane re-baselines (kind="baseline" + quality_ref_exempt)
+    # are throughput-only A/B probes: no accuracy, no stop.
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "run_eval_disabled": True},
+        params={"quality_ref_exempt": True},
     )
     assert reason == ""
 
@@ -716,8 +737,28 @@ def test_eval_enablement_multi_node_falls_back_to_stop(monkeypatch):
     assert BASELINE_EVAL_FAILED_KEY not in result
 
 
-def test_eval_enablement_operator_optout_not_routed(monkeypatch):
+def test_eval_enablement_operator_optout_is_routed(monkeypatch):
+    """A disabled eval is not an opt-out: with enablement on it routes there.
+
+    Rather than stopping, the missing reference is stamped as an eval-failure
+    contract so enablement can repair the eval path. ``_is_promotable_result``
+    then keeps this baseline from anchoring tput / accuracy / config.
+    """
     result = {"status": "succeeded", "run_eval_disabled": True}
     reason = _route(monkeypatch, "sglang", result)
     assert reason == ""
+    assert result[BASELINE_EVAL_FAILED_KEY] is True
+
+
+def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
+    """Synthetic kernel-lane re-baselines are neither routed nor stopped."""
+    result = {"status": "succeeded", "run_eval_disabled": True}
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    executor._maybe_stop_on_missing_baseline_accuracy(
+        _stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result
+    )
+    assert rec.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result

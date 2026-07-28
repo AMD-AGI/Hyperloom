@@ -313,7 +313,7 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     return (output_dir / result_dir).resolve()
 
 
-def _should_establish_quality_ref(task_kind: str | None) -> bool:
+def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
 
     ``replay_warm_recipe`` reuses this executor but is an optimization
@@ -321,14 +321,25 @@ def _should_establish_quality_ref(task_kind: str | None) -> bool:
     than redefine it (otherwise the gate would mask the warm recipe's own
     deviation from the baseline output).
 
+    The kernel lane also drives this executor through synthetic tasks that
+    carry ``kind="baseline"`` literally (integrate re-baseline, the paired-A/B
+    pristine arm, stack validation). Those are throughput-only A/B probes
+    against an already-anchored baseline -- they never anchor one -- so they
+    opt out via ``params["quality_ref_exempt"]`` and are treated exactly like
+    ``replay_warm_recipe``: compare, never establish.
+
     Args:
         task_kind: The task kind (``ctx.task.kind``); ``None`` is treated as
             "not a baseline".
+        params: The task params (``ctx.task.params``); a truthy
+            ``quality_ref_exempt`` disqualifies an otherwise-genuine baseline.
 
     Returns:
-        bool: ``True`` only when the task kind is exactly ``"baseline"``.
+        bool: ``True`` only for a ``"baseline"`` task that is not exempt.
     """
-    return str(task_kind or "") == "baseline"
+    if str(task_kind or "") != "baseline":
+        return False
+    return not (params or {}).get("quality_ref_exempt")
 
 
 def _resolve_reference_base(
@@ -1235,7 +1246,7 @@ class BaselineExecutor:
             return False
         if is_multi_node():
             return False
-        return _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
+        return _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {})
 
     def _stamp_eval_failure_contract(
         self,
@@ -1298,21 +1309,25 @@ class BaselineExecutor:
         workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
         absent, and serving records no accuracy at all, so both are covered.
 
-        "Expected" means accuracy was not intentionally turned off. Scriptable
-        workloads always carry the quality gate. For serving, the operator can
-        opt out via ``disable_run_eval``, an explicit ``RUN_EVAL=false`` env, or
-        a YAML/reference-env ``RUN_EVAL=false`` -- all folded into the
-        authoritative ``run_eval_disabled`` on the result. The eval-failure
-        fallback also disables eval, but it is tagged
-        ``accuracy_source="eval_unavailable"`` and must still stop (eval was
-        expected and broke). Throughput-level baseline failures are handled by
-        the Coordinator's existing ``baseline_failed`` streak logic.
+        There is no opt-out. Disabling the eval (via ``disable_run_eval``, an
+        explicit ``RUN_EVAL=false`` env, or a YAML/reference-env value) does not
+        make a missing accuracy acceptable on a genuine baseline -- it only
+        means the reference was never measured, which is exactly the state this
+        guard exists to reject. Synthetic kernel-lane re-baselines that reuse
+        ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``.
+
+        With eval-on-fail enablement active (the default), the result is stamped
+        as an eval-failure contract and routed to enablement rather than
+        stopping; ``_is_promotable_result`` then blocks it from anchoring
+        ``baseline_tput`` / ``baseline_accuracy`` / ``baseline_config_path``.
+        Otherwise the run stops. Throughput-level baseline failures are handled
+        by the Coordinator's existing ``baseline_failed`` streak logic.
 
         Args:
             ctx (RunnerContext): The runner context (task kind + shared_state).
             result (dict): The final baseline result dict.
         """
-        if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+        if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
             return
         if result.get("status") != "succeeded":
             return
@@ -1328,18 +1343,13 @@ class BaselineExecutor:
             return  # a usable baseline accuracy exists
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
-        from hyperloom.inference_optimizer import framework_registry
         from ._accuracy_gate import request_baseline_accuracy_stop
 
-        scriptable = framework_registry.is_scriptable(framework)
-        # Operator opt-out only when eval was disabled AND this is not the
-        # eval-failure fallback (which forces RUN_EVAL=false but still means the
-        # eval was expected and broke). Scriptable always runs its quality gate.
-        operator_disabled_eval = bool(result.get("run_eval_disabled")) and (
-            result.get("accuracy_source") != "eval_unavailable"
-        )
-        if not (scriptable or not operator_disabled_eval):
-            return
+        # No opt-out: a genuine baseline exists to establish the accuracy
+        # reference, so turning the eval off does not make a missing accuracy
+        # acceptable -- it only means the reference was never measured. Every
+        # disable path (the ``disable_run_eval`` param, an explicit
+        # ``RUN_EVAL=false`` env, a YAML/reference-env value) now lands here.
         # Route into enablement instead of stopping/salvaging: the throughput
         # baseline stays for diagnostics but is blocked from anchoring.
         if eval_enablement:
@@ -1470,7 +1480,7 @@ class BaselineExecutor:
         # Only a genuine ``baseline`` task may establish/overwrite the quality
         # reference; ``replay_warm_recipe`` reuses this executor but must compare
         # against the pure baseline reference rather than redefine it.
-        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
+        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params)
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
