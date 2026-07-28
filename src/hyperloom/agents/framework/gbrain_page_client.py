@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+from hyperloom.common.jsonio import iter_sse_objects
 
 
 def _require_http_url(url: str) -> None:
@@ -34,36 +35,10 @@ class GbrainPageError(RuntimeError):
     """Raised on transport / envelope / tool-level gbrain failures."""
 
 
-def _iter_sse_objects(raw: str):
-    """Yield JSON objects from an MCP body (plain JSON or one/many SSE events)."""
-    text = raw.lstrip()
-    if text.startswith("{") or text.startswith("["):
-        try:
-            yield json.loads(text)
-        except json.JSONDecodeError:
-            # Malformed non-SSE payload: yield nothing.
-            return
-        return
-    for block in re.split(r"\r?\n\r?\n", raw):
-        parts: list[str] = []
-        for line in block.splitlines():
-            if line.startswith("data:"):
-                seg = line[5:]
-                parts.append(seg[1:] if seg.startswith(" ") else seg)
-        payload = "\n".join(parts).strip()
-        if not payload:
-            continue
-        try:
-            yield json.loads(payload)
-        except json.JSONDecodeError:
-            # Skip a malformed SSE event block.
-            continue
-
-
 def _select_mcp_response(raw: str, want_id: Any = None) -> Any:
     """Pick the JSON-RPC response event matching ``want_id`` (else first result)."""
     fallback: Any = None
-    for obj in _iter_sse_objects(raw):
+    for obj in iter_sse_objects(raw):
         if isinstance(obj, dict):
             if want_id is not None and obj.get("id") == want_id:
                 return obj

@@ -23,6 +23,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import scrub_child_process_env
 from hyperloom.common.jsonio import read_json
+from ._grid_base import pareto_front
 
 log = logging.getLogger(__name__)
 
@@ -78,36 +79,6 @@ def _serving_gpus(tp: int) -> str:
 def _parse_isl_osl(spec: str) -> tuple[int, int]:
     isl_s, _, osl_s = str(spec).partition(":")
     return int(isl_s or 1024), int(osl_s or 1024)
-
-
-def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Max output_throughput, min ttft_mean_ms (bench_summary has no e2el)."""
-    succ = [
-        e
-        for e in entries
-        if e["status"] == "succeeded"
-        and isinstance(e.get("output_throughput"), (int, float))
-        and isinstance(e.get("ttft_mean_ms"), (int, float))
-    ]
-    front: list[dict[str, Any]] = []
-    for cand in succ:
-        dominated = False
-        for other in succ:
-            if other is cand:
-                continue
-            if (
-                other["output_throughput"] >= cand["output_throughput"]
-                and other["ttft_mean_ms"] <= cand["ttft_mean_ms"]
-                and (
-                    other["output_throughput"] > cand["output_throughput"]
-                    or other["ttft_mean_ms"] < cand["ttft_mean_ms"]
-                )
-            ):
-                dominated = True
-                break
-        if not dominated:
-            front.append(cand)
-    return front
 
 
 async def sweep_via_geak(
@@ -278,7 +249,7 @@ async def sweep_via_geak(
             )
             entries.append(entry)
 
-    front = _pareto_front(entries)
+    front = pareto_front(entries, latency_key="ttft_mean_ms")
     best_for_each_conc: dict[str, dict[str, Any]] = {}
     for e in entries:
         if e["status"] != "succeeded":
