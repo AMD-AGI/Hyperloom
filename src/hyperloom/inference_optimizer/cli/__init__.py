@@ -1044,23 +1044,6 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
-def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Report whether ``argv`` explicitly carries a given option.
-
-    Matches both the bare flag (``--tp``) and the ``=``-joined form
-    (``--tp=8``).
-
-    Args:
-        argv (list[str]): The argument vector to scan.
-        option (str): The long-option flag to look for (e.g. ``"--tp"``).
-
-    Returns:
-        bool: ``True`` when the option appears in ``argv``, else ``False``.
-    """
-    prefix = f"{option}="
-    return any(arg == option or arg.startswith(prefix) for arg in argv)
-
-
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
     if getattr(args, "max_model_len", None):

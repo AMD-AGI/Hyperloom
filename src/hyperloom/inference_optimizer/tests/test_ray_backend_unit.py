@@ -387,7 +387,6 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "ray", fake)
     backend = rb.RayExecutionBackend()
     backend._ensured = True
-    backend._started = True
     monkeypatch.setattr(rb, "_BACKEND", backend)
 
     lease = ServingLease(num_gpus=1)
@@ -398,7 +397,6 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     assert "ray_actor_error" in err
     assert fake.shutdown_called == 1
     assert backend._ensured is False
-    assert backend._started is False
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):

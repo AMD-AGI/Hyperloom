@@ -939,19 +939,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     return 0
 
 
-def _infera_all_gpu_ips(state: dict[str, Any]) -> list[str]:
-    """Every GPU pod IP to act on: PD => prefill+decode, else worker.
-
-    Args:
-        state (dict[str, Any]): The infera state.
-
-    Returns:
-        list[str]: The GPU pod IPs (prefill + decode when disaggregated, else
-        worker).
-    """
-    return [str(t.get("podIP") or "").strip() for t in _infera_all_gpu_targets(state) if t.get("podIP")]
-
-
 def _infera_kill_inference(args: argparse.Namespace) -> int:
     """Infera kill: SSH fan-out launch_infera_node.py --kill-only to every GPU pod.
 

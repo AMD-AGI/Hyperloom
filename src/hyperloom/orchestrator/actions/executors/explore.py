@@ -164,25 +164,6 @@ def _entry_control_fields(entry: Any) -> dict[str, Any]:
     return out
 
 
-def _flag_names_for_removal(args_text: str) -> list[str]:
-    """Return flag names from an arg string for base replace-mode ablation."""
-    if not args_text.strip():
-        return []
-    import shlex
-
-    try:
-        tokens = shlex.split(args_text)
-    except ValueError:
-        tokens = args_text.split()
-    out: list[str] = []
-    for tok in tokens:
-        if tok.startswith("--"):
-            flag = tok.split("=", 1)[0]
-            if flag not in out:
-                out.append(flag)
-    return out
-
-
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
@@ -475,19 +456,6 @@ def _compute_explore_variant_timeout(
     effective_kill_ratio = max(1.0, float(kill_ratio))
     derived = float(baseline_runtime_sec) * (effective_kill_ratio + float(safety_margin))
     return int(max(floor_sec, min(ceiling_sec, derived)))
-
-
-def _join_args(*parts: str) -> str:
-    """Join non-empty, stripped argument fragments with single spaces.
-
-    Args:
-        *parts (str): Argument fragments; empty/whitespace ones are
-            dropped.
-
-    Returns:
-        str: The space-joined argument string.
-    """
-    return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 class ExploreExecutor:
