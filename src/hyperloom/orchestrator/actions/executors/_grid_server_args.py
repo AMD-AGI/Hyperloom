@@ -773,8 +773,9 @@ def inject_sglang_moe_runner_backend(
 
     Returns ``server_args`` unchanged when: framework is not sglang, a
     ``--moe-runner-backend`` is already pinned (operator wins), the GPU is not
-    an AMD/ROCm runner, or the model is not Mixture-of-Experts (fail-safe:
-    inject nothing). Otherwise appends the backend from
+    an AMD/ROCm runner, the model is not Mixture-of-Experts (fail-safe: inject
+    nothing), or the checkpoint carries a quant scheme only the aiter runner
+    implements. Otherwise appends the backend from
     ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND`` (default ``triton``); only this
     flag is added.
 
@@ -786,8 +787,8 @@ def inject_sglang_moe_runner_backend(
 
     Returns:
         str: ``server_args`` with ``--moe-runner-backend`` appended, or unchanged
-        for non-sglang frameworks, when already pinned, off AMD/ROCm, or for
-        non-MoE models.
+        for non-sglang frameworks, when already pinned, off AMD/ROCm, for
+        non-MoE models, or for aiter-only MoE quant schemes.
     """
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
@@ -800,6 +801,17 @@ def inject_sglang_moe_runner_backend(
     if not _resolve_amd_gpu_type(gpu_type):
         return args
     if not _model_is_moe(str(model_path or "")):
+        return args
+    from hyperloom.inference_optimizer.cli.model_gate import _model_moe_runner_requires_aiter
+
+    # Quark MXFP4/W4A4 MoE has no triton runner: injecting one crashes the
+    # server on the first forward pass. Let sglang resolve the backend itself.
+    if _model_moe_runner_requires_aiter(str(model_path or "")):
+        log.info(
+            "MoE model with an aiter-only quant scheme: skipping "
+            "--moe-runner-backend injection (the triton runner has no "
+            "implementation for it)."
+        )
         return args
     backend = (
         os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip() or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND

@@ -256,6 +256,17 @@ _AMD_UNSUPPORTED_QUANT_ALGOS = frozenset({"nvfp4", "fp4"})
 
 _AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
 
+# Quark PTQ 4-bit MoE schemes (MXFP4 / W4A4) are implemented in sglang only on
+# the aiter/native MoE runner path; the triton runner leaves the scheme without
+# a ``runner`` attribute and the server dies on the first forward pass.
+_NATIVE_MOE_RUNNER_QUANT_METHODS = frozenset({"quark"})
+
+_MXFP4_QUANT_MARKERS = ("mxfp4", "mx_fp4", "w4a4")
+
+# ``fp4`` alone is ambiguous (nvfp4 uses it too); the e8m0 scale format is what
+# makes it MX.
+_MX_SCALE_MARKER = "e8m0"
+
 # Quant methods with a real vLLM/sglang loader. Anything else declared in
 # config.json is a private/third-party format that fails in engine init.
 # bitsandbytes/bnb are listed here but separately gated on AMD.
@@ -666,6 +677,51 @@ def _model_is_moe(model_path: str) -> bool:
         if "moe" in str(cfg.get("model_type") or "").lower():
             return True
         if any("moe" in arch.lower() for arch in _config_architectures(cfg)):
+            return True
+    return False
+
+
+def _model_moe_runner_requires_aiter(model_path: str) -> bool:
+    """Best-effort detect a MoE quant scheme that only the aiter runner serves.
+
+    A Quark PTQ 4-bit MoE checkpoint (MXFP4 / W4A4, e.g.
+    Qwen3.5-397B-A17B-MXFP4) is only wired up on sglang's aiter/native MoE
+    runner. Forcing ``--moe-runner-backend triton`` builds the scheme without a
+    ``runner`` attribute, so the first forward pass raises ``AttributeError``
+    and the server dies during cuda-graph capture. Callers use this to skip the
+    AMD triton injection and let sglang pick the backend itself. Checks the top
+    level and a nested ``text_config``. Soft-degrades to False on any missing /
+    unreadable / invalid config.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        bool: ``True`` when the checkpoint carries a Quark 4-bit MoE scheme.
+    """
+    if not model_path:
+        return False
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return False
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        qc = cfg.get("quantization_config")
+        if not isinstance(qc, dict):
+            continue
+        method = str(qc.get("quant_method") or "").strip().lower()
+        if method not in _NATIVE_MOE_RUNNER_QUANT_METHODS:
+            continue
+        try:
+            blob = json.dumps(qc).lower()
+        except (TypeError, ValueError):
+            blob = str(qc).lower()
+        if any(marker in blob for marker in _MXFP4_QUANT_MARKERS):
+            return True
+        if "fp4" in blob and _MX_SCALE_MARKER in blob:
             return True
     return False
 
