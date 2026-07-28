@@ -242,10 +242,9 @@ def _bootstrap_knowledge_plane(
     )
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
     pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
 
-    pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
+    pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:
         reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
         status_text = f"disabled ({reason})"

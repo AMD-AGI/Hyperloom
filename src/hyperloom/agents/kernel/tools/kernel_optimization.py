@@ -1782,7 +1782,7 @@ def build_prompt(
     # Multi-node sandbox is GPU-less: direct the LLM to delegate compile + execution
     # to a GPU-bearing pod. Trust only the in-process $INFERENCE_OPTIMIZER_NODES
     # signal the optimizer CLI exports at launch; never read a co-tenant-writable
-    # state file, so a planted /tmp/multi_node_state.json cannot force multi-node
+    # state file, so a planted multi_node_state.json cannot force multi-node
     # fan-out guidance (same hardening as apply_kernel_patch._is_multi_node).
     try:
         is_multinode_run = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2

@@ -228,19 +228,6 @@ def discover_role_pods(
     return groups
 
 
-def discover_worker_pods(workload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the aggregated worker pods — convenience wrapper over
-    :func:`discover_role_pods` for the non-PD path. Frontend pods are excluded.
-
-    Args:
-        workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
-
-    Returns:
-        The aggregated worker pod entries.
-    """
-    return discover_role_pods(workload, pd_mode="aggregated")["worker"]
-
-
 def pod_targets_from_lists(
     pods: list[dict[str, Any]] | None,
     ips: list[str] | None,

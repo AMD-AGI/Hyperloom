@@ -1706,21 +1706,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
-def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
-    """Whether a candidate is safe to send to kernel optimization backends.
-
-    Thin wrapper over :func:`classify_patchability` kept for backward
-    compatibility with downstream consumers that only need the bool.
-
-    Args:
-        candidate (dict[str, Any]): A hot-kernel candidate row.
-
-    Returns:
-        bool: ``True`` when the candidate is routable to a kernel-opt backend.
-    """
-    return classify_patchability(candidate)[0]
-
-
 # Wrapper TUs that just dispatch to a precompiled .so/.co, detected by small
 # file size + content signature (conservative so real small kernels survive).
 _VENDOR_DISPATCH_SIGS = (
@@ -3806,7 +3791,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
-    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+    if not candidate.get("reusable_native_kernel", classify_patchability(candidate)[0]):
         return []
     if source_type == "vendor_binary":
         return []
@@ -3832,7 +3817,7 @@ def build_notes(candidate: dict[str, Any]) -> str:
         is_runtime_generated_kernel(str(candidate.get("name") or ""), str(candidate.get("source_file") or "")),
     ):
         return "runtime-generated torch.compile/Inductor kernel; not reusable, kernel-opt disabled"
-    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+    if not candidate.get("reusable_native_kernel", classify_patchability(candidate)[0]):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
 

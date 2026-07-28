@@ -9,9 +9,9 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
 idempotent), ``kill-inference``, ``stop-multi-job``.
 
-State lives in ``$MULTI_NODE_STATE_FILE`` (default:
+State lives in ``$MULTI_NODE_STATE_FILE``, or
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
-when the session is pinned, else a file under :func:`tempfile.gettempdir`).
+when the session is pinned. There is no default; one of the two must be set.
 HTTP polls under the sandbox's 120s ceiling and surface progress on stderr.
 Credentials must already be in sandbox env; this module never invents URLs or
 keys.
@@ -952,8 +952,8 @@ def _build_multinode_launch_entrypoint(
     except (TypeError, ValueError):
         ep_val = 1
     ep_arg = f"--ep {ep_val} " if ep_val > 1 else ""
-    # Forward PD knobs only when disaggregated (else keep the colocated default).
-    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    # Forward PD knobs only when disaggregated (else keep the aggregated default).
+    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     pd_args = ""
     if pd_mode == "disaggregated":
         pn = int(getattr(args, "pd_prefill_nodes", 0) or 0)
@@ -1615,8 +1615,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             and str(state.get("last_restart_model") or "") == str(args.model)
             and int(state.get("last_restart_tp") or 0) == int(args.tp)
             and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
-            and str(state.get("last_restart_pd_mode") or "colocated")
-            == (getattr(args, "pd_mode", "") or "colocated").lower()
+            and str(state.get("last_restart_pd_mode") or "aggregated")
+            == (getattr(args, "pd_mode", "") or "aggregated").lower()
             and _normalize_extra_args(state.get("last_restart_extra_args"))
             == _normalize_extra_args(getattr(args, "extra_args", ""))
         )
@@ -1670,7 +1670,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_model"] = args.model
             state["last_restart_tp"] = int(args.tp)
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-            state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "colocated").lower()
+            state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
             state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
             _save_state(state)
 
@@ -1707,7 +1707,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
             # PD disaggregated: read prefill/decode URLs and submit a separate
             # router entrypoint binding 8888 (fatal if it fails).
-            pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+            pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
             router_sub = ""
             router_state: dict = {}
             if pd_mode == "disaggregated":
@@ -1769,7 +1769,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_tp"] = args.tp
         state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
         # Persist PD state so later invocations can fall back when a flag is omitted.
-        pd_mode_persist = (getattr(args, "pd_mode", "") or "colocated").lower()
+        pd_mode_persist = (getattr(args, "pd_mode", "") or "aggregated").lower()
         state["last_restart_pd_mode"] = pd_mode_persist
         if pd_mode_persist == "disaggregated":
             state["last_restart_pd_prefill_nodes"] = int(
@@ -1794,7 +1794,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         return 0
 
     # Single-node path. PD is meaningless on one pod; fail loudly.
-    if (getattr(args, "pd_mode", "") or "colocated").lower() == "disaggregated":
+    if (getattr(args, "pd_mode", "") or "aggregated").lower() == "disaggregated":
         info(
             "ERROR --pd-mode disaggregated is not supported in single-node "
             "mode (state.json says nodes=1). PD requires >=2 nodes so "
@@ -1986,7 +1986,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python3 -m hyperloom.inference_optimizer.multi_node",
         description=(
             "Manage a session-scoped SaFE RayJob for multi-node inference "
-            "optimization. State persists in /tmp/multi_node_state.json."
+            "optimization. State persists in $MULTI_NODE_STATE_FILE."
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2146,14 +2146,14 @@ def build_parser() -> argparse.ArgumentParser:
         "`--enable-expert-parallel`. EP > TP is rejected by the "
         "orchestrator helper before this CLI is invoked.",
     )
-    # Prefill-Decode disaggregation: colocated (default) keeps a single server
+    # Prefill-Decode disaggregation: aggregated (default) keeps a single server
     # group; disaggregated splits into prefill + decode groups fronted by a
     # router on the head pod that binds the public 8888 port.
     sp.add_argument(
         "--pd-mode",
-        choices=("colocated", "disaggregated"),
-        default="colocated",
-        help="PD disaggregation mode (default colocated).",
+        choices=("aggregated", "disaggregated"),
+        default="aggregated",
+        help="PD disaggregation mode (default aggregated).",
     )
     sp.add_argument(
         "--pd-prefill-nodes",
@@ -2262,7 +2262,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stop-multi-job", help="stop the multi-node workload (rayjob or infera) via SaFE REST")
     sp.add_argument("--workload-id", default=None, help="override the workload id from state file")
     sp.add_argument("--delete", action="store_true", help="hard delete instead of soft stop (default: stop)")
-    sp.add_argument("--clear-state", action="store_true", help="remove /tmp/multi_node_state.json on success")
+    sp.add_argument("--clear-state", action="store_true", help="remove the resolved $MULTI_NODE_STATE_FILE on success")
     sp.set_defaults(func=cmd_stop_multi_job)
 
     # apply-patch (multi-node only)
