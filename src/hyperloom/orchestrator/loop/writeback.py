@@ -2518,15 +2518,34 @@ class WritebackCollaborator:
             self.shared_state.last_profile_status = "failed"
             if not trace_path:
                 self.shared_state.last_profile_trace = ""
+            self.shared_state.last_profile_args = ""
+            self.shared_state.last_profile_workload = {}
+            self.shared_state.last_profile_workload_action = ""
             changed = True
         elif trace_path:
             self.shared_state.last_profile_trace = str(trace_path)
             self.shared_state.last_profile_status = "succeeded"
-            # Record the server config in effect for this trace.
+            # Record the server config in effect for this trace, tagged with the
+            # arm it measured so a later same-arm check can trust it.
             profile_args = ""
             if task is not None:
-                profile_args = str((task.params or {}).get("base_extra_args") or "")
-            self.shared_state.last_profile_args = profile_args
+                task_params = task.params or {}
+                profile_args = str(task_params.get("base_extra_args") or "")
+                self.shared_state.record_profile_workload(
+                    task_params,
+                    arm=("baseline" if str(task_params.get("reason") or "") == "prelude_initial" else ""),
+                )
+            else:
+                self.shared_state.last_profile_workload = (
+                    self.shared_state.current_profile_workload_context()
+                )
+                self.shared_state.last_profile_workload_action = str(
+                    (self.shared_state.current_best or {}).get("action") or ""
+                )
+            self.shared_state.last_profile_args = str(
+                self.shared_state.last_profile_workload.get("server_args")
+                or profile_args
+            )
             # New trace invalidates the stale trace_analyze cache.
             self.shared_state.last_trace_analyze = {}
             changed = True

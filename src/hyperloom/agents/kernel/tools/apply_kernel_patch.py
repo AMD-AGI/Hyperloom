@@ -2035,7 +2035,18 @@ def _apply_kernel_patch_snapshot(
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}
     cpp_itfs_cache_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run", "is_cpp_itfs": False}
     if compiled and not skip_rebuild:
-        jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
+        aiter_jit_target = next(
+            (
+                path
+                for path in write_paths
+                if _target_is_in_aiter_csrc(path)
+            ),
+            target,
+        )
+        jit_build_backup = _invalidate_aiter_jit_build(
+            aiter_jit_target,
+            backup_dir,
+        )
         if jit_build_backup.get("status") == "failed":
             revert_kernel_patch(manifest_path)
             return {
@@ -2049,7 +2060,18 @@ def _apply_kernel_patch_snapshot(
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-        cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(target, backup_dir)
+        cpp_itfs_target = next(
+            (
+                path
+                for path in write_paths
+                if _target_is_in_aiter_cpp_itfs(path)
+            ),
+            target,
+        )
+        cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(
+            cpp_itfs_target,
+            backup_dir,
+        )
         if cpp_itfs_cache_backup.get("status") == "failed":
             revert_kernel_patch(manifest_path)
             return {

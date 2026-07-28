@@ -691,6 +691,12 @@ class IntentRouter:
                                 "error_class": "handler_exception",
                                 "error": repr(exc),
                             }
+                        # A block-FP8 GEMM run may have executed an inline
+                        # Roofline whose refreshed profile fields only live in
+                        # state.json. Merge them before the terminal lifecycle
+                        # event persists the live state over them.
+                        if kind == "run_gemm_tuning":
+                            self._sync_profile_state_after_gemm_roofline(result)
                         _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
                         _lc_detail = " ".join(
                             str(p)

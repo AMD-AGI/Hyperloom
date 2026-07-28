@@ -956,6 +956,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_ck_blockscale_switch_eligible": "phase_kernel",
         "_ck_switch_precision_is_fp8": "phase_kernel",
         "_handle_gemm_tuning_result": "phase_kernel",
+        "_sync_profile_state_after_gemm_roofline": "phase_kernel",
         "_journal_gemm_tuning_keep": "phase_kernel",
         "_promote_gemm_tuning_keep": "phase_kernel",
         "_replace_latest_gemm_tuning_attempt": "phase_kernel",
