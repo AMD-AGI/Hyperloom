@@ -47,6 +47,30 @@ def _moe_model_dir(tmp_path: Path) -> str:
     return str(d)
 
 
+def _quark_mxfp4_moe_model_dir(tmp_path: Path) -> str:
+    """A Quark MX-FP4 MoE checkpoint dir (the gate skips injection for it)."""
+    spec = {"dtype": "fp4", "qscheme": "per_group", "group_size": 32, "scale_format": "e8m0"}
+    d = tmp_path / "Qwen3.5-397B-A17B-MXFP4"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5_moe",
+                "num_experts": 128,
+                "quantization_config": {
+                    "quant_method": "quark",
+                    "global_quant_config": {
+                        "weight": {**spec, "is_dynamic": False},
+                        "input_tensors": {**spec, "is_dynamic": True},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(d)
+
+
 def _write_yaml(path: Path, model: str) -> None:
     cfg = {
         "benchmark": {
@@ -120,6 +144,33 @@ def test_moe_runner_failure_scans_logs(tmp_path: Path):
 def test_moe_runner_failure_negative():
     result = {"status": "failed", "error": "CUDA out of memory"}
     assert BaselineExecutor._is_moe_runner_rooted_failure(result) is False
+
+
+def test_unrelated_missing_runner_attribute_is_not_a_moe_failure():
+    # A missing 'runner' attribute outside the MoE path must not burn a retry.
+    result = {
+        "status": "failed",
+        "error": (
+            'File ".../bench/harness.py", line 12, in start\n'
+            "    self.runner.run(request)\n"
+            "AttributeError: 'BenchHarness' object has no attribute 'runner'\n"
+        ),
+    }
+    assert BaselineExecutor._is_moe_runner_rooted_failure(result) is False
+
+
+def test_moe_failure_detected_for_non_quark_scheme():
+    # Detection is keyed on the MoE runner, not on Quark: sglang's int4fp8 and
+    # mxfp4 dynamic-quant MoE methods fail the same way.
+    result = {
+        "status": "failed",
+        "error": (
+            'File ".../layers/quantization/quark_int4fp8_moe.py", line 446, in apply\n'
+            "    return self.runner.run(dispatch_output, quant_info)\n"
+            "AttributeError: 'QuarkInt4Fp8MoEMethod' object has no attribute 'runner'\n"
+        ),
+    }
+    assert BaselineExecutor._is_moe_runner_rooted_failure(result) is True
 
 
 # --- end-to-end fallback ----------------------------------------------------
@@ -307,6 +358,93 @@ def test_moe_fallback_keeps_eval_disabled_by_earlier_fallback(tmp_path, monkeypa
     warnings = result.get("nonfatal_warnings", [])
     assert "eval_failed_fallback_no_accuracy" in warnings
     assert "moe_runner_backend_fallback_dropped_flag" in warnings
+
+
+def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkeypatch):
+    """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips
+    injection, but an operator pin still reaches the server on attempt 1. The
+    fallback must strip it."""
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    model = _quark_mxfp4_moe_model_dir(tmp_path)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model)
+    calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        sglang_args = _sglang_args(cmd)
+        calls.append(sglang_args)
+        if "--moe-runner-backend" in sglang_args:
+            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": model,
+            "gpu_type": "mi300x",
+            "disable_run_eval": True,
+            "extra_server_args": "--moe-runner-backend triton --mem-fraction-static 0.9",
+        }
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert "--moe-runner-backend triton" in calls[0]
+    assert all("--moe-runner-backend" not in c for c in calls[1:])
+    assert "--mem-fraction-static 0.9" in calls[1]
+    assert result["status"] == "succeeded"
+
+
+def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch):
+    """With the gate in place a Quark MX-FP4 checkpoint launches clean on the
+    first attempt -- no crash, no retry."""
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    model = _quark_mxfp4_moe_model_dir(tmp_path)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, model)
+    calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        sglang_args = _sglang_args(cmd)
+        calls.append(sglang_args)
+        if "--moe-runner-backend" in sglang_args:
+            return subprocess.CompletedProcess(cmd, 1, "", _QUARK_TRACEBACK)
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": model,
+            "gpu_type": "mi300x",
+            "disable_run_eval": True,
+        }
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert all("--moe-runner-backend" not in c for c in calls)
+    assert result["status"] == "succeeded"
+    assert "moe_runner_backend_fallback_dropped_flag" not in result.get("nonfatal_warnings", [])
 
 
 def test_fallback_fires_only_once(tmp_path, monkeypatch):

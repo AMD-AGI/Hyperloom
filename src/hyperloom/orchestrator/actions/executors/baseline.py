@@ -81,11 +81,23 @@ _EVAL_FAILURE_MARKERS = (
 _LOG_SCAN_MAX_BYTES = 262_144
 
 # Markers identifying a MoE quant scheme with no implementation for the
-# ``--moe-runner-backend`` Hyperloom injects: the scheme is built without a
-# ``runner`` and the first forward pass dies (e.g. Quark MXFP4 on triton).
-_MOE_RUNNER_FAILURE_MARKERS = (
+# ``--moe-runner-backend`` in use: ``create_moe_runner`` falls through without
+# building a runner and the first forward pass dies (e.g. Quark MXFP4 on
+# triton). Both a missing-runner marker AND a MoE-scheme marker must appear, so
+# an unrelated AttributeError mentioning some other ``runner`` attribute does
+# not burn a full benchmark retry. Deliberately not keyed on Quark: sglang has
+# other aiter-only MoE schemes (quark_int4fp8_moe, the mxfp4 dynamic-quant
+# method) that fail exactly the same way.
+_MOE_RUNNER_MISSING_MARKERS = (
     "has no attribute 'runner'",
     'has no attribute "runner"',
+)
+_MOE_SCHEME_CONTEXT_MARKERS = (
+    "create_moe_runner",
+    "moe_runner",
+    "_moe.py",
+    "fused_moe",
+    "/moe/",
 )
 
 
@@ -1110,7 +1122,11 @@ class BaselineExecutor:
         return None
 
     @staticmethod
-    def _failure_carries_markers(result: dict[str, Any], markers: tuple[str, ...]) -> bool:
+    def _failure_carries_markers(
+        result: dict[str, Any],
+        markers: tuple[str, ...],
+        context_markers: tuple[str, ...] | None = None,
+    ) -> bool:
         """Whether a failed result's error tail, warnings or logs hit a marker.
 
         Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
@@ -1122,13 +1138,18 @@ class BaselineExecutor:
         Args:
             result: A ``status="failed"`` baseline result dict.
             markers: Substrings identifying the root cause being probed.
+            context_markers: When set, one of these must appear in the SAME
+                blob as a ``markers`` hit, narrowing a generic signature to the
+                subsystem that owns it.
 
         Returns:
-            ``True`` when any marker is found, else ``False``.
+            ``True`` when the marker (and its context) is found, else ``False``.
         """
 
         def _hit(text: str) -> bool:
-            return any(m in text for m in markers)
+            if not any(m in text for m in markers):
+                return False
+            return not context_markers or any(m in text for m in context_markers)
 
         if _hit(str(result.get("error") or "")):
             return True
@@ -1194,7 +1215,11 @@ class BaselineExecutor:
         Returns:
             ``True`` when a MoE-runner marker is found, else ``False``.
         """
-        return BaselineExecutor._failure_carries_markers(result, _MOE_RUNNER_FAILURE_MARKERS)
+        return BaselineExecutor._failure_carries_markers(
+            result,
+            _MOE_RUNNER_MISSING_MARKERS,
+            _MOE_SCHEME_CONTEXT_MARKERS,
+        )
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback.

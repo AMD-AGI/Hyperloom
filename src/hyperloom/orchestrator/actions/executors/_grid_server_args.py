@@ -762,6 +762,66 @@ _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
+# sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the
+# aiter backend (the others fall through to a bare ``pass``, so the first
+# forward pass dies on a missing ``runner``). Two are selected online through
+# ``--quantization`` rather than the checkpoint's own config: quark_int4fp8_moe
+# always, and mxfp4 only when the checkpoint is NOT mxfp4-serialized (sglang
+# then routes to its dynamic-quant MoE method, which is aiter-only too).
+_AITER_ONLY_ONLINE_QUANT_METHODS = frozenset({"quark_int4fp8_moe"})
+
+_AITER_ONLY_UNLESS_SERIALIZED_QUANT_METHOD = "mxfp4"
+
+_SGLANG_QUANTIZATION_RE = re.compile(r"--quantization[=\s]+(\S+)")
+
+
+def _online_quant_requires_aiter_moe_runner(server_args: str, model_path: str) -> bool:
+    """Whether ``--quantization`` selects an aiter-only MoE scheme.
+
+    Args:
+        server_args (str): The server-arg string to read ``--quantization`` from.
+        model_path (str): Model path, used to tell a serialized mxfp4
+            checkpoint (which gets the backend-flexible method) from an online
+            dynamic-quant one.
+
+    Returns:
+        bool: ``True`` when the selected scheme only has an aiter MoE runner.
+    """
+    match = _SGLANG_QUANTIZATION_RE.search(server_args or "")
+    if not match:
+        return False
+    quantization = match.group(1).strip().strip("\"'").lower()
+    if quantization in _AITER_ONLY_ONLINE_QUANT_METHODS:
+        return True
+    if quantization != _AITER_ONLY_UNLESS_SERIALIZED_QUANT_METHOD:
+        return False
+    from hyperloom.inference_optimizer.cli.model_gate import _model_declared_quant_method
+
+    # Mirrors sglang: is_checkpoint_mxfp4_serialized = "mxfp4" in quant_method.
+    return "mxfp4" not in _model_declared_quant_method(model_path)
+
+
+def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -> bool:
+    """Whether this model + server args resolve to an aiter-only MoE scheme.
+
+    Folds the two ways sglang can land on such a scheme: the checkpoint's own
+    Quark MX-FP4 config, and an online ``--quantization`` selection.
+
+    Args:
+        server_args (str | None): Server args, read for ``--quantization``.
+        model_path (str | None): Model path whose ``config.json`` is inspected.
+
+    Returns:
+        bool: ``True`` when only the aiter MoE runner can serve this model.
+    """
+    from hyperloom.inference_optimizer.cli.model_gate import _model_moe_runner_requires_aiter
+
+    path = str(model_path or "")
+    return _model_moe_runner_requires_aiter(path) or _online_quant_requires_aiter_moe_runner(
+        str(server_args or ""),
+        path,
+    )
+
 
 def inject_sglang_moe_runner_backend(
     server_args: str | None,
@@ -802,11 +862,9 @@ def inject_sglang_moe_runner_backend(
         return args
     if not _model_is_moe(str(model_path or "")):
         return args
-    from hyperloom.inference_optimizer.cli.model_gate import _model_moe_runner_requires_aiter
-
-    # Quark MXFP4/W4A4 MoE has no triton runner: injecting one crashes the
+    # An aiter-only MoE scheme has no triton runner: injecting one crashes the
     # server on the first forward pass. Let sglang resolve the backend itself.
-    if _model_moe_runner_requires_aiter(str(model_path or "")):
+    if moe_runner_requires_aiter(args, str(model_path or "")):
         log.info(
             "MoE model with an aiter-only quant scheme: skipping "
             "--moe-runner-backend injection (the triton runner has no "
