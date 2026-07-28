@@ -46,8 +46,6 @@ from ._internal.external_state import load_multi_node_state
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
-# MoE cold-start often needs 20-30 min; set HYPERLOOM_MN_POLL_TIMEOUT_S=1800.
-_DEFAULT_JIT_POLL_TIMEOUT_S = 1800
 
 
 def _resolve_poll_timeout_s() -> int:

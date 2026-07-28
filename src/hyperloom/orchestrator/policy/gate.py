@@ -122,9 +122,6 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-_GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
-
-
 # Per-action delegate source allowlist; unlisted actions fall through to the general delegate rules.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
     "recover": frozenset({"robustness"}),

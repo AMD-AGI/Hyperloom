@@ -18,10 +18,6 @@ import sys
 import sysconfig
 from pathlib import Path
 
-_DEFAULT_SGLANG_SERVER_ARGS = Path("/sgl-workspace/sglang/python/sglang/srt/server_args.py")
-_DEFAULT_VLLM_ARG_UTILS = Path("/sgl-workspace/vllm/vllm/engine/arg_utils.py")
-_DEFAULT_ATOM_ARG_UTILS = Path("/app/ATOM/atom/model_engine/arg_utils.py")
-
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
