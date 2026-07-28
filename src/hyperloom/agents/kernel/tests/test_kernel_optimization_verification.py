@@ -998,6 +998,80 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     assert res is None
 
 
+def test_forge_patch_builds_multifile_deploy_bundle(tmp_path):
+    repo = tmp_path / "aiter"
+    mirror = repo / "csrc" / "kernels" / "attention_ragged.cu"
+    runtime = repo / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
+    mirror.parent.mkdir(parents=True)
+    runtime.parent.mkdir(parents=True)
+    old_mirror = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void original_kernel() {}\n'
+    )
+    new_mirror = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void optimized_kernel() {}\n'
+    )
+    mirror.write_text(old_mirror, encoding="utf-8")
+    runtime.write_text("OLD_RUNTIME\n", encoding="utf-8")
+    artifact = tmp_path / "v1_forge.cu"
+    artifact.write_text(new_mirror, encoding="utf-8")
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.10x\n",
+        encoding="utf-8",
+    )
+    files_root = tmp_path / "optimized_versions" / "files"
+    final_mirror = files_root / "csrc" / "kernels" / "attention_ragged.cu"
+    final_runtime = files_root / "csrc" / "cpp_itfs" / "pa" / "pa_kernels.cuh"
+    final_mirror.parent.mkdir(parents=True)
+    final_runtime.parent.mkdir(parents=True)
+    final_mirror.write_text(new_mirror, encoding="utf-8")
+    final_runtime.write_text("NEW_RUNTIME\n", encoding="utf-8")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/csrc/kernels/attention_ragged.cu "
+        "b/csrc/kernels/attention_ragged.cu\n"
+        "--- a/csrc/kernels/attention_ragged.cu\n"
+        "+++ b/csrc/kernels/attention_ragged.cu\n"
+        "@@ -1,2 +1,2 @@\n"
+        " #include <hip/hip_runtime.h>\n"
+        '-extern "C" void original_kernel() {}\n'
+        '+extern "C" void optimized_kernel() {}\n'
+        "diff --git a/csrc/cpp_itfs/pa/pa_kernels.cuh "
+        "b/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "--- a/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "+++ b/csrc/cpp_itfs/pa/pa_kernels.cuh\n"
+        "@@ -1 +1 @@\n-OLD_RUNTIME\n+NEW_RUNTIME\n",
+        encoding="utf-8",
+    )
+    attempt = {
+        "attempt_id": "forge-attention",
+        "backend": "forge",
+        "status": "completed",
+        "optimized_path": str(artifact),
+        "backend_paths": {
+            "partial_latest_optimized": str(artifact),
+            "partial_report": str(report),
+            "forge_patch": str(patch),
+            "output_dir": str(tmp_path),
+        },
+    }
+
+    verification = ko.build_verification(
+        _args(source_file=str(mirror), kernel_repo=str(repo)),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    bundle = verification["best_artifact_bundle"]
+    assert bundle["type"] == "patch_snapshot"
+    assert set(bundle["write_paths"]) == {
+        "csrc/kernels/attention_ragged.cu",
+        "csrc/cpp_itfs/pa/pa_kernels.cuh",
+    }
+
+
 # Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must
 # match both the `_optimized.<suffix>` and `_stdout.log` names.
 

@@ -1207,6 +1207,41 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
     assert "--quantization fp8" in merged
 
 
+def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
+    """A refreshed Roofline must launch with the backend env selected by Explore."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def _fake_parent(self, ctx):
+        captured.update(ctx.task.params)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(BaselineExecutor, "__call__", _fake_parent)
+    task = SimpleNamespace(
+        params={
+            "base_extra_envs": {
+                "VLLM_ROCM_USE_AITER": "1",
+                "SHARED": "base",
+            },
+            "extra_envs": {
+                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+                "SHARED": "caller",
+            },
+        },
+        task_id="t-profile-envs",
+    )
+    ctx = SimpleNamespace(task=task, extra={"workspace": str(tmp_path / "ws")})
+
+    result = asyncio.run(ProfileExecutor()(ctx))
+
+    assert result["status"] == "succeeded"
+    assert captured["extra_envs"] == {
+        "VLLM_ROCM_USE_AITER": "1",
+        "VLLM_ROCM_USE_AITER_LINEAR": "1",
+        "SHARED": "caller",
+    }
+
+
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""

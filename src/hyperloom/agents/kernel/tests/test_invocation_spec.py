@@ -22,6 +22,25 @@ sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
 
 
+def test_forge_e2e_pct_prefers_task_group_aggregate():
+    candidate = {
+        "gpu_pct": 29.131,
+        "task_group": {"aggregate_gpu_pct": 81.471},
+    }
+
+    assert forge_submit._forge_e2e_pct(candidate) == 81.471
+
+
+def test_forge_e2e_pct_falls_back_to_primary_row():
+    assert forge_submit._forge_e2e_pct({"gpu_pct": 3.218}) == 3.218
+
+
+def test_forge_e2e_pct_rejects_invalid_values_without_rescaling():
+    for value in (-1.0, 101.0, float("nan"), float("inf"), "invalid"):
+        assert forge_submit._forge_e2e_pct({"gpu_pct": value}) is None
+    assert forge_submit._forge_e2e_pct({"gpu_pct": 0.5}) == 0.5
+
+
 def _candidate(tmp_path: Path) -> dict:
     repo = tmp_path / "repo"
     benchmark = repo / "tests" / "test_scaled_gemm.py"
@@ -340,12 +359,16 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
         experiments_dir=tmp_path / "experiments",
         forge_log=tmp_path / "forge.log",
         timeout_s=60,
+        deadline_unix=9_999_999_999.0,
+        experience_id="forge-attempt-1",
     )
 
     cmd = captured["cmd"]
     option_index = cmd.index("--invocation-spec-file")
     assert cmd[option_index + 1] == str(spec_path.resolve())
     assert cmd[cmd.index("--experiment-id") + 1] == "hyperloom"
+    assert cmd[cmd.index("--experience-id") + 1] == "forge-attempt-1"
+    assert cmd[cmd.index("--deadline-unix") + 1] == "9999999999.0"
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
 

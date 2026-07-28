@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
@@ -32,7 +33,7 @@ from .session_paths import manifest_path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 # Env vars consulted by _detect_stack_fingerprint (operator pins that
@@ -412,6 +413,10 @@ def build_manifest(
             workload["precision"] = str(args.precision)
     claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
     sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
+    # Shared provenance builder (WP-0): single source of truth for gfx/EP/
+    # graph-mode/server-args, kept in lockstep with the TraceShapeManifest's
+    # provenance block so the two never drift.
+    _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id or build_session_id(model_name),
@@ -427,6 +432,13 @@ def build_manifest(
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
         "tp": tp,
+        # Added provenance (schema v4) via the shared WP-0 builder so a trace
+        # consumer can pin gfx arch / expert-parallel / graph mode / server args.
+        "gfx_arch": _prov.get("gfx_arch"),
+        "ep": _prov.get("ep"),
+        "graph_mode": _prov.get("graph_mode"),
+        "server_args": _prov.get("server_args"),
+        "server_args_hash": _prov.get("server_args_hash"),
         "workload": workload,
         "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,

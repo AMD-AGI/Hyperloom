@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 # Minimal SharedState + TaskRegistry doubles.
@@ -69,7 +70,10 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
-    c.shared_state = _BareState()
+    c.shared_state = SharedState(
+        baseline_tput=100.0,
+        kernel_optimizer="native",
+    )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
@@ -81,6 +85,10 @@ def test_prelude_initial_roofline_task_contract(coord: Coordinator):
     """The PRELUDE-bootstrap roofline represents baseline, not current_best."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        "remove_args": ["--old-backend"],
+        "unset_envs": ["OLD_BACKEND"],
+        "args_mode": "replace",
     }
     coord.shared_state.last_baseline = {
         "benchmark_script": "magpie_serving_bench.sh",
@@ -150,6 +158,10 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
     """Watermark roofline still profiles the optimized current_best config."""
     coord.shared_state.current_best = {
         "extra_server_args": "--tp 8 --enable-mla",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        "remove_args": ["--old-backend"],
+        "unset_envs": ["OLD_BACKEND"],
+        "args_mode": "replace",
     }
 
     task = asyncio.run(
@@ -158,6 +170,10 @@ def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
 
     assert task.params["reason"] == "explore_keep_watermark"
     assert task.params["base_extra_args"] == "--tp 8 --enable-mla"
+    assert task.params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER_LINEAR": "1"}
+    assert task.params["base_remove_args"] == ["--old-backend"]
+    assert task.params["base_unset_envs"] == ["OLD_BACKEND"]
+    assert task.params["base_args_mode"] == "replace"
 
 
 @pytest.mark.asyncio
@@ -233,10 +249,58 @@ async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state)
     coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
+    coord.shared_state.last_profile_workload = (
+        coord.shared_state.current_profile_workload_context()
+    )
 
     await coord._maybe_reprofile_for_kernel()
 
     assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_legacy_trace_without_runtime_fingerprint(
+    coord: Coordinator,
+):
+    """A pre-upgrade trace without runtime metadata is stale and must be refreshed."""
+    coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.cumulative_gain_validated = 0.0
+    coord.shared_state.last_profile_workload = {}
+    coord.sub = _StubSub(coord.shared_state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_reprofiles_when_backend_context_changes(coord: Coordinator):
+    """A backend/env change invalidates the prior trace even when throughput is unchanged."""
+    state = coord.shared_state
+    state.framework = "vllm"
+    state.precision = "fp8"
+    state.model_path = "/models/qwen"
+    state.tp = 1
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 1024
+    state.max_model_len = 4096
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    state.cumulative_gain_validated = 0.0
+    state.last_profile_workload = state.profile_workload_context(
+        {"base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "0"}}
+    )
+    state.current_best = {
+        "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+    }
+    coord.sub = _StubSub(state, landed_tput=100.0)
+
+    await coord._maybe_reprofile_for_kernel()
+
+    assert len(coord.sub.tasks_run) == 1
+    assert coord.sub.tasks_run[0].params["base_extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_LINEAR": "1"
+    }
 
 
 @pytest.mark.asyncio
