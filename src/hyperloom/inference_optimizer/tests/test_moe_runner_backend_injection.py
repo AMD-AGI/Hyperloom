@@ -81,6 +81,26 @@ def dense_model(tmp_path) -> str:
     )
 
 
+@pytest.fixture
+def quark_mxfp4_moe_model(tmp_path) -> str:
+    """A Quark-PTQ MXFP4 (W4A4) MoE checkpoint dir."""
+    return _write_model_config(
+        tmp_path / "Qwen3.5-397B-A17B-MXFP4",
+        {
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "model_type": "qwen3_5_moe",
+            "num_experts": 128,
+            "quantization_config": {
+                "quant_method": "quark",
+                "global_quant_config": {
+                    "weight": {"dtype": "fp4", "group_size": 32, "scale_format": "e8m0"},
+                    "input_tensors": {"dtype": "fp4", "group_size": 32, "scale_format": "e8m0"},
+                },
+            },
+        },
+    )
+
+
 # _model_is_moe detection
 @pytest.mark.parametrize(
     "config",
@@ -115,6 +135,52 @@ def test_model_is_moe_false(tmp_path, config):
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
     assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
+
+
+# _model_moe_runner_requires_aiter detection
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "mx_fp4"}}},
+        {"quant_method": "quark", "export": {"kv_cache_group": []}, "fmt": "mxfp4"},
+        {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "fp4", "scale_format": "e8m0"}}},
+        {"quant_method": "quark", "layer_quant_config": {"*mlp.experts*": {"w4a4": True}}},
+    ],
+)
+def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
+    path = _write_model_config(
+        tmp_path / "m",
+        {"num_experts": 128, "quantization_config": quant_config},
+    )
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"num_experts": 128},  # unquantized MoE
+        {"num_experts": 128, "quantization_config": {"quant_method": "fp8"}},
+        # fp4 without Quark: not the scheme that lacks a triton runner.
+        {"num_experts": 128, "quantization_config": {"quant_method": "modelopt", "fmt": "mxfp4"}},
+        # Quark without a 4-bit marker keeps the triton runner.
+        {"num_experts": 128, "quantization_config": {"quant_method": "quark", "fmt": "fp8_e4m3"}},
+    ],
+)
+def test_moe_runner_requires_aiter_false(tmp_path, config):
+    path = _write_model_config(tmp_path / "m", config)
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is False
+
+
+def test_moe_runner_requires_aiter_reads_nested_text_config(tmp_path):
+    path = _write_model_config(
+        tmp_path / "m",
+        {"text_config": {"num_experts": 128, "quantization_config": {"quant_method": "quark", "fmt": "mxfp4"}}},
+    )
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+
+
+def test_moe_runner_requires_aiter_missing_config_is_false(tmp_path):
+    assert cli_model_gate._model_moe_runner_requires_aiter(str(tmp_path / "nope")) is False
 
 
 # inject_sglang_moe_runner_backend (pure helper)
@@ -159,6 +225,18 @@ def test_inject_noop_for_dense_model(dense_model):
     )
 
 
+def test_inject_noop_for_quark_mxfp4_moe(quark_mxfp4_moe_model):
+    # sglang's QuarkW4A4MXFp4MoE only initialises its runner on the aiter path;
+    # forcing triton crashes the server on the first forward pass.
+    assert inject_sglang_moe_runner_backend("--foo", "sglang", quark_mxfp4_moe_model, _AMD) == "--foo"
+    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
+
+
+def test_inject_env_override_does_not_resurrect_quark_injection(quark_mxfp4_moe_model, monkeypatch):
+    monkeypatch.setenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "triton")
+    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
+
+
 def test_inject_noop_on_non_amd_gpu(moe_model):
     # Explicit non-AMD gpu + autodetect pinned off (fixture) -> no injection.
     assert inject_sglang_moe_runner_backend("--foo", "sglang", moe_model, "h100") == "--foo"
@@ -198,6 +276,7 @@ def _materialize_envs(
     model: str,
     framework: str = "sglang",
     extra_server_args: str = "",
+    drop_moe_runner_backend: bool = False,
 ) -> dict:
     base = tmp_path / "base.yaml"
     _write_yaml(base, model=model, framework=framework)
@@ -207,6 +286,7 @@ def _materialize_envs(
         base,
         out,
         extra_server_args=extra_server_args,
+        drop_moe_runner_backend=drop_moe_runner_backend,
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -221,6 +301,31 @@ def test_materialize_noop_for_dense_model_on_amd(tmp_path, dense_model, monkeypa
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(tmp_path, model=dense_model)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(tmp_path, model=quark_mxfp4_moe_model)
+    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_drop_skips_injection(tmp_path, moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(tmp_path, model=moe_model, drop_moe_runner_backend=True)
+    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_drop_strips_inherited_backend(tmp_path, moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(
+        tmp_path,
+        model=moe_model,
+        extra_server_args="--moe-runner-backend ck --foo 1",
+        drop_moe_runner_backend=True,
+    )
+    sglang_args = envs.get("EXTRA_SGLANG_ARGS", "")
+    assert "--moe-runner-backend" not in sglang_args
+    assert "--foo 1" in sglang_args
 
 
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):

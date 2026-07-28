@@ -253,9 +253,15 @@ def _finalize_framework_server_args(
     gpu_type: str | None,
     isl_val: int,
     osl_val: int,
+    drop_moe_runner_backend: bool = False,
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
-    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed."""
+    (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
+
+    ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
+    already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
+    SERVER_ARGS``, the reference recipe, the YAML base), so stripping here is
+    what guarantees a retry launches without the backend that killed it."""
     framework_env = server_args_env_name(bench.get("framework"))
     resolved_server_args = str(envs.get(framework_env, "")).strip()
     resolved_server_args = inject_sglang_context_length(
@@ -281,12 +287,16 @@ def _finalize_framework_server_args(
     # 4. MoE runner backend: aiter's CK fused-MoE JIT build is broken in some
     #    images; inject the triton MoE runner unless --moe-runner-backend is
     #    pinned.
-    resolved_server_args = inject_sglang_moe_runner_backend(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
-    )
+    if drop_moe_runner_backend:
+        if framework_env == "EXTRA_SGLANG_ARGS":
+            resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
+    else:
+        resolved_server_args = inject_sglang_moe_runner_backend(
+            resolved_server_args,
+            bench.get("framework"),
+            bench.get("model"),
+            gpu_type=gpu_type or bench.get("runner_type"),
+        )
     resolved_server_args = inject_vllm_expert_parallel(
         resolved_server_args,
         bench.get("framework"),
@@ -329,6 +339,7 @@ def materialize_config_with_envs(
     reference_envs: dict[str, Any] | None = None,
     out_name: str = "baseline_config.with_envs.yaml",
     establish_quality_ref: bool = False,
+    drop_moe_runner_backend: bool = False,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -366,6 +377,10 @@ def materialize_config_with_envs(
             image-quality reference is ESTABLISHED (written) by this run;
             otherwise the run only COMPARES against it. See the quality-
             reference wiring block below.
+        drop_moe_runner_backend: When True, skip the AMD MoE
+            ``--moe-runner-backend`` injection and strip the flag from the
+            merged args whatever source it came from (the one-shot fallback
+            after a launch failure blamed on that backend).
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -920,7 +935,14 @@ def materialize_config_with_envs(
     # 2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
     #    first-request aiter JIT compile survives (the 300s default fires
     #    SIGQUIT mid-warmup on a cold aiter cache).
-    _finalize_framework_server_args(envs, bench, gpu_type=gpu_type, isl_val=isl_val, osl_val=osl_val)
+    _finalize_framework_server_args(
+        envs,
+        bench,
+        gpu_type=gpu_type,
+        isl_val=isl_val,
+        osl_val=osl_val,
+        drop_moe_runner_backend=drop_moe_runner_backend,
+    )
     # ── Client trust-remote-code (model-agnostic) ─────────────────────────
     # The MI300X bench scripts always launch the SERVER with
     # --trust-remote-code, so a custom-tokenizer model's CLIENT must load the
