@@ -181,10 +181,13 @@ _RUN_LM_EVAL_PARSER_PATCHED_BLOCK = (
 )
 
 # InferenceX a4bb43af+ refactored the parser into a single merged case
-# (``--port|--task|...|--top-p)`` with an inner dispatch) and a ``>&2`` /
+# (``--port|--task|...|--top-p)`` with an inner dispatch and a ``>&2`` /
 # ``return 2`` catch-all, so the per-flag legacy block above no longer matches.
 # Match that catch-all (any ``return N``) and splice a dedicated
 # ``--concurrent-requests`` case in front of it, preserving the leading indent.
+# The scan is scoped to the ``run_lm_eval`` body (see
+# :func:`_extract_run_lm_eval_region`) so it never lands in an earlier
+# function's identical ``*)`` catch-all (benchmark_lib.sh has several).
 _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
     r"^(?P<indent>[ \t]*)\*\)\s*\n"
     r"[ \t]*echo\s+\"Unknown parameter: \$1\"(?:\s+>&2)?\s*\n"
@@ -192,6 +195,10 @@ _RUN_LM_EVAL_MERGED_CATCHALL_RE = re.compile(
     r"[ \t]*;;\s*\n",
     re.MULTILINE,
 )
+
+# Header of the InferenceX ``run_lm_eval`` shell function; used to scope the
+# merged-case parser patch and the tolerance check to that function's body.
+_RUN_LM_EVAL_FN_MARKER = "run_lm_eval()"
 
 # InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env
 # (EVAL_CONCURRENT_REQUESTS, fallback CONC). Passing --concurrent-requests to
@@ -462,15 +469,46 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
     return ok
 
 
+def _extract_run_lm_eval_region(text: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` char offsets of the ``run_lm_eval`` function body.
+
+    Scopes any parser-shape scan to that one function so an identical ``*)``
+    catch-all in an earlier ``benchmark_lib.sh`` function (there are several)
+    can never be mistaken for ``run_lm_eval``'s. The body runs from the
+    ``run_lm_eval()`` header to the next line-start ``}`` (the function's
+    closing brace at column 0), or end-of-text when that brace is absent.
+
+    Args:
+        text: The full ``benchmark_lib.sh`` source text.
+
+    Returns:
+        The ``(start, end)`` offsets of the function body, or ``None`` when the
+        ``run_lm_eval()`` header is absent.
+    """
+    start = text.find(_RUN_LM_EVAL_FN_MARKER)
+    if start == -1:
+        return None
+    close = re.search(r"^\}", text[start:], re.MULTILINE)
+    end = start + close.end() if close else len(text)
+    return start, end
+
+
 def _patch_merged_case_parser(text: str) -> str | None:
     """Splice a ``--concurrent-requests`` case before the merged-case parser's
-    ``*)`` catch-all, or return ``None`` when that catch-all is not found.
+    ``*)`` catch-all, or return ``None`` when that catch-all is not found inside
+    the ``run_lm_eval`` body.
 
     Handles the InferenceX a4bb43af+ shape where every flag shares one
     ``case`` arm; the new arm sets the ``concurrent_requests`` local the parser
-    already owns. Indentation is inherited from the matched catch-all.
+    already owns. Indentation is inherited from the matched catch-all. Matching
+    is scoped to the ``run_lm_eval`` body so the patch never lands in an
+    earlier function's identical catch-all.
     """
-    m = _RUN_LM_EVAL_MERGED_CATCHALL_RE.search(text)
+    region = _extract_run_lm_eval_region(text)
+    if region is None:
+        return None
+    start, end = region
+    m = _RUN_LM_EVAL_MERGED_CATCHALL_RE.search(text, start, end)
     if m is None:
         return None
     indent = m.group("indent")
@@ -506,8 +544,12 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
         log.warning("_magpie_patcher: cannot read %s: %s", benchmark_lib, e)
         return False
 
-    # Already tolerant (our sentinel, or an upstream that added the flag).
-    if _RUN_LM_EVAL_PARSER_SENTINEL in original or _EVAL_CONCURRENCY_FLAG_MARKER in original:
+    # Already tolerant (our sentinel, or an upstream that added the flag) --
+    # scoped to the run_lm_eval body so a sentinel/flag elsewhere in the file
+    # does not short-circuit the patch of run_lm_eval itself.
+    _region = _extract_run_lm_eval_region(original)
+    _body = original[_region[0] : _region[1]] if _region is not None else ""
+    if _RUN_LM_EVAL_PARSER_SENTINEL in _body or _EVAL_CONCURRENCY_FLAG_MARKER in _body:
         return True
 
     if _RUN_LM_EVAL_PARSER_LEGACY_BLOCK in original:
@@ -609,7 +651,14 @@ def _inferencex_tolerates_eval_flag(inferencex_dir: Path | str | None) -> bool:
         text = lib.read_text(encoding="utf-8")
     except OSError:
         return False
-    return _RUN_LM_EVAL_PARSER_SENTINEL in text or _EVAL_CONCURRENCY_FLAG_MARKER in text
+    # Scope the check to the run_lm_eval body: a sentinel / flag anywhere else
+    # in the file (e.g. a mis-placed patch in another function's catch-all, or
+    # an unrelated comment) must NOT be read as run_lm_eval tolerating the flag.
+    region = _extract_run_lm_eval_region(text)
+    if region is None:
+        return False
+    body = text[region[0] : region[1]]
+    return _RUN_LM_EVAL_PARSER_SENTINEL in body or _EVAL_CONCURRENCY_FLAG_MARKER in body
 
 
 def live_eval_concurrency_flag_scripts(
