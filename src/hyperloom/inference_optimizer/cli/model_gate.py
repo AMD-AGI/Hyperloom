@@ -206,6 +206,7 @@ _MAXPOS_CONFIG_KEYS = (
     "max_sequence_length",
     "seq_length",
     "max_seq_len",
+    "model_max_length",  # HuggingFace tokenizer_config field; used by some custom models (e.g. kimi_linear)
 )
 
 _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
