@@ -81,3 +81,6 @@ code_functions_guidance_v2
 .gen_funcdocs_reboot.wf.js
 evaluation_analysis
 
+
+# Operator runtime env (contains real API keys — never commit)
+runtime-env/

@@ -584,6 +584,25 @@ def should_reloop_to_explore(
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
+
+
+def _kernel_idle_max_ticks() -> int:
+    """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP.
+
+    Env-overridable via ``INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS``. Default 3
+    tolerates transient no-work windows (e.g. a candidate being set up) while
+    still winding down promptly once candidates are genuinely exhausted, instead
+    of spinning until the KERNEL wall-clock cap.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
+    try:
+        val = int(raw)
+        return val if val >= 1 else 3
+    except (TypeError, ValueError):
+        return 3
+
+
+KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
@@ -1713,6 +1732,21 @@ def exit_normal_kernel(
             return "kernel_no_more_leverage", {
                 "evidence": "kernel_no_more_leverage",
                 "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+            }
+    # Idle-spin guard: the escalate-hint handoff above needs the kernel_agent to
+    # emit ``escalate_strategy_change``, but PolicyGate denies that intent for the
+    # kernel_agent role — so when candidates are exhausted the phase can otherwise
+    # spin (hallucinated kernel-id requests / no-intent turns) until the wall-clock
+    # cap. When work has been unavailable for KERNEL_IDLE_MAX_TICKS consecutive
+    # ticks, wind down to SWEEP without the hint. (kernel_idle_ticks is maintained
+    # per-tick by the phase machine.)
+    if not kernel_work_pending(state):
+        idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
+        if idle_ticks >= KERNEL_IDLE_MAX_TICKS:
+            return "kernel_no_more_leverage", {
+                "evidence": "kernel_idle_no_progress",
+                "idle_ticks": idle_ticks,
+                "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
             }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0
