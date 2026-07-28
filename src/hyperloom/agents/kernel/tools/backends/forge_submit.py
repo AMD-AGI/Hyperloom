@@ -923,13 +923,9 @@ def _write_generated_driver(workspace: str | Path, content: str) -> str:
 def _build_driver_adapter(
     test_command: str,
     worktree: str,
-    output_dir: Path,
-    *,
-    inplace: bool = False,
 ) -> str:
     """Write the driver-adapter script and return its path."""
     test_command = _validate_test_command_argv_like(test_command)
-    del output_dir, inplace  # The long-horizon CLI requires the driver inside workspace.
     return _write_generated_driver(
         worktree,
         _ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree),
@@ -2678,7 +2674,7 @@ def submit(
             )
         elif test_command:
             try:
-                driver = _build_driver_adapter(test_command, workspace, output_dir, inplace=inplace)
+                driver = _build_driver_adapter(test_command, workspace)
                 driver_from_adapter = True
                 log.info("forge driver: harness adapter from test_command")
             except (OSError, ValueError) as exc:
