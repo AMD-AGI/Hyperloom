@@ -235,14 +235,6 @@ async def test_promote_profile_writes_state_and_audit(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_failed_profile_clears_stale_workload_metadata(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.last_profile_trace = "/tmp/old-trace.json.gz"
-    s.last_profile_status = "succeeded"
-    s.last_profile_args = "--old-config"
-    s.last_profile_workload = {"framework": "vllm", "conc": 64}
-
 async def test_promote_profile_without_task_uses_shared_state_workload(session_dir):
     coord = _coord(session_dir)
     state = coord.shared_state
