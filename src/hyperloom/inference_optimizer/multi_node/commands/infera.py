@@ -59,28 +59,6 @@ from .rayjob import (
 )
 
 
-def _infera_pod_targets_from_lists(
-    pods: list[dict[str, Any]] | None,
-    ips: list[str] | None,
-    *,
-    default_port: int,
-    default_role: str = "worker",
-) -> list[dict[str, Any]]:
-    """Build SSH targets from rich pod dicts or legacy IP-only state.
-
-    Args:
-        pods (list[dict] | None): Rich pod target dicts (``{podIP, sshPort,
-            ...}``) recorded by ``create-infera``.
-        ips (list[str] | None): Legacy IP-only fallback list.
-        default_port (int): SSH port assigned to legacy IP-only targets.
-        default_role (str): Role tag for legacy IP-only targets.
-
-    Returns:
-        list[dict[str, Any]]: The resolved SSH target dicts.
-    """
-    return infera_support.pod_targets_from_lists(pods, ips, default_port=default_port, default_role=default_role)
-
-
 def _infera_all_gpu_targets(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Every GPU pod SSH target (PD => prefill+decode, else worker).
 
@@ -814,13 +792,13 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         # Prefill group + decode group: each is its own LWS, each pod uses its
         # own $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS. We send per-group tp/nnodes
         # and the matching --disaggregation-mode.
-        prefill_targets = _infera_pod_targets_from_lists(
+        prefill_targets = infera_support.pod_targets_from_lists(
             state.get("prefill_pods"),
             state.get("prefill_pod_ips"),
             default_port=_mn_cli._infera_default_ssh_port(state),
             default_role="prefill",
         )
-        decode_targets = _infera_pod_targets_from_lists(
+        decode_targets = infera_support.pod_targets_from_lists(
             state.get("decode_pods"),
             state.get("decode_pod_ips"),
             default_port=_mn_cli._infera_default_ssh_port(state) + infera_support.INFERA_SSH_PORT_ROLE_STRIDE,
@@ -877,7 +855,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             all_results[role] = results
     else:
         nnodes = int(state.get("nodes") or 1)
-        worker_targets = _infera_pod_targets_from_lists(
+        worker_targets = infera_support.pod_targets_from_lists(
             state.get("worker_pods"),
             state.get("worker_pod_ips"),
             default_port=_mn_cli._infera_default_ssh_port(state),

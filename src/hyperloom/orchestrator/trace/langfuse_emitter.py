@@ -1276,22 +1276,6 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
-def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
-    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent).
-
-    Args:
-        session_dir: Session directory whose breakdown file is read.
-
-    Returns:
-        dict[str, Any]: the parsed breakdown object, or ``{}`` when the file is
-            missing, unreadable, or not a JSON object.
-    """
-    from hyperloom.common.jsonio import read_json
-    from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
-
-    return read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
-
-
 def record_session_breakdown(
     session_dir: Path,
     breakdown: dict[str, Any] | None = None,
@@ -1307,7 +1291,10 @@ def record_session_breakdown(
         breakdown: the breakdown document; read from disk when ``None``.
     """
     if breakdown is None:
-        breakdown = _read_breakdown_file(Path(session_dir))
+        from hyperloom.common.jsonio import read_json
+        from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
+
+        breakdown = read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
     get_emitter(session_dir).record_session_breakdown(breakdown)
 
 
