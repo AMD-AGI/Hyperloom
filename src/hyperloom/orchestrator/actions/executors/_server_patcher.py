@@ -345,6 +345,10 @@ class _PatchPlan:
     # Per-plan ``-p<N>`` strip count: ``-p1`` for editable / vLLM, ``-p3`` for
     # wheel SGLang. Passed to both ``git apply`` and ``patch``.
     apply_strip: int = 1
+    # Patch names that may fail ``git apply --check`` and be skipped instead of
+    # rolling back the whole atomic set (e.g. eagle-draft patches whose context
+    # drifted across same-version different-commit sglang builds).
+    optional_patches: frozenset[str] = frozenset()
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
