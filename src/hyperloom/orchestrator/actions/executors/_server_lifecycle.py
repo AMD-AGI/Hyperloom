@@ -61,6 +61,23 @@ REUSE_PORT_DEFAULT = 8888
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
 SERVER_READY_TIMEOUT_SEC = 2700
 
+# Weight loading dominates server boot for very large checkpoints, and it
+# scales with checkpoint bytes rather than with anything the flat
+# ``SERVER_READY_TIMEOUT_SEC`` default can express. A 1.4 TiB MoE checkpoint on
+# a network filesystem needs well over an hour just to read the safetensors
+# shards, so the flat 2700s default kills a perfectly healthy server mid-load
+# (Magpie reports "Shared server launcher timed out"). Budget the read at a
+# deliberately pessimistic floor throughput so the allowance stays generous on
+# slow NFS mounts while still bounding a genuine hang.
+CHECKPOINT_LOAD_FLOOR_GIB_PER_SEC = 0.20
+
+# Upper bound on the size-derived allowance: past this a stuck loader should
+# surface as a timeout rather than idling for the rest of the budget.
+SERVER_READY_MAX_TIMEOUT_SEC = 21600  # 6 h
+
+# Checkpoints below this size keep the flat default (no scaling).
+CHECKPOINT_SCALING_MIN_GIB = 200.0
+
 def _pick_free_port() -> int:
     """Return an OS-assigned free TCP port.
 
@@ -200,6 +217,79 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     return info
 
 
+def _checkpoint_size_gib(model_path: str | None) -> float:
+    """Return the on-disk weight size of ``model_path`` in GiB (0.0 when unknown).
+
+    Sums the top-level weight shards only (``*.safetensors`` / ``*.bin``); a
+    recursive walk over an HF cache tree is not worth the stat storm on a
+    network filesystem.
+
+    Args:
+        model_path: Local model directory, or ``None`` / an HF repo id.
+
+    Returns:
+        The summed shard size in GiB, or ``0.0`` when the path is not a
+        readable local directory.
+    """
+    raw = str(model_path or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        root = Path(raw)
+        if not root.is_dir():
+            return 0.0
+        total = 0
+        for pattern in ("*.safetensors", "*.bin"):
+            for shard in root.glob(pattern):
+                try:
+                    total += shard.stat().st_size
+                except OSError:
+                    continue
+        return total / (1024.0**3)
+    except OSError:
+        return 0.0
+
+
+def resolve_server_ready_timeout(model_path: str | None) -> int:
+    """Return the server-boot budget in seconds, scaled by checkpoint size.
+
+    ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`` wins when set. Otherwise
+    small checkpoints keep the flat :data:`SERVER_READY_TIMEOUT_SEC` default,
+    and larger ones add an allowance for reading the weights at
+    :data:`CHECKPOINT_LOAD_FLOOR_GIB_PER_SEC`, clamped to
+    :data:`SERVER_READY_MAX_TIMEOUT_SEC` so a hung loader still times out.
+
+    Callers that also impose an outer subprocess timeout must keep it above
+    this value (plus Magpie's own 180s launcher grace), or the outer kill
+    preempts the boot with a less specific error.
+
+    Args:
+        model_path: Local model directory used to size the allowance.
+
+    Returns:
+        The server-ready timeout in seconds.
+    """
+    env_override = str(os.environ.get("INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC", "") or "").strip()
+    if env_override:
+        return int(env_override)
+    size_gib = _checkpoint_size_gib(model_path)
+    if size_gib < CHECKPOINT_SCALING_MIN_GIB:
+        return SERVER_READY_TIMEOUT_SEC
+    load_allowance = int(size_gib / CHECKPOINT_LOAD_FLOOR_GIB_PER_SEC)
+    scaled = min(SERVER_READY_TIMEOUT_SEC + load_allowance, SERVER_READY_MAX_TIMEOUT_SEC)
+    log.info(
+        "server_lifecycle: checkpoint %.0f GiB at %s — server_ready_timeout_s "
+        "%d -> %d (weight-load allowance %ds at a %.2f GiB/s floor)",
+        size_gib,
+        model_path,
+        SERVER_READY_TIMEOUT_SEC,
+        scaled,
+        load_allowance,
+        CHECKPOINT_LOAD_FLOOR_GIB_PER_SEC,
+    )
+    return scaled
+
+
 def inject_lifecycle(
     bench: dict[str, Any],
     *,
@@ -219,12 +309,7 @@ def inject_lifecycle(
         pid_dir: Shared directory for the server pid/meta files.
         port: HTTP port pinned for the persistent server.
     """
-    ready_timeout = int(
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
-            SERVER_READY_TIMEOUT_SEC,
-        )
-    )
+    ready_timeout = resolve_server_ready_timeout(bench.get("model"))
     bench["server_lifecycle"] = {
         "enabled": True,
         "cleanup": bool(cleanup),
