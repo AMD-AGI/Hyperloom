@@ -23,6 +23,7 @@ from ..state.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
+from ..state.task_registry import TERMINAL_STATES
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
@@ -175,11 +176,21 @@ class KernelPhase(PhaseHandler):
             profile_identity.encode("utf-8")
         ).hexdigest()[:12]
         try:
-            await self.sub.run_task(
-                await self._enqueue_internal_analysis_task(
-                    reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
-                )
+            reprofile_task = await self._enqueue_internal_analysis_task(
+                reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
             )
+            # An idempotent reuse can return a task that already reached a
+            # terminal state (its snapshot from a prior cycle is still valid).
+            # run_task would then attempt succeeded->running -> IllegalTransition,
+            # so reuse the existing snapshot instead of re-running.
+            if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
+                log.info(
+                    "kernel-entry reprofile reuses terminal analysis task (state=%s); "
+                    "GEAK targets existing snapshot",
+                    reprofile_task.state,
+                )
+                return
+            await self.sub.run_task(reprofile_task)
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
