@@ -375,7 +375,7 @@ def test_compile_generated_kernel_is_not_reusable_native():
         )
         is True
     )
-    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.classify_patchability(candidate)[0] is False
     assert tla.recommend_backends(candidate) == []
     assert "not reusable" in tla.build_notes(candidate)
 
@@ -397,7 +397,7 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         )
         is False
     )
-    assert tla.is_reusable_native_kernel(candidate) is True
+    assert tla.classify_patchability(candidate)[0] is True
     assert tla.recommend_backends(candidate) == ["forge"]
 
 
@@ -445,7 +445,7 @@ def test_unknown_source_root_is_not_reusable_native():
         ),
     }
     assert candidate["source_type"] == "hip_cpp"
-    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.classify_patchability(candidate)[0] is False
     assert tla.recommend_backends(candidate) == []
 
 
@@ -2780,21 +2780,6 @@ def test_classify_patchability_rejects_unreusable_source_root():
     )
     assert reusable is False
     assert "reusable framework root" in reason
-
-
-def test_is_reusable_native_kernel_delegates_to_classify():
-    """The bool wrapper must stay in lockstep with classify_patchability."""
-    samples = [
-        {"name": "rms_norm", "source_file": "", "source_type": "triton"},
-        {"name": "rocblas_sgemm", "source_file": "/sgl-workspace/aiter/x.py", "source_type": "python"},
-        {
-            "name": "triton_attn",
-            "source_file": "/sgl-workspace/sglang/python/sglang/x.py",
-            "source_type": "triton",
-        },
-    ]
-    for cand in samples:
-        assert tla.is_reusable_native_kernel(cand) == tla.classify_patchability(cand)[0]
 
 
 def test_build_audit_summary_splits_tasks_and_skipped():
