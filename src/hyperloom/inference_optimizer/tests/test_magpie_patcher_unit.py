@@ -785,3 +785,126 @@ def test_parser_patch_reports_failure_on_an_unrecognised_parser_block(tmp_path):
     lib.write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
 
     assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is False
+
+
+# ---- merged-case parser (InferenceX a4bb43af+) ----------------------------
+# The pinned InferenceX (a4bb43af) refactored run_lm_eval's arg parser into a
+# single merged ``--port|--task|...|--top-p)`` case with an inner dispatch and a
+# ``>&2`` / ``return 2`` catch-all. It already reads concurrency from
+# EVAL_CONCURRENT_REQUESTS/CONC and no caller passes --concurrent-requests, so
+# accuracy eval is NOT blocked. The old per-flag legacy block no longer matches,
+# which used to make eval_flag_ok=False and (post 3166da7f) fail install with a
+# false positive.
+_BENCHMARK_LIB_MERGED_CASE = (
+    "#!/bin/bash\n"
+    "run_lm_eval() {\n"
+    '    local port="${PORT:-8888}"\n'
+    '    local top_p=1\n'
+    '    local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-64}}"\n'
+    "    while [[ $# -gt 0 ]]; do\n"
+    "        case \"$1\" in\n"
+    "            --port|--task|--results-dir|--gen-max-tokens|--temperature|--top-p)\n"
+    "                case \"$1\" in\n"
+    '                    --port)           port="$2" ;;\n'
+    '                    --top-p)          top_p="$2" ;;\n'
+    "                esac\n"
+    "                shift 2\n"
+    "                ;;\n"
+    "            *)\n"
+    '                echo "Unknown parameter: $1" >&2\n'
+    "                return 2\n"
+    "                ;;\n"
+    "        esac\n"
+    "    done\n"
+    "}\n"
+)
+
+
+def test_merged_case_parser_is_taught_the_flag(tmp_path):
+    """The a4bb43af merged-case parser must be patched to accept the flag."""
+    lib = tmp_path / "benchmark_lib.sh"
+    lib.write_text(_BENCHMARK_LIB_MERGED_CASE, encoding="utf-8")
+
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
+    text = lib.read_text(encoding="utf-8")
+    assert "--concurrent-requests|--concurrent_requests" in text
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in text
+    # Idempotent second pass.
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
+    assert lib.read_text(encoding="utf-8").count("--concurrent-requests|--concurrent_requests") == 1
+
+
+def test_merged_case_env_only_ix_is_not_a_false_positive(tmp_path):
+    """Full status: merged-case parser + env concurrency + no live flag => ok.
+
+    Reproduces the shuoshuo-dev install failure: the defence-in-depth parser
+    patch could not match the refactored parser, but nothing passes the flag, so
+    the install must NOT be failed (status.ok stays True).
+    """
+    ix = tmp_path / "ix"
+    bench = ix / "benchmarks"
+    bench.mkdir(parents=True)
+    (bench / "benchmark_lib.sh").write_text(_BENCHMARK_LIB_MERGED_CASE, encoding="utf-8")
+    # A caller script that takes concurrency via env, not the flag (no live flag).
+    (bench / "vllm_mi355x.sh").write_text(
+        "#!/bin/bash\n"
+        'if [[ "$RUN_EVAL" = "true" ]]; then\n'
+        '        run_eval --framework lm-eval --port "$PORT" || exit $?\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    status = mp.magpie_scripts_patch_status(None, str(ix))
+    # The merged-case parser was taught the flag, so the eval fix succeeded.
+    assert status.eval_flag_ok is True
+    # atomic is a benign no-op here (no MAGPIE_PATH / benchmarker.py), not a
+    # genuine failure; install.sh treats reason=missing as fail-soft.
+    assert status.atomic_reason == mp._ATOMIC_REASON_MISSING
+    assert status.atomic_genuine_failure is False
+    assert mp.live_eval_concurrency_flag_scripts(None, str(ix)) == []
+
+
+def test_unpatchable_parser_without_live_flag_is_not_fatal(tmp_path):
+    """Narrowed judgement: even a parser we cannot teach must not fail install
+    when no caller passes the flag (aligns install-time with run-time)."""
+    ix = tmp_path / "ix"
+    bench = ix / "benchmarks"
+    bench.mkdir(parents=True)
+    # A run_lm_eval whose parser shape we cannot recognise at all.
+    (bench / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
+    # No live --concurrent-requests anywhere.
+    (bench / "vllm_mi355x.sh").write_text(
+        "#!/bin/bash\n"
+        'if [[ "$RUN_EVAL" = "true" ]]; then\n'
+        '        run_eval --framework lm-eval --port "$PORT" || exit $?\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    status = mp.magpie_scripts_patch_status(None, str(ix))
+    assert mp.live_eval_concurrency_flag_scripts(None, str(ix)) == []
+    # The belt patch could not apply, but nothing is blocked -> not fatal.
+    assert status.eval_flag_ok is True
+
+
+def test_unpatchable_parser_with_live_flag_stays_fatal(tmp_path):
+    """The narrowed judgement must still fail when a live flag really survives
+    an unteachable parser (no false negative)."""
+    ix = tmp_path / "ix"
+    bench = ix / "benchmarks"
+    bench.mkdir(parents=True)
+    (bench / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
+    # A caller that STILL passes the rejected flag in a shape the strip regex
+    # (which expects the $CONC variable) cannot remove: a literal value. The
+    # live-flag scan still recognises it, so it is a genuine, unstrippable blocker.
+    (bench / "vllm_mi355x.sh").write_text(
+        "#!/bin/bash\n"
+        'if [[ "$RUN_EVAL" = "true" ]]; then\n'
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    status = mp.magpie_scripts_patch_status(None, str(ix))
+    assert [p.name for p in mp.live_eval_concurrency_flag_scripts(None, str(ix))] == ["vllm_mi355x.sh"]
+    assert status.eval_flag_ok is False
