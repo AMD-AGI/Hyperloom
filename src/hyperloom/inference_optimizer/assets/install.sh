@@ -817,11 +817,13 @@ if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
-# Redundant --concurrent-requests eval flag could not be stripped from a
-# generic benchmark script (unrecognised shape). Non-fatal: RUN_EVAL=true
-# baselines may abort on InferenceX's 'Unknown parameter', but the baseline
-# executor's eval-failure fallback re-runs with RUN_EVAL=false, so the run
-# still proceeds (without an accuracy gate). Distinct exit so install warns.
+# eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
+# survives in a caller script AND InferenceX's run_lm_eval would reject it
+# (a defence-in-depth patch that merely could not be applied, with no live
+# flag, is NOT counted as a failure -- install-time now matches the run-time
+# ensure_eval_concurrency_compat judgement). This is the genuinely fatal case:
+# every RUN_EVAL=true baseline aborts on 'Unknown parameter'. Distinct exit so
+# install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
 # Defensive catch-all: a not-ok status with none of the bits above set should
