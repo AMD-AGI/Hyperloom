@@ -657,26 +657,6 @@ class OpResolver:
         )
 
 
-def resolve_op_source(
-    op_name: str,
-    framework: str | None = None,
-    device_kernel_name: str | None = None,
-    *,
-    mapping: dict[str, Any] | None = None,
-) -> OpResolution | None:
-    """Resolve a CPU op to its editable ``.cu`` via the ground-truth dictionary.
-
-    Thin wrapper over :class:`OpResolver`; returns ``None`` on a dictionary miss
-    (the caller then falls back to trusting the TraceLens ``.py`` launcher).
-    """
-    table = mapping if mapping is not None else load_mapping()
-    return OpResolver(table).resolve_op_source(
-        op_name,
-        framework=framework,
-        device_kernel_name=device_kernel_name,
-    )
-
-
 # HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
 # (imported above) as the shared single source of truth across trace routes.
 
@@ -2895,7 +2875,7 @@ def _expand_op_fanout(
         # Prefer the candidate's own device symbol; else fall back to the
         # dominant-by-time device kernel so _composite pins the single hot source.
         dkn = str(item.get("device_kernel_name") or "").strip() or op_dominant_kernel.get(op_name) or None
-        res = resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
+        res = OpResolver(load_mapping()).resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
         if res is None:
             item["_op_resolution"] = None
             expanded.append(item)

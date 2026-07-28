@@ -478,53 +478,6 @@ class RecipeKB:
             extras=extras,
         )
 
-    def append_attempt(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str,
-        diff: dict[str, Any] | None = None,
-        predicted_delta: dict[str, Any] | None = None,
-        measured_metrics: dict[str, Any] | None = None,
-        fitness: float | None = None,
-        outcome: str = "",
-        rationale: str = "",
-        attempt_at: str | None = None,
-    ) -> dict[str, Any]:
-        """Append one attempt row LOCALLY ONLY.
-
-        Forwards verbatim to :meth:`LocalRecipeStore.append_attempt`.
-
-        Args:
-            canonical_id (str): Parent recipe identity; must be
-                non-empty.
-            session_id (str): Owning session; must be non-empty.
-            diff (dict[str, Any] | None): Config diff applied.
-            predicted_delta (dict[str, Any] | None): Predicted metric
-                deltas.
-            measured_metrics (dict[str, Any] | None): Measured metrics.
-            fitness (float | None): Scalar fitness score, or ``None``.
-            outcome (str): Outcome label.
-            rationale (str): Free-form rationale.
-            attempt_at (str | None): Explicit ISO-8601 timestamp; auto
-                stamped when ``None``.
-
-        Returns:
-            dict[str, Any]: A dict with keys ``id``,
-                ``recipe_canonical_id`` and ``attempt_at``.
-        """
-        return self.local.append_attempt(
-            canonical_id=canonical_id,
-            session_id=session_id,
-            diff=diff,
-            predicted_delta=predicted_delta,
-            measured_metrics=measured_metrics,
-            fitness=fitness,
-            outcome=outcome,
-            rationale=rationale,
-            attempt_at=attempt_at,
-        )
-
     # Reads — remote-first, local fallback
     def get_recipe(
         self,
