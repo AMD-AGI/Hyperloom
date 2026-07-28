@@ -25,8 +25,8 @@ export FORGE_TUNE_TASK_TIMEOUT="${FORGE_TUNE_TASK_TIMEOUT:-3600}"
 export AITER_ROOT_DIR="${AITER_ROOT_DIR:-/sgl-workspace/aiter}"
 
 TS="${RUN_TS:-$(date -u +%Y%m%d-%H%M)}"
-LOG=/primus/xiaofei/logs/qwen3-14b-fp8-kernel-4h-forge-${TS}.log
-INFO=/primus/xiaofei/logs/qwen3-14b-fp8-kernel-4h-forge-${TS}.launch.json
+LOG=/primus/xiaofei/logs/qwen3-14b-fp8-kernel-${MAX_HOURS:-4}h-forge-${TS}.log
+INFO=/primus/xiaofei/logs/qwen3-14b-fp8-kernel-${MAX_HOURS:-4}h-forge-${TS}.launch.json
 
 cd "${REPO}"
 exec python3 -m hyperloom.inference_optimizer.cli optimize \
@@ -35,7 +35,7 @@ exec python3 -m hyperloom.inference_optimizer.cli optimize \
   --gpu-type mi355x \
   --tp 1 --conc 64 --isl 1024 --osl 1024 \
   --precision fp8 \
-  --max-hours 4 \
+  --max-hours "${MAX_HOURS:-4}" \
   --no-explore \
   --no-framework-agent \
   --no-enable-conc-sweep \
