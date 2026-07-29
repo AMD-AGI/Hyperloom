@@ -2047,9 +2047,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         max_minutes=max_minutes_for_prompt,
     )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
+    # ``--framework-discover-timeout-sec`` lands on argparse dest
+    # ``framework_discover_timeout_sec``; reading only the ``framework_agent_``
+    # spelling always missed it, so the flag silently did nothing and discovery
+    # stayed on the default budget. Accept the parser's dest first and keep the
+    # longer name as a fallback for callers that set it directly.
     try:
         coordinator.framework_agent_discover_timeout_sec = float(
-            getattr(args, "framework_agent_discover_timeout_sec", 0.0) or 0.0
+            getattr(args, "framework_discover_timeout_sec", 0.0)
+            or getattr(args, "framework_agent_discover_timeout_sec", 0.0)
+            or 0.0
         )
     except (TypeError, ValueError):
         coordinator.framework_agent_discover_timeout_sec = 0.0
