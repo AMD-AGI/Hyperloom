@@ -1533,8 +1533,6 @@ def untried_hot_reusable_kernels(
             if identity in seen_identities:
                 continue
             seen_identities.add(identity)
-        if dedup_key in seen_groups:
-            continue
         seen_groups.add(dedup_key)
         ranked.append(row)
     ranked = ranked[:top_n]

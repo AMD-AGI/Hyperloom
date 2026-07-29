@@ -84,3 +84,8 @@ evaluation_analysis
 
 # Operator runtime env (contains real API keys — never commit)
 runtime-env/
+
+# Personal per-operator launch/resume scratch scripts (worktree- and
+# framework-specific; not part of the product). Keep them out of the repo.
+run_kernel_forge.sh
+resume_kernel_forge.sh
