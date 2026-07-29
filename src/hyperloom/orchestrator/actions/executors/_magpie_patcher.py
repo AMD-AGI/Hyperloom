@@ -171,6 +171,30 @@ _RUN_LM_EVAL_PARSER_PATCHED_BLOCK = (
     '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
 )
 
+# Newer InferenceX folded every value-taking flag into one shared ``case`` arm
+# that dispatches through an inner ``case``, so the flat ``--top-p) ...;
+# shift 2 ;;`` line the block above anchors on no longer exists and the patch
+# silently missed (install.sh then aborts on eval_flag_ok=False). Match that
+# shape by its fallthrough arm instead and splice a dedicated arm in front of
+# it. Scoped to the ``run_lm_eval`` body by the caller, and the ``>&2`` +
+# ``return 2`` pair distinguishes this parser from the other two ``Unknown
+# parameter`` fallthroughs in the same file.
+_RUN_LM_EVAL_PARSER_GROUPED_FALLTHROUGH_RE = re.compile(
+    r"^(?P<indent>[ \t]*)\*\)\n"
+    r"[ \t]*echo \"Unknown parameter: \$1\" >&2\n"
+    r"[ \t]*return 2\n"
+    r"[ \t]*;;\n",
+    re.MULTILINE,
+)
+_RUN_LM_EVAL_PARSER_GROUPED_ARM = (
+    "{indent}# HYPERLOOM_EVAL_CONCURRENCY_ARG: accept the redundant flag\n"
+    "{indent}# (concurrency also flows via EVAL_CONCURRENT_REQUESTS/CONC).\n"
+    "{indent}--concurrent-requests|--concurrent_requests)\n"
+    '{indent}    concurrent_requests="$2"\n'
+    "{indent}    shift 2\n"
+    "{indent}    ;;\n"
+)
+
 # InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env
 # (EVAL_CONCURRENT_REQUESTS, fallback CONC). Passing --concurrent-requests to
 # run_eval is rejected as an unknown argument.
@@ -437,6 +461,36 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
     return ok
 
 
+def _patch_grouped_run_lm_eval_parser(text: str) -> str | None:
+    """Insert a ``--concurrent-requests`` arm into the grouped-``case`` shape of
+    ``run_lm_eval``'s arg parser.
+
+    Args:
+        text: Full ``benchmark_lib.sh`` source.
+
+    Returns:
+        The patched source, or ``None`` when ``run_lm_eval`` or its
+        fallthrough arm could not be located.
+    """
+    start = text.find("\nrun_lm_eval() {")
+    if start < 0:
+        return None
+    # Function bodies end at the first column-0 ``}``; bound the edit to this
+    # one so the other ``Unknown parameter`` fallthroughs stay untouched.
+    end = text.find("\n}\n", start)
+    if end < 0:
+        return None
+
+    body = text[start:end]
+    match = _RUN_LM_EVAL_PARSER_GROUPED_FALLTHROUGH_RE.search(body)
+    if match is None:
+        return None
+
+    arm = _RUN_LM_EVAL_PARSER_GROUPED_ARM.format(indent=match.group("indent"))
+    patched_body = body[: match.start()] + arm + body[match.start() :]
+    return text[:start] + patched_body + text[end:]
+
+
 def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     """Teach InferenceX's ``benchmark_lib.sh::run_lm_eval`` to accept the
     ``--concurrent-requests`` flag instead of aborting on ``Unknown parameter``.
@@ -465,21 +519,22 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     if _RUN_LM_EVAL_PARSER_SENTINEL in original or _EVAL_CONCURRENCY_FLAG_MARKER in original:
         return True
 
-    if _RUN_LM_EVAL_PARSER_LEGACY_BLOCK not in original:
+    if _RUN_LM_EVAL_PARSER_LEGACY_BLOCK in original:
+        patched = original.replace(
+            _RUN_LM_EVAL_PARSER_LEGACY_BLOCK,
+            _RUN_LM_EVAL_PARSER_PATCHED_BLOCK,
+            1,
+        )
+    else:
+        patched = _patch_grouped_run_lm_eval_parser(original)
+
+    if patched is None or patched == original:
         log.warning(
             "_magpie_patcher: run_lm_eval arg-parser block not found in %s; "
             "cannot make it tolerate '--concurrent-requests'. RUN_EVAL=true "
             "baselines may still abort if a stray flag survives the strip.",
             benchmark_lib,
         )
-        return False
-
-    patched = original.replace(
-        _RUN_LM_EVAL_PARSER_LEGACY_BLOCK,
-        _RUN_LM_EVAL_PARSER_PATCHED_BLOCK,
-        1,
-    )
-    if patched == original:
         return False
 
     if not atomic_write_text(
