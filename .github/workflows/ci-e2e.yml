@@ -144,6 +144,10 @@ jobs:
               run=true
               ;;
           esac
+          if [ "$run" = true ] && [ -z "$head_sha" ]; then
+            echo "failed to resolve head_sha for ref=$head_ref" >&2
+            exit 1
+          fi
           echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo"
           emit
 
