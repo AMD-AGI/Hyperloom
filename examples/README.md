@@ -33,7 +33,7 @@ into the current directory:
 
 ```bash
 python3 -m pip install \
-  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a2/hyperloom_inference_optimizer-1.0.0a2-py3-none-any.whl \
   --target .
 ```
 

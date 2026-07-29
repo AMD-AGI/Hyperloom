@@ -1,18 +1,72 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a1, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a2, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0a1 (`pyproject.toml`). For the
+The current packaged version is 1.0.0a2 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.0.0a2 release
+
+The [1.0.0a2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2)
+builds on 1.0.0a1 with long-horizon Forge integration, trace-driven GEMM
+capture, an enablement subsystem for non-runnable combos, and install/eval
+integrity fixes.
+
+### 1.0.0a2 highlights
+
+- **Long-horizon Forge kernel optimization**: The KernelForge long-horizon CLI is
+  integrated end-to-end into the kernel-optimization path, with
+  `forge_experiments/best_result.json` promoted to the top-priority keep/revert
+  authority — rewritten atomically on every KEEP, correctness-gated, and naming an
+  already-committed workspace, so tuned results survive soft-budget exhaustion and
+  hard kills. Forge hardens deadline recovery, artifact export, and KB identity,
+  decouples the Fusion stage from GEMM tuning, and reaps timed-out process groups.
+
+- **Trace-driven GEMM shape capture and block-FP8 tuning**: Real vLLM GEMM shapes
+  are captured before Forge tuning (explicit failures instead of silent skips),
+  routed to the vLLM-AITER blockscale tuner and preferred over stale specialist
+  CSVs. Block-FP8 tuning reuses steady-state Roofline/TraceLens shapes only when
+  provenance and normalized runtime match, falling back cleanly otherwise.
+
+- **Enablement subsystem for non-runnable combos**: A new path lets a non-runnable
+  (model, backend) combination repair itself and earn KEEP by actually launching
+  the model, via attempt-scoped runtimes in isolated venvs, source localization of
+  merged-PR/vendored closures behind a compiled-closure gate, and off-loop compiled
+  builds (AITER, sgl-kernel, vLLM-from-source) on a dedicated `build_lane`.
+
+- **Long-horizon orchestration, budgets, and resume fidelity**: Every macro-cycle
+  gets a fresh directive with cycle-scoped plateau/transient counters; SWEEP and
+  EXPLORE stop testing grid variants once the wall-clock budget is exhausted;
+  FRAMEWORK outcomes reconcile across resumes without fabricating deliveries; and
+  `current_best` / `current_setting.sh` reproduce the complete accepted recipe.
+
+- **Ray execution and multi-node safety**: Single-node execution again defaults to
+  the Ray backend when `INFERENCE_OPTIMIZER_RAY_EXEC` is unset (multi-node stays
+  gated off; pytest keeps the local subprocess path). create-rayjob idempotency
+  scans all canonical state-file locations and reuses the first live `rayjob_id`,
+  preventing duplicate RayJobs that waste a node set and deadlock scheduling.
+
+- **Serving and inference correctness**: A quant-aware gate reads the checkpoint's
+  `config.json` so Quark MXFP4 / W4A4 MoE models stay on sglang's aiter path
+  instead of being forced onto `--moe-runner-backend triton`. Magpie client-trust
+  patching extends to MI355X/MI300X local-path SGLang clients, the InferenceX pin
+  is refreshed, and an author-time v4 breakdown model adds richer tracing.
+
+- **Evaluation and install integrity**: Accuracy eval survives the refactored
+  InferenceX `run_lm_eval` arg parser — the patcher recognizes the merged-case
+  shape and install-time judgement is aligned with the runtime entry point via a
+  shared concurrency-unblocked helper, ending false-positive install aborts
+  (exit 5). Persistent baseline servers use per-session unique ports, and the
+  installer downloads the release wheel and hotfix via public `curl`.
 
 ## Hyperloom 1.0.0a1 public release
 
