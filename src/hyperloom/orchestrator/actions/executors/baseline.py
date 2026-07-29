@@ -1677,31 +1677,6 @@ class BaselineExecutor:
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
         from ._accuracy_gate import request_baseline_accuracy_stop
 
-        # No opt-out: a genuine baseline exists to establish the accuracy
-        # reference, so turning the eval off does not make a missing accuracy
-        # acceptable -- it only means the reference was never measured. Every
-        # disable path (the ``disable_run_eval`` param, an explicit
-        # ``RUN_EVAL=false`` env, a YAML/reference-env value) now lands here.
-        # Route into enablement instead of stopping/salvaging: the throughput
-        # baseline stays for diagnostics but is blocked from anchoring.
-        if eval_enablement:
-            kind = classify_accuracy_failure(acc, floor)
-            observed = float(acc) if isinstance(acc, (int, float)) else None
-            evidence = (
-                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
-                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
-                f"source={result.get('accuracy_source')}"
-            )
-            self._stamp_eval_failure_contract(
-                ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
-            )
-            log.warning(
-                "baseline_executor: accuracy %s below floor %.4f; routing to "
-                "enablement instead of stopping the run.",
-                acc,
-                floor,
-            )
-            return
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
         # Session-level salvage (complements #942): the cold-start guard and the
@@ -1712,6 +1687,17 @@ class BaselineExecutor:
         # produced a valid ``results*.json``. Before halting, reuse a positive
         # accuracy measured by any sibling attempt rather than discarding a good
         # baseline and stopping the whole run.
+        #
+        # This runs BEFORE the enablement branch below, not after it. The
+        # cold-start guard splits one baseline into warmup_round (RUN_EVAL=true
+        # -- the only round that measures accuracy) and measure_round
+        # (RUN_EVAL=false -- hot throughput only), then decides on the
+        # measure_round result, which by construction carries no accuracy. With
+        # enablement active the branch below used to fire first and dispatch a
+        # specialist to chase a quality regression that never happened, while
+        # the sibling warmup_round held a perfectly good score (gsm8k 0.8954 on
+        # Kimi-K3, 2026-07-29). Only a genuinely missing or below-floor accuracy
+        # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
             acc_val = float(salvaged["accuracy"])
@@ -1732,6 +1718,36 @@ class BaselineExecutor:
                 "attempt (%s); not stopping the run",
                 acc_val,
                 salvaged.get("source_file", ""),
+            )
+            if not eval_enablement or accuracy_meets_floor(acc_val, floor):
+                return
+            # Salvaged, but still under the floor: that is a real quality
+            # signal, so fall through to enablement with the observed value.
+            acc = acc_val
+
+        # No opt-out: a genuine baseline exists to establish the accuracy
+        # reference, so turning the eval off does not make a missing accuracy
+        # acceptable -- it only means the reference was never measured. Every
+        # disable path (the ``disable_run_eval`` param, an explicit
+        # ``RUN_EVAL=false`` env, a YAML/reference-env value) now lands here.
+        # Route into enablement instead of stopping: the throughput baseline
+        # stays for diagnostics but is blocked from anchoring.
+        if eval_enablement:
+            kind = classify_accuracy_failure(acc, floor)
+            observed = float(acc) if isinstance(acc, (int, float)) else None
+            evidence = (
+                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
+                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
+                f"source={result.get('accuracy_source')}"
+            )
+            self._stamp_eval_failure_contract(
+                ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
+            )
+            log.warning(
+                "baseline_executor: accuracy %s below floor %.4f; routing to "
+                "enablement instead of stopping the run.",
+                acc,
+                floor,
             )
             return
         request_baseline_accuracy_stop(
