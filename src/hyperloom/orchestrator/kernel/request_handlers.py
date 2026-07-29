@@ -5610,58 +5610,6 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
     return {"raw_stdout_tail": text[-2000:]}
 
 
-def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
-    """Transcribe ``reports/kernel_roofline.json`` (written by the external
-    kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
-    singleton. Best-effort; never raises.
-
-    Args:
-        session_dir: Session directory holding the ``reports/kernel_roofline.json``
-            sidecar to transcribe.
-    """
-    try:
-        sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
-        if not sidecar_path.is_file():
-            return
-        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or not payload:
-            return
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_singleton_section(
-            session_dir,
-            "kernel_roofline",
-            payload,
-            producer="kernel-agent",
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
-    """Resolve the TraceLens/device kernel name for a roofline sidecar row.
-
-    Args:
-        session_dir: Session directory holding the roofline sidecar.
-        kernel_id: The kernel id to look up.
-
-    Returns:
-        The matched kernel name, or ``""`` when the sidecar/row is absent.
-    """
-    sidecar_path = session_dir / "reports" / "kernel_roofline.json"
-    try:
-        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    rows = payload.get("kernels") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return ""
-    for row in rows:
-        if isinstance(row, dict) and str(row.get("kernel_id") or "") == str(kernel_id):
-            return str(row.get("name") or row.get("matched_kernel_name") or "").strip()
-    return ""
-
-
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
     """Best-effort orphaned-lock sweep immediately before an integrate boot."""
     from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead

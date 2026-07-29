@@ -298,7 +298,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
     assert "could not schedule" in disp._run_action_now_sync("probe", {})
 
 
-def test_multi_node_state_paths_resolution_and_migration(monkeypatch, tmp_path) -> None:
+def test_multi_node_state_paths_resolution_and_binding(monkeypatch, tmp_path) -> None:
     from hyperloom.inference_optimizer.multi_node import state_paths
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
@@ -325,15 +325,11 @@ def test_multi_node_state_paths_resolution_and_migration(monkeypatch, tmp_path) 
     unsafe.chmod(0o600)
     assert state_paths.state_file_safe_to_read(unsafe) is True
 
-    src = tmp_path / "source_state.json"
-    src.write_text('{"nodes": []}', encoding="utf-8")
-    src.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(src))
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "source_state.json"))
     bound = state_paths.bind_state_file_to_session(session)
     assert bound == session / "runtime" / "multi_node_state.json"
-    assert bound.read_text(encoding="utf-8") == '{"nodes": []}'
+    assert not bound.exists()
     assert state_paths.resolve_state_file() == bound
-    assert bound.stat().st_mode & 0o777 == 0o600
     assert bound.parent.stat().st_mode & 0o777 == 0o700
 
 
@@ -342,13 +338,6 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch, tmp_pat
 
     messages: list[str] = []
     monkeypatch.setattr(state_paths, "warn", messages.append)
-
-    class _BadPath:
-        def chmod(self, _mode):
-            raise OSError("chmod denied")
-
-    state_paths._chmod_state_file(_BadPath())
-    assert "could not chmod state file" in messages[-1]
 
     runtime_dir = tmp_path / "runtime"
     original_chmod = type(runtime_dir).chmod

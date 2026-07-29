@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.io import safe_mtime
 
 from ._common import (
@@ -1017,74 +1018,6 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
     }
 
 
-def _conc_sweep_pair_comparison(
-    baseline_points: list[dict[str, Any]],
-    optimized_points: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Pure baseline-vs-optimized outer join over CONC (no heavy deps).
-
-    Mirrors ``orchestrator.conc_sweep._build_comparison`` but stays import-light
-    so the breakdown collector never drags in Magpie/torch at report time.
-    """
-    by_b = {p["conc"]: p for p in baseline_points}
-    by_o = {p["conc"]: p for p in optimized_points}
-    concs = sorted(set(by_b) | set(by_o))
-    rows: list[dict[str, Any]] = []
-    speedups: list[float] = []
-    successful = 0
-    failed = 0
-    for c in concs:
-        b = by_b.get(c) or {}
-        o = by_o.get(c) or {}
-        bt = b.get("output_throughput")
-        ot = o.get("output_throughput")
-        speedup = None
-        delta = None
-        if isinstance(bt, (int, float)) and bt > 0 and isinstance(ot, (int, float)) and ot > 0:
-            speedup = float(ot) / float(bt)
-            delta = (speedup - 1.0) * 100.0
-            speedups.append(speedup)
-            successful += 1
-        else:
-            failed += 1
-        rows.append(
-            {
-                "conc": c,
-                "baseline_tput": bt,
-                "optimized_tput": ot,
-                "speedup": speedup,
-                "delta_pct": delta,
-                "baseline_status": b.get("status"),
-                "optimized_status": o.get("status"),
-            }
-        )
-    summary: dict[str, Any] = {
-        "successful_pairs": successful,
-        "failed_pairs": failed,
-        "best_conc": None,
-        "best_speedup": None,
-        "median_speedup": None,
-        "mean_speedup": None,
-    }
-    if speedups:
-        best_idx, best_val = max(
-            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
-            key=lambda x: x[1],
-        )
-        srt = sorted(speedups)
-        n = len(srt)
-        median = srt[n // 2] if n % 2 == 1 else 0.5 * (srt[n // 2 - 1] + srt[n // 2])
-        summary.update(
-            {
-                "best_conc": rows[best_idx]["conc"],
-                "best_speedup": round(best_val, 4),
-                "median_speedup": round(median, 4),
-                "mean_speedup": round(sum(speedups) / len(speedups), 4),
-            }
-        )
-    return rows, summary
-
-
 def _recover_conc_sweep_summary_from_runs(
     session_dir: Path,
     warnings: list[str],
@@ -1120,7 +1053,7 @@ def _recover_conc_sweep_summary_from_runs(
             continue
         baseline_points.sort(key=lambda p: p["conc"])
         optimized_points.sort(key=lambda p: p["conc"])
-        comparison, summary = _conc_sweep_pair_comparison(baseline_points, optimized_points)
+        comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
         pairs = int(summary.get("successful_pairs") or 0)
         payload = {
             "schema_version": "recovered-v1",

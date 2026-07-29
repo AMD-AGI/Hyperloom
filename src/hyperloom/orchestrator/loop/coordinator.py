@@ -528,7 +528,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         role_registry: dict[str, AgentRole] | None = None,
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
-        compare_against_gpu: str | None = None,
         model_class: str | None = None,
         cortex_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
@@ -537,8 +536,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         warm_replay_enabled: bool = True,
         warm_replay_min_confidence: float = 0.7,
         warm_replay_min_reproduce_pct: float = 0.8,
-        legacy_action_scores: str = "drop",
-        migration_mode: str = "strict",
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -570,8 +567,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
         except ValueError:
             self._specialist_stale_sec = 600.0
-        # External launcher config; decides whether target_analysis fetches real rows.
-        self._compare_against_gpu: str = (compare_against_gpu or "").strip()
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -595,11 +590,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         )
 
         # Persistent session state (state.json) — load existing for resume.
-        self.shared_state = SharedState.load_or_init(
-            self.session_dir,
-            legacy_action_scores=legacy_action_scores,
-            migration_mode=migration_mode,
-        )
+        self.shared_state = SharedState.load_or_init(self.session_dir)
         # Lifecycle save debounce: terminal events flush immediately; bursty
         # non-terminal markers coalesce within a short window.
         # ``_lifecycle_last_save`` is a monotonic timestamp.
@@ -1414,10 +1405,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
-    # CLOSE phase sequencer; class-level wait-for-task timeouts (overridable per-instance in tests).
-    CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
-    CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
-    CLOSE_NDJSON_DRAIN_TIMEOUT_SEC: float = 60.0
     # CLOSE step 0 post-opt roofline hard cap; on timeout the optimized snapshot
     # is skipped so report/breakdown always run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0

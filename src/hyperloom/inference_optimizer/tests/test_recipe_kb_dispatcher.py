@@ -133,13 +133,6 @@ def test_put_recipe_never_touches_remote(local_store: LocalRecipeStore) -> None:
     assert local_store.get_recipe(canonical_id=cid) is not None
 
 
-def test_append_attempt_never_touches_remote(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    cid = _cid()
-    out = kb.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    assert out["id"] == 1
-
-
 def test_get_recipe_returns_remote_when_remote_hits(local_store: LocalRecipeStore) -> None:
     """A remote hit is returned, translated from the nested v2 envelope to arbor."""
     cid = _cid()

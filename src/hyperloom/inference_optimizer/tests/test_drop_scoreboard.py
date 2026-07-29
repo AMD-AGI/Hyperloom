@@ -7,10 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
-import logging
 from pathlib import Path
-
-import pytest
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -83,33 +80,6 @@ def test_from_dict_drops_action_scores_silently():
     assert not hasattr(loaded, "action_scores")
     assert loaded.baseline_tput == 1234.0
     assert loaded.cumulative_gain == 2.5
-
-
-def test_from_dict_drop_mode_logs_at_info_level(caplog):
-    raw = _legacy_state_payload()
-    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.state.shared_state"):
-        SharedState.from_dict(raw)
-    matched = [r for r in caplog.records if "v0.8 §3.9" in r.getMessage()]
-    assert matched, "drop mode should log at INFO level"
-    assert all(r.levelno == logging.INFO for r in matched)
-
-
-def test_from_dict_warn_mode_emits_warning(caplog):
-    raw = _legacy_state_payload()
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.state.shared_state"):
-        SharedState.from_dict(raw, legacy_action_scores="warn")
-    matched = [r for r in caplog.records if "v0.8 §3.9" in r.getMessage()]
-    assert matched, "warn mode should log a WARNING"
-    assert any(r.levelno == logging.WARNING for r in matched)
-
-
-def test_from_dict_no_legacy_fields_means_no_log(caplog):
-    """A clean state.json doesn't produce any migration log line."""
-    raw = {"session_id": "fresh", "baseline_tput": 999.0}
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.state.shared_state"):
-        SharedState.from_dict(raw, legacy_action_scores="warn")
-    matched = [r for r in caplog.records if "§3.9" in r.getMessage()]
-    assert matched == []
 
 
 def test_load_or_init_roundtrips_through_drop(tmp_path, monkeypatch):
@@ -272,44 +242,3 @@ def test_orchestration_md_has_no_score_view():
     for needle in forbidden:
         assert needle not in fragment, f"orchestration.md still references retired token {needle!r}"
     assert "decision priority" in fragment.lower()
-
-
-def test_cli_exposes_legacy_action_scores_flag():
-    """``--legacy-action-scores`` must be wired (drop / warn)."""
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    args = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/dummy-model",
-            "--legacy-action-scores",
-            "warn",
-        ]
-    )
-    assert args.legacy_action_scores == "warn"
-    args2 = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/dummy-model",
-        ]
-    )
-    assert args2.legacy_action_scores in ("drop", "warn")
-
-
-def test_cli_rejects_unknown_legacy_action_scores_value():
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "optimize",
-                "--model",
-                "/tmp/dummy-model",
-                "--legacy-action-scores",
-                "keep",
-            ]
-        )

@@ -63,11 +63,9 @@ from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
-    _resolve_critic_agent_root as _resolve_critic_agent_root,
-    _validate_critic_agent_runtime as _validate_critic_agent_runtime,
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
-    _resolve_robustness_agent_root as _resolve_robustness_agent_root,
-    _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
+    _resolve_agent_root as _resolve_agent_root,
+    _validate_agent_runtime as _validate_agent_runtime,
 )
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
@@ -1030,7 +1028,7 @@ def _reset_state_file(session_dir: Path) -> None:
         import logging as _logging
 
         _logging.getLogger(__name__).warning(
-            "v0.8 §3.10 --reset-state: could not move %s → %s: %s",
+            "--reset-state: could not move %s → %s: %s",
             state_path,
             backup_path,
             exc,
@@ -1039,26 +1037,9 @@ def _reset_state_file(session_dir: Path) -> None:
     import logging as _logging
 
     _logging.getLogger(__name__).info(
-        "v0.8 §3.10 --reset-state: backed up state.json to %s; session starts blank.",
+        "--reset-state: backed up state.json to %s; session starts blank.",
         backup_path.name,
     )
-
-
-def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Report whether ``argv`` explicitly carries a given option.
-
-    Matches both the bare flag (``--tp``) and the ``=``-joined form
-    (``--tp=8``).
-
-    Args:
-        argv (list[str]): The argument vector to scan.
-        option (str): The long-option flag to look for (e.g. ``"--tp"``).
-
-    Returns:
-        bool: ``True`` when the option appears in ``argv``, else ``False``.
-    """
-    prefix = f"{option}="
-    return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
@@ -1324,14 +1305,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
     # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
-    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     if pd_mode == "disaggregated" and nodes_resolved < 2:
         # PD disaggregation needs >=2 nodes (separate prefill + decode pods); fail at parse time.
         print(
             f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
             f"(got --nodes {nodes_resolved}). PD splits the cluster "
             "into prefill + decode groups; a single pod cannot host "
-            "both. Either drop --pd-mode (defaults to colocated) or "
+            "both. Either drop --pd-mode (defaults to aggregated) or "
             "raise --nodes.",
             file=sys.stderr,
         )
@@ -1466,13 +1447,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
-        migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
-        state = SharedState.load_or_init(
-            session_dir,
-            legacy_action_scores=legacy_mode,
-            migration_mode=migration_mode,
-        )
+        state = SharedState.load_or_init(session_dir)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1901,7 +1876,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_choice,
         codex_follows_claude=codex_follows_claude,
     ):
-        critic_agent_root = _resolve_critic_agent_root()
+        critic_agent_root = _resolve_agent_root("critic")
         if critic_agent_root is None:
             print(
                 f"ERROR: --critic-agent selected but critic-agent runtime not "
@@ -1913,7 +1888,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_critic_agent_runtime(critic_agent_root)
+        _validate_agent_runtime(critic_agent_root, agent="critic")
         if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
             print(
                 "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
@@ -1930,7 +1905,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     robustness_agent_root: Path | None = None
     robustness_options = _build_robustness_options(args)
     if robustness_choice == "agent":
-        robustness_agent_root = _resolve_robustness_agent_root()
+        robustness_agent_root = _resolve_agent_root("robustness")
         if robustness_agent_root is None:
             print(
                 f"ERROR: --robustness-agent selected but robustness-agent "
@@ -1942,7 +1917,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_robustness_agent_runtime(robustness_agent_root)
+        _validate_agent_runtime(robustness_agent_root, agent="robustness")
 
     backends = _build_backends(
         claude_model=args.claude_model,
@@ -1976,8 +1951,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _reset_state_file(session_dir)
     from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
-    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
-    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
     transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
     set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
@@ -1994,12 +1967,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         role_registry=role_registry,
-        compare_against_gpu=getattr(args, "compare_against_gpu", None),
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
-        legacy_action_scores=legacy_mode,
-        migration_mode=migration_mode,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default

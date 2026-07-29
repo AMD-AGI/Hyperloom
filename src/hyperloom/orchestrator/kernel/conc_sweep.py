@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -130,78 +131,6 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "workspace": v.workspace,
         "report_path": v.report_path,
     }
-
-
-def _build_comparison(
-    baseline_points: list[dict[str, Any]],
-    optimized_points: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Pair points by CONC, compute per-conc speedup, and aggregate.
-
-    Args:
-        baseline_points: Curve rows for the baseline arm.
-        optimized_points: Curve rows for the optimized arm.
-
-    Returns:
-        A tuple of ``(per_conc_rows, summary_dict)``.
-    """
-    by_conc_b = {p["conc"]: p for p in baseline_points}
-    by_conc_o = {p["conc"]: p for p in optimized_points}
-    concs = sorted(set(by_conc_b) | set(by_conc_o))
-    rows: list[dict[str, Any]] = []
-    speedups: list[float] = []
-    successful_pairs = 0
-    failed_pairs = 0
-    for c in concs:
-        b = by_conc_b.get(c) or {}
-        o = by_conc_o.get(c) or {}
-        bt = b.get("output_throughput")
-        ot = o.get("output_throughput")
-        speedup: float | None = None
-        delta_pct: float | None = None
-        if isinstance(bt, (int, float)) and bt > 0 and isinstance(ot, (int, float)) and ot > 0:
-            speedup = float(ot) / float(bt)
-            delta_pct = (speedup - 1.0) * 100.0
-            speedups.append(speedup)
-            successful_pairs += 1
-        else:
-            failed_pairs += 1
-        rows.append(
-            {
-                "conc": c,
-                "baseline_tput": bt,
-                "optimized_tput": ot,
-                "speedup": speedup,
-                "delta_pct": delta_pct,
-                "baseline_status": b.get("status"),
-                "optimized_status": o.get("status"),
-            }
-        )
-    summary: dict[str, Any] = {
-        "successful_pairs": successful_pairs,
-        "failed_pairs": failed_pairs,
-        "best_conc": None,
-        "best_speedup": None,
-        "median_speedup": None,
-        "mean_speedup": None,
-    }
-    if speedups:
-        best_idx, best_val = max(
-            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
-            key=lambda x: x[1],
-        )
-        sorted_sp = sorted(speedups)
-        n = len(sorted_sp)
-        median = sorted_sp[n // 2] if n % 2 == 1 else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
-        summary.update(
-            {
-                "best_conc": rows[best_idx]["conc"],
-                "best_speedup": round(best_val, 4),
-                "median_speedup": round(median, 4),
-                "mean_speedup": round(sum(speedups) / len(speedups), 4),
-            }
-        )
-    return rows, summary
 
 
 def _budget_limited_without_valid_pair(
@@ -1150,7 +1079,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         b_pts.sort(key=lambda p: p["conc"])
         o_pts.sort(key=lambda p: p["conc"])
 
-        comparison, summary = _build_comparison(b_pts, o_pts)
+        comparison, summary = conc_pair_comparison(b_pts, o_pts)
         p: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "status": "in_progress" if partial else "unknown",
@@ -1404,7 +1333,7 @@ async def run_conc_sweep(
     baseline_points.sort(key=lambda p: p["conc"])
     optimized_points.sort(key=lambda p: p["conc"])
 
-    comparison, summary = _build_comparison(baseline_points, optimized_points)
+    comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
         summary=summary,

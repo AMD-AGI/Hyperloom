@@ -140,11 +140,11 @@ def _resolve_pd_args(
 
     Returns a flat dict of resolved PD values for the multi_node CLI Namespace.
     Resolution per field: explicit kwarg > ``state["last_restart_pd_*"]`` >
-    ``$PD_*`` env > defaults (mode=colocated, prefill/decode TP=tp). Validates
+    ``$PD_*`` env > defaults (mode=aggregated, prefill/decode TP=tp). Validates
     ``pd_mode`` and disaggregated prefill/decode TP.
 
     Args:
-        pd_mode: Prefill/decode mode (``colocated`` or ``disaggregated``).
+        pd_mode: Prefill/decode mode (``aggregated`` or ``disaggregated``).
         pd_prefill_nodes: Node count for the prefill group.
         pd_decode_nodes: Node count for the decode group.
         pd_prefill_tp: Tensor-parallel size for the prefill group.
@@ -165,10 +165,6 @@ def _resolve_pd_args(
     mode = (
         (pd_mode or state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
     )
-    # Canonical term is 'aggregated'; accept legacy 'colocated' / 'mixed' as
-    # aliases so older state.json / env resume cleanly.
-    if mode in ("colocated", "mixed"):
-        mode = "aggregated"
     if mode not in ("aggregated", "disaggregated"):
         raise ServerRestartFailed(f"unsupported pd_mode {mode!r}; expected 'aggregated' or 'disaggregated'")
 

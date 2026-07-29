@@ -196,7 +196,7 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
     # Hyperloom patch (operator-local): forward --pd-* flags so the auto-created
     # IDEP honours the operator's PD topology AND so cmd_create_infera's reuse
     # path classifies pods under the correct prefill/decode roles when writing
-    # /tmp/multi_node_state.json. Without these forwards the helper defaults
+    # the resolved multi_node_state.json. Without these forwards the helper defaults
     # pd_mode to 'aggregated' regardless of the optimize CLI, and downstream
     # restart_server_for_round finds zero prefill/decode pods → no SSH launch →
     # baseline gets 0 completed requests → baseline_failed after 3 attempts.
