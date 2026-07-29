@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [v1.0.0a2] - 2026-07-29
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2)
+for the user-facing summary.
+
 - **breaking(inference_optimizer)**: rename the multi-node `optimize` CLI
   flags `--rayjob-image` → `--mn-image` and `--rayjob-gpus-per-node` →
   `--gpus-per-node`, covering both the `rayjob` and `infera` multi-node
@@ -41,8 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   via `_legacy_drop_fields`.
 
 ## [v1.0.0a1] - 2026-07-22
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) for the user-facing summary.
+See [release notes](docs/release-notes.md) for the user-facing summary.
 
 ## [0.8.0]
 Earlier packaged version. See [release notes](docs/release-notes.md) for the
@@ -63,7 +69,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a1...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a2...HEAD
+[v1.0.0a2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2
 [v1.0.0a1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a1
 [0.8.0]: https://github.com/AMD-AGI/Hyperloom/blob/main/docs/release-notes.md
 [v0.3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v0.3
