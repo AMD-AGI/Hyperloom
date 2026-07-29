@@ -1806,7 +1806,11 @@ def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str, timeo
     env.setdefault("AITER_LOG_MORE", "1")
     if gpu_target:
         env["GPU_TARGET"] = gpu_target
-    gate_timeout = min(timeout_s, int(os.environ.get("FORGE_BASELINE_GATE_TIMEOUT", "300")))
+    # Cold aiter/CK JIT: running the UNMODIFIED kernel here compiles on first use
+    # (~44s+/module, serial baton-lock on gfx950), so a 300s cap could time out and
+    # force a needless autogen fallback. Default 900s; still floored by the per-kernel
+    # budget and overridable via FORGE_BASELINE_GATE_TIMEOUT.
+    gate_timeout = min(timeout_s, int(os.environ.get("FORGE_BASELINE_GATE_TIMEOUT", "900")))
     try:
         proc = subprocess.run(
             [sys.executable, driver], cwd=workspace, env=env, capture_output=True, text=True, timeout=gate_timeout
