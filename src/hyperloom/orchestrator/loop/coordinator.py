@@ -675,20 +675,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
             _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
         )
-        _hard_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
-        )
         self._checkpoint_policy = _orch_mem.CheckpointPolicy(
             context_token_soft=int(_ctx_window * _soft_frac),
-            context_token_hard=int(_ctx_window * _hard_frac),
         )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
-        # Minimum ticks between orchestration-memory compactions, to avoid a
-        # checkpoint-every-tick loop. A near-window emergency bypasses this floor.
-        self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies; resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.

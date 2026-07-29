@@ -139,7 +139,7 @@ class ConversationCollaborator:
                 included; defaults to ``0`` (all events).
 
         Returns:
-            A newline-joined rendering of the last 40 matching inbox events, or
+            A newline-joined rendering of all matching inbox events, or
             a placeholder string when none are available.
         """
         try:
@@ -153,7 +153,7 @@ class ConversationCollaborator:
             return "(no inbox events)"
 
         msgs = [Message.from_row(r) for r in rows]
-        lines = [_format_inbox_event(m) for m in msgs[-40:]]
+        lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
@@ -548,7 +548,11 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        rendered = list(msgs[-20:])
+        # Render the full unread batch for this tick: prefer information
+        # completeness over prompt size. (Cross-tick history already consumed by
+        # the cursor is not replayed; see Critic augment below for the durable
+        # re-delivery of still-undecided proposals.)
+        rendered = list(msgs)
         # Durable at-least-once-until-decided delivery of proposals to the
         # Critic: the inbox tail is lossy, so re-present every still-undecided
         # proposal from the durable ``pending_proposals`` registry.

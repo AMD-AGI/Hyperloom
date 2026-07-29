@@ -800,9 +800,6 @@ async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return False
 
-        def is_hard_compaction(self, n):
-            return False
-
     coord._checkpoint_policy = _Policy()
     assert await coord._maybe_checkpoint_orchestration(tick=5) is False
 
@@ -819,9 +816,6 @@ async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
     class _Policy:
         def should_checkpoint(self, **kw):
             return True
-
-        def is_hard_compaction(self, n):
-            return False
 
     coord._checkpoint_policy = _Policy()
     took = await coord._maybe_checkpoint_orchestration(tick=12, phase_changed=True)
@@ -863,7 +857,6 @@ async def test_checkpoint_history_ring_caps_at_ten(coord: Coordinator) -> None:
 def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION", "0.5")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_HARD_FRACTION", "0.75")
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
 
@@ -872,7 +865,6 @@ def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
     backends["orchestration"].model = "claude-opus-4-8"  # type: ignore[attr-defined]
     c = Coordinator(sd, backends=backends)
     assert c._checkpoint_policy.context_token_soft == 100_000
-    assert c._checkpoint_policy.context_token_hard == 150_000
 
 
 def test_orchestration_memory_rollback_env(tmp_path, monkeypatch) -> None:
@@ -900,9 +892,6 @@ def _always_checkpoint(coord: Coordinator) -> None:
     class _Policy:
         def should_checkpoint(self, **kw):
             return True
-
-        def is_hard_compaction(self, n):  # default: not hard
-            return False
 
     coord._checkpoint_policy = _Policy()
 
@@ -945,30 +934,6 @@ async def test_checkpoint_degenerate_three_times_emits_medium_observation(coord:
     rows = await coord.bus.tail(topic="observation", n=20)
     degraded = [m.payload for m in rows if m.payload.get("kind") == "orchestration_checkpoint_degraded"]
     assert any(p.get("severity") == "medium" and p.get("consecutive") == 3 for p in degraded)
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_degenerate_hard_uses_fallback(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord, raw_text="still no JSON")
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-    coord.shared_state.phase = "EXPLORE"
-
-    class _Policy:
-        def should_checkpoint(self, **kw):
-            return True
-
-        def is_hard_compaction(self, n):  # near the window → force
-            return True
-
-    coord._checkpoint_policy = _Policy()
-    took = await coord._maybe_checkpoint_orchestration(tick=20)
-    assert took is True
-    assert coord._orchestration_seeded is False
-    assert coord.shared_state.orchestration_memory.get("current_plan", "").startswith("[auto]")
 
 
 @pytest.mark.asyncio

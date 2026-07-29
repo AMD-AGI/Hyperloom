@@ -10,7 +10,6 @@ from hyperloom.orchestrator.state.orchestration_memory import (
     CheckpointTracker,
     build_memory_record,
     context_window_for_model,
-    deterministic_memory_fallback,
     is_degenerate_checkpoint,
     parse_checkpoint_reply,
     render_memory_for_seed,
@@ -246,14 +245,6 @@ def test_policy_context_token_soft_disabled_by_default():
     )
 
 
-def test_policy_is_hard_compaction():
-    p = CheckpointPolicy(context_token_hard=170_000)
-    assert p.is_hard_compaction(170_000)
-    assert not p.is_hard_compaction(169_999)
-    # Disabled (0) never fires.
-    assert not CheckpointPolicy().is_hard_compaction(10**9)
-
-
 def test_tracker_set_context_tokens_and_reset_preserves_level():
     t = CheckpointTracker()
     t.set_context_tokens(123_456)
@@ -320,33 +311,6 @@ def test_build_memory_record_new_value_wins():
     assert rec["hypotheses"] == ["h2"]
     assert rec["pending"] == ["p1"]  # inherited
     assert rec["learnings"] == ["L1", "L2"]
-
-
-class _FakeState:
-    phase = "EXPLORE"
-    macro_cycle = 2
-    current_best = {"tput": 1234.5}
-    optimization_stack = [{"a": 1}, {"b": 2}]
-    cumulative_gain_validated = 12.34
-
-
-def test_deterministic_memory_fallback_is_non_degenerate():
-    fb = deterministic_memory_fallback(_FakeState())
-    assert "EXPLORE" in fb["current_plan"]
-    assert "cycle=2" in fb["current_plan"]
-    assert "best_tput=1234.5" in fb["current_plan"]
-    assert "validated_gain=12.34%" in fb["current_plan"]
-    assert fb["tried_and_why"] == ["stack has 2 accepted change(s)"]
-    assert not is_degenerate_checkpoint(fb)
-
-
-def test_deterministic_memory_fallback_missing_attrs():
-    class _Empty:
-        pass
-
-    fb = deterministic_memory_fallback(_Empty())
-    # Never raises; yields a usable record.
-    assert fb["current_plan"].startswith("[auto]")
 
 
 # ---- next_cycle_directive: parse, sanitize, carry-forward ----
