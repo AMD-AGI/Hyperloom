@@ -791,3 +791,70 @@ def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
     labels = sorted(lbl for _p, lbl, _m in shards)
     assert labels == ["bs_16", "bs_64"]  # bs_16 deduped 2 ranks -> 1
     assert len(shards) == 2
+
+
+# ── CUDA/HIP graph-mode under-recording ──────────────────────────────────────
+
+
+def _graph_under_recorded_events():
+    """Synthetic graph-mode trace: 4 graph launches but only 1 replay's kernels
+    recorded, spanning a large wall clock (busy fraction << 0.5)."""
+    events = [{"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}}]
+    # Four graph-launch runtime events (no External id, only correlation).
+    for i, corr in enumerate((5, 6, 7, 8)):
+        events.append(
+            {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": corr, "External id": None}}
+        )
+    # A normally-launched kernel (attributable) and graph-internal kernels for a
+    # single recorded replay (correlation 5). Total wall span ~10s, busy ~200us.
+    events += [
+        {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 99, "External id": 200}},
+        {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1000, "dur": 100, "args": {"correlation": 99}},
+        {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "graph_fused_mlp", "ts": 10_000_000, "dur": 100, "args": {"correlation": 5}},
+    ]
+    return events
+
+
+def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
+    # Graph-launch correlations classify replayed kernels as graph-attributed,
+    # never as (unlinked); flags graph_mode / graph_under_recorded.
+    trace = tmp_path / "g.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
+    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    attr = out["attribution"]
+    cov = out["graph_coverage"]
+    assert attr["graph_mode"] is True
+    assert attr["graph_launch_count"] == 4
+    assert attr["graph_attributed_kernels"] == 2
+    assert attr["unlinked_kernels"] == 0
+    assert cov["graph_under_recorded"] is True
+    assert cov["busy_fraction"] < 0.5
+    # graph-internal kernels are not surfaced as a (unlinked) op bucket
+    assert "(unlinked)" not in {o["name"] for o in out["ops"]}
+
+
+def test_reader_no_graph_mode_when_no_graph_launches(tmp_path):
+    trace = tmp_path / "ng.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    assert out["attribution"]["graph_mode"] is False
+    assert out["graph_coverage"]["graph_under_recorded"] is False
+
+
+def test_graph_under_recorded_skips_idle_gate_keeps_candidates(tmp_path, capsys, monkeypatch):
+    # Under-recorded graph trace: idle% is ~99% but the idle gate must NOT clear
+    # candidates; instead a bypass_graph_under_recorded warning is surfaced.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "g.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["timeline"]["idle_pct"] > 80.0
+    assert result["graph_coverage"]["graph_under_recorded"] is True
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    assert "bypass_graph_under_recorded" in codes
+    assert "high_gpu_idle_pct" not in codes
+    # candidates are preserved (ranked by recorded-kernel GPU share)
+    assert result["hot_kernels"], "candidates must survive the idle gate under graph under-recording"

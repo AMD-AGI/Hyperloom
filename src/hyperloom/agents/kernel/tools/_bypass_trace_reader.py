@@ -344,6 +344,8 @@ def _finalize(
     window: tuple[float, float] | None,
     top_k: int,
     emit_launches: bool = False,
+    graph_launch_corrs: frozenset[int] | None = None,
+    graph_launch_count: int = 0,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events.
 
@@ -418,12 +420,22 @@ def _finalize(
     attributed_kernels = 0
     unlinked_us = 0.0
     unlinked_kernels = 0
+    # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a
+    # correlation matching a graph-launch runtime event (which has no External id),
+    # so they resolve to no cpu_op but are not a genuine attribution failure.
+    graph_corrs = graph_launch_corrs or frozenset()
+    graph_kernels = 0
+    graph_gpu_us = 0.0
     for name, dur, corr, _ts, _end in k_events:
         extid = corr_to_extid.get(corr) if corr is not None else None
         op_name = extid_to_opname.get(extid) if extid is not None else None
         if op_name:
             attributed_us += dur
             attributed_kernels += 1
+        elif corr is not None and corr in graph_corrs:
+            op_name = "(graph)"
+            graph_kernels += 1
+            graph_gpu_us += dur
         else:
             op_name = "(unlinked)"
             unlinked_us += dur
@@ -448,7 +460,7 @@ def _finalize(
         """
         best, best_dur = "", 0.0
         for op, d in (kern_op.get(kernel_name) or {}).items():
-            if op != "(unlinked)" and d > best_dur:
+            if op not in ("(unlinked)", "(graph)") and d > best_dur:
                 best, best_dur = op, d
         return best
 
@@ -470,6 +482,16 @@ def _finalize(
     else:
         total_ms = 0.0
     idle_ms = max(0.0, total_ms - busy_ms)
+
+    # Graph coverage health: under continuous graph replay roctracer's activity
+    # buffer overflows, so only ~1 replay's kernels are recorded. Flag when
+    # graphs are replaying yet recorded busy covers <50% of the wall span, or
+    # many launches map to a single recorded replay's worth of kernels.
+    graph_mode = graph_launch_count > 0
+    busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
+    graph_under_recorded = graph_mode and (
+        busy_fraction < 0.5 or (graph_launch_count >= 4 and graph_kernels > 0 and busy_fraction < 0.9)
+    )
 
     gpu_kernel_total_us = sum(a.dur_us for a in kern_agg.values())
 
@@ -547,6 +569,17 @@ def _finalize(
             "cuda_runtime_links": len(corr_to_extid),
             "cpu_ops": len(extid_to_opname),
             "gpu_memcpy_count": memcpy_count,
+            "graph_mode": graph_mode,
+            "graph_launch_count": graph_launch_count,
+            "graph_attributed_kernels": graph_kernels,
+            "graph_attributed_gpu_ms": round(graph_gpu_us / 1000.0, 4),
+        },
+        "graph_coverage": {
+            "graph_mode": graph_mode,
+            "graph_launch_count": graph_launch_count,
+            "graph_attributed_kernels": graph_kernels,
+            "busy_fraction": busy_fraction,
+            "graph_under_recorded": graph_under_recorded,
         },
     }
 
@@ -577,7 +610,8 @@ def analyze_trace(
           ``timeline`` (total/busy/idle/kernel/memcpy ms),
           ``ops`` (op-level GPU-time aggregates, desc by gpu time),
           ``kernels`` (device-kernel aggregates, desc by gpu time),
-          ``attribution`` (coverage stats),
+          ``attribution`` (coverage stats + graph-mode signals),
+          ``graph_coverage`` (graph-mode / under-recording health signals),
           ``annotation_windows`` (gpu_user_annotation name/ts/dur),
           ``aggregation_scope`` (``steady_state`` or ``full_trace``),
           ``steady_window`` (window meta when steady state was applied),
@@ -604,6 +638,9 @@ def analyze_trace(
     k_events: list[tuple[str, float, Any, float, float]] = []
     m_events: list[tuple[float, float, float]] = []
     annotation_windows: list[dict[str, Any]] = []
+    # Correlations of CUDA/HIP graph-launch runtime events (no External id), so
+    # their replayed kernels are classified graph-attributed, not (unlinked).
+    graph_launch_corrs: set[int] = set()
     event_total = 0
 
     fobj = _open_trace_binary(tf)
@@ -617,6 +654,8 @@ def analyze_trace(
                 extid = args.get("External id")
                 if cid is not None and extid is not None:
                     corr_to_extid[cid] = extid
+                if cid is not None and "GraphLaunch" in (ev.get("name", "") or ""):
+                    graph_launch_corrs.add(cid)
                 continue
             if cat == "cpu_op":
                 args = ev.get("args") or {}
@@ -674,6 +713,8 @@ def analyze_trace(
         window=window,
         top_k=top_k,
         emit_launches=emit_launches,
+        graph_launch_corrs=frozenset(graph_launch_corrs),
+        graph_launch_count=len(graph_launch_corrs),
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 

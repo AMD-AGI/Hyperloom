@@ -29,7 +29,7 @@ from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
-from _bypass_source_resolver import editable_trace_source, resolve_source
+from _bypass_source_resolver import editable_trace_source, resolve_by_kernel_name, resolve_source
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
@@ -361,11 +361,16 @@ def build_candidates(
         display = op_name or _short_name(kname)
 
         # Source resolution. Priority: (1) a Triton kernel_file from the trace's
-        # cpu_op args; (2) op_to_source.json lookup; else unresolved.
+        # cpu_op args; (2) op_to_source.json lookup; (3) repo-scan by device
+        # kernel name; else unresolved.
         source_file = editable_trace_source(k.get("op_kernel_file", "") or "", k.get("op_kernel_backend", "") or "")
         source_method = "trace_kernel_file" if source_file else "unresolved"
         if not source_file and op_name:
             source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
+            if source_file:
+                source_method = method
+        if not source_file and kname:
+            source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
 
