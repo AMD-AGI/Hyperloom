@@ -72,9 +72,25 @@ def build_external_state_from_env() -> dict[str, Any]:
             return 10 if (role or "").lower() == "decode" else 0
 
     def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
+        """Build SSH targets for one role, mirroring the pods' own port math.
+
+        A pod's sshd listens on ``role_base + LWS_WORKER_INDEX`` (see
+        ``infera_support.idle_worker_entrypoint`` / ``ssh_port_for_pod``), so the
+        pods of a multi-node role occupy consecutive ports. The platform lists a
+        role's IPs in LWS ordinal order (leader first), hence the list index is
+        the ordinal. Dropping it would leave every non-leader unreachable as soon
+        as a role spans nodes.
+        """
         base = ssh_port + ssh_role_port_offset(role)
         return [
-            {"podIP": ip, "podId": f"external-{role}-{i}", "role": role, "sshPort": base} for i, ip in enumerate(ips)
+            {
+                "podIP": ip,
+                "podId": f"external-{role}-{i}",
+                "role": role,
+                "lwsIndex": i,
+                "sshPort": base + i,
+            }
+            for i, ip in enumerate(ips)
         ]
 
     prefill, decode, worker = (

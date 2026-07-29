@@ -47,6 +47,52 @@ def test_build_external_state_from_env_pd_topology(_external_env: Path) -> None:
     assert state["last_restart_pd_decode_nodes"] == 1
 
 
+def test_external_pod_ssh_ports_follow_the_lws_ordinal(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each pod of a multi-node role listens on ``base + role_offset + ordinal``.
+
+    Regression guard. ``mn-idle.sh`` is launched with
+    ``MN_SSH_PORT=$(( role_base + ${LWS_WORKER_INDEX:-0} ))``, so the pods of one
+    LeaderWorkerSet group listen on consecutive ports. External mode used to hand
+    the same ``role_base`` to every IP in a role, which is invisible while a role
+    has a single pod but makes every non-leader unreachable as soon as the role
+    spans nodes. The platform supplies the IP lists in LWS ordinal order (leader
+    first), so the list index IS the ordinal.
+    """
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.1.1,10.0.1.2")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_IPS", "10.0.2.1,10.0.2.2")
+
+    state = ext.build_external_state_from_env()
+
+    # prefill keeps the base; decode is strided so co-located roles never collide.
+    assert [p["sshPort"] for p in state["prefill_pods"]] == [2222, 2223]
+    assert [p["sshPort"] for p in state["decode_pods"]] == [2232, 2233]
+    # Ports must pair with the right IP, in the order the platform listed them.
+    assert [(p["podIP"], p["sshPort"]) for p in state["prefill_pods"]] == [
+        ("10.0.1.1", 2222),
+        ("10.0.1.2", 2223),
+    ]
+
+
+def test_external_aggregated_worker_ports_follow_the_lws_ordinal(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The aggregated worker role is the common multi-node shape: one LWS group."""
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_WORKER_IPS", "10.0.3.1,10.0.3.2,10.0.3.3")
+
+    state = ext.build_external_state_from_env()
+
+    assert [p["sshPort"] for p in state["worker_pods"]] == [2222, 2223, 2224]
+
+
 def test_load_multi_node_state_falls_back_to_env(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
