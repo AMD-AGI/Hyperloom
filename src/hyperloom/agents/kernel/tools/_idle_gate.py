@@ -82,3 +82,36 @@ def build_high_idle_warning(
             "can route to params/backends."
         ),
     }
+
+
+def build_graph_under_recorded_warning(
+    *,
+    graph_launch_count: int,
+    idle_pct: float | None = None,
+) -> dict[str, Any]:
+    """Build the ``trace_health_warnings[]`` entry for a graph under-recorded trace.
+
+    Under continuous CUDA/HIP graph replay the profiler activity buffer overflows
+    and captures only ~1 of ``graph_launch_count`` replays, so idle% is unreliable
+    and must not gate candidates; ranking by recorded-kernel GPU share stays valid.
+
+    Args:
+        graph_launch_count: Number of graph-launch runtime events in the trace.
+        idle_pct: The (unreliable) measured GPU idle percentage, for context.
+
+    Returns:
+        The structured ``bypass_graph_under_recorded`` warning entry.
+    """
+    idle_note = f" (computed idle% {idle_pct:.2f}% is unreliable here)" if isinstance(idle_pct, (int, float)) else ""
+    return {
+        "code": "bypass_graph_under_recorded",
+        "severity": "warning",
+        "graph_launch_count": graph_launch_count,
+        "message": (
+            f"graph-mode trace under-recorded: only ~1 of {graph_launch_count} graph "
+            f"replays captured (profiler activity-buffer overflow under continuous GPU "
+            f"saturation){idle_note}; idle% is unreliable and the idle gate is skipped. "
+            "Hot-kernel candidates are still ranked by recorded-kernel GPU share, which "
+            "is a representative sample of one replay."
+        ),
+    }
