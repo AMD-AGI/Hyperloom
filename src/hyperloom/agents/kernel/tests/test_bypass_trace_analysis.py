@@ -66,6 +66,16 @@ _CUDAGRAPH_HIGH_IDLE_TRACE_EVENTS = [
     {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 100000, "dur": 100, "args": {"correlation": 7}},
 ]
 
+# CUDA-graph replay trace with the most severe under-recording: graph launches
+# are present but NO device kernel events were recorded at all.
+_CUDAGRAPH_NO_KERNEL_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
+    *[
+        {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "args": {"correlation": 900 + i}}
+        for i in range(64)
+    ],
+]
+
 
 def _run(argv, capsys):
     rc = bta.main(argv)
@@ -237,6 +247,23 @@ def test_cudagraph_replay_not_suppressed_by_idle_gate(tmp_path, capsys, monkeypa
     assert "high_gpu_idle_pct" not in codes
     assert "bypass_cudagraph_unreliable_idle" in codes
     # (C) a general cudagraph-replay health signal is surfaced.
+    assert "bypass_cudagraph_replay" in codes
+
+
+def test_cudagraph_replay_signal_without_recorded_kernels(tmp_path, capsys, monkeypatch):
+    # Graph replay is a whole-trace property: even when the profiler records the
+    # graph launches but NO device kernels (the most severe under-recording case),
+    # the general cudagraph-replay signal must still be surfaced. It must not be
+    # gated behind "kernels were recorded".
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "cudagraph_nokernel.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _CUDAGRAPH_NO_KERNEL_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["status"] == "ok"
+    assert result["attribution"]["graph_launch_count"] == 64
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    assert "bypass_no_gpu_kernels" in codes
     assert "bypass_cudagraph_replay" in codes
 
 

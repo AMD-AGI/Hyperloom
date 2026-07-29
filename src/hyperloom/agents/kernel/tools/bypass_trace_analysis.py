@@ -171,23 +171,6 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
             }
         )
 
-    graph_launch_count = (analyze.get("attribution") or {}).get("graph_launch_count", 0)
-    if graph_launch_count > 0:
-        warnings.append(
-            {
-                "code": "bypass_cudagraph_replay",
-                "severity": "warning",
-                "graph_launch_count": graph_launch_count,
-                "message": (
-                    f"{graph_launch_count} CUDA-graph replay launches detected. Device kernels "
-                    "for graph replays are under-recorded and their launching runtime call "
-                    "carries no cpu_op link, so op-attribution coverage and idle_pct are "
-                    "unreliable for this trace; kernel-name classification and per-kernel GPU-time "
-                    "shares still apply."
-                ),
-            }
-        )
-
     if analyze.get("steady_window_status"):
         warnings.append(
             {
@@ -643,6 +626,26 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+    # CUDA-graph replay is a whole-trace property, independent of whether any
+    # device kernels were recorded, so surface it unconditionally: the zero-
+    # recorded-kernel case is exactly when graph under-recording is most severe.
+    graph_launch_count = (analyze.get("attribution") or {}).get("graph_launch_count", 0)
+    if graph_launch_count > 0:
+        trace_health_warnings.append(
+            {
+                "code": "bypass_cudagraph_replay",
+                "severity": "warning",
+                "graph_launch_count": graph_launch_count,
+                "message": (
+                    f"{graph_launch_count} CUDA-graph replay launches detected. Device kernels "
+                    "for graph replays are under-recorded and their launching runtime call "
+                    "carries no cpu_op link, so op-attribution coverage and idle_pct are "
+                    "unreliable for this trace; kernel-name classification and per-kernel GPU-time "
+                    "shares still apply."
+                ),
+            }
+        )
+
     # Analysis-quality health signals (observability only; never fatal).
     if analyze.get("kernels"):
         _emit_quality_warnings(analyze, trace_health_warnings)
@@ -671,7 +674,6 @@ def main(argv: list[str] | None = None) -> int:
     # surface a high_gpu_idle_pct warning for the Coordinator.
     idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
     idle_pct_threshold = resolve_idle_pct_threshold()
-    graph_launch_count = (analyze.get("attribution") or {}).get("graph_launch_count", 0)
     if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
         if graph_launch_count > 0:
             # CUDA-graph replay: idle_pct is unreliable here. The profiler

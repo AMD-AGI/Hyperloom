@@ -77,6 +77,7 @@ _TUNER_DTYPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def classify_op(name: str, op_name: str = "") -> str:
     """Return the coarse op category for a kernel/op name pair.
 

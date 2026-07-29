@@ -52,7 +52,9 @@ _RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 # the only reliable in-trace signal that the timeline/attribution is a
 # graph-replay trace (and thus that idle_pct is untrustworthy). Canonical
 # definition for the tools layer -- ``_trace_shape_manifest`` reuses it.
-_GRAPH_LAUNCH_RE = re.compile(r"graphlaunch|graph_launch|hipgraphlaunch|cudagraphlaunch", re.IGNORECASE)
+# ``graphlaunch`` already matches inside ``cudaGraphLaunch`` / ``hipGraphLaunch``;
+# ``graph_launch`` additionally covers snake_case emitters.
+_GRAPH_LAUNCH_RE = re.compile(r"graphlaunch|graph_launch", re.IGNORECASE)
 
 
 def _file_size(fp: Path) -> int:
