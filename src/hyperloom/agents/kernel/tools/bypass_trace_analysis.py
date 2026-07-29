@@ -706,21 +706,29 @@ def main(argv: list[str] | None = None) -> int:
     # High-idle gate: when GPU idle exceeds the threshold, per-kernel rewriting
     # cannot move end-to-end latency, so suppress every candidate list and
     # surface a high_gpu_idle_pct warning for the Coordinator.
-    idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
+    _timeline = analyze.get("timeline") or {}
+    idle_pct_value = _timeline.get("idle_pct")
+    _total_ms = _timeline.get("total_time_ms")
     idle_pct_threshold = resolve_idle_pct_threshold()
     idle_over_threshold = isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold
+    # Degenerate timeline: graph replays present but (near-)zero GPU time recorded,
+    # so idle_pct fell out as 0 from an empty timeline. This is the MOST severe
+    # under-recording, not a genuinely 0%-idle GPU.
+    idle_data_missing = not isinstance(_total_ms, (int, float)) or _total_ms <= 0.0
 
     # --- data reliability (honest degradation; no reconstruction) ---
     # When the upstream trace is an incomplete CUDA-graph capture, its GPU-time
     # and attribution data are simply not present. We do not fabricate them; we
     # mark them unreliable and propagate that so nothing downstream (report,
     # roofline snapshot, specialist prompt) treats them as authoritative.
-    # * idle: a high idle reading under graph replay is an under-recording
-    #   artifact, not a genuinely idle GPU.
+    # * idle: under graph replay a high idle reading is an under-recording artifact
+    #   (not a genuinely idle GPU); a degenerate empty timeline (idle=0 from no
+    #   recorded GPU time) is the same artifact at its extreme. A plausible
+    #   low/moderate idle computed from real recorded kernels is kept trustworthy.
     # * attribution: graph-replayed kernels carry no cpu_op link, so coverage
     #   below the shared floor is a data gap, not a real 0%.
     attributed_pct = float((analyze.get("attribution") or {}).get("attributed_pct") or 0.0)
-    idle_reliable = not (idle_over_threshold and graph_launch_count > 0)
+    idle_reliable = not (graph_launch_count > 0 and (idle_over_threshold or idle_data_missing))
     attribution_reliable = not (graph_launch_count > 0 and attributed_pct < _bypass_corr_warn_pct())
     data_reliability_reason = "" if (idle_reliable and attribution_reliable) else "cudagraph_incomplete_trace"
 

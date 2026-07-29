@@ -299,8 +299,11 @@ def test_cudagraph_replay_signal_without_recorded_kernels(tmp_path, capsys, monk
     codes = {w["code"] for w in result["trace_health_warnings"]}
     assert "bypass_no_gpu_kernels" in codes
     assert "bypass_cudagraph_replay" in codes
-    # honest degradation: attribution is unreliable (replay kernels carry no link)
+    # honest degradation: attribution is unreliable (replay kernels carry no link),
+    # and idle is unreliable too — a degenerate empty timeline (idle=0 from zero
+    # recorded GPU time) is the most severe under-recording, not a real 0% idle.
     assert result["attribution_reliable"] is False
+    assert result["idle_reliable"] is False
     assert result["data_reliability_reason"] == "cudagraph_incomplete_trace"
 
 
