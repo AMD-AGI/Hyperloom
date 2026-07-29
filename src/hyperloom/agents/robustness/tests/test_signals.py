@@ -612,9 +612,9 @@ def test_kernel_pipeline_config_slot_feeds_two_rows():
 
 
 def test_classifier_config_map_covers_every_registry_slot():
-    from hyperloom.agents.robustness.signals.classifier import (
-        signal_registry_config_attrs,
-    )
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    expected_slots = {spec.config_attr for spec in _SIGNAL_REGISTRY if spec.config_attr}
 
     classifier = Classifier()
-    assert set(classifier.signal_configs) == set(signal_registry_config_attrs())
+    assert set(classifier.signal_configs) == expected_slots

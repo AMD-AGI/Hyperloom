@@ -319,3 +319,44 @@ class VariantResult:
             "killed_overtime": self.killed_overtime,
             "estimated_output_throughput": self.estimated_output_throughput,
         }
+
+
+def pareto_front(
+    entries: list[dict[str, Any]],
+    *,
+    latency_key: str = "e2el_mean_ms",
+) -> list[dict[str, Any]]:
+    """Naive O(N²) Pareto for (max ``output_throughput``, min *latency_key*).
+
+    Args:
+        entries (list[dict[str, Any]]): Sweep result entries to filter.
+        latency_key (str): Which latency metric to minimize. The native sweep
+            reads ``e2el_mean_ms``; the GEAK sweep reads ``ttft_mean_ms``
+            because ``bench_summary.json`` carries no e2el.
+
+    Returns:
+        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
+    """
+    succ = [
+        e
+        for e in entries
+        if e["status"] == "succeeded"
+        and isinstance(e.get("output_throughput"), (int, float))
+        and isinstance(e.get(latency_key), (int, float))
+    ]
+    front: list[dict[str, Any]] = []
+    for cand in succ:
+        dominated = False
+        for other in succ:
+            if other is cand:
+                continue
+            if (
+                other["output_throughput"] >= cand["output_throughput"]
+                and other[latency_key] <= cand[latency_key]
+                and (other["output_throughput"] > cand["output_throughput"] or other[latency_key] < cand[latency_key])
+            ):
+                dominated = True
+                break
+        if not dominated:
+            front.append(cand)
+    return front

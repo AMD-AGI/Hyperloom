@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import sqlite3
 
-# ensure_schema migrates v1 DBs in place under BEGIN IMMEDIATE.
+# ensure_schema creates the current schema under BEGIN IMMEDIATE. Databases
+# written by older versions are not supported and must be recreated.
 SCHEMA_VERSION = 3
 
 
@@ -141,60 +142,6 @@ _MANAGED_TABLES = (
 )
 
 
-def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
-    """In-place widen of the legacy ``leases`` PK (``lane`` -> composite
-    ``(lane, holder_id)``). Snapshots rows, recreates the table, re-inserts;
-    runs inside the caller's BEGIN IMMEDIATE.
-
-    Args:
-        cur: Open SQLite cursor within the caller's transaction.
-
-    Returns:
-        ``True`` when a migration ran, ``False`` when already migrated or the
-        table has an unknown shape.
-    """
-    try:
-        cur.execute("PRAGMA table_info(leases)")
-    except sqlite3.OperationalError:
-        return False
-    info = cur.fetchall()
-    if not info:
-        return False
-    pk_cols = sorted((row[1] for row in info if int(row[5] or 0) > 0))
-    if pk_cols == ["holder_id", "lane"]:
-        return False  # already migrated
-    if pk_cols != ["lane"]:
-        return False  # unknown shape — leave it alone
-    cur.execute("SELECT lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at FROM leases")
-    rows = cur.fetchall()
-    cur.execute("DROP TABLE leases")
-    cur.execute(
-        """
-        CREATE TABLE leases (
-            lane          TEXT    NOT NULL,
-            holder_id     TEXT    NOT NULL,
-            task_id       TEXT    NOT NULL,
-            action        TEXT    NOT NULL,
-            pid           INTEGER NOT NULL,
-            acquired_at   TEXT    NOT NULL,
-            expires_at    TEXT    NOT NULL,
-            heartbeat_at  TEXT    NOT NULL,
-            PRIMARY KEY (lane, holder_id)
-        )
-        """
-    )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_leases_lane ON leases(lane)")
-    for r in rows:
-        cur.execute(
-            "INSERT OR REPLACE INTO leases(lane, holder_id, task_id, "
-            "action, pid, acquired_at, expires_at, heartbeat_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            tuple(r),
-        )
-    return True
-
-
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     """Idempotently insert default capacity rows; existing rows are left
     alone so a resume preserves the operator's choice.
@@ -264,18 +211,15 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
         row = cur.fetchone()
         if row is not None:
             return int(row[0])
-    except sqlite3.OperationalError:
-        # Table/row may not exist yet; treat as no value.
-        pass
     finally:
         cur.close()
     return int(DEFAULT_LANE_CAPACITIES.get(lane, 1))
 
 
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently create all tables, run the leases PK migration, seed
-    lane_capacity defaults, and record the schema version. Single
-    transaction so readers never see an intermediate schema.
+    """Idempotently create all tables, seed lane_capacity defaults, and
+    record the schema version. Single transaction so readers never see an
+    intermediate schema.
 
     Args:
         conn: Open database connection.
@@ -286,18 +230,6 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
-        # schema_version first so migrations have somewhere to record.
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version    INTEGER PRIMARY KEY,
-                applied_at TEXT    NOT NULL
-            )
-            """
-        )
-        # Migrate before the _DDL CREATE IF NOT EXISTS, which would
-        # otherwise keep the legacy PK on existing DBs.
-        _migrate_leases_v1_to_v2(cur)
         for stmt in _DDL:
             cur.execute(stmt)
         _seed_default_lane_capacity(cur)

@@ -24,13 +24,13 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
     _build_arm_grid,
-    _build_comparison,
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
     _has_optimization,
     _order_concs_desc,
     run_conc_sweep,
 )
+from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

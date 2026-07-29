@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import os
-import shutil
 import stat
-import tempfile
 from pathlib import Path
 
 from ..session.paths import ENV_CURRENT_SESSION_DIR
 
 from ._internal.log import warn
 
-_LEGACY_STATE_FILE = Path(tempfile.gettempdir()) / "multi_node_state.json"
 _RUNTIME_REL = Path("runtime") / "multi_node_state.json"
 
 
@@ -42,15 +39,6 @@ def resolve_state_file() -> Path:
     )
 
 
-def legacy_state_file() -> Path:
-    """Return the legacy default state file path.
-
-    Returns:
-        Path: ``/tmp/multi_node_state.json``.
-    """
-    return _LEGACY_STATE_FILE
-
-
 def state_file_safe_to_read(path: Path) -> bool:
     """Return True when ``path`` is owned by the current uid and not group/world-writable.
 
@@ -71,18 +59,6 @@ def state_file_safe_to_read(path: Path) -> bool:
     return True
 
 
-def _chmod_state_file(path: Path) -> None:
-    """Restrict state file permissions to owner read/write.
-
-    Args:
-        path: State file to chmod.
-    """
-    try:
-        path.chmod(0o600)
-    except OSError as exc:
-        warn(f"could not chmod state file {path} to 0600: {exc}")
-
-
 def _ensure_runtime_dir(runtime_dir: Path) -> None:
     """Create the runtime directory with owner-only access.
 
@@ -97,11 +73,7 @@ def _ensure_runtime_dir(runtime_dir: Path) -> None:
 
 
 def bind_state_file_to_session(session_dir: Path) -> Path:
-    """Pin ``$MULTI_NODE_STATE_FILE`` under ``session_dir`` and migrate legacy state.
-
-    When the session-scoped file is absent, copies a safe legacy
-    ``/tmp/multi_node_state.json`` (or an explicit ``$MULTI_NODE_STATE_FILE``)
-    into the session runtime directory.
+    """Pin ``$MULTI_NODE_STATE_FILE`` under ``session_dir``.
 
     Args:
         session_dir: Active optimizer session directory.
@@ -111,27 +83,5 @@ def bind_state_file_to_session(session_dir: Path) -> Path:
     """
     target = session_dir / _RUNTIME_REL
     _ensure_runtime_dir(target.parent)
-
-    if not target.is_file():
-        candidates: list[Path] = []
-        env_path = os.environ.get("MULTI_NODE_STATE_FILE", "").strip()
-        if env_path:
-            candidates.append(Path(env_path))
-        if legacy_state_file() not in candidates:
-            candidates.append(legacy_state_file())
-        for src in candidates:
-            if src == target or not src.is_file():
-                continue
-            if not state_file_safe_to_read(src):
-                warn(f"skipping unsafe multi-node state migration from {src}")
-                continue
-            try:
-                shutil.copy2(src, target)
-                _chmod_state_file(target)
-                warn(f"migrated multi-node state {src} -> {target}")
-                break
-            except OSError as exc:
-                warn(f"could not migrate multi-node state {src} -> {target}: {exc}")
-
     os.environ["MULTI_NODE_STATE_FILE"] = str(target)
     return target

@@ -30,9 +30,8 @@ from ..role.envelope import (
 class PolicyAware:
     """Local validator for intents the robustness reactor is about to emit.
 
-    Construct once and reuse; the validator is stateless. Use either
-    :meth:`assert_payload_complete` (raise on first violation) or
-    :meth:`validate_all` (collect every violation for diagnostics).
+    Construct once and reuse; the validator is stateless. Call
+    :meth:`assert_payload_complete` to raise on the first violation.
     """
 
     def assert_payload_complete(self, intent: Intent) -> None:
@@ -50,27 +49,6 @@ class PolicyAware:
         self._check_role(intent)
         self._check_required_fields(intent)
         self._check_per_intent(intent)
-
-    def validate_all(self, intent: Intent) -> list[PolicyViolation]:
-        """Return every violation without raising.
-
-        Used in unit tests to assert exhaustive coverage of a malformed
-        intent. The reactor calls :meth:`assert_payload_complete` only.
-
-        Args:
-            intent (Intent): The intent to validate.
-
-        Returns:
-            list[PolicyViolation]: Every violation found; empty when the intent
-            is emit-safe.
-        """
-        violations: list[PolicyViolation] = []
-        for check in (self._check_role, self._check_required_fields, self._check_per_intent):
-            try:
-                check(intent)
-            except PolicyViolation as exc:
-                violations.append(exc)
-        return violations
 
     def _check_role(self, intent: Intent) -> None:
         """Verify the intent type is in the robustness role allowlist.

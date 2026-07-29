@@ -16,7 +16,10 @@ globs:
 
 Drive every RayJob lifecycle action through the Python CLI below. **Never
 `ray.init`, `kubectl`, or raw `curl` to SaFE / Ray Dashboard.** All state
-is in `/tmp/multi_node_state.json` (sandbox-local; lost on sandbox
+is in the state file resolved from `$MULTI_NODE_STATE_FILE` (or
+`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json`
+when the session is pinned; one of the two MUST be set — there is no
+`/tmp` default). It is sandbox-local (lost on sandbox
 recreate — re-running any subcommand reads back from SaFE / Ray
 Dashboard and rewrites the file), maintained by the CLI.
 
@@ -353,7 +356,7 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 
 After step 4 route all benchmark / Magpie traffic to
 `state.service_url` (head pod ClusterIP `:8888`). Re-read
-`/tmp/multi_node_state.json` every turn; never cache `head_pod_ip` /
+`$MULTI_NODE_STATE_FILE` every turn; never cache `head_pod_ip` /
 `service_url` across actions — RayJob recreate (or `stop-multi-job` then
 `create-rayjob` again) reassigns the head pod and rewrites both keys.
 

@@ -21,18 +21,9 @@ _RAY_ACTOR_DIED_RC: int = -913
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
 
-# Scheduling timeout for GPU-specialist actors; coordinator tasks do not use one.
-_RAY_SPECIALIST_SCHED_TIMEOUT_SEC: float = float(
-    os.environ.get("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", "300")
-)
-
 
 class RayInfeasibleError(RuntimeError):
     """Raised when the cluster can never satisfy the requested resources."""
-
-
-class RaySchedTimeoutError(RuntimeError):
-    """Raised when a specialist actor fails to schedule within the timeout."""
 
 
 def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
@@ -473,8 +464,9 @@ class GpuSpecialistLease:
 
     Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``. The
     specialist's entire subprocess runs inside the actor so all GPU commands land
-    within Ray's assigned visible devices. Exposes ``start`` / ``is_alive`` /
-    ``exit_code`` / ``stop`` / ``close`` (mirroring Popen for the reap loop).
+    within Ray's assigned visible devices. Exposes ``start_async`` /
+    ``poll_started`` / ``is_alive`` / ``exit_code`` / ``stop`` / ``close``
+    (mirroring Popen for the reap loop).
     Single-node only.
     """
 
@@ -496,43 +488,6 @@ class GpuSpecialistLease:
         # *running* wall budget.
         self._start_ref: Any = None
         self._pending_started_monotonic: float | None = None
-
-    def start(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        log_path: str | None = None,
-    ) -> int:
-        """Ensure the cluster, create the actor, launch the subprocess; return its pid.
-
-        Blocking convenience wrapper around :meth:`start_async` +
-        :meth:`poll_started` kept for callers / tests that want the legacy
-        synchronous contract. Raises :exc:`RayInfeasibleError` for unschedulable
-        resource requests or :exc:`RaySchedTimeoutError` if the actor does not
-        schedule within :data:`_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`.
-
-        Prefer :meth:`start_async` + :meth:`poll_started` on the hot dispatch
-        path so Ray pending time neither blocks the event loop nor counts
-        against the specialist's wall budget (§3.3).
-        """
-        import ray  # noqa: PLC0415
-
-        self.start_async(cmd, env=env, cwd=cwd, log_path=log_path)
-        try:
-            self._pid = int(
-                ray.get(self._start_ref, timeout=_RAY_SPECIALIST_SCHED_TIMEOUT_SEC)
-            )
-            self._start_ref = None
-        except ray.exceptions.GetTimeoutError as exc:
-            self.close()
-            raise RaySchedTimeoutError(
-                f"GPU-specialist actor did not schedule within "
-                f"{_RAY_SPECIALIST_SCHED_TIMEOUT_SEC:.0f}s; "
-                "cluster may be fully occupied"
-            ) from exc
-        return self._pid
 
     def start_async(
         self,
@@ -595,7 +550,7 @@ class GpuSpecialistLease:
         return max(0.0, time.monotonic() - self._pending_started_monotonic)
 
     def pid(self) -> int | None:
-        """Return the launched pid, or ``None`` before :meth:`start`.
+        """Return the launched pid, or ``None`` before it has been resolved.
 
         Returns:
             The pid, or ``None``.
@@ -961,7 +916,6 @@ __all__ = [
     "GpuSpecialistLease",
     "ManagedServerProcess",
     "RayInfeasibleError",
-    "RaySchedTimeoutError",
     "ServingGroupManager",
     "ServingLease",
     "make_gpu_specialist_actor",
