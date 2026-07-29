@@ -772,6 +772,9 @@ def render_analysis_md(
     throughput_unit: str = "tok/s",
     metrics_csv_path: str = "",
     summary_csv_path: str = "",
+    idle_reliable: bool = True,
+    attribution_reliable: bool = True,
+    data_reliability_reason: str = "",
 ) -> str:
     """Render the human/downstream ``analysis.md`` report (bypass route).
 
@@ -786,6 +789,12 @@ def render_analysis_md(
         framework: Serving framework tag.
         target_platform: GPU platform tag.
         throughput_unit: ``tok/s`` (text-gen) or ``img/s`` (xDiT).
+        idle_reliable: When False, the idle/busy cells are nulled (rendered as
+            "-") because the trace is an incomplete CUDA-graph capture.
+        attribution_reliable: When False, the op-attribution coverage cell is
+            nulled for the same reason.
+        data_reliability_reason: Machine tag (e.g. ``cudagraph_incomplete_trace``)
+            appended to the provenance note when any metric is unreliable.
 
     Returns:
         The full markdown report text.
@@ -817,6 +826,17 @@ def render_analysis_md(
         "exposed_comm_pct": None,  # bypass does not model exposed communication
         "exposed_memcpy_pct": memcpy_pct,
     }
+
+    # Honest degradation (no reconstruction): when the upstream trace is an
+    # incomplete CUDA-graph capture, the affected metrics are not real data, so
+    # null them (rendered as "-") rather than emit an untrustworthy number. This
+    # also stops the downstream parser from reading a spurious idle_pct.
+    if not idle_reliable:
+        exec_summary["gpu_idle_pct"] = None
+        exec_summary["gpu_busy_pct"] = None
+        system_signals["idle_pct"] = None
+    if not attribution_reliable:
+        exec_summary["attribution_pct"] = None
 
     # Top Hot Kernels rows. Displayed Eff% is the binding-side roofline
     # attainment.
@@ -870,6 +890,17 @@ def render_analysis_md(
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
         f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
+    if data_reliability_reason:
+        _unreliable = [
+            name
+            for name, ok in (("idle", idle_reliable), ("op-attribution", attribution_reliable))
+            if not ok
+        ]
+        provenance += (
+            f" DATA RELIABILITY: {', '.join(_unreliable)} unreliable "
+            f"(reason={data_reliability_reason}); affected metrics shown as '-' and must not be "
+            "treated as authoritative — the upstream trace lacks the required data (not reconstructed)."
+        )
 
     extra = _render_bypass_extra_sections(
         candidates,

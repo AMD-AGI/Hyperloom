@@ -265,6 +265,52 @@ def test_cudagraph_replay_signal_without_recorded_kernels(tmp_path, capsys, monk
     codes = {w["code"] for w in result["trace_health_warnings"]}
     assert "bypass_no_gpu_kernels" in codes
     assert "bypass_cudagraph_replay" in codes
+    # honest degradation: attribution is unreliable (replay kernels carry no link)
+    assert result["attribution_reliable"] is False
+    assert result["data_reliability_reason"] == "cudagraph_incomplete_trace"
+
+
+def test_cudagraph_idle_marked_unreliable_and_degraded(tmp_path, capsys, monkeypatch):
+    # Honest degradation (no reconstruction): on an incomplete CUDA-graph trace
+    # the idle metric is flagged unreliable and propagated through
+    # result / timeline / manifest, and the analysis.md renders the idle cell as
+    # an em-dash (not a bogus number) plus a DATA RELIABILITY note.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "cudagraph.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _CUDAGRAPH_HIGH_IDLE_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["idle_reliable"] is False
+    # recorded kernels here are linked, so attribution stays reliable
+    assert result["attribution_reliable"] is True
+    assert result["data_reliability_reason"] == "cudagraph_incomplete_trace"
+    assert result["timeline"]["idle_reliable"] is False
+    manifest = json.loads(Path(result["artifact_paths"]["trace_input_manifest"]).read_text())
+    assert manifest["idle_reliable"] is False
+    assert manifest["data_reliability_reason"] == "cudagraph_incomplete_trace"
+    # analysis.md: idle cell is the em-dash placeholder, and a reliability note fires.
+    md = Path(result["artifact_paths"]["trace_report_path"]).read_text(encoding="utf-8")
+    assert "DATA RELIABILITY" in md
+    assert "| GPU Idle % | — |" in md
+    assert "| GPU Busy % | — |" in md
+
+
+def test_normal_trace_stays_reliable(tmp_path, capsys, monkeypatch):
+    # Regression lock: a non-cudagraph trace is unaffected — reliable flags True,
+    # no reliability note, and a numeric idle is still rendered.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    trace = tmp_path / "t.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["idle_reliable"] is True
+    assert result["attribution_reliable"] is True
+    assert result["data_reliability_reason"] == ""
+    md = Path(result["artifact_paths"]["trace_report_path"]).read_text(encoding="utf-8")
+    assert "DATA RELIABILITY" not in md
+    idle_row = next(ln for ln in md.splitlines() if ln.startswith("| GPU Idle %"))
+    assert "%" in idle_row  # numeric percentage rendered, not the em-dash placeholder
 
 
 # ── diffusion workload roofline ──────────────────────────────────────────────

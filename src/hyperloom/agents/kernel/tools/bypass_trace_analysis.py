@@ -117,6 +117,19 @@ def _maybe_enrich_rocprof(
         return {"status": msg}
 
 
+def _bypass_corr_warn_pct() -> float:
+    """Op-attribution coverage floor (percent) below which coverage is untrusted.
+
+    Single source shared by the ``bypass_low_op_correlation`` warning and the
+    ``attribution_reliable`` gate so they can never disagree. Tunable via
+    ``HYPERLOOM_BYPASS_CORR_WARN_PCT`` (default 10).
+    """
+    try:
+        return float(os.environ.get("HYPERLOOM_BYPASS_CORR_WARN_PCT", "10") or 10)
+    except ValueError:
+        return 10.0
+
+
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
     """Append analysis-quality health signals so weak analyses are never silent.
 
@@ -138,10 +151,7 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
         others_thr = float(os.environ.get("HYPERLOOM_BYPASS_OTHERS_WARN_PCT", "40") or 40)
     except ValueError:
         others_thr = 40.0
-    try:
-        corr_thr = float(os.environ.get("HYPERLOOM_BYPASS_CORR_WARN_PCT", "10") or 10)
-    except ValueError:
-        corr_thr = 10.0
+    corr_thr = _bypass_corr_warn_pct()
 
     rollup = _report._category_rollup(analyze)
     others_pct = next((r["gpu_pct"] for r in rollup if r["category"] == "Others"), 0.0)
@@ -674,47 +684,62 @@ def main(argv: list[str] | None = None) -> int:
     # surface a high_gpu_idle_pct warning for the Coordinator.
     idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
     idle_pct_threshold = resolve_idle_pct_threshold()
-    if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
-        if graph_launch_count > 0:
-            # CUDA-graph replay: idle_pct is unreliable here. The profiler
-            # under-records the device kernels of graph replays, so the recorded
-            # kernel intervals cover only a fraction of the real GPU-busy time and
-            # idle_pct reads spuriously high even on a near-saturated GPU. Do NOT
-            # suppress the candidate lists (that would derail the run toward
-            # parameter tuning on a false "GPU is idle" signal); keep the
-            # candidates and surface an explicit unreliability warning instead of
-            # the misleading high_gpu_idle_pct route-to-params warning. This is a
-            # bypass-side carve-out only; the shared _idle_gate threshold/warning
-            # (also used by the TraceLens route) is left untouched.
-            trace_health_warnings.append(
-                {
-                    "code": "bypass_cudagraph_unreliable_idle",
-                    "severity": "warning",
-                    "idle_pct": round(float(idle_pct_value), 2),
-                    "threshold_pct": round(idle_pct_threshold, 2),
-                    "graph_launch_count": graph_launch_count,
-                    "source": str(analysis_md_path),
-                    "message": (
-                        f"GPU idle measured {float(idle_pct_value):.2f}% (> "
-                        f"{idle_pct_threshold:.2f}%), but {graph_launch_count} CUDA-graph "
-                        "replay launches were detected. Under graph replay the profiler "
-                        "under-records device kernels, so idle_pct is unreliable and does "
-                        "NOT indicate a genuinely idle GPU. The hot-kernel candidate list is "
-                        "retained (idle-gate suppression skipped); do not route to parameter "
-                        "optimization on the basis of this idle_pct."
-                    ),
-                }
+    idle_over_threshold = isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold
+
+    # --- data reliability (honest degradation; no reconstruction) ---
+    # When the upstream trace is an incomplete CUDA-graph capture, its GPU-time
+    # and attribution data are simply not present. We do not fabricate them; we
+    # mark them unreliable and propagate that so nothing downstream (report,
+    # roofline snapshot, specialist prompt) treats them as authoritative.
+    # * idle: a high idle reading under graph replay is an under-recording
+    #   artifact, not a genuinely idle GPU.
+    # * attribution: graph-replayed kernels carry no cpu_op link, so coverage
+    #   below the shared floor is a data gap, not a real 0%.
+    attributed_pct = float((analyze.get("attribution") or {}).get("attributed_pct") or 0.0)
+    idle_reliable = not (idle_over_threshold and graph_launch_count > 0)
+    attribution_reliable = not (graph_launch_count > 0 and attributed_pct < _bypass_corr_warn_pct())
+    data_reliability_reason = "" if (idle_reliable and attribution_reliable) else "cudagraph_incomplete_trace"
+
+    if idle_over_threshold and not idle_reliable:
+        # CUDA-graph replay: idle_pct is unreliable here. The profiler
+        # under-records the device kernels of graph replays, so the recorded
+        # kernel intervals cover only a fraction of the real GPU-busy time and
+        # idle_pct reads spuriously high even on a near-saturated GPU. Do NOT
+        # suppress the candidate lists (that would derail the run toward
+        # parameter tuning on a false "GPU is idle" signal); keep the
+        # candidates and surface an explicit unreliability warning instead of
+        # the misleading high_gpu_idle_pct route-to-params warning. This is a
+        # bypass-side carve-out only; the shared _idle_gate threshold/warning
+        # (also used by the TraceLens route) is left untouched.
+        trace_health_warnings.append(
+            {
+                "code": "bypass_cudagraph_unreliable_idle",
+                "severity": "warning",
+                "idle_pct": round(float(idle_pct_value), 2),
+                "threshold_pct": round(idle_pct_threshold, 2),
+                "graph_launch_count": graph_launch_count,
+                "source": str(analysis_md_path),
+                "message": (
+                    f"GPU idle measured {float(idle_pct_value):.2f}% (> "
+                    f"{idle_pct_threshold:.2f}%), but {graph_launch_count} CUDA-graph "
+                    "replay launches were detected. Under graph replay the profiler "
+                    "under-records device kernels, so idle_pct is unreliable and does "
+                    "NOT indicate a genuinely idle GPU. The hot-kernel candidate list is "
+                    "retained (idle-gate suppression skipped); do not route to parameter "
+                    "optimization on the basis of this idle_pct."
+                ),
+            }
+        )
+    elif idle_over_threshold:
+        for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
+            candidates[_cand_key] = []
+        trace_health_warnings.append(
+            build_high_idle_warning(
+                idle_pct=float(idle_pct_value),
+                threshold_pct=idle_pct_threshold,
+                report_path=analysis_md_path,
             )
-        else:
-            for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
-                candidates[_cand_key] = []
-            trace_health_warnings.append(
-                build_high_idle_warning(
-                    idle_pct=float(idle_pct_value),
-                    threshold_pct=idle_pct_threshold,
-                    report_path=analysis_md_path,
-                )
-            )
+        )
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):
@@ -732,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
             throughput_unit=throughput_unit,
             metrics_csv_path=str(kernel_metrics_csv_path),
             summary_csv_path=str(kernel_summary_csv_path),
+            idle_reliable=idle_reliable,
+            attribution_reliable=attribution_reliable,
+            data_reliability_reason=data_reliability_reason,
         ),
     )
     atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
@@ -748,6 +776,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     summary["estimated"] = estimated
     summary["analysis_degraded"] = analysis_degraded
+    summary["idle_reliable"] = idle_reliable
+    summary["attribution_reliable"] = attribution_reliable
+    summary["data_reliability_reason"] = data_reliability_reason
     # Always present (may be null) so the summary/manifest/result schemas match.
     summary["steady_window"] = steady_window  # always present (may be null)
 
@@ -762,6 +793,9 @@ def main(argv: list[str] | None = None) -> int:
             "steady_window": steady_window,
             "estimated": estimated,
             "analysis_degraded": analysis_degraded,
+            "idle_reliable": idle_reliable,
+            "attribution_reliable": attribution_reliable,
+            "data_reliability_reason": data_reliability_reason,
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
@@ -838,6 +872,9 @@ def main(argv: list[str] | None = None) -> int:
         "steady_window": steady_window,
         "estimated": estimated,
         "analysis_degraded": analysis_degraded,
+        "idle_reliable": idle_reliable,
+        "attribution_reliable": attribution_reliable,
+        "data_reliability_reason": data_reliability_reason,
         "analyzed_rank": analyzed_rank,
         "rank_count": rank_count,
         "num_denoise_steps": requested_denoise_steps or inferred_denoise_steps,
@@ -875,6 +912,11 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
+    # Mirror the idle-reliability flag inside the timeline block so consumers
+    # reading result["timeline"] directly also see that idle_pct is untrusted.
+    if isinstance(result.get("timeline"), dict):
+        result["timeline"]["idle_reliable"] = idle_reliable
+
     # Surfaced only when the opt-in manifest was produced (P0-A / WP-1).
     result["trace_shape_manifest"] = shape_manifest
     if shape_manifest.get("status") == "ok" and shape_manifest.get("path"):
