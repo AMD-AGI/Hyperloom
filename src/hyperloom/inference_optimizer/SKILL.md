@@ -361,9 +361,9 @@ not back into a shared WekaFS source checkout.
 
 Prompt fields naming read-only source trees consumed by sandbox-side
 `install.sh` / launcher. `export <K>="<v>"` in the launcher shell before
-`install.sh`. These are **sandbox-only** — do NOT forward them to the
-RayJob via `--rayjob-extra-env`; the RayJob pod has its own paths and
-does not consume these.
+`install.sh`. These are **sandbox-only** — never ask the platform to bake them
+into multi-node pod env; those pods have their own paths and do not consume
+these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|

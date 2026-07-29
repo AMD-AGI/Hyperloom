@@ -70,7 +70,7 @@ from .credentials import (
     _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
 )
 from .multi_node import (
-    _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
+    _prepare_multi_node_state as _prepare_multi_node_state,
     _dump_mn_input_params as _dump_mn_input_params,
     _resolve_mn_backend as _resolve_mn_backend,
 )
@@ -1294,17 +1294,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # Multi-node topology handoff: export the CLI-flag-resolved backend /
     # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
-    # topology, external-mode state synthesis) read a single stable source. These
-    # are internal handoff envs, not a public config API; users pass --mn-backend
-    # / --mn-image / --gpus-per-node instead.
+    # topology, state synthesis) read a single stable source. These are internal
+    # handoff envs, not a public config API; users pass --mn-backend /
+    # --gpus-per-node instead. The pod image is not among them: the platform
+    # builds the pods before the optimizer starts.
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
-        if mn_image_resolved:
-            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
@@ -1827,7 +1825,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     bind_state_file_to_session(session_dir)
     if nodes_resolved >= 2:
-        await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
+        await asyncio.to_thread(_prepare_multi_node_state, args)
 
     objective = build_objective(
         {

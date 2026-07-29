@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.multi_node import _provision_multi_node_rayjob_stack
+from hyperloom.inference_optimizer.cli.multi_node import _prepare_multi_node_state
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
@@ -160,7 +160,7 @@ def test_provision_external_writes_state_and_skips_safe(
         model="/models/test",
         no_kernel=True,
     )
-    _provision_multi_node_rayjob_stack(args)
+    _prepare_multi_node_state(args)
     state_path = resolve_state_file()
     assert state_path.is_file()
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -183,5 +183,5 @@ def test_provision_external_infera_requires_ssh(
         no_kernel=True,
     )
     with pytest.raises(SystemExit) as ei:
-        _provision_multi_node_rayjob_stack(args)
+        _prepare_multi_node_state(args)
     assert ei.value.code == 2

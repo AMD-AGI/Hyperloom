@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..session.paths import mn_profile_trace_root
-from ._internal import safe_client, ray_dashboard
+from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import (
@@ -1282,9 +1282,7 @@ def _submit_and_collect_pod_json(
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
 # Cohesive rayjob/infera clusters live in commands/{rayjob,infera}.py. Bind
 # only the command hooks used below.
-from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
 from .commands.infera import (
-    cmd_create_infera as cmd_create_infera,
     _infera_restart_server as _infera_restart_server,
     _infera_kill_inference as _infera_kill_inference,
     _infera_apply_tracelens_patch as _infera_apply_tracelens_patch,
@@ -1913,41 +1911,6 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
 
 
 # Subcommand: stop-multi-job
-def cmd_stop_multi_job(args: argparse.Namespace) -> int:
-    """Stop the RayJob via SaFE REST. Idempotent.
-
-    Optionally deletes the workload and/or clears the local state file.
-    Does nothing (returns success) when no workload id is known.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (workload_id, delete,
-            clear_state).
-
-    Returns:
-        int: A process exit code (always ``EXIT_OK`` here).
-    """
-    state = _load_state()
-    wid = args.workload_id or state.get("rayjob_id")
-    if not wid:
-        warn("no rayjob_id in state file and --workload-id not provided; nothing to stop")
-        return 0
-    with safe_client.from_env() as safe:
-        info(f"stopping workload {wid} (delete={args.delete})")
-        if args.delete:
-            safe.delete_workload(wid)
-        else:
-            safe.stop_workload(wid)
-    if args.clear_state:
-        path = _state_file()
-        try:
-            path.unlink(missing_ok=True)
-            info(f"cleared {path}")
-        except OSError as exc:
-            warn(f"could not unlink {path}: {exc}")
-    return 0
-
-
-# argparse
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     """Register the shared ``--poll-interval`` / ``--poll-timeout`` flags.
 
@@ -1992,122 +1955,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    # create-rayjob
-    sp = sub.add_parser("create-rayjob", help="create the RayJob via SaFE REST")
-    sp.add_argument(
-        "--workspace",
-        default=None,
-        help="SaFE workspace id. Resolution: --workspace > $SAFE_WORKSPACE env. Bails fast if neither is set.",
-    )
-    sp.add_argument("--image", required=True, help="container image for both head and worker pods")
-    sp.add_argument("--nodes", type=int, required=True, help="total node count (>=1)")
-    sp.add_argument(
-        "--gpus-per-node",
-        type=int,
-        default=8,
-        help="GPUs per pod (default 8 — full MI300X / MI355X node). "
-        "Override only if the user prompt explicitly asks for a "
-        "smaller per-pod GPU count.",
-    )
-    sp.add_argument(
-        "--cpus-per-node",
-        type=int,
-        default=96,
-        help="default 96 — matches a full MI300X / MI355X pod. Override only if the user prompt asks for less.",
-    )
-    sp.add_argument(
-        "--mem-per-node",
-        type=int,
-        default=1024,
-        help="GiB per pod. default 1024 — matches a full MI300X / "
-        "MI355X pod. Override only if the user prompt asks for less.",
-    )
-    sp.add_argument("--ephemeral-per-node", type=int, default=400, help="GiB per pod. default 400.")
-    sp.add_argument(
-        "--display-name",
-        default=None,
-        help="Optional human-readable RayJob name (shows up in SaFE UI). "
-        "Resolution: $DISPLAY_NAME env > --display-name > "
-        "auto-generated multi_node_<unix-ts>.",
-    )
-    sp.add_argument("--description", default=None)
-    sp.add_argument(
-        "--owner-id",
-        default=None,
-        help="ownerId for SaFE cascading cleanup. Resolution: --owner-id > "
-        "$WORKLOAD_ID (sandbox workload id). When set, SaFE GCs the "
-        "RayJob when the owner workload stops (safety net for missed "
-        "`stop-multi-job`).",
-    )
-    sp.add_argument("--extra-env", action="append", default=[], help="K=V (repeatable); merged AFTER credential fanout")
-    sp.add_argument(
-        "--extra-label",
-        action="append",
-        default=[],
-        help="K=V (repeatable); reserved primus-safe.* prefixes are stripped",
-    )
-    sp.add_argument("--no-wait", action="store_true", help="don't poll for Running; just create and exit")
-    sp.add_argument(
-        "--recreate",
-        action="store_true",
-        help="force creating a fresh workload even if state.json "
-        "already has a live rayjob_id. Default behaviour is "
-        "to REUSE the prior workload (idempotent retries).",
-    )
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_create_rayjob)
-
-    # create-infera (Infera idle-pod backend)
-    sp = sub.add_parser(
-        "create-infera",
-        help="create an idle multi-node InferaDeployment (SSH control plane); "
-        "benchmark entry point is the Infera frontend :8000",
-    )
-    sp.add_argument("--workspace", default=None, help="SaFE workspace id (--workspace > $SAFE_WORKSPACE)")
-    sp.add_argument("--image", required=True, help="infera image WITH the sshd layer (mn-idle.sh present)")
-    sp.add_argument(
-        "--model",
-        required=True,
-        help="model path/HF id (frontend --router-tokenizer-path)",
-    )
-    sp.add_argument("--nodes", type=int, required=True, help="worker LWS node count (>=1); worker.replica == nodes")
-    sp.add_argument("--gpus-per-node", type=int, default=8)
-    sp.add_argument("--cpus-per-node", type=int, default=96)
-    sp.add_argument("--mem-per-node", type=int, default=1024, help="GiB per worker pod")
-    sp.add_argument("--ephemeral-per-node", type=int, default=400, help="GiB per worker pod")
-    sp.add_argument("--shared-mem-per-node", type=int, default=200, help="GiB /dev/shm per worker pod (sharedMemory)")
-    sp.add_argument("--backend-framework", default="sglang", choices=("sglang", "vllm"))
-    sp.add_argument("--kv-transfer-backend", default="mori", choices=("nixl", "mori", "mooncake"))
-    sp.add_argument(
-        "--ssh-port",
-        type=int,
-        default=ssh_client.DEFAULT_SSH_PORT,
-        help=f"pod sshd port (default {ssh_client.DEFAULT_SSH_PORT}; not 22 to avoid hostNetwork collision)",
-    )
-    sp.add_argument(
-        "--pd-mode",
-        choices=("aggregated", "disaggregated"),
-        default="aggregated",
-        help="aggregated [frontend,worker] (default) or disaggregated [frontend,prefill,decode]",
-    )
-    sp.add_argument("--pd-prefill-nodes", type=int, default=0, help="prefill role replica (disaggregated only)")
-    sp.add_argument("--pd-decode-nodes", type=int, default=0, help="decode role replica (disaggregated only)")
-    sp.add_argument(
-        "--pd-prefill-tp", type=int, default=0, help="prefill TP; a role spans nodes (LWS) when tp > gpus-per-node"
-    )
-    sp.add_argument(
-        "--pd-decode-tp", type=int, default=0, help="decode TP; a role spans nodes (LWS) when tp > gpus-per-node"
-    )
-    sp.add_argument("--display-name", default=None)
-    sp.add_argument("--description", default=None)
-    sp.add_argument("--owner-id", default=None)
-    sp.add_argument("--extra-env", action="append", default=[], help="K=V (repeatable); merged AFTER credential fanout")
-    sp.add_argument("--extra-label", action="append", default=[])
-    sp.add_argument("--no-wait", action="store_true")
-    sp.add_argument("--recreate", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_create_infera)
 
     # bootstrap
     sp = sub.add_parser(
@@ -2261,12 +2108,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_kill_inference)
 
     # stop-multi-job
-    sp = sub.add_parser("stop-multi-job", help="stop the multi-node workload (rayjob or infera) via SaFE REST")
-    sp.add_argument("--workload-id", default=None, help="override the workload id from state file")
-    sp.add_argument("--delete", action="store_true", help="hard delete instead of soft stop (default: stop)")
-    sp.add_argument("--clear-state", action="store_true", help="remove /tmp/multi_node_state.json on success")
-    sp.set_defaults(func=cmd_stop_multi_job)
-
     # apply-patch (multi-node only)
     sp = sub.add_parser(
         "apply-patch",
@@ -2402,12 +2243,6 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_TERMINAL_FAILURE
     except TransientFailure as tf:
         err(str(tf))
-        return EXIT_TRANSIENT
-    except safe_client.SafeApiError as sae:
-        # 4xx (incl. 401/403) = caller-fixable -> config error (exit 3); 5xx = retryable (exit 1).
-        err(str(sae))
-        if sae.status is not None and 400 <= sae.status < 500:
-            return EXIT_CONFIG_ERROR
         return EXIT_TRANSIENT
     except (RuntimeError, ValueError) as exc:
         # Caller-fixable input/state errors -> config error; else transient.

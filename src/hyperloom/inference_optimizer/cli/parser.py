@@ -240,14 +240,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--nodes",
         type=int,
         default=1,
-        help="Total number of GPU nodes for the inference RayJob. "
+        help="Total number of GPU nodes for the inference cluster. "
         "1 (default) keeps the legacy single-pod path. "
-        ">=2: `optimize` provisions the SaFE RayJob before preflight "
-        "(unless already in /tmp/multi_node_state.json), runs bootstrap "
-        "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
-        "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
-        "stop-multi-job` when you want to release it. Requires "
-        "--mn-image. "
+        ">=2: `optimize` adopts the cluster the platform provisioned and handed "
+        "over via HYPERLOOM_MN_EXT_* (see multi_node/SKILL.md), runs bootstrap "
+        "once, and exports RAY_ADDRESS for kernel-agent. It never creates or "
+        "releases the cluster; without a hand-off it exits 2. "
         "Default: 1.",
     )
     opt.add_argument(
@@ -260,46 +258,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "this flag.",
     )
     opt.add_argument(
-        "--mn-image",
-        default=None,
-        help="Container image for the multi-node pods (Infera worker/prefill/"
-        "decode pods, or RayJob head+workers). Required when --nodes>=2 unless "
-        "the state file last_create_request.image is present.",
-    )
-    opt.add_argument(
         "--gpus-per-node",
         type=int,
         default=None,
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
         "head+workers). Defaults to 8 when omitted.",
-    )
-    opt.add_argument(
-        "--cpus-per-node",
-        type=int,
-        default=None,
-        help="CPU cores requested per multi-node pod (Infera or RayJob). Resolution: flag > 96 (default).",
-    )
-    opt.add_argument(
-        "--mem-per-node",
-        type=int,
-        default=None,
-        help="Memory (GiB) requested per multi-node pod (Infera or RayJob). Resolution: flag > 1024 (default).",
-    )
-    # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
-    # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
-    opt.add_argument(
-        "--rayjob-extra-env",
-        action="append",
-        default=[],
-        metavar="K=V",
-        help="Extra env entries to inject into the multi-node RayJob "
-        "(repeatable). Agent maps each line of the user prompt's "
-        "`env:` block into one --rayjob-extra-env K=V; the CLI "
-        "does not own any default. Skip RAY_JOB_ENTRYPOINT "
-        "(reserved by workload_spec). Only takes effect when "
-        "--nodes>=2 and this run actually creates the RayJob; "
-        "idempotent reuse of an existing rayjob_id keeps the env "
-        "set at original create time.",
     )
     opt.add_argument(
         "--tp",
