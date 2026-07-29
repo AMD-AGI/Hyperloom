@@ -345,6 +345,10 @@ class _PatchPlan:
     # Per-plan ``-p<N>`` strip count: ``-p1`` for editable / vLLM, ``-p3`` for
     # wheel SGLang. Passed to both ``git apply`` and ``patch``.
     apply_strip: int = 1
+    # Patch names that may fail ``git apply --check`` and be skipped instead of
+    # rolling back the whole atomic set (e.g. eagle-draft patches whose context
+    # drifted across same-version different-commit sglang builds).
+    optional_patches: frozenset[str] = frozenset()
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
@@ -572,6 +576,14 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     )
 
 
+#: Basename substrings marking SGLang patches that are non-critical to kernel
+#: shape profiling. These patch eagle speculative-decoding cuda-graph runners,
+#: unrelated to the shape-profiler pipeline; when one fails ``git apply --check``
+#: against a point-release-shifted SGLang it is skipped instead of aborting the
+#: whole atomic set (which would also roll back the critical profiler patch).
+_SGLANG_OPTIONAL_PATCH_MARKERS = ("eagle",)
+
+
 def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     """Build the SGLang patch plan for the installed SGLang version.
 
@@ -677,6 +689,11 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
             ("shape_discovery", "roofline_annotations"),
         ),
     )
+    optional_patches = frozenset(
+        p.name
+        for p in filtered_patches
+        if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+    )
     return _PatchPlan(
         framework="sglang",
         version=version,
@@ -688,6 +705,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         sentinel_text=("kernel_shape_profiler",),
         extra_sentinels=extra_sentinels,
         apply_strip=apply_strip,
+        optional_patches=optional_patches,
     )
 
 
@@ -995,6 +1013,19 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
                 plan.framework,
                 p.name,
+            )
+            apply_modes[p] = "skip"
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
             )
             apply_modes[p] = "skip"
             continue

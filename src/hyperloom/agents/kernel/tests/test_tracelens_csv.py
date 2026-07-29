@@ -375,7 +375,7 @@ def test_compile_generated_kernel_is_not_reusable_native():
         )
         is True
     )
-    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.classify_patchability(candidate)[0] is False
     assert tla.recommend_backends(candidate) == []
     assert "not reusable" in tla.build_notes(candidate)
 
@@ -397,7 +397,7 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         )
         is False
     )
-    assert tla.is_reusable_native_kernel(candidate) is True
+    assert tla.classify_patchability(candidate)[0] is True
     assert tla.recommend_backends(candidate) == ["forge"]
 
 
@@ -445,7 +445,7 @@ def test_unknown_source_root_is_not_reusable_native():
         ),
     }
     assert candidate["source_type"] == "hip_cpp"
-    assert tla.is_reusable_native_kernel(candidate) is False
+    assert tla.classify_patchability(candidate)[0] is False
     assert tla.recommend_backends(candidate) == []
 
 
@@ -2782,21 +2782,6 @@ def test_classify_patchability_rejects_unreusable_source_root():
     assert "reusable framework root" in reason
 
 
-def test_is_reusable_native_kernel_delegates_to_classify():
-    """The bool wrapper must stay in lockstep with classify_patchability."""
-    samples = [
-        {"name": "rms_norm", "source_file": "", "source_type": "triton"},
-        {"name": "rocblas_sgemm", "source_file": "/sgl-workspace/aiter/x.py", "source_type": "python"},
-        {
-            "name": "triton_attn",
-            "source_file": "/sgl-workspace/sglang/python/sglang/x.py",
-            "source_type": "triton",
-        },
-    ]
-    for cand in samples:
-        assert tla.is_reusable_native_kernel(cand) == tla.classify_patchability(cand)[0]
-
-
 def test_build_audit_summary_splits_tasks_and_skipped():
     """``build_audit_summary`` surfaces kernel name + skip_reason for every dropped candidate."""
     finalized = [
@@ -3598,15 +3583,17 @@ def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
     nested templates are handled; an all-template name falls back to the
     original so a group key never collapses to empty."""
-    assert tlr._normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
-    assert tlr._normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"
-    assert tlr._normalize_operation_key("foo<bar<baz>>") == "foo"
+    from hyperloom.agents.kernel.tools._task_group_contract import normalize_operation_key
+
+    assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
+    assert normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"
+    assert normalize_operation_key("foo<bar<baz>>") == "foo"
     # Distinct base names must remain distinct after normalization.
-    assert tlr._normalize_operation_key("a<x>") != tlr._normalize_operation_key("b<x>")
+    assert normalize_operation_key("a<x>") != normalize_operation_key("b<x>")
     # No templates: returned verbatim (Q1 base names never change).
-    assert tlr._normalize_operation_key("vllm::rocm_unquantized_gemm") == "vllm::rocm_unquantized_gemm"
+    assert normalize_operation_key("vllm::rocm_unquantized_gemm") == "vllm::rocm_unquantized_gemm"
     # Degenerate all-template name: keep original rather than an empty key.
-    assert tlr._normalize_operation_key("<all>") == "<all>"
+    assert normalize_operation_key("<all>") == "<all>"
 
 
 def test_is_native_source_detects_device_extensions():

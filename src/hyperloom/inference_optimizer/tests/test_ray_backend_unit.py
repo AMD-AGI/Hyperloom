@@ -2,14 +2,13 @@
 
 """Unit tests for the Ray-managed GPU execution backend (P0).
 
-Covers the flag gate, the visible-device merge invariant, the run_subprocess
-contract (via an inline fake ``ray``), and the ManagedServerProcess reap
-invariant (with a real subprocess, no Ray cluster required).
+Covers the flag gate, the visible-device merge invariant, and the
+ManagedServerProcess reap invariant (with a real subprocess, no Ray cluster
+required).
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -91,7 +90,7 @@ def test_merge_worker_env_none():
     assert merged.get("PATH") == os.environ.get("PATH")
 
 
-# ── run_subprocess contract (inline fake ray) ────────────────────────────────
+# ── inline fake ray (shared by the tests below) ──────────────────────────────
 class _FakeWorker:
     def __init__(self, fn, num_gpus, resources):
         self.fn = fn
@@ -120,38 +119,6 @@ class _FakeRay:
     def get(self, ref):
         self.last_ref = ref
         return ref["result"]
-
-
-def test_run_subprocess_passthrough_and_exec(monkeypatch: pytest.MonkeyPatch):
-    """num_gpus/resources are forwarded to ray.remote and the subprocess runs."""
-    fake = _FakeRay()
-    monkeypatch.setitem(sys.modules, "ray", fake)
-    backend = rb.RayExecutionBackend()
-    backend._ensured = True  # skip real cluster ensure
-
-    result = asyncio.run(
-        backend.run_subprocess(
-            ["echo", "hello-ray"],
-            num_gpus=2,
-            resources={"serving_slot": 1},
-            timeout_s=30,
-        )
-    )
-    assert isinstance(result, rb.SubprocessResult)
-    assert result.returncode == 0
-    assert "hello-ray" in result.stdout
-    # ray.remote received the requested lease.
-    assert fake.last_ref["num_gpus"] == 2
-    assert fake.last_ref["resources"] == {"serving_slot": 1}
-
-
-def test_run_subprocess_nonzero_rc(monkeypatch: pytest.MonkeyPatch):
-    fake = _FakeRay()
-    monkeypatch.setitem(sys.modules, "ray", fake)
-    backend = rb.RayExecutionBackend()
-    backend._ensured = True
-    result = asyncio.run(backend.run_subprocess(["false"], num_gpus=0))
-    assert result.returncode != 0
 
 
 # ── ManagedServerProcess reap invariant (real subprocess) ────────────────────
@@ -387,7 +354,6 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "ray", fake)
     backend = rb.RayExecutionBackend()
     backend._ensured = True
-    backend._started = True
     monkeypatch.setattr(rb, "_BACKEND", backend)
 
     lease = ServingLease(num_gpus=1)
@@ -398,7 +364,6 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     assert "ray_actor_error" in err
     assert fake.shutdown_called == 1
     assert backend._ensured is False
-    assert backend._started is False
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
@@ -558,6 +523,9 @@ class _FakeRayP2:
         _tag, fn, a, k = ref
         return fn(*a, **k)
 
+    def wait(self, refs, num_returns=1, timeout=None):
+        return (list(refs), [])
+
     def kill(self, actor):
         self.killed.append(actor)
 
@@ -575,8 +543,8 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
-    pid = lease.start(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
-    assert pid == 4242
+    lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
+    assert lease.poll_started() == 4242
     assert lease.pid() == 4242
     assert actor.started_with["log_path"] == "/tmp/p.log"
     assert lease.is_alive() is True
@@ -770,7 +738,8 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=8, serving_slot=True)
-    assert lease.start(["claude"]) == 4242
+    lease.start_async(["claude"])
+    assert lease.poll_started() == 4242
     assert seen == {"num_gpus": 8.0, "serving_slot": True}
 
 
@@ -901,20 +870,7 @@ def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.Mon
     assert not (tmp_path / "config.ray.yaml").exists()
 
 
-# ── coverage: backend sync submit + shared-root MN + strip fallbacks ─────────
-def test_run_subprocess_sync_passthrough(monkeypatch: pytest.MonkeyPatch):
-    """run_subprocess_sync submits via ray and returns the SubprocessResult."""
-    fake = _FakeRay()
-    monkeypatch.setitem(sys.modules, "ray", fake)
-    backend = rb.RayExecutionBackend()
-    backend._ensured = True
-    result = backend.run_subprocess_sync(["echo", "sync-ray"], num_gpus=1, resources={"serving_slot": 1}, timeout_s=30)
-    assert isinstance(result, rb.SubprocessResult)
-    assert result.returncode == 0
-    assert "sync-ray" in result.stdout
-    assert fake.last_ref["num_gpus"] == 1
-
-
+# ── coverage: shared-root MN + strip fallbacks ───────────────────────────────
 def test_resolve_shared_artifact_root_multi_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Multi-node + HYPERLOOM_MN_PROFILE_TRACE_DIR -> the shared root wins."""
     mn_root = tmp_path / "shared"
@@ -1373,61 +1329,14 @@ def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatc
 
 
 def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch):
-    """Infeasible cluster -> GpuSpecialistLease.start raises RayInfeasibleError."""
+    """Infeasible cluster -> GpuSpecialistLease.start_async raises RayInfeasibleError."""
     fake = _InfeasibleFakeRay(gpus=0.0, has_serving_slot=False)
     monkeypatch.setitem(sys.modules, "ray", fake)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=4)
     with pytest.raises(rs.RayInfeasibleError, match="GPU"):
-        lease.start(["agent"])
-
-
-class _SchedTimeoutFakeRay:
-    """Fake ray that raises GetTimeoutError on the specialist actor.start call."""
-
-    class exceptions:  # noqa: N801
-        class GetTimeoutError(Exception):
-            pass
-
-        class RayActorError(Exception):
-            pass
-
-        class RayTaskError(Exception):
-            pass
-
-    def __init__(self, *, gpus: float = 8.0):
-        self._gpus = gpus
-        self.killed: list = []
-
-    def cluster_resources(self) -> dict:
-        return {"CPU": 64.0, "GPU": self._gpus, "serving_slot": 1.0}
-
-    def get(self, ref, timeout=None):
-        # Simulate a GetTimeoutError if a timeout is provided (the start call).
-        if timeout is not None:
-            raise _SchedTimeoutFakeRay.exceptions.GetTimeoutError("timed out")
-        return ref
-
-    def kill(self, actor):
-        self.killed.append(actor)
-
-
-def test_gpu_specialist_lease_sched_timeout_raises_and_closes(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """GetTimeoutError on actor.start -> RaySchedTimeoutError + close() called."""
-    fake = _SchedTimeoutFakeRay()
-    monkeypatch.setitem(sys.modules, "ray", fake)
-    actor = _FakeGpuActor()
-    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
-    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
-
-    lease = rs.GpuSpecialistLease(num_gpus=4)
-    with pytest.raises(rs.RaySchedTimeoutError):
-        lease.start(["agent"])
-    # close() must have been called after the timeout (actor in killed list).
-    assert actor in fake.killed
+        lease.start_async(["agent"])
 
 
 class _NoTimeoutCapturingFakeRay:

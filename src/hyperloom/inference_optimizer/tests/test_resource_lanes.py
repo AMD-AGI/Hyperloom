@@ -81,53 +81,6 @@ def test_set_lane_capacity_upserts(conn):
     assert get_lane_capacity(conn.raw, "research_lane") == 1
 
 
-def test_v1_to_v2_migration_preserves_rows(tmp_path):
-    """Spin up a v1 DB by hand and let ``ensure_schema`` migrate it."""
-    p = tmp_path / "legacy.db"
-    raw = sqlite3.connect(str(p))
-    raw.row_factory = sqlite3.Row
-    raw.execute("""
-        CREATE TABLE leases (
-            lane TEXT PRIMARY KEY,
-            holder_id TEXT NOT NULL,
-            task_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            pid INTEGER NOT NULL,
-            acquired_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            heartbeat_at TEXT NOT NULL
-        )
-    """)
-    raw.execute(
-        "INSERT INTO leases VALUES (?,?,?,?,?,?,?,?)",
-        (
-            "benchmark_lane",
-            "h1",
-            "t1",
-            "bench",
-            12345,
-            "2026-05-19T18:00:00+00:00",
-            "2099-12-31T23:59:59+00:00",
-            "2026-05-19T18:00:00+00:00",
-        ),
-    )
-    raw.commit()
-    raw.close()
-
-    db = SqliteConnection(p)
-    v = ensure_schema(db.raw)
-    assert v == 3
-    cur = db.raw.execute("PRAGMA table_info(leases)")
-    pk_cols = sorted(row["name"] for row in cur.fetchall() if int(row["pk"] or 0) > 0)
-    assert pk_cols == ["holder_id", "lane"]
-    cur = db.raw.execute("SELECT * FROM leases")
-    rows = [dict(r) for r in cur.fetchall()]
-    assert len(rows) == 1
-    assert rows[0]["lane"] == "benchmark_lane"
-    assert rows[0]["holder_id"] == "h1"
-    db.close()
-
-
 def test_v2_ensure_schema_is_idempotent(conn):
     """Calling ensure_schema twice on the same DB doesn't lose data."""
     conn.raw.execute(

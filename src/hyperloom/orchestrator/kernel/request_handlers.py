@@ -260,7 +260,14 @@ _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
-_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
+# Outer subprocess/global cap for the whole GEMM-tuning run (all shapes/tuners).
+# 5h (was 3h): large models have many more GEMM shapes -- vllm_dense_tunableop
+# already hit ~4512s (>1h) at 312 shapes, and bigger models push past 3h -- so 3h
+# was silently killing the run (rc124) or skipping lower-priority tuners. Kept
+# strictly above the per-group aiter timeout (FORGE_TUNE_TASK_TIMEOUT=2h) so a
+# single hung group is isolated and the rest still tune. NOT tied to the session
+# --max-hours budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC.
+_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
@@ -5608,58 +5615,6 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
     return {"raw_stdout_tail": text[-2000:]}
-
-
-def _record_kernel_roofline_sidecar(session_dir: Path) -> None:
-    """Transcribe ``reports/kernel_roofline.json`` (written by the external
-    kernel-agent tool) into the breakdown recorder as a ``kernel_roofline``
-    singleton. Best-effort; never raises.
-
-    Args:
-        session_dir: Session directory holding the ``reports/kernel_roofline.json``
-            sidecar to transcribe.
-    """
-    try:
-        sidecar_path = Path(session_dir) / "reports" / "kernel_roofline.json"
-        if not sidecar_path.is_file():
-            return
-        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or not payload:
-            return
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_singleton_section(
-            session_dir,
-            "kernel_roofline",
-            payload,
-            producer="kernel-agent",
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
-    """Resolve the TraceLens/device kernel name for a roofline sidecar row.
-
-    Args:
-        session_dir: Session directory holding the roofline sidecar.
-        kernel_id: The kernel id to look up.
-
-    Returns:
-        The matched kernel name, or ``""`` when the sidecar/row is absent.
-    """
-    sidecar_path = session_dir / "reports" / "kernel_roofline.json"
-    try:
-        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    rows = payload.get("kernels") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return ""
-    for row in rows:
-        if isinstance(row, dict) and str(row.get("kernel_id") or "") == str(kernel_id):
-            return str(row.get("name") or row.get("matched_kernel_name") or "").strip()
-    return ""
 
 
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:

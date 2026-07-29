@@ -235,22 +235,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
 )
 
 
-def signal_registry_config_attrs() -> tuple[str, ...]:
-    """Return the distinct config slot names in registry order.
-
-    Used by :func:`factory.build_reactor_components` (and its tests) to prove
-    the Config->SignalConfig map covers every registry entry.
-
-    Returns:
-        tuple[str, ...]: Unique ``config_attr`` values, first-seen order.
-    """
-    seen: list[str] = []
-    for spec in _SIGNAL_REGISTRY:
-        if spec.config_attr and spec.config_attr not in seen:
-            seen.append(spec.config_attr)
-    return tuple(seen)
-
-
 @dataclass
 class Classifier:
     """Compose the configured signal evaluators via :data:`_SIGNAL_REGISTRY`.
@@ -391,5 +375,4 @@ __all__ = [
     "Classifier",
     "SignalEvaluator",
     "SignalSpec",
-    "signal_registry_config_attrs",
 ]

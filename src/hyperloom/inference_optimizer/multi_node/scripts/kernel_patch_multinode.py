@@ -16,12 +16,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import os
 import py_compile
 import shutil
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +32,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from patch_path_safety import (  # noqa: E402
+    atomic_write_bytes,
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
@@ -63,37 +62,6 @@ def _safe_name(value: str) -> str:
     """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
-
-
-def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Write ``data`` to ``target`` atomically (tmp file + os.replace).
-
-    Args:
-        target (Path): Destination file path.
-        data (bytes): Bytes to write.
-
-    Raises:
-        OSError: If writing the temp file or replacing the target fails.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, target)
-    except Exception:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                # Temp file already gone; the original error is re-raised below.
-                pass
-        raise
 
 
 def _apply_remote(
@@ -137,7 +105,7 @@ def _apply_remote(
     except Exception as exc:
         raise ValueError(f"patch_b64 not valid base64: {exc!r}") from exc
 
-    _atomic_write_bytes(target, data)
+    atomic_write_bytes(target, data)
 
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
     if target.suffix.lower() == ".py":

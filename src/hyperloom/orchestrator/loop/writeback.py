@@ -261,9 +261,6 @@ class WritebackCollaborator:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        if not self.shared_state.optimization_stack:
-            self.shared_state.seed_stack_from_current_best()
-
         cb = self.shared_state.current_best or {}
         extra_args = (
             str(result.get("extra_server_args") or "")
@@ -1823,9 +1820,7 @@ class WritebackCollaborator:
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "steward routing failed for task=%s; assessment "
-                    "left in last_remaining_gaps_assessment but no "
-                    "phase-routing change applied",
+                    "steward routing failed for task=%s; no phase-routing change applied",
                     task.task_id,
                 )
 
@@ -2041,9 +2036,6 @@ class WritebackCollaborator:
                 provenance resolves by gap id rather than name.
         """
         previous = self.shared_state.current_best or {}
-        if not self.shared_state.optimization_stack:
-            self.shared_state.seed_stack_from_current_best()
-
         base_args = ""
         if isinstance(previous, dict):
             base_args = str(previous.get("extra_server_args") or "").strip()
@@ -3494,15 +3486,7 @@ class WritebackCollaborator:
                 state.current_best = new_cb
                 report["fixes"].append("rebuilt_current_best_config_from_stack")
         elif cb:
-            # Legacy sessions before the append-only stack existed are still
-            # recoverable; seed once instead of dropping a possibly valid best.
-            before = len(getattr(state, "optimization_stack", []) or [])
-            state.seed_stack_from_current_best()
-            after = len(getattr(state, "optimization_stack", []) or [])
-            if after > before:
-                report["fixes"].append("seeded_stack_from_legacy_current_best")
-            else:
-                report["warnings"].append({"kind": "current_best_without_stack"})
+            report["warnings"].append({"kind": "current_best_without_stack"})
 
         # (4) Validation-watermark compensation: unvalidated
         # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE

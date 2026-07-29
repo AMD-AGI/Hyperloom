@@ -51,26 +51,6 @@ def test_enrich_with_tested_gain():
     assert SharedState._enrich_with_tested_gain({"fingerprint": "none"}, tested) == {"fingerprint": "none"}
 
 
-def test_format_backend_winners_history():
-    st = SharedState()
-    assert "no explore rounds" in st._format_backend_winners_history()
-    st.backend_winners_history = [
-        {
-            "round_id": f"r{i}",
-            "action": "explore",
-            "base_tput": 100.0,
-            "best": {"name": "w", "gain_pct": 2.0},
-            "winners": [{"name": "w", "gain_pct": 2.0, "extra_server_args": "--x"}],
-        }
-        for i in range(7)
-    ]
-    # one round (within the last-5 window) with no winners
-    st.backend_winners_history[-1]["winners"] = []
-    out = st._format_backend_winners_history()
-    assert "earlier rounds elided" in out
-    assert "no winners this round" in out
-
-
 def test_format_search_state():
     assert SharedState._format_search_state(None) == "(none)"
     search = {

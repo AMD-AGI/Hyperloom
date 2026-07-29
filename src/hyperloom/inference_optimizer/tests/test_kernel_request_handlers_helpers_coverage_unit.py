@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -224,40 +223,6 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     # empty stdout -> _parse_tool_stdout returns {} -> synthesize branch
     out = krh._shape_tool_result(2, "", "the stderr")
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
-
-
-# -- _lookup_kernel_roofline_name -----------------------------------------
-def test_lookup_roofline_name_missing_sidecar(tmp_path: Path) -> None:
-    assert krh._lookup_kernel_roofline_name(tmp_path, "k1") == ""
-
-
-def test_lookup_roofline_name_found(tmp_path: Path) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "kernel_roofline.json").write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {"kernel_id": "k1", "name": "fused_moe_kernel"},
-                    {"kernel_id": "k2", "matched_kernel_name": "attn"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert krh._lookup_kernel_roofline_name(tmp_path, "k1") == "fused_moe_kernel"
-    assert krh._lookup_kernel_roofline_name(tmp_path, "k2") == "attn"
-    assert krh._lookup_kernel_roofline_name(tmp_path, "k9") == ""
-
-
-def test_lookup_roofline_name_bad_shape(tmp_path: Path) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "kernel_roofline.json").write_text(
-        json.dumps({"kernels": "not-a-list"}),
-        encoding="utf-8",
-    )
-    assert krh._lookup_kernel_roofline_name(tmp_path, "k1") == ""
 
 
 # -- _in_flight_kernel_ids -------------------------------------------------

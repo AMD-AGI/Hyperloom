@@ -1043,22 +1043,6 @@ def test_infera_body_vllm_backend_and_session_label():
 # infera_support pure-helper tests (Infera backend SSH fan-out).
 
 
-def test_infera_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-
-    wl = {
-        "pods": [
-            {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
-            {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
-            {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
-            {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
-        ]
-    }
-    w = infera_support.discover_worker_pods(wl)
-    assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
-    assert [p["lwsIndex"] for p in w] == [0, 1]
-
-
 def test_infera_frontend_service_url_prefers_live_then_dns():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
@@ -1521,7 +1505,7 @@ def test_multinode_launch_entrypoint_neutralizes_malicious_extra_args(monkeypatc
         no_wait_health=False,
         extra_args="--foo 1; touch /tmp/pwned",
         ep=1,
-        pd_mode="colocated",
+        pd_mode="aggregated",
     )
     ep = mn_cli._build_multinode_launch_entrypoint(ns, nnodes=2, pid_dir="/tmp/pids", log_dir="/tmp/logs")
     assert "1; touch /tmp/pwned" not in ep

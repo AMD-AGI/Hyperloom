@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Mapping
 
+from hyperloom.common.jsonio import iter_sse_objects
 from hyperloom.inference_optimizer import recipe_snapshot_constants as C
 from . import RemoteRecipeClientError
 from .canonical_id import recipe_canonical_id
@@ -87,46 +88,6 @@ class GbrainRemoteError(RemoteRecipeClientError):
         super().__init__(message, category=category, **kwargs)
 
 
-def _iter_sse_objects(raw: str):
-    """Yield JSON objects decoded from an MCP HTTP response body.
-
-    Handles the three framings the gbrain ``/mcp`` endpoint uses:
-
-    * A plain JSON body (the whole payload is one object).
-    * A single ``text/event-stream`` event whose ``data`` field is split
-      across multiple ``data:`` lines (joined with ``\\n`` per the SSE spec,
-      one optional leading space after the colon stripped).
-    * Multiple SSE events in one response (e.g. a heartbeat before the result
-      event). Each event is decoded independently so a non-result event can
-      never corrupt the result parse.
-
-    Malformed / incomplete events are skipped, so this is safe to call on a
-    partially-read buffer.
-    """
-    import re
-
-    text = raw.lstrip()
-    if text.startswith("{") or text.startswith("["):
-        try:
-            yield json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        return
-    for block in re.split(r"\r?\n\r?\n", raw):
-        parts: list[str] = []
-        for line in block.splitlines():
-            if line.startswith("data:"):
-                seg = line[5:]
-                parts.append(seg[1:] if seg.startswith(" ") else seg)
-        payload = "\n".join(parts).strip()
-        if not payload:
-            continue
-        try:
-            yield json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-
-
 _BARE_RESULT_TOOLS = {
     "get_links",
     "get_backlinks",
@@ -145,7 +106,7 @@ def _select_mcp_response(raw: str, want_id: Any = None, *, allow_bare_result: bo
     """
     fallback: Any = None
     bare: Any = None
-    for obj in _iter_sse_objects(raw):
+    for obj in iter_sse_objects(raw):
         if isinstance(obj, dict):
             if want_id is not None and obj.get("id") == want_id:
                 return obj

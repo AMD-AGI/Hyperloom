@@ -40,7 +40,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import ensure_xdit_profiler_patched
+from ._xdit_patcher import verify_xdit_profiler_baked
 from .baseline import BaselineExecutor
 
 
@@ -624,7 +624,7 @@ class ProfileExecutor(BaselineExecutor):
             # hunyuan_image3, a transformers CausalLM with no xfuser tree) share
             # the server-less early-return but must not trigger the xDiT check.
             if str(framework or "").strip().lower() == "xdit":
-                ensure_xdit_profiler_patched()
+                verify_xdit_profiler_baked()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):
