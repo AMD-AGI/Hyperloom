@@ -738,6 +738,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
+    # Consecutive KERNEL_AGENT ticks with no actionable work pending. Lets the
+    # phase machine wind down to SWEEP instead of spinning on hallucinated
+    # kernel-id requests / no-intent turns until the wall-clock cap. Reset to 0
+    # whenever kernel work is pending or the phase is not KERNEL_AGENT.
+    kernel_idle_ticks: int = 0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -943,10 +948,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         recorded = getattr(self, "last_profile_workload", None)
         if not isinstance(recorded, dict) or not recorded:
             return False
+        # Default to the *current-best* runtime identity, not the bare context:
+        # last_profile_workload is recorded with the real profile params (actual
+        # server_args / extra_envs), while profile_workload_context() with no
+        # overrides reports server_args="" and skips the current_best runtime
+        # backfill, so any workload with server args/extra envs would compare
+        # unequal and every fresh profile would be discarded as stale. This
+        # matches the vLLM block-FP8 path, which passes
+        # current_profile_workload_context() as ``expected``.
         target = (
             expected
             if isinstance(expected, dict) and expected
-            else self.profile_workload_context()
+            else self.current_profile_workload_context()
         )
         return recorded == target
 
