@@ -176,14 +176,16 @@ ${actions}"
 params="$(jq -n \
   --arg repo_id "$MODEL" --arg tp "$TP" --arg mh "$MAX_HOURS" \
   --arg ref "$HEAD_REF" --arg sha "$HEAD_SHA" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
+  --arg task_source "github-e2e-ci" --arg pr_number "${PR_NUMBER:-}" \
   --arg mc "$MODEL_CLASS" --arg mbase "${MODEL_BASE:-}" \
   '{REPO_ID:$repo_id, TP:$tp, MAX_HOURS:$mh,
     HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_SHA:$sha,
-    HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir}
+    HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir,
+    HYPERLOOM_TASK_SOURCE:$task_source, HYPERLOOM_SOURCE_PR:$pr_number}
    + (if $mc == "" then {} else {MODEL_CLASS:$mc} end)
    + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)')"
 body="$(jq -n \
-  --arg name "ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
+  --arg name "github-e2e-ci-pr-${PR_NUMBER:-manual}-${GITHUB_RUN_ID:-local}" \
   --arg uname "${CI_E2E_USER_NAME:-}" --arg itype "$E2E_INFRA_TYPE" \
   --argjson gpus "$GPUS" --argjson params "$params" \
   '{name:$name, infra_type:$itype, kind:"hyperloom", replicas:1,
