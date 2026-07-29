@@ -31,6 +31,7 @@ _CLI_STUB = SimpleNamespace(
     _load_model_max_position_embeddings=lambda _model: 32768,
     _model_has_dual_chunk_attention=lambda _model: False,
     _model_is_moe=lambda _model: False,
+    _model_moe_runner_requires_aiter=lambda _model: False,
     _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
 )
 

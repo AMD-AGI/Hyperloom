@@ -4,7 +4,7 @@
 """Unit tests for the FRAMEWORK_AGENT local-exploration arm.
 
 Covers:
-- the phase-budget re-split (FRAMEWORK 20 / EXPLORE 35 / KERNEL 28, sum == 1.0);
+- the phase-budget re-split (FRAMEWORK 20 / EXPLORE 35 / KERNEL 35, sum == 1.0);
 - the selectable phase-audit LLM policy (off / on / auto) + uncertainty gate;
 - the candidate-free local-exploration pseudo-candidate + id sequencing;
 - the discovery-exhaustion pivot to a local-exploration specialist (instead of
@@ -30,11 +30,14 @@ from hyperloom.orchestrator.phases.framework import FrameworkPhase
 # 1. Budget re-split
 # --------------------------------------------------------------------------- #
 def test_phase_budget_resplit_values_and_sum():
-    """FRAMEWORK 20 / EXPLORE 35 / KERNEL 28; the split still sums to 1.0."""
+    """FRAMEWORK 20 / EXPLORE 35 / KERNEL 35 / SWEEP 5; the split still sums to 1.0."""
     b = _phase_state.DEFAULT_PHASE_BUDGET_PCT
     assert b[_phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
     assert b[_phase_state.PHASE_EXPLORE] == pytest.approx(0.35)
-    assert b[_phase_state.PHASE_KERNEL_AGENT] == pytest.approx(0.28)
+    # KERNEL was raised 0.28 -> 0.35 (funded by SWEEP 0.12 -> 0.05) because
+    # MI355X GEMM tuning pays a one-time ~20min JIT before any benchmarking.
+    assert b[_phase_state.PHASE_KERNEL_AGENT] == pytest.approx(0.35)
+    assert b[_phase_state.PHASE_SWEEP] == pytest.approx(0.05)
     assert sum(b.values()) == pytest.approx(1.0)
 
 

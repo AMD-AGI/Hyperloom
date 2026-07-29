@@ -407,13 +407,23 @@ def test_baseline_operator_disabled_eval_still_stops(tmp_path):
     assert state.stop_reason == "baseline_accuracy_failed"
 
 
-def test_baseline_eval_failure_fallback_stops_run(tmp_path):
-    """The eval-failure fallback still salvages the throughput baseline, but a
-    genuine baseline with no accuracy result now halts the run."""
+def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
+    """A genuine baseline whose eval aborted must stop the run IMMEDIATELY.
+
+    Regression (2026-07-27 Qwen3-8B outage): the executor used to re-run the
+    whole baseline with ``RUN_EVAL=false`` to "salvage the throughput
+    baseline", and ``_maybe_stop_on_missing_baseline_accuracy`` then halted the
+    run anyway (the fallback is tagged ``eval_unavailable``, which is NOT an
+    operator opt-out). That burned a second full server boot + benchmark to
+    produce a result guaranteed to be discarded. The retry is now skipped for a
+    genuine ``baseline`` task and the same ``baseline_accuracy_failed`` stop is
+    recorded straight away.
+    """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
     _write_yaml(base)
+    run_evals: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
         cfg_idx = cmd.index("--benchmark-config")
@@ -421,6 +431,7 @@ def test_baseline_eval_failure_fallback_stops_run(tmp_path):
         cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
         slot = Path(cmd[out_idx + 1])
         run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        run_evals.append(run_eval)
         if run_eval != "false":
             return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
         _fake_workspace(slot)
@@ -447,9 +458,65 @@ def test_baseline_eval_failure_fallback_stops_run(tmp_path):
     ):
         result = _run(executor(ctx))
 
+    # No RUN_EVAL=false salvage round was launched -- the wasted budget is gone.
+    assert "false" not in run_evals
+    assert result["status"] == "failed"
+    assert result.get("accuracy_source") == "eval_unavailable"
+    assert "eval_failed_no_fallback_baseline_requires_accuracy" in result.get("nonfatal_warnings", [])
+    # Same operator-visible verdict as before, minutes earlier.
+    assert state.stop_reason == "baseline_accuracy_failed"
+
+
+def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
+    """The fail-fast rule is scoped to genuine baselines.
+
+    ``replay_warm_recipe`` reuses this executor but does NOT establish the
+    quality reference, so a throughput-only result IS usable there and the
+    one-shot ``RUN_EVAL=false`` salvage must still run.
+    """
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    run_evals: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        slot = Path(cmd[out_idx + 1])
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        run_evals.append(run_eval)
+        if run_eval != "false":
+            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    task = SimpleNamespace(task_id="t-warm", kind="replay_warm_recipe", params={
+        "output_dir": str(tmp_path / "ws"),
+        "timeout_sec": 10,
+        "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+        "gpu_type": "mi300x",
+    })
+    ctx = SimpleNamespace(task=task, extra={"shared_state": state})
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert "false" in run_evals  # salvage retry ran
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
-    assert state.stop_reason == "baseline_accuracy_failed"
+    assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
+    # Not a genuine baseline -> the accuracy stop gate does not fire.
+    assert state.stop_reason == ""
 
 
 class _StopRecorder:
@@ -600,9 +667,13 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
 
 
-def test_salvage_ignores_discarded_warmup_and_stops(tmp_path):
-    # Only a discarded warmup round carries a score; parse_eval_results excludes
-    # warmup output, so there is nothing to salvage and the run stops.
+def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
+    """A warmup-round eval is a valid accuracy source, so the run must not stop.
+
+    What a warmup discards is throughput -- the cold-boot window inflates later
+    gains. Accuracy is not timing-sensitive, and the baseline double-run now
+    evaluates only in the warmup round, so this is the sole score available.
+    """
     runs_baseline = tmp_path / "runs" / "baseline"
     _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.9)
     deciding = runs_baseline / "retry2_bootsafe"
@@ -612,7 +683,21 @@ def test_salvage_ignores_discarded_warmup_and_stops(tmp_path):
         "vllm",
         {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)},
     )
-    assert reason == "baseline_accuracy_failed"
+    assert reason == ""
+
+
+def test_salvage_prefers_a_measured_round_over_a_warmup(tmp_path):
+    """The warmup is a fallback, not a substitute: a real round still wins."""
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.10)
+    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.90)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
+
+    parsed = parse_eval_results(runs_baseline, framework="vllm")
+    assert parsed["accuracy"] == pytest.approx(0.90)
 
 
 def test_eval_already_off_does_not_retry(tmp_path):
@@ -762,3 +847,173 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     )
     assert rec.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+# --- regression: the --concurrent-requests flag gate (2026-07-27 outage) ----
+# Magpie re-copies its own generic *.sh scripts into <inferencex>/benchmarks/ on
+# every run, and the InferenceX checkout is re-mirrored from scratch on every
+# run, so an install-time-only patch does not survive. A Magpie installed by
+# preflight (which never ran the patcher) re-introduced
+#     run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
+# into the executed copy; InferenceX's run_lm_eval rejected it and aborted the
+# benchmark before any results*.json existed.
+def _materialized_cfg(tmp_path: Path, *, run_eval: str, inferencex_path: str = "") -> Path:
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/path/models/Qwen-Qwen3-8B",
+            "envs": {"TP": 1, "CONC": 8, "RUN_EVAL": run_eval},
+            "inferencex_path": inferencex_path,
+        }
+    }
+    path = tmp_path / "materialized.yaml"
+    with path.open("w") as f:
+        yaml.safe_dump(cfg, f)
+    return path
+
+
+def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
+    """The compat patch is re-asserted against the exact checkout that runs."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
+    seen: list[str | None] = []
+
+    def fake_compat(*, inferencex_dir=None):
+        seen.append(inferencex_dir)
+        return True
+
+    executor = BaselineExecutor()
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+        side_effect=fake_compat,
+    ):
+        assert executor._after_materialize_config(cfg, tmp_path) is None
+
+    assert seen == [str(ix)]
+
+
+def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
+    """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the
+    benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
+
+    executor = BaselineExecutor()
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+        return_value=False,
+    ):
+        out = executor._after_materialize_config(cfg, tmp_path)
+
+    assert out is not None
+    assert out["status"] == "failed"
+    assert out["error_class"] == "eval_concurrency_flag_unpatchable"
+    assert "--concurrent-requests" in out["error"]
+    assert "EVAL_CONCURRENT_REQUESTS" in out["error"]
+    # The failure is recognisably eval-rooted, so the accuracy stop gate fires.
+    assert BaselineExecutor._is_eval_rooted_failure(out) is True
+
+
+def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
+    """RUN_EVAL=false runs never reach run_lm_eval, so the flag cannot bite:
+    an unpatchable script must not block a deliberately eval-less run."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    cfg = _materialized_cfg(tmp_path, run_eval="false", inferencex_path=str(ix))
+    calls: list[int] = []
+
+    def fake_compat(**_kwargs):
+        calls.append(1)
+        return False
+
+    executor = BaselineExecutor()
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+        side_effect=fake_compat,
+    ):
+        assert executor._after_materialize_config(cfg, tmp_path) is None
+
+    assert calls == []
+
+
+def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
+    """An exception from the patcher must surface as the same loud failure, not
+    as a silent 'best-effort skip'."""
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
+
+    executor = BaselineExecutor()
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.ensure_eval_concurrency_compat",
+        side_effect=OSError("read-only fs"),
+    ):
+        out = executor._after_materialize_config(cfg, tmp_path)
+
+    assert out is not None
+    assert out["error_class"] == "eval_concurrency_flag_unpatchable"
+
+
+def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
+    """No mocks on the patcher: a real flagged sglang_mi355x.sh under
+    $MAGPIE_PATH is scrubbed, and the real benchmark_lib.sh parser is taught to
+    tolerate the flag, when the baseline materializes its config."""
+    magpie = tmp_path / "site-packages"
+    mbench = magpie / "Magpie" / "scripts" / "benchmark"
+    mbench.mkdir(parents=True)
+    (mbench / "sglang_mi355x.sh").write_text(
+        '#!/bin/bash\n'
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n',
+        encoding="utf-8",
+    )
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text(
+        "run_lm_eval() {\n"
+        '    local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-64}}"\n'
+        "    while [[ $# -gt 0 ]]; do\n"
+        "        case $1 in\n"
+        '            --top-p)          top_p="$2"; shift 2 ;;\n'
+        '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
+        "        esac\n"
+        "    done\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
+
+    executor = BaselineExecutor()
+    with patch.dict("os.environ", {"MAGPIE_PATH": str(magpie)}):
+        assert executor._after_materialize_config(cfg, tmp_path) is None
+
+    script = (mbench / "sglang_mi355x.sh").read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in script
+    assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in script
+    lib = (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    assert '--concurrent-requests|--concurrent_requests) concurrent_requests="$2"' in lib
+
+
+def test_end_to_end_live_flag_blocks_launch_without_mocks(tmp_path):
+    """Unmocked: a genuinely unremovable ``run_eval --concurrent-requests``
+    (unrecognised value shape, and a benchmark_lib.sh whose parser cannot be
+    taught to absorb it) short-circuits the baseline before the server boots."""
+    magpie = tmp_path / "site-packages"
+    mbench = magpie / "Magpie" / "scripts" / "benchmark"
+    mbench.mkdir(parents=True)
+    (mbench / "sglang_mi355x.sh").write_text(
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests 64 || exit $?\n',
+        encoding="utf-8",
+    )
+    ix = tmp_path / "ix"
+    (ix / "benchmarks").mkdir(parents=True)
+    (ix / "benchmarks" / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
+    cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
+
+    executor = BaselineExecutor()
+    with patch.dict("os.environ", {"MAGPIE_PATH": str(magpie)}):
+        out = executor._after_materialize_config(cfg, tmp_path)
+
+    assert out is not None
+    assert out["error_class"] == "eval_concurrency_flag_unpatchable"

@@ -79,17 +79,25 @@ def test_install_sh_gates_magpie_calls():
     # ``tr -d '[:space:]'`` would collapse "by pass" -> "bypass" and diverge.
     assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'" in text
     assert "tr -d '[:space:]'" not in text
-    # Magpie stages are inside the else branch (only run for non-bypass).
+    # ensure_magpie runs only for non-bypass (inside the first else…fi block).
     gate_idx = text.index("HYPERLOOM_BENCHMARK_BACKEND_LC=")
     else_idx = text.index("else", gate_idx)
     fi_idx = text.index("\nfi\n", gate_idx)
     magpie_idx = text.index("ensure_magpie\n", gate_idx)
-    patch_idx = text.index("ensure_magpie_atomic_scripts_patch\n", gate_idx)
     assert else_idx < magpie_idx < fi_idx
-    assert else_idx < patch_idx < fi_idx
     # InferenceX stays unconditional (after the fi).
     inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
     assert inferencex_idx > fi_idx
+    # The atomic-scripts patch also scrubs the redundant --concurrent-requests
+    # eval flag from the InferenceX benchmark copies, so it must run AFTER
+    # ensure_inferencex (which exports $INFERENCEX_PATH) and is gated on
+    # non-bypass by its own guard rather than the first else branch.
+    patch_guard_idx = text.index(
+        'if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then', gate_idx
+    )
+    patch_idx = text.index("ensure_magpie_atomic_scripts_patch\n", gate_idx)
+    patch_fi_idx = text.index("\nfi\n", patch_guard_idx)
+    assert inferencex_idx < patch_guard_idx < patch_idx < patch_fi_idx
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():

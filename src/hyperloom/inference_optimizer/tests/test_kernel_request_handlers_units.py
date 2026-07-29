@@ -756,6 +756,131 @@ class TestForgeGemmHelperCoverage:
         assert result["engine"] == "forge"
 
 
+    @pytest.mark.parametrize(
+        "quant_type",
+        [
+            "blockscale_bpreshuffle",
+            "a8w8_blockscale_bpreshuffle",
+            "blockscale+bpreshuffle",
+        ],
+    )
+    def test_resolve_forge_untuned_csv_blockscale_bpreshuffle(
+        self,
+        tmp_path,
+        quant_type,
+    ):
+        expected = self._write_aiter_csv(
+            tmp_path,
+            "abc",
+            "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+            "M,N,K\n16,1536,7168\n",
+        )
+        assert (
+            krh._resolve_forge_untuned_csv(
+                tmp_path,
+                "fp8",
+                quant_type,
+            )
+            == str(expected)
+        )
+
+
+    def test_resolve_forge_untuned_csv_rejects_unknown_fp8_quant(self, tmp_path):
+        self._write_aiter_csv(
+            tmp_path,
+            "abc",
+            "a8w8_blockscale_untuned_gemm.csv",
+            "M,N,K\n16,1536,7168\n",
+        )
+
+        assert (
+            krh._resolve_forge_untuned_csv(
+                tmp_path,
+                "fp8",
+                "misspelled_quant_type",
+            )
+            == ""
+        )
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "source",
+        ["fresh_profile", "explicit_benchmark", "stale_profile"],
+    )
+    async def test_sglang_shape_source_priority(
+        self,
+        tmp_path,
+        monkeypatch,
+        source,
+    ):
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps(
+                {
+                    "hidden_size": 5120,
+                    "intermediate_size": 17408,
+                    "quantization_config": {"weight_block_size": [128, 128]},
+                }
+            )
+        )
+        profile_shapes = tmp_path / "profile_shapes.json"
+        profile_shapes.write_text(
+            json.dumps([{"M": 1024, "N": 34816, "K": 5120}])
+        )
+        specialist_csv = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
+        specialist_csv.write_text("M,N,K\n4096,34816,5120\n")
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model),
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            last_profile_status="succeeded",
+            last_trace_analyze={"shapes_json": str(profile_shapes)},
+        )
+        state.last_profile_workload = state.profile_workload_context()
+        if source == "stale_profile":
+            state.last_profile_workload["conc"] = 32
+        state.save(tmp_path)
+        captured: dict = {}
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(
+            krh,
+            "_resolve_forge_untuned_csv",
+            lambda *args, **kwargs: str(specialist_csv),
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured.update(json.loads(input_path.read_text()))
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps({"status": "ok", "micro_decision": "skipped"})
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        payload = (
+            {"untuned_csv": str(specialist_csv)}
+            if source == "explicit_benchmark"
+            else {}
+        )
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        if source in {"explicit_benchmark", "stale_profile"}:
+            assert captured["untuned_csv"] == str(specialist_csv)
+            assert captured["shapes_json"] == ""
+        else:
+            assert captured["untuned_csv"] == ""
+            assert captured["shapes_json"] == str(profile_shapes)
+
+
 def _ensure_torch_module(monkeypatch):
     try:
         import torch
@@ -2769,6 +2894,85 @@ class TestRunGemmTuningHandler:
         }
 
         assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
+
+
+    @pytest.mark.parametrize(
+        "quant_type",
+        [
+            "bpreshuffle",
+            "a8w8_bpreshuffle",
+            "blockscale_bpreshuffle",
+            "a8w8_blockscale_bpreshuffle",
+        ],
+    )
+    def test_vllm_block_fp8_rejects_sglang_bpreshuffle_types(self, quant_type):
+        assert krh._is_vllm_block_fp8("fp8", quant_type) is False
+
+
+    def test_resolve_forge_shapes_extracts_only_latest_trace(self, tmp_path):
+        session_dir = tmp_path / "session"
+        runs = session_dir / "kernel-agent" / "runs"
+        old_candidates = runs / "old" / "kernel_candidates.json"
+        latest_candidates = runs / "latest" / "kernel_candidates.json"
+        old_candidates.parent.mkdir(parents=True)
+        latest_candidates.parent.mkdir(parents=True)
+
+        def _write_candidates(path: Path, m: int) -> None:
+            path.write_text(
+                json.dumps(
+                    {
+                        "hot_kernels": [
+                            {
+                                "name": "aiter::gemm_a8w8_blockscale",
+                                "input_shapes": [
+                                    {"shape": f"({m},5120) fp8<br>(34816,5120) fp8"}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        _write_candidates(old_candidates, 16384)
+        _write_candidates(latest_candidates, 4096)
+        state = SharedState(
+            last_trace_analyze={"candidates_path": str(latest_candidates)}
+        )
+
+        shapes_path = krh._resolve_forge_shapes(state, session_dir)
+
+        assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [
+            {"M": 4096, "N": 34816, "K": 5120}
+        ]
+
+
+    def test_extract_gemm_shapes_tolerates_whitespace_after_comma(self, tmp_path):
+        # TraceLens may render tuples with a space after the comma
+        # ("(1024, 5120)"); the extractor must still parse M/N/K instead of
+        # silently dropping every shape and falling back to config defaults.
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale",
+                            "input_shapes": [
+                                {"shape": "(1024, 5120) fp8<br>(34816, 5120) fp8"}
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 1024, "N": 34816, "K": 5120}
+        ]
 
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.

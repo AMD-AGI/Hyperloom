@@ -17,6 +17,13 @@ _GFX_TO_RUNNER: dict[str, str] = {
     "gfx950": "mi355x",
 }
 
+_AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
+    "mi300x": ("gfx942", 304),
+    "mi308x": ("gfx942", 304),
+    "mi325x": ("gfx942", 304),
+    "mi355x": ("gfx950", 256),
+}
+
 
 def _gpu_runner_type(gpu_type: str) -> str:
     """Return the Magpie runner label for a resolved real GPU type."""
@@ -81,3 +88,11 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
         return env_norm if env_norm in _AMD_GPU_TYPES else None
     detected = (_autodetect_gpu_type() or "").strip().lower()
     return detected if detected in _AMD_GPU_TYPES else None
+
+
+def amd_gpu_dispatch_identity(gpu_type: str | None = None) -> tuple[str, int] | None:
+    """Return the AITER dispatch architecture and CU count for an AMD GPU."""
+    resolved = _resolve_amd_gpu_type(gpu_type)
+    if not resolved:
+        return None
+    return _AMD_GPU_DISPATCH_IDENTITIES.get(resolved)

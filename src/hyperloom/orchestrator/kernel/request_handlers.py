@@ -1686,12 +1686,15 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
+    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
         if precision == "fp8" and quant_type.lower() == "auto":
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1718,7 +1721,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
             quant_type = "per_token"
         else:
             model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path)
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1731,7 +1735,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
         model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-        quant_type = _resolve_fp8_quant_type(model_path)
+        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
 
 
@@ -1740,35 +1745,66 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
 
     Priority: current_best workspace (matches the resolved server args)
     → baseline workspace → most recent server.log under runs/.
+
+    The server log is written by the benchmark server at startup and lives in
+    the warmup_round benchmark directory (where the server process was first
+    launched). When ``current_best.workspace`` points to the measure_round
+    benchmark directory (one level sibling), the log is not there — so we also
+    check sibling ``warmup_round/`` dirs and walk up to the parent run
+    directory.
     """
-    # current_best workspace — matches the resolved runtime args.
+    def _find_server_log_near(workspace_str: str) -> str | None:
+        if not workspace_str:
+            return None
+        ws = Path(workspace_str)
+        # Direct hit (server started in this exact dir).
+        if (ws / "server.log").is_file():
+            return str(ws / "server.log")
+        # Sibling warmup_round — benchmark dirs sit under
+        # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
+        parent = ws.parent  # e.g. measure_round/
+        if parent.name in ("warmup_round", "measure_round"):
+            run_hash_dir = parent.parent
+        else:
+            run_hash_dir = parent
+        warmup = run_hash_dir / "warmup_round"
+        if warmup.is_dir():
+            candidates: list[tuple[float, str]] = []
+            for child in warmup.iterdir():
+                sl = child / "server.log"
+                if sl.is_file():
+                    try:
+                        candidates.append((sl.stat().st_mtime, str(sl)))
+                    except OSError:
+                        continue
+            if candidates:
+                candidates.sort(reverse=True)
+                return candidates[0][1]
+        return None
+
     current_best = getattr(state, "current_best", None) or {}
     if isinstance(current_best, dict):
-        cb_workspace = str(current_best.get("workspace") or "").strip()
-        if cb_workspace:
-            log_path = Path(cb_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(current_best.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Baseline workspace — the initial server run.
     last_baseline = getattr(state, "last_baseline", None) or {}
     if isinstance(last_baseline, dict):
-        bl_workspace = last_baseline.get("workspace") or ""
-        if bl_workspace:
-            log_path = Path(bl_workspace) / "server.log"
-            if log_path.is_file():
-                return str(log_path)
+        found = _find_server_log_near(str(last_baseline.get("workspace") or "").strip())
+        if found:
+            return found
 
-    # Fallback: check known run subdirs (bounded, not recursive glob).
+    # Fallback: check known run subdirs with sufficient depth for the nested
+    # layout ({phase}/{hash}/{warmup_round|measure_round}/{bench_dir}/server.log).
     runs_dir = session_dir / "runs"
     if runs_dir.is_dir():
         best: Path | None = None
         best_mtime: float = 0.0
-        for sub in ("baseline", "explore", "gemm_tuning"):
+        for sub in ("baseline", "explore", "gemm_tuning", "roofline"):
             sub_dir = runs_dir / sub
             if not sub_dir.is_dir():
                 continue
-            for log in sub_dir.glob("*/server.log"):
+            for log in sub_dir.glob("**/server.log"):
                 try:
                     mt = log.stat().st_mtime
                 except OSError:
@@ -1804,13 +1840,29 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _resolve_forge_shapes(state, session_dir: Path) -> str:
+def _profile_shapes_are_fresh(state: Any) -> bool:
+    """Return whether the latest profile matches the active workload/config."""
+    return bool(state.profile_trace_matches_workload())
+
+
+def _resolve_forge_shapes(
+    state,
+    session_dir: Path,
+    *,
+    require_fresh_profile: bool = False,
+) -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
     Only passes files that match this schema; incompatible formats are
     silently skipped so forge falls back to config.json shape derivation.
     """
+    if require_fresh_profile and not _profile_shapes_are_fresh(state):
+        log.info(
+            "Forge GEMM shapes: latest TraceLens profile does not match the "
+            "active workload/config; ignoring its shape artifacts"
+        )
+        return ""
     last_trace = getattr(state, "last_trace_analyze", None) or {}
     if not isinstance(last_trace, dict):
         return ""
@@ -1841,7 +1893,94 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
+    # Final fallback: extract the GEMM shapes observed by the latest TraceLens
+    # analysis. Older traces can describe a backend that is no longer active.
+    extracted = _extract_gemm_shapes_from_candidates(
+        str(last_trace.get("candidates_path") or ""),
+        session_dir,
+    )
+    if extracted:
+        return extracted
+
     return ""
+
+
+def _extract_gemm_shapes_from_candidates(
+    candidates_path_str: str, session_dir: Path
+) -> str:
+    """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
+
+    Parses the TraceLens shape format "(M,K) fp8<br>(N,K) fp8<br>..." to derive
+    the actual GEMM dimensions observed during serving. Writes a forge-compatible
+    shapes JSON beside the candidates file and returns its path.
+    """
+    import json as _json
+    import re as _re
+
+    if not candidates_path_str:
+        return ""
+    cand_file = Path(candidates_path_str)
+    if not cand_file.is_file():
+        return ""
+
+    try:
+        data = _json.loads(cand_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+
+    hot_kernels = data.get("hot_kernels", [])
+    if not isinstance(hot_kernels, list):
+        return ""
+
+    shapes: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    for kernel in hot_kernels:
+        name = str(kernel.get("name", ""))
+        if "gemm" not in name.lower():
+            continue
+        input_shapes = kernel.get("input_shapes", [])
+        if not isinstance(input_shapes, list):
+            continue
+        for entry in input_shapes:
+            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
+            if not shape_str:
+                continue
+            # Parse "(M,K) dtype<br>(N,K) dtype<br>..." — first two tensors give M,N,K
+            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+            if len(parts) < 2:
+                continue
+            # Tolerate whitespace after the comma ("(1024, 5120)") and any
+            # leading token before the tuple; TraceLens formats vary. .search()
+            # rather than .match() so a leading dtype/name does not defeat it.
+            dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+            m0 = dim_pattern.search(parts[0])
+            m1 = dim_pattern.search(parts[1])
+            if not m0 or not m1:
+                continue
+            M = int(m0.group(1))
+            K = int(m0.group(2))
+            N = int(m1.group(1))
+            key = (M, N, K)
+            if key not in seen:
+                seen.add(key)
+                shapes.append({"M": M, "N": N, "K": K})
+
+    if not shapes:
+        return ""
+
+    out_path = cand_file.parent / "traced_gemm_shapes.json"
+    try:
+        out_path.write_text(_json.dumps(shapes, indent=2), encoding="utf-8")
+    except OSError:
+        return ""
+
+    log.info(
+        "extracted %d unique GEMM shapes from kernel_candidates.json -> %s",
+        len(shapes),
+        out_path,
+    )
+    return str(out_path)
 
 
 # Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the
@@ -1849,11 +1988,24 @@ def _resolve_forge_shapes(state, session_dir: Path) -> str:
 _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
     "auto": "a8w8_blockscale_untuned_gemm.csv",
     "blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "block_scale": "a8w8_blockscale_untuned_gemm.csv",
+    "a8w8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
+    "fp8_blockscale": "a8w8_blockscale_untuned_gemm.csv",
     "per_token": "a8w8_untuned_gemm.csv",
     "per_tensor": "a8w8_untuned_gemm.csv",
+    "a8w8": "a8w8_untuned_gemm.csv",
+    "w8a8": "a8w8_untuned_gemm.csv",
+    "w8a8_fp8": "a8w8_untuned_gemm.csv",
+    "fp8_w8a8": "a8w8_untuned_gemm.csv",
     "bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "a8w8_bpreshuffle": "a8w8_bpreshuffle_untuned_gemm.csv",
+    "blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "a8w8_blockscale_bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
+    "blockscale+bpreshuffle": "a8w8_blockscale_bpreshuffle_untuned_gemm.csv",
     "fp4": "a4w4_blockscale_untuned_gemm.csv",
     "mxfp4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4": "a4w4_blockscale_untuned_gemm.csv",
+    "a4w4_blockscale": "a4w4_blockscale_untuned_gemm.csv",
 }
 
 
@@ -1941,15 +2093,19 @@ def _model_hidden_size(model_path: str) -> int | None:
     return None
 
 
-def _resolve_fp8_quant_type(model_path: str) -> str:
+def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str = "") -> str:
     """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
-    - ``blockscale`` only when the checkpoint ships block-quantized weights
-      (``config.json`` ``quantization_config.weight_block_size`` or a block-style
-      ``quant_method``) -- the a8w8 blockscale GEMM path.
+    - ``blockscale_bpreshuffle`` when the checkpoint uses block-quantized
+      weights AND the target GPU is gfx950 (MI355X) AND framework is sglang --
+      sglang/aiter automatically upgrades blockscale to the bpreshuffle kernel
+      on CDNA4. vLLM does NOT use this path (it reads
+      AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
+    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
+      on vllm, or when GPU type is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
       ``--quantization fp8`` (the a8w8 per-token path).
     - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
@@ -1959,22 +2115,51 @@ def _resolve_fp8_quant_type(model_path: str) -> str:
     data = _read_model_config(model_path)
     if data is None:
         return "auto"
-    # Check both the top-level config and a nested ``text_config`` (multimodal
-    # checkpoints sometimes carry the quantization_config there), mirroring
-    # ``_model_hidden_size``.
     candidates: list[dict] = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
         candidates.append(nested)
+    is_blockscale = False
     for cfg_dict in candidates:
         qc = cfg_dict.get("quantization_config")
         if isinstance(qc, dict):
             if qc.get("weight_block_size"):
-                return "blockscale"
+                is_blockscale = True
+                break
             method = str(qc.get("quant_method") or qc.get("fmt") or "").lower()
             if "block" in method:
-                return "blockscale"
+                is_blockscale = True
+                break
+    if is_blockscale:
+        if _is_gfx950(gpu_type) and framework.lower() == "sglang":
+            return "blockscale_bpreshuffle"
+        return "blockscale"
     return "per_token"
+
+
+_GFX950_GPU_TYPES = frozenset({"mi355x", "gfx950"})
+
+
+def _is_gfx950(gpu_type: str) -> bool:
+    """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
+    key = (gpu_type or "").strip().lower()
+    if key in _GFX950_GPU_TYPES:
+        return True
+    if not key or key == "auto":
+        return _is_gfx950_rocminfo()
+    return False
+
+
+@functools.lru_cache(maxsize=1)
+def _is_gfx950_rocminfo() -> bool:
+    """Cached rocminfo probe for gfx950 arch."""
+    try:
+        out = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        return "gfx950" in out.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
@@ -1998,12 +2183,13 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
 
 
 def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str, model_path: str = "") -> str:
-    """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
+    """Find an aiter untuned-GEMM CSV in a specialist worktree.
 
-    Dense fp8/fp4 forge tuners skip themselves unless real GEMM shapes are
-    supplied. Specialist runs write these to
+    Specialist runs may materialize or modify these files under
     ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv``; this
     resolver picks the newest non-empty CSV matching the resolved quant type.
+    Because an unchanged checkout can also contain static upstream rows, this is
+    a fallback behind explicit benchmark input and the latest runtime profile.
 
     When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
     the model are rejected so forge derives per-model shapes from ``config.json``.
@@ -2014,12 +2200,13 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
 
     fname = _FORGE_UNTUNED_CSV_BY_QUANT.get(quant_type)
     if fname is None:
-        if precision == "fp8":
-            fname = "a8w8_blockscale_untuned_gemm.csv"
-        elif precision in ("fp4", "mxfp4"):
-            fname = "a4w4_blockscale_untuned_gemm.csv"
-        else:
-            return ""
+        log.warning(
+            "Forge GEMM shapes: unknown quant_type=%r for precision=%r; "
+            "not guessing an untuned CSV",
+            quant_type,
+            precision,
+        )
+        return ""
 
     from hyperloom.inference_optimizer.session.session_paths import runs_root
 
@@ -2774,19 +2961,29 @@ async def _run_forge_gemm_tuning(
     if not kernel_sig_log:
         kernel_sig_log = _resolve_forge_server_log(state, session_dir)
 
-    # Resolve TraceLens shapes if available (normalize inline JSON to a real file).
+    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
+    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
+    # Forge's config-derived fallback. A specialist checkout is not sufficient
+    # evidence that its static CSV came from the active benchmark. vLLM instead
+    # requires native TunableOp rows or a workload-matched block-FP8 profile.
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    if not shapes_json:
-        shapes_json = _resolve_forge_shapes(state, session_dir)
-
-    # Dense fp8/fp4 tuners need real GEMM shapes; without a shapes JSON fall back
-    # to the aiter untuned-GEMM CSVs the specialist phase recorded.
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
         # Guard against inline content / stale paths.
         untuned_csv = ""
-    if not untuned_csv and not shapes_json:
-        untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
+    if not shapes_json and not untuned_csv and framework != "vllm":
+        shapes_json = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+        )
+        if not shapes_json:
+            untuned_csv = _resolve_forge_untuned_csv(
+                session_dir,
+                precision,
+                quant_type,
+                model_path,
+            )
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
     forge_framework = _forge_framework_for_vllm(
