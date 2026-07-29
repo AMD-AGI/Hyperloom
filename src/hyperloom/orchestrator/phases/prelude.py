@@ -278,6 +278,8 @@ class PreludePhase(PhaseHandler):
             config_source = str(replay.get("config_source") or "")
             config_tier = str(replay.get("config_tier") or "self")
             donor_expected_gain = float(replay.get("expected_gain_pct") or 0.0)
+            # Stamped by T0; absent on rows written before this field existed.
+            config_measured = bool(replay.get("config_measured", True))
         else:
             best_config = recipe_attrs.get("best_config") or {}
             if not isinstance(best_config, dict):
@@ -290,6 +292,9 @@ class PreludePhase(PhaseHandler):
             config_source = str(recipe.get("canonical_id") or "")
             config_tier = "self"
             donor_expected_gain = 0.0
+            from hyperloom.orchestrator.knowledge.recipe_kb_t0 import _row_is_measured
+
+            config_measured = _row_is_measured(recipe)
         donor_metadata = {
             field: replay.get(field)
             for field in (
@@ -302,6 +307,20 @@ class PreludePhase(PhaseHandler):
             )
             if replay.get(field) not in (None, "", [])
         }
+        # Never apply an inferred config to a real server process. Checked before
+        # the confidence gate because a remote's advertised confidence is
+        # operator-tunable and therefore not a trust boundary.
+        if not config_measured:
+            state.warm_replay_outcome = {
+                "status": "skipped",
+                "reason": "not_measured",
+                "warm_recipe_tier": tier,
+                "warm_recipe_conf": conf,
+                "config_donor_tier": config_tier,
+                "config_source": config_source,
+            }
+            state.warm_replay_attempted = True
+            return None
         # Gate on the config-transfer confidence.
         if replay_conf < min_conf:
             state.warm_replay_outcome = {

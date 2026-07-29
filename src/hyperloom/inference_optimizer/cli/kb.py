@@ -116,15 +116,31 @@ def _build_recipe_kb_dispatcher(
     if bool(getattr(args, "degraded_kb", False)):
         return RecipeKB(local=local_store, remote=None)  # opt-out: no network
 
-    # Read-side remote is gbrain only. Writes stay local-only; gbrain is
-    # consulted for READS and (optionally) mirrored to on local write.
+    # Read-side remotes. Writes stay local-only; remotes are consulted for READS
+    # and (optionally) mirrored to on local write.
     from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
+    from hyperloom.orchestrator.knowledge.recipe_kb.memo_remote_client import build_memo_remote_from_env
 
     gbrain_remote = build_gbrain_remote_from_env()
-    if gbrain_remote is None or not gbrain_remote.enabled:
-        return RecipeKB(local=local_store, remote=None)  # gbrain unconfigured: local-only
+    memo_remote = build_memo_remote_from_env()
 
-    kb = RecipeKB(local=local_store, remote=gbrain_remote)
+    if memo_remote is not None and memo_remote.enabled:
+        # MEMO_KB_URL set: consult the MEM ahead of gbrain, but never ahead of a
+        # local row. RecipeKB reads remote-first, so the guard is what keeps the
+        # lossy MEM from shadowing measured local rows.
+        from hyperloom.orchestrator.knowledge.recipe_kb.chained_remote import (
+            ChainedRemoteRecipeClient,
+        )
+
+        memo_remote.set_local_guard(local_store)
+        kb = RecipeKB(
+            local=local_store,
+            remote=ChainedRemoteRecipeClient([memo_remote, gbrain_remote]),
+        )
+    elif gbrain_remote is None or not gbrain_remote.enabled:
+        return RecipeKB(local=local_store, remote=None)  # nothing configured: local-only
+    else:
+        kb = RecipeKB(local=local_store, remote=gbrain_remote)
     # RECIPE_KB_MIRROR_MODE (default ``external``): ``external`` keeps gbrain off
     # the write path; ``inline`` best-effort mirrors each local write into gbrain
     # in-process (local write stays authoritative).
@@ -138,6 +154,29 @@ def _build_recipe_kb_dispatcher(
         mirror_mcp = build_mirror_mcp_from_env()
         return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
     return kb  # external (default): no in-process mirror
+
+
+def _set_memo_model_hint(kb: Any, raw_model: str) -> None:
+    """Forward the unslugged model reference to a MEM remote, if one is wired.
+
+    Walks the dispatcher's remote (and a chain's members) looking for a client
+    that accepts a model hint. A no-op when the MEM is not configured.
+
+    Args:
+        kb: The RecipeKB dispatcher.
+        raw_model: The model path or HF id as supplied, before slugging.
+    """
+    if not raw_model:
+        return
+    remote = getattr(kb, "remote", None)
+    candidates = list(getattr(remote, "members", None) or ([remote] if remote else []))
+    for candidate in candidates:
+        setter = getattr(candidate, "set_model_hint", None)
+        if callable(setter):
+            try:
+                setter(raw_model)
+            except Exception:  # noqa: BLE001 - a hint is an optimization, not a requirement
+                log.debug("memo model hint rejected", exc_info=True)
 
 
 def _bootstrap_recipe_kb(
@@ -169,6 +208,15 @@ def _bootstrap_recipe_kb(
 
     kb = _build_recipe_kb_dispatcher(args)
     _attach_recipe_audit_hook(kb, session_dir)
+    # canonical_id keeps only the model basename; the MEM was keyed on the
+    # org-qualified spelling. Hand it the unslugged reference (manifest first, so
+    # resumes work when --model is absent).
+    _set_memo_model_hint(
+        kb,
+        str(manifest.get("model_path") or "")
+        or str(manifest.get("model_name") or "")
+        or str(getattr(args, "model", "") or ""),
+    )
 
     state = SharedState.load_or_init(session_dir)
     workload = (

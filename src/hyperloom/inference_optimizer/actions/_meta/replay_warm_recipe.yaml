@@ -26,9 +26,11 @@ description: "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_
 pipeline_phase: measure
 typical_runtime_min: 5.0
 applicable_when:
-  # The Coordinator gates the enqueue (one-shot via ``warm_replay_attempted``
-  # + ``warm_start_recipe.confidence`` >= ``--warm-replay-min-confidence``),
-  # so ``applicable_when`` here is descriptive only.
+  # The Coordinator gates the enqueue (one-shot via ``warm_replay_attempted``,
+  # a measured config source, and ``warm_start_recipe.confidence`` >=
+  # ``--warm-replay-min-confidence``), so ``applicable_when`` here is
+  # descriptive only. An inferred config (``authority=INFERRED`` /
+  # ``provenance.measured=false``) is rejected regardless of confidence.
   - "baseline_tput > 0"
   - "warm_replay_attempted == False"
 # Descriptive (not validated by ActionRegistry) — the Coordinator constructs

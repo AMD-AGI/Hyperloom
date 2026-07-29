@@ -20,6 +20,8 @@ log = logging.getLogger(__name__)
 # name. Unknown backends fall back to their class name.
 _REMOTE_LABELS: dict[str, str] = {
     "GbrainRemoteRecipeClient": "gbrain",
+    "MemoRemoteRecipeClient": "memo",
+    "ChainedRemoteRecipeClient": "chain",
 }
 
 

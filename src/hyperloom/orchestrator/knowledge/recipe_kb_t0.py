@@ -23,6 +23,11 @@ from hyperloom.inference_optimizer.session.session_paths import (
 
 log = logging.getLogger(__name__)
 
+# Hard ceiling on the warm-start confidence an inferred (non-measured) row may
+# reach. A remote may advertise its own confidence via an operator-tunable env,
+# so the cap must not be derived from the row itself.
+_INFERRED_MAX_CONFIDENCE = 0.5
+
 
 def _default_status_emitter(line: str) -> None:
     """Default ``on_status`` callback — log the banner line at INFO.
@@ -141,6 +146,30 @@ def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
         if row.get(key):
             return True
     return False
+
+
+def _row_is_measured(row: Mapping[str, Any]) -> bool:
+    """False when a row is an inferred projection rather than a measurement.
+
+    Remote KB paths may answer with rows a model produced closed-book instead of
+    rows a benchmark produced. Such a row is stamped ``authority="INFERRED"``
+    and/or ``provenance.measured=False``. Both markers are written by different
+    producers, so the union is used: either one alone demotes the row.
+
+    Args:
+        row: A recipe row to inspect.
+
+    Returns:
+        ``True`` when the row carries no inferred/unmeasured marker.
+    """
+    if not isinstance(row, Mapping):
+        return False
+    if str(row.get("authority") or "").strip().upper() == "INFERRED":
+        return False
+    prov = row.get("provenance")
+    if isinstance(prov, Mapping) and prov.get("measured") is False:
+        return False
+    return True
 
 
 def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
@@ -482,6 +511,10 @@ def _build_warm_start_context(
                 "config_source": str(donor.get("canonical_id") or ""),
                 "config_tier": config_donor_tier or "self",
                 "config_confidence": float(config_donor_confidence or confidence),
+                # Lets the replay gate reject an inferred config regardless of
+                # the confidence the donor advertises. Needed because the KG
+                # donor path does not pass through _donor_is_trustworthy.
+                "config_measured": _row_is_measured(donor),
             }
             donor_canonical_id = str(donor.get("canonical_id") or "")
             donor_model = str(donor.get("model") or "")
@@ -909,6 +942,15 @@ def _cascade_warm_start_search(
         log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
         row = None
     if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
+        # Identity really did match, so the tier stays ``exact``; only the trust
+        # level drops. An inferred row echoes the requested cid back verbatim,
+        # which would otherwise buy it measured-grade confidence.
+        if not _row_is_measured(row):
+            try:
+                row_conf = float(row.get("confidence") or _INFERRED_MAX_CONFIDENCE)
+            except (TypeError, ValueError):
+                row_conf = _INFERRED_MAX_CONFIDENCE
+            return row, "exact", min(row_conf, _INFERRED_MAX_CONFIDENCE)
         return row, "exact", 1.0
     # L2: drop model — same (hw+fw+model_type+arch+fwv+prec)
     if model_type_val or architectures_val:
@@ -1206,13 +1248,14 @@ def run_t0_anchor(
     _tgt_conc = getattr(shared_state, "conc", None)
     _tgt_isl = getattr(shared_state, "isl", None)
     _tgt_osl = getattr(shared_state, "osl", None)
-    # A true-self (identity ``exact``) champion always replays; a cross-model
-    # borrow must clear the trustworthiness gate before it becomes the donor.
+    # A true-self (identity ``exact``) MEASURED champion always replays; a
+    # cross-model borrow — and any inferred row, whose exact identity match is
+    # only an echo of the request — must clear the trustworthiness gate first.
     if (
         warm_point
         and _has_replayable_config(warm_point)
         and (
-            warm_tier == "exact"
+            (warm_tier == "exact" and _row_is_measured(warm_point))
             or _donor_is_trustworthy(
                 warm_point,
                 target_arch_slug=_arch_slug,
