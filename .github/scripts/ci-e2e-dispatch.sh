@@ -17,6 +17,7 @@
 #   MAX_HOURS         optimizer time budget (hours)    (default 0.5)
 #   PR_NUMBER         PR number (for the job name)
 #   HEAD_REF          PR head branch name (the code to run)
+#   HEAD_SHA          immutable PR head commit SHA (the exact code to run)
 #   HEAD_REPO_URL     PR head repo clone url (for forks)
 #   BASE_REPO_URL     base repo clone url
 #   MODEL_BASE        local model base dir (optional; backend fills if empty)
@@ -48,6 +49,7 @@ POLL_MAX="${POLL_MAX:-120}"
 : "${E2E_API_KEY:?E2E_API_KEY is required}"
 : "${E2E_INFRA_TYPE:?E2E_INFRA_TYPE is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
+: "${HEAD_SHA:?HEAD_SHA (immutable PR head commit) is required}"
 API="${E2E_API_BASE%/}/api/v1/orchestration/workloads"
 
 # Fork PRs: the head branch lives in the contributor's fork, so clone from the head
@@ -56,12 +58,12 @@ SRC_REPO="${BASE_REPO_URL:-}"
 if [ -n "${HEAD_REPO_URL:-}" ] && [ "${HEAD_REPO_URL}" != "${BASE_REPO_URL:-}" ]; then
   SRC_REPO="${HEAD_REPO_URL}"
 fi
-# Where the launcher puts this PR's source: a stable, inspectable per-PR path under a
-# shared base (<base>/pr_<N>/hyperloom). Override the base with CI_E2E_PR_CHECK_BASE,
-# or point CI_E2E_SOURCE_DIR at an existing checkout to skip cloning. Re-triggered runs
-# pick up new commits because the launcher refreshes this checkout when HL_CI_E2E=1.
+# The exact commit is part of the source path. Do not reuse a branch-only checkout:
+# a later push must never make this CI run test a different commit from the one its
+# GitHub status is attached to. CI_E2E_SOURCE_DIR remains an explicit escape hatch
+# for operator-managed debugging checkouts.
 PR_CHECK_BASE="${CI_E2E_PR_CHECK_BASE:-/tmp/ci-e2e}"
-SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/hyperloom}"
+SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/${HEAD_SHA}/hyperloom}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 auth=(-H "Authorization: Bearer ${E2E_API_KEY}")
@@ -173,10 +175,11 @@ ${actions}"
 # ---- submit ---------------------------------------------------------------
 params="$(jq -n \
   --arg repo_id "$MODEL" --arg tp "$TP" --arg mh "$MAX_HOURS" \
-  --arg ref "$HEAD_REF" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
+  --arg ref "$HEAD_REF" --arg sha "$HEAD_SHA" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
   --arg mc "$MODEL_CLASS" --arg mbase "${MODEL_BASE:-}" \
   '{REPO_ID:$repo_id, TP:$tp, MAX_HOURS:$mh,
-    HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir}
+    HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_SHA:$sha,
+    HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir}
    + (if $mc == "" then {} else {MODEL_CLASS:$mc} end)
    + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)')"
 body="$(jq -n \
@@ -187,7 +190,7 @@ body="$(jq -n \
     gpu_per_replica:$gpus, template:{params:$params, env:{HL_CI_E2E:"1"}}}
    + (if $uname == "" then {} else {user_name:$uname} end)')"
 
-echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
+echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
 resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
   "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
 code="$(printf '%s' "$resp" | tail -n1)"
