@@ -1031,6 +1031,88 @@ async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir,
         await c.stop()
 
 
+def _eval_unavailable_result() -> dict:
+    """An eval-less baseline: succeeded, but measured no accuracy at all."""
+    return {
+        "status": "succeeded",
+        "baseline_eval_failed": True,
+        "baseline_eval_failure_kind": "accuracy_unavailable",
+        "baseline_eval_observed_accuracy": None,
+        "baseline_eval_accuracy_floor": 0.0,
+        "baseline_eval_evidence": (
+            "baseline accuracy did not meet floor: accuracy=None floor=0.0 task=None metric=None source=None"
+        ),
+        "baseline_eval_contract_fingerprint": "noeval-fp",
+        "materialized_config": "/runs/baseline/noeval.yaml",
+    }
+
+
+@pytest.mark.asyncio
+async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_dir, monkeypatch):
+    """An eval-less re-baseline must not overwrite a measured enablement trigger.
+
+    ``disable_run_eval`` re-baselines report ``accuracy_unavailable`` with no
+    task/metric/source. They still count as a failed round, but the stored
+    ``accuracy_below_floor`` evidence (the measurement enablement must
+    reproduce) has to survive.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement_baseline_eval_kind = "accuracy_below_floor"
+        st.enablement_observed_accuracy = 0.0
+        st.enablement_observed_task = "gsm8k"
+        st.enablement_observed_metric = "exact_match,strict-match"
+        st.enablement_baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
+        st.enablement_probe_config_path = "/runs/baseline/measured.yaml"
+        st.enablement_eval_contract_fingerprint = "measured-fp"
+
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
+        )
+
+        # The measured characterization survives...
+        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement_observed_task == "gsm8k"
+        assert st.enablement_observed_metric == "exact_match,strict-match"
+        assert "accuracy=0.0" in st.enablement_baseline_eval_evidence
+        assert st.enablement_probe_config_path == "/runs/baseline/measured.yaml"
+        assert st.enablement_eval_contract_fingerprint == "measured-fp"
+        # ...while the round still registers as an eval-rooted failure.
+        assert st.enablement_origin == "eval"
+        assert st.enablement_pending is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monkeypatch):
+    """The guard is one-way: a real measurement still replaces an empty trigger."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement_baseline_eval_kind = "accuracy_unavailable"
+        st.enablement_baseline_eval_evidence = "accuracy=None"
+
+        measured = _eval_unavailable_result()
+        measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
+        measured["baseline_eval_observed_accuracy"] = 0.0
+        measured["accuracy_task"] = "gsm8k"
+        measured["baseline_eval_evidence"] = "measured: accuracy=0.0 task=gsm8k"
+
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
+
+        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement_observed_task == "gsm8k"
+        assert "measured" in st.enablement_baseline_eval_evidence
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir, monkeypatch):
     """Any revalidation failure (including plain boot failures) clears pending and increments stall."""
