@@ -397,6 +397,34 @@ def test_cudagraph_healthy_low_idle_stays_reliable(tmp_path, capsys, monkeypatch
     assert "%" in idle_row
 
 
+def test_capture_folder_flagged_as_not_used_for_core(tmp_path, capsys, monkeypatch):
+    # Honest degradation for #4: passing --capture-folder must not silently look
+    # like it helps. The core analysis does not consume it, so a health warning
+    # says so explicitly. A run WITHOUT the flag emits no such warning.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    trace = tmp_path / "t.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
+    cap = tmp_path / "capture_traces"
+    cap.mkdir()
+
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace), extra=["--capture-folder", str(cap)]), capsys)
+    assert rc == 0
+    warn = next(
+        (w for w in result["trace_health_warnings"] if w["code"] == "bypass_capture_folder_not_used_for_core"),
+        None,
+    )
+    assert warn is not None
+    assert warn["shape_manifest_enabled"] is False
+    assert "does not consume it" in warn["message"]
+
+    # No flag -> no warning.
+    rc2, result2, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert "bypass_capture_folder_not_used_for_core" not in {
+        w["code"] for w in result2["trace_health_warnings"]
+    }
+
+
 # ── diffusion workload roofline ──────────────────────────────────────────────
 
 

@@ -656,6 +656,30 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+    # Honest degradation for --capture-folder: it is NOT consumed by the core
+    # bypass analysis (idle / attribution / candidates); it only feeds the opt-in
+    # TraceShapeManifest. Surface that explicitly when an operator passes it, so it
+    # never looks like it is filling the CUDA-graph data gaps (it is not — the
+    # capture shards are not used to reconstruct idle or op-attribution).
+    if args.capture_folder:
+        _sm_on = os.environ.get(_SHAPE_MANIFEST_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
+        trace_health_warnings.append(
+            {
+                "code": "bypass_capture_folder_not_used_for_core",
+                "severity": "warning",
+                "capture_folder": args.capture_folder,
+                "shape_manifest_enabled": _sm_on,
+                "message": (
+                    "--capture-folder was provided but the bypass core analysis "
+                    "(idle / op-attribution / kernel candidates) does not consume it; it only "
+                    f"feeds the opt-in TraceShapeManifest ({_SHAPE_MANIFEST_ENV}="
+                    f"{'on' if _sm_on else 'off'}). Capture shards are NOT used to reconstruct "
+                    "idle or op-attribution for CUDA-graph traces — those gaps remain (marked via "
+                    "idle_reliable / attribution_reliable), not filled."
+                ),
+            }
+        )
+
     # Analysis-quality health signals (observability only; never fatal).
     if analyze.get("kernels"):
         _emit_quality_warnings(analyze, trace_health_warnings)
