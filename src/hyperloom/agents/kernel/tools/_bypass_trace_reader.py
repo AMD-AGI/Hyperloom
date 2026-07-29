@@ -45,6 +45,15 @@ _DECODER = json.JSONDecoder()
 # Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
 _RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 
+# CUDA/HIP graph-replay launch names seen on ``cuda_runtime`` events. A workload
+# that runs through captured graphs issues one such launch per replay; the
+# device kernels of the replays are under-recorded and their launching
+# ``cuda_runtime`` call carries no ``External id``, so counting these by name is
+# the only reliable in-trace signal that the timeline/attribution is a
+# graph-replay trace (and thus that idle_pct is untrustworthy). Canonical
+# definition for the tools layer -- ``_trace_shape_manifest`` reuses it.
+_GRAPH_LAUNCH_RE = re.compile(r"graphlaunch|graph_launch|hipgraphlaunch|cudagraphlaunch", re.IGNORECASE)
+
 
 def _file_size(fp: Path) -> int:
     """Return file size in bytes, or 0 on stat() failure."""
@@ -605,6 +614,10 @@ def analyze_trace(
     m_events: list[tuple[float, float, float]] = []
     annotation_windows: list[dict[str, Any]] = []
     event_total = 0
+    # Count CUDA/HIP graph-replay launches by name. These are the only in-trace
+    # evidence that the workload ran via captured graphs, which makes the
+    # recorded device kernels sparse and idle_pct unreliable (see _GRAPH_LAUNCH_RE).
+    graph_launch_count = 0
 
     fobj = _open_trace_binary(tf)
     try:
@@ -617,6 +630,8 @@ def analyze_trace(
                 extid = args.get("External id")
                 if cid is not None and extid is not None:
                     corr_to_extid[cid] = extid
+                if _GRAPH_LAUNCH_RE.search(ev.get("name") or ""):
+                    graph_launch_count += 1
                 continue
             if cat == "cpu_op":
                 args = ev.get("args") or {}
@@ -676,6 +691,7 @@ def analyze_trace(
         emit_launches=emit_launches,
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
+    body["attribution"]["graph_launch_count"] = graph_launch_count
 
     # Detect (relative to the input dir) whether the selected trace is a
     # CUDA-graph capture shard, so the tool layer can surface a health warning.

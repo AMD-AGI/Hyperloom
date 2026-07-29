@@ -171,6 +171,23 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
             }
         )
 
+    graph_launch_count = (analyze.get("attribution") or {}).get("graph_launch_count", 0)
+    if graph_launch_count > 0:
+        warnings.append(
+            {
+                "code": "bypass_cudagraph_replay",
+                "severity": "warning",
+                "graph_launch_count": graph_launch_count,
+                "message": (
+                    f"{graph_launch_count} CUDA-graph replay launches detected. Device kernels "
+                    "for graph replays are under-recorded and their launching runtime call "
+                    "carries no cpu_op link, so op-attribution coverage and idle_pct are "
+                    "unreliable for this trace; kernel-name classification and per-kernel GPU-time "
+                    "shares still apply."
+                ),
+            }
+        )
+
     if analyze.get("steady_window_status"):
         warnings.append(
             {
@@ -654,16 +671,48 @@ def main(argv: list[str] | None = None) -> int:
     # surface a high_gpu_idle_pct warning for the Coordinator.
     idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
     idle_pct_threshold = resolve_idle_pct_threshold()
+    graph_launch_count = (analyze.get("attribution") or {}).get("graph_launch_count", 0)
     if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
-        for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
-            candidates[_cand_key] = []
-        trace_health_warnings.append(
-            build_high_idle_warning(
-                idle_pct=float(idle_pct_value),
-                threshold_pct=idle_pct_threshold,
-                report_path=analysis_md_path,
+        if graph_launch_count > 0:
+            # CUDA-graph replay: idle_pct is unreliable here. The profiler
+            # under-records the device kernels of graph replays, so the recorded
+            # kernel intervals cover only a fraction of the real GPU-busy time and
+            # idle_pct reads spuriously high even on a near-saturated GPU. Do NOT
+            # suppress the candidate lists (that would derail the run toward
+            # parameter tuning on a false "GPU is idle" signal); keep the
+            # candidates and surface an explicit unreliability warning instead of
+            # the misleading high_gpu_idle_pct route-to-params warning. This is a
+            # bypass-side carve-out only; the shared _idle_gate threshold/warning
+            # (also used by the TraceLens route) is left untouched.
+            trace_health_warnings.append(
+                {
+                    "code": "bypass_cudagraph_unreliable_idle",
+                    "severity": "warning",
+                    "idle_pct": round(float(idle_pct_value), 2),
+                    "threshold_pct": round(idle_pct_threshold, 2),
+                    "graph_launch_count": graph_launch_count,
+                    "source": str(analysis_md_path),
+                    "message": (
+                        f"GPU idle measured {float(idle_pct_value):.2f}% (> "
+                        f"{idle_pct_threshold:.2f}%), but {graph_launch_count} CUDA-graph "
+                        "replay launches were detected. Under graph replay the profiler "
+                        "under-records device kernels, so idle_pct is unreliable and does "
+                        "NOT indicate a genuinely idle GPU. The hot-kernel candidate list is "
+                        "retained (idle-gate suppression skipped); do not route to parameter "
+                        "optimization on the basis of this idle_pct."
+                    ),
+                }
             )
-        )
+        else:
+            for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
+                candidates[_cand_key] = []
+            trace_health_warnings.append(
+                build_high_idle_warning(
+                    idle_pct=float(idle_pct_value),
+                    threshold_pct=idle_pct_threshold,
+                    report_path=analysis_md_path,
+                )
+            )
 
     # Stamp the report path onto each candidate (downstream reads it).
     for cand in candidates.get("hot_kernels", []):

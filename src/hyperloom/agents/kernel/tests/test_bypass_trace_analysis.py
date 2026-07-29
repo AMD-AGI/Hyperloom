@@ -44,6 +44,28 @@ _HIGH_IDLE_TRACE_EVENTS = [
     {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 100000, "dur": 100, "args": {"correlation": 7}},
 ]
 
+# CUDA-graph replay trace: the workload runs via 128 cudaGraphLaunch replays but
+# the profiler only records the device kernels of a single capture, so the union
+# of recorded kernel intervals (200us) over the full event span (~99ms) yields a
+# spurious idle_pct ~99%. A correct reader must (A) count the replays by name and
+# (B) NOT let the high-idle gate suppress candidates on this unreliable idle_pct.
+_CUDAGRAPH_HIGH_IDLE_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 7, "External id": 200}},
+    # 128 graph replays: cudaGraphLaunch runtime calls carry only a correlation
+    # (no "External id"), so the reader currently discards them entirely.
+    *[
+        {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "args": {"correlation": 900 + i}}
+        for i in range(128)
+    ],
+    # Only the single captured graph's kernels are recorded (1/128 of real work),
+    # separated by a large gap so the naive idle formula reads ~99%.
+    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 1000, "dur": 100, "args": {"correlation": 5}},
+    {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 100000, "dur": 100, "args": {"correlation": 7}},
+]
+
 
 def _run(argv, capsys):
     rc = bta.main(argv)
@@ -186,6 +208,36 @@ def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert result["hot_kernels"], "gate must not fire below the configured threshold"
     assert "high_gpu_idle_pct" not in {w["code"] for w in result["trace_health_warnings"]}
+
+
+def test_cudagraph_replay_not_suppressed_by_idle_gate(tmp_path, capsys, monkeypatch):
+    # Under CUDA-graph replay the recorded device kernels are sparse, so idle_pct
+    # reads spuriously high. The bypass path must (A) count the graph replays, and
+    # (B) NOT suppress the candidate lists on this unreliable idle_pct — instead of
+    # emitting the misleading high_gpu_idle_pct "route to params" warning it emits
+    # an explicit unreliability warning and (C) a general cudagraph-replay signal.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "cudagraph.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _CUDAGRAPH_HIGH_IDLE_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["status"] == "ok"
+    # The naive idle formula still reports high idle on this trace ...
+    assert result["timeline"]["idle_pct"] > 80.0
+    # (A) the reader counted the 128 cudaGraphLaunch replays.
+    assert result["attribution"]["graph_launch_count"] == 128
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    # (B) candidates are retained (idle-gate suppression skipped) ...
+    assert result["hot_kernels"], "cudagraph idle_pct must not suppress candidates"
+    kc = json.loads(Path(result["artifact_paths"]["kernel_candidates"]).read_text())
+    assert kc["hot_kernels"], "kernel_candidates.json must not be suppressed under cudagraph"
+    # ... and the misleading route-to-params warning is replaced by an explicit
+    # unreliability warning.
+    assert "high_gpu_idle_pct" not in codes
+    assert "bypass_cudagraph_unreliable_idle" in codes
+    # (C) a general cudagraph-replay health signal is surfaced.
+    assert "bypass_cudagraph_replay" in codes
 
 
 # ── diffusion workload roofline ──────────────────────────────────────────────

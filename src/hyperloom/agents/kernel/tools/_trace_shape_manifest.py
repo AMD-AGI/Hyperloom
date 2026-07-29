@@ -43,6 +43,8 @@ import json
 import re
 from typing import Any
 
+import _bypass_trace_reader as _reader
+
 #: Manifest schema version. Bump on any breaking change to row/field semantics.
 SCHEMA_VERSION = 1
 
@@ -74,10 +76,6 @@ _TUNER_DTYPE_RE = re.compile(
     r"bf16|bfloat16|fp16|float16|half|fp8|float8|e4m3|e5m2|fp4|float4|f8|f4",
     re.IGNORECASE,
 )
-
-#: Graph-replay launch marker in the main (graph-on) trace.
-_GRAPH_LAUNCH_RE = re.compile(r"graphlaunch|graph_launch|hipgraphlaunch|cudagraphlaunch", re.IGNORECASE)
-
 
 def classify_op(name: str, op_name: str = "") -> str:
     """Return the coarse op category for a kernel/op name pair.
@@ -317,7 +315,7 @@ def count_graph_replays(main_analysis: dict[str, Any]) -> int:
     """
     total = 0
     for k in main_analysis.get("kernels") or []:
-        if _GRAPH_LAUNCH_RE.search(str(k.get("name", "") or "")):
+        if _reader._GRAPH_LAUNCH_RE.search(str(k.get("name", "") or "")):
             total += int(k.get("count", 0) or 0)
     return total
 
