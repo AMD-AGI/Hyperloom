@@ -658,12 +658,10 @@ PY
 
 # --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
 _forge_gemm_tune_candidates() {
-  # Explicit override first.
+  # Explicit gemm-tune override first.
   [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root aliases used by Hyperloom's forge backend.
+  # KernelForge root (single canonical var: FORGE_PATH).
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
 }
 
 _resolve_forge_gemm_tune_root() {
