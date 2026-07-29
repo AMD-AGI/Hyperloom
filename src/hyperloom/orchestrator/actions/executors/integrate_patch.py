@@ -2612,21 +2612,31 @@ class IntegratePatchExecutor:
             extra=extra,
         )
         # Commit the KEEP so a later REVERT checkout fallback can't wipe this
-        # win (best-effort, non-fatal).
-        try:
-            touched = _patch_touched_paths(framework_root, applied)
-            ok, note = _git_commit_kept(
-                framework_root,
-                f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                touched,
-            )
-            if not ok:
-                log.warning(
-                    "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
-                    note,
+        # win (best-effort, non-fatal). Non-git roots (e.g. a pip-installed
+        # framework in site-packages) have no checkout fallback to guard
+        # against and get their durability from snapshot_source_layer below,
+        # so skip the commit instead of failing it — matches framework_agent.
+        if framework_root is not None and _is_git_tree(framework_root):
+            try:
+                touched = _patch_touched_paths(framework_root, applied)
+                ok, note = _git_commit_kept(
+                    framework_root,
+                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                    touched,
                 )
-        except Exception:  # noqa: BLE001 — commit durability is best-effort
-            log.exception("integrate_patch: commit-on-KEEP raised")
+                if not ok:
+                    log.warning(
+                        "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
+                        note,
+                    )
+            except Exception:  # noqa: BLE001 — commit durability is best-effort
+                log.exception("integrate_patch: commit-on-KEEP raised")
+        else:
+            log.info(
+                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP "
+                "(backup-based revert + source snapshot provide durability)",
+                framework_root,
+            )
 
         source_snapshot_dir = ""
         source_base_sha = ""
