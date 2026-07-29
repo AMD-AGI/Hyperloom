@@ -81,6 +81,44 @@ def dense_model(tmp_path) -> str:
     )
 
 
+def _mx_fp4_spec(**overrides) -> dict:
+    """A Quark spec dict that satisfies sglang's ``_is_mx_fp4``."""
+    spec = {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+        "is_dynamic": False,
+    }
+    spec.update(overrides)
+    return spec
+
+
+def _mx_fp4_entry(**overrides) -> dict:
+    return {
+        "weight": _mx_fp4_spec(),
+        "input_tensors": _mx_fp4_spec(is_dynamic=True),
+        **overrides,
+    }
+
+
+@pytest.fixture
+def quark_mxfp4_moe_model(tmp_path) -> str:
+    """A Quark-PTQ MXFP4 (W4A4) MoE checkpoint dir."""
+    return _write_model_config(
+        tmp_path / "Qwen3.5-397B-A17B-MXFP4",
+        {
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "model_type": "qwen3_5_moe",
+            "num_experts": 128,
+            "quantization_config": {
+                "quant_method": "quark",
+                "global_quant_config": _mx_fp4_entry(),
+            },
+        },
+    )
+
+
 # _model_is_moe detection
 @pytest.mark.parametrize(
     "config",
@@ -115,6 +153,78 @@ def test_model_is_moe_false(tmp_path, config):
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
     assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
+
+
+# _model_moe_runner_requires_aiter detection
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"quant_method": "quark", "global_quant_config": _mx_fp4_entry()},
+        # The MoE layers alone carry MX-FP4; sglang resolves per-layer first.
+        {
+            "quant_method": "quark",
+            "global_quant_config": {"weight": {"dtype": "fp8_e4m3", "qscheme": "per_tensor"}},
+            "layer_quant_config": {"*mlp.experts*": _mx_fp4_entry()},
+        },
+        {"quant_method": "quark", "layer_type_quant_config": {"FusedMoE": _mx_fp4_entry()}},
+    ],
+)
+def test_moe_runner_requires_aiter_true(tmp_path, quant_config):
+    path = _write_model_config(
+        tmp_path / "m",
+        {"num_experts": 128, "quantization_config": quant_config},
+    )
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        None,  # unquantized MoE
+        {"quant_method": "fp8"},
+        # nvfp4 is fp4 too, but not per_group/e8m0 microscaling.
+        {
+            "quant_method": "quark",
+            "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(qscheme="per_tensor", scale_format="float32")),
+        },
+        # fp4 with a non-MX group size.
+        {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size=16))},
+        # Keep exact parity with sglang: its _is_mx_fp4 compares against integer
+        # 32, so a string value is not a valid MX-FP4 config either.
+        {"quant_method": "quark", "global_quant_config": _mx_fp4_entry(weight=_mx_fp4_spec(group_size="32"))},
+        # Statically quantized activations are not the W4A4 dynamic scheme.
+        {
+            "quant_method": "quark",
+            "global_quant_config": _mx_fp4_entry(input_tensors=_mx_fp4_spec(is_dynamic=False)),
+        },
+        # Same shape, but a quant method sglang routes elsewhere.
+        {"quant_method": "modelopt", "global_quant_config": _mx_fp4_entry()},
+        {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "fp8_e4m3"}}},
+    ],
+)
+def test_moe_runner_requires_aiter_false(tmp_path, quant_config):
+    config: dict = {"num_experts": 128}
+    if quant_config is not None:
+        config["quantization_config"] = quant_config
+    path = _write_model_config(tmp_path / "m", config)
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is False
+
+
+def test_moe_runner_requires_aiter_reads_nested_text_config(tmp_path):
+    path = _write_model_config(
+        tmp_path / "m",
+        {
+            "text_config": {
+                "num_experts": 128,
+                "quantization_config": {"quant_method": "quark", "global_quant_config": _mx_fp4_entry()},
+            }
+        },
+    )
+    assert cli_model_gate._model_moe_runner_requires_aiter(path) is True
+
+
+def test_moe_runner_requires_aiter_missing_config_is_false(tmp_path):
+    assert cli_model_gate._model_moe_runner_requires_aiter(str(tmp_path / "nope")) is False
 
 
 # inject_sglang_moe_runner_backend (pure helper)
@@ -159,6 +269,48 @@ def test_inject_noop_for_dense_model(dense_model):
     )
 
 
+def test_inject_noop_for_quark_mxfp4_moe(quark_mxfp4_moe_model):
+    # sglang's QuarkW4A4MXFp4MoE only initialises its runner on the aiter path;
+    # forcing triton crashes the server on the first forward pass.
+    assert inject_sglang_moe_runner_backend("--foo", "sglang", quark_mxfp4_moe_model, _AMD) == "--foo"
+    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
+
+
+def test_inject_env_override_does_not_resurrect_quark_injection(quark_mxfp4_moe_model, monkeypatch):
+    monkeypatch.setenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "triton")
+    assert inject_sglang_moe_runner_backend("", "sglang", quark_mxfp4_moe_model, _AMD) == ""
+
+
+# Online --quantization schemes that are equally aiter-only in sglang.
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--quantization quark_int4fp8_moe",
+        "--quantization=quark_int4fp8_moe",
+        "--foo 1 --quantization quark_int4fp8_moe --bar 2",
+    ],
+)
+def test_inject_noop_for_online_int4fp8_moe(moe_model, args):
+    assert inject_sglang_moe_runner_backend(args, "sglang", moe_model, _AMD) == args
+
+
+def test_inject_noop_for_online_mxfp4_dynamic_quant(moe_model):
+    # An unserialized checkpoint + --quantization mxfp4 routes to sglang's
+    # dynamic-quant MoE method, which only builds an aiter runner.
+    args = "--quantization mxfp4"
+    assert inject_sglang_moe_runner_backend(args, "sglang", moe_model, _AMD) == args
+
+
+def test_inject_still_applies_for_serialized_mxfp4_checkpoint(tmp_path):
+    # A serialized mxfp4 checkpoint uses the backend-flexible MoE method.
+    model = _write_model_config(
+        tmp_path / "gpt-oss-mxfp4",
+        {"num_experts": 128, "quantization_config": {"quant_method": "mxfp4"}},
+    )
+    out = inject_sglang_moe_runner_backend("--quantization mxfp4", "sglang", model, _AMD)
+    assert out == "--quantization mxfp4 --moe-runner-backend triton"
+
+
 def test_inject_noop_on_non_amd_gpu(moe_model):
     # Explicit non-AMD gpu + autodetect pinned off (fixture) -> no injection.
     assert inject_sglang_moe_runner_backend("--foo", "sglang", moe_model, "h100") == "--foo"
@@ -198,6 +350,7 @@ def _materialize_envs(
     model: str,
     framework: str = "sglang",
     extra_server_args: str = "",
+    drop_moe_runner_backend: bool = False,
 ) -> dict:
     base = tmp_path / "base.yaml"
     _write_yaml(base, model=model, framework=framework)
@@ -207,6 +360,7 @@ def _materialize_envs(
         base,
         out,
         extra_server_args=extra_server_args,
+        drop_moe_runner_backend=drop_moe_runner_backend,
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -221,6 +375,31 @@ def test_materialize_noop_for_dense_model_on_amd(tmp_path, dense_model, monkeypa
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(tmp_path, model=dense_model)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(tmp_path, model=quark_mxfp4_moe_model)
+    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_drop_skips_injection(tmp_path, moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(tmp_path, model=moe_model, drop_moe_runner_backend=True)
+    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+def test_materialize_drop_strips_inherited_backend(tmp_path, moe_model, monkeypatch):
+    monkeypatch.setenv("GPU_TYPE", _AMD)
+    envs = _materialize_envs(
+        tmp_path,
+        model=moe_model,
+        extra_server_args="--moe-runner-backend ck --foo 1",
+        drop_moe_runner_backend=True,
+    )
+    sglang_args = envs.get("EXTRA_SGLANG_ARGS", "")
+    assert "--moe-runner-backend" not in sglang_args
+    assert "--foo 1" in sglang_args
 
 
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):
@@ -242,6 +421,10 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
         ("--foo 1 --moe-runner-backend triton --bar 2", "--foo 1 --bar 2"),
         ("--foo 1 --moe-runner-backend=triton", "--foo 1"),
         ("--moe-runner-backend aiter", ""),
+        # Value-less flag: strip it rather than let it survive a retry.
+        ("--foo 1 --moe-runner-backend", "--foo 1"),
+        ("--moe-runner-backend", ""),
+        ("--moe-runner-backend --foo 1", "--foo 1"),
     ],
 )
 def test_remove_moe_runner_backend_arg(args, expected):

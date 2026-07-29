@@ -54,6 +54,7 @@ from ._subprocess_kill import (
 )
 from ._workload_envs import (
     _RUN_EVAL_FALSE_VALUES,
+    _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
@@ -78,7 +79,27 @@ _EVAL_FAILURE_MARKERS = (
     "Unknown parameter: --concurrent-requests",
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
-_EVAL_SCAN_MAX_BYTES = 262_144
+_LOG_SCAN_MAX_BYTES = 262_144
+
+# Markers identifying a MoE quant scheme with no implementation for the
+# ``--moe-runner-backend`` in use: ``create_moe_runner`` falls through without
+# building a runner and the first forward pass dies (e.g. Quark MXFP4 on
+# triton). Both a missing-runner marker AND a MoE-scheme marker must appear, so
+# an unrelated AttributeError mentioning some other ``runner`` attribute does
+# not burn a full benchmark retry. Deliberately not keyed on Quark: sglang has
+# other aiter-only MoE schemes (quark_int4fp8_moe, the mxfp4 dynamic-quant
+# method) that fail exactly the same way.
+_MOE_RUNNER_MISSING_MARKERS = (
+    "has no attribute 'runner'",
+    'has no attribute "runner"',
+)
+_MOE_SCHEME_CONTEXT_MARKERS = (
+    "create_moe_runner",
+    "moe_runner",
+    "_moe.py",
+    "fused_moe",
+    "/moe/",
+)
 
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
@@ -1151,24 +1172,34 @@ class BaselineExecutor:
         return None
 
     @staticmethod
-    def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
-        """Whether a failed baseline result was caused by the accuracy eval.
+    def _failure_carries_markers(
+        result: dict[str, Any],
+        markers: tuple[str, ...],
+        context_markers: tuple[str, ...] | None = None,
+    ) -> bool:
+        """Whether a failed result's error tail, warnings or logs hit a marker.
 
         Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
-        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
-        for ``run_eval``-failure markers. Recursive so the double-run path is
-        covered (the warmup round's logs carry the marker even when the measure
-        round failed for a downstream reason). Never raises.
+        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``.
+        Recursive so the double-run path is covered (the warmup round's logs
+        carry the marker even when the measure round failed for a downstream
+        reason). Never raises.
 
         Args:
             result: A ``status="failed"`` baseline result dict.
+            markers: Substrings identifying the root cause being probed.
+            context_markers: When set, one of these must appear in the SAME
+                blob as a ``markers`` hit, narrowing a generic signature to the
+                subsystem that owns it.
 
         Returns:
-            ``True`` when an eval-failure marker is found, else ``False``.
+            ``True`` when the marker (and its context) is found, else ``False``.
         """
 
         def _hit(text: str) -> bool:
-            return any(m in text for m in _EVAL_FAILURE_MARKERS)
+            if not any(m in text for m in markers):
+                return False
+            return not context_markers or any(m in text for m in context_markers)
 
         if _hit(str(result.get("error") or "")):
             return True
@@ -1179,8 +1210,8 @@ class BaselineExecutor:
         if not out_dir:
             return False
         root = Path(out_dir)
-        # Double-run: the eval failure markers may live in the sibling warmup
-        # round, so climb to the shared task root to scan both rounds.
+        # Double-run: the failure markers may live in the sibling warmup round,
+        # so climb to the shared task root to scan both rounds.
         if root.name in ("warmup_round", "measure_round"):
             root = root.parent
         if not root.exists():
@@ -1198,7 +1229,7 @@ class BaselineExecutor:
                     with path.open("rb") as f:
                         f.seek(0, 2)
                         size = f.tell()
-                        f.seek(max(0, size - _EVAL_SCAN_MAX_BYTES))
+                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
                         chunk = f.read().decode("utf-8", "replace")
                 except OSError:
                     continue
@@ -1207,6 +1238,38 @@ class BaselineExecutor:
         except OSError:
             return False
         return False
+
+    @staticmethod
+    def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
+        """Whether a failed baseline result was caused by the accuracy eval.
+
+        Args:
+            result: A ``status="failed"`` baseline result dict.
+
+        Returns:
+            ``True`` when an eval-failure marker is found, else ``False``.
+        """
+        return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
+
+    @staticmethod
+    def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
+        """Whether a failed baseline died on the MoE runner backend in use.
+
+        The quant scheme's ``runner`` is only built on the backends it actually
+        implements, so an unsupported ``--moe-runner-backend`` surfaces as a
+        missing-attribute crash on the first forward pass.
+
+        Args:
+            result: A ``status="failed"`` baseline result dict.
+
+        Returns:
+            ``True`` when a MoE-runner marker is found, else ``False``.
+        """
+        return BaselineExecutor._failure_carries_markers(
+            result,
+            _MOE_RUNNER_MISSING_MARKERS,
+            _MOE_SCHEME_CONTEXT_MARKERS,
+        )
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback.
@@ -1250,6 +1313,7 @@ class BaselineExecutor:
             "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
+        eval_disabled_by_fallback = False
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
             if _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
                 log.error(
@@ -1279,6 +1343,28 @@ class BaselineExecutor:
             retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
             if retry.get("status") == "succeeded":
                 retry["accuracy_source"] = "eval_unavailable"
+            eval_disabled_by_fallback = True
+            result = retry
+        if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
+            log.warning(
+                "baseline_executor: the server died on a MoE runner backend "
+                "that has no implementation for this checkpoint's quant "
+                "scheme; retrying once without --moe-runner-backend so the "
+                "framework picks the backend itself."
+            )
+            # Carry the eval fallback forward: the eval that broke above must
+            # stay off, and its bookkeeping must survive onto this result.
+            retry = await self._run_once(
+                ctx,
+                force_disable_eval=eval_disabled_by_fallback,
+                force_drop_moe_runner_backend=True,
+            )
+            retry.setdefault("nonfatal_warnings", [])
+            if eval_disabled_by_fallback:
+                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+                if retry.get("status") == "succeeded":
+                    retry["accuracy_source"] = "eval_unavailable"
+            retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
@@ -1483,6 +1569,7 @@ class BaselineExecutor:
         ctx: RunnerContext,
         *,
         force_disable_eval: bool = False,
+        force_drop_moe_runner_backend: bool = False,
     ) -> dict[str, Any]:
         """Run the Magpie baseline benchmark and parse its result.
 
@@ -1498,6 +1585,9 @@ class BaselineExecutor:
             force_disable_eval: When True, force ``RUN_EVAL=false`` into the
                 materialized config (the eval-failure fallback path); also set
                 by the ``disable_run_eval`` task param.
+            force_drop_moe_runner_backend: When True, strip any inherited
+                ``--moe-runner-backend`` and skip the AMD MoE injection (the
+                one-shot fallback after the backend killed the server).
 
         Returns:
             dict[str, Any]: On success, a ``status="succeeded"`` dict with
@@ -1544,6 +1634,8 @@ class BaselineExecutor:
                 cg_flag,
                 fw,
             )
+        if force_drop_moe_runner_backend:
+            effective_extra_server_args = _remove_moe_runner_backend_arg(effective_extra_server_args)
         if effective_extra_server_args or "extra_server_args" in params:
             # Keep the task envelope aligned with the materialized runtime so
             # Roofline fingerprints record one-shot eager fallback accurately.
@@ -1631,6 +1723,7 @@ class BaselineExecutor:
                 reference_server_args=ref_args,
                 reference_envs=ref_envs,
                 establish_quality_ref=is_genuine_baseline,
+                drop_moe_runner_backend=force_drop_moe_runner_backend,
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.

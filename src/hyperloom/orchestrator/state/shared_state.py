@@ -766,6 +766,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
+    # Consecutive KERNEL_AGENT ticks with no actionable work pending. Lets the
+    # phase machine wind down to SWEEP instead of spinning on hallucinated
+    # kernel-id requests / no-intent turns until the wall-clock cap. Reset to 0
+    # whenever kernel work is pending or the phase is not KERNEL_AGENT.
+    kernel_idle_ticks: int = 0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
