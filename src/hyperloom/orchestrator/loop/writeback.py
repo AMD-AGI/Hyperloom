@@ -49,6 +49,7 @@ from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_FAILED_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+    EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
 )
 
@@ -441,9 +442,29 @@ class WritebackCollaborator:
         Records origin, floor, probe config, contract fingerprint, evidence,
         kind and observed accuracy, and seeds ``enablement_launch_log`` so the
         FRAMEWORK pump dispatches even when the failure carries no boot log.
+
+        A run that never executed the eval characterizes nothing: it reports
+        ``accuracy_unavailable`` with no task/metric/source. Such a run must
+        still register as a failed round (origin / pending / stall accounting
+        below), but it must NOT overwrite a stored trigger that actually
+        measured an accuracy -- otherwise an eval-less re-baseline downgrades
+        real ``accuracy_below_floor`` evidence to an empty
+        ``accuracy_unavailable`` and the next enablement attempt loses the
+        measurement it is supposed to reproduce. Contract fingerprints cannot
+        gate this: ``RUN_EVAL`` is itself a contract field, so the eval-less
+        run's fingerprint never matches the measured one.
         """
         state = self.shared_state
         was_validation_pending = bool(getattr(state, "enablement_validation_pending", False))
+        incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
+        measured_incoming = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None
+        stored_kind = str(getattr(state, "enablement_baseline_eval_kind", "") or "")
+        preserve_measured_trigger = (
+            incoming_kind == EVAL_KIND_ACCURACY_UNAVAILABLE
+            and not measured_incoming
+            and bool(stored_kind)
+            and stored_kind != EVAL_KIND_ACCURACY_UNAVAILABLE
+        )
         state.enablement_origin = "eval"
         state.enablement_pending = True
         # A failed revalidation reopens the authoring loop and counts as a
@@ -456,15 +477,24 @@ class WritebackCollaborator:
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
             state.enablement_accuracy_floor = float(floor)
+        if preserve_measured_trigger:
+            log.info(
+                "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
+                "an eval-less baseline reported accuracy_unavailable and must not "
+                "overwrite it",
+                stored_kind,
+                getattr(state, "enablement_observed_accuracy", None),
+                getattr(state, "enablement_observed_task", ""),
+            )
+            return
         cfg = result_payload.get("materialized_config")
         if isinstance(cfg, str) and cfg:
             state.enablement_probe_config_path = cfg
         fp = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
         if isinstance(fp, str) and fp:
             state.enablement_eval_contract_fingerprint = fp
-        kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
-        if isinstance(kind, str) and kind:
-            state.enablement_baseline_eval_kind = kind
+        if isinstance(incoming_kind, str) and incoming_kind:
+            state.enablement_baseline_eval_kind = incoming_kind
         observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
         if observed is not None:
             state.enablement_observed_accuracy = float(observed)
