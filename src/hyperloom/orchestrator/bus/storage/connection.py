@@ -15,7 +15,7 @@ import contextlib
 import os
 import sqlite3
 import threading
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -112,19 +112,6 @@ class SqliteConnection:
         """
         return self._conn
 
-    def execute_sync(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
-        """Execute a statement synchronously under the sync lock.
-
-        Args:
-            sql (str): SQL statement to execute.
-            params (Sequence[Any]): Bound parameters.
-
-        Returns:
-            sqlite3.Cursor: The cursor produced by ``execute``.
-        """
-        with self._sync_lock:
-            return self._conn.execute(sql, params)
-
     def fetchall_sync(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run a query synchronously and return all rows.
 
@@ -156,26 +143,6 @@ class SqliteConnection:
             cur = self._conn.execute(sql, params)
             try:
                 return cur.fetchone()
-            finally:
-                cur.close()
-
-    @contextlib.contextmanager
-    def transaction_sync(self) -> Iterator[sqlite3.Cursor]:
-        """Synchronous BEGIN IMMEDIATE -> COMMIT/ROLLBACK.
-
-        Yields:
-            An open cursor inside the immediate write transaction; the
-            transaction commits on clean exit and rolls back on exception.
-        """
-        with self._sync_lock:
-            cur = self._conn.cursor()
-            try:
-                cur.execute("BEGIN IMMEDIATE")
-                yield cur
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
             finally:
                 cur.close()
 

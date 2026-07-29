@@ -129,7 +129,4 @@ def verify_xdit_profiler_baked() -> bool:
     return False
 
 
-# Backward-compatible alias for callers importing ``ensure_xdit_profiler_patched``.
-ensure_xdit_profiler_patched = verify_xdit_profiler_baked
-
-__all__ = ["ensure_xdit_profiler_patched", "verify_xdit_profiler_baked"]
+__all__ = ["verify_xdit_profiler_baked"]

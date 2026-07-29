@@ -23,7 +23,6 @@ from hyperloom.orchestrator.actions.executors import _xdit_patcher
 from hyperloom.orchestrator.actions.executors._xdit_patcher import (
     _discover_xfuser_base_models,
     _is_baked,
-    ensure_xdit_profiler_patched,
     verify_xdit_profiler_baked,
 )
 
@@ -137,11 +136,6 @@ def test_verify_scans_all_discovered_and_accepts_any_baked(tmp_path: Path, monke
     baked.write_text(_BAKED_FIXTURE, encoding="utf-8")
     monkeypatch.setattr(_xdit_patcher, "_discover_xfuser_base_models", lambda: [pristine, baked])
     assert verify_xdit_profiler_baked() is True
-
-
-def test_ensure_alias_is_verify() -> None:
-    """The backward-compatible name maps to the verifier (callers unchanged)."""
-    assert ensure_xdit_profiler_patched is verify_xdit_profiler_baked
 
 
 # ---------------------------------------------------------------------------

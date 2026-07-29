@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.credentials import _resolve_robustness_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
@@ -35,7 +35,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 @pytest.fixture
 def robustness_agent_root() -> Path:
     """Locate the real robustness-agent package. Skip gracefully if absent."""
-    root = _resolve_robustness_agent_root()
+    root = _resolve_agent_root("robustness")
     if root is None:
         pytest.skip(
             "robustness-agent runtime not found — set ROBUSTNESS_AGENT_ROOT or "

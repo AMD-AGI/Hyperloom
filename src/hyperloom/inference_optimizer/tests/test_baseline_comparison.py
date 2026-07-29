@@ -166,7 +166,7 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
 
 def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
     """A disaggregated / multinode row with inflated per-GPU throughput must not
-    be promoted to ``best`` — only single-node colocated rows are comparable."""
+    be promoted to ``best`` — only single-node aggregated rows are comparable."""
     rows = _make_rows()
     disagg = json.loads(json.dumps(_SAMPLE_ROW))
     disagg["disagg"] = True

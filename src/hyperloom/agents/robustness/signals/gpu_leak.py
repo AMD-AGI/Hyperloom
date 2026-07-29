@@ -83,17 +83,6 @@ class GpuLeakDetector:
         except (TypeError, ValueError):
             self._consecutive_hits = 0
 
-    @property
-    def consecutive_hits(self) -> int:
-        """Number of consecutive ticks the leak condition has held.
-
-        Visible for tests; production code should not rely on this.
-
-        Returns:
-            int: The current consecutive-hit counter.
-        """
-        return self._consecutive_hits
-
     def _persist(self) -> None:
         """Write the current consecutive-hit counter to the state view, if any."""
         if self._state_view is None:

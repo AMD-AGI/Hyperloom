@@ -75,8 +75,6 @@ def _mock_state(
         stop_reason="report_emitted",
         baseline_tput=4309.2,
         baseline_accuracy=0.0,
-        last_remaining_gaps_assessment={},
-        remaining_gaps_assessments=[],
         current_best={"action": "params", "tput": 4357.27},
         cumulative_gain=1.12,
         cumulative_gain_validated=0.33,

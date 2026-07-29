@@ -32,24 +32,15 @@ class PRMonitorClient:
     enabled: bool = True
 
     @classmethod
-    def from_args(
-        cls,
-        *,
-        url: str | None = None,
-        enabled: bool = True,
-        timeout_sec: float | None = None,
-    ) -> "PRMonitorClient":
-        """Build a client, resolving config from args then env vars.
+    def from_args(cls, *, enabled: bool = True) -> "PRMonitorClient":
+        """Build a client from the enablement flag.
 
         Args:
-            url (str | None): Accepted for CLI compatibility; REST access was removed.
             enabled (bool): Whether the MCP tool group is enabled.
-            timeout_sec (float | None): Ignored (kept for call-site compat).
 
         Returns:
             PRMonitorClient: The configured client instance.
         """
-        del url, timeout_sec
         return cls(enabled=bool(enabled))
 
 

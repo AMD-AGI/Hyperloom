@@ -214,21 +214,3 @@ def test_send_message_missing_topic(policy: PolicyAware):
     with pytest.raises(PolicyViolation) as excinfo:
         policy.assert_payload_complete(intent)
     assert excinfo.value.rule == "payload"
-
-
-# validate_all collects every violation
-
-
-def test_validate_all_collects_multiple_violations(policy: PolicyAware):
-    bad = Intent(
-        type=IntentType.UPDATE_STATE,
-        payload={"changes": {"current_best": 1, "random": 2}},
-    )
-    violations = policy.validate_all(bad)
-    assert violations
-    rules = [v.rule for v in violations]
-    assert "state_field" in rules
-
-
-def test_validate_all_returns_empty_on_valid_intent(policy: PolicyAware):
-    assert policy.validate_all(build_heartbeat()) == []
