@@ -827,16 +827,19 @@ def render_analysis_md(
         "exposed_memcpy_pct": memcpy_pct,
     }
 
-    # Honest degradation (no reconstruction): when the upstream trace is an
-    # incomplete CUDA-graph capture, the affected metrics are not real data, so
-    # null them (rendered as "-") rather than emit an untrustworthy number. This
-    # also stops the downstream parser from reading a spurious idle_pct.
+    # Honest degradation (no reconstruction): under an incomplete CUDA-graph
+    # capture the idle/busy numbers are wrong (recorded busy is a fraction of the
+    # real busy), so null them (rendered as "-") rather than emit an untrustworthy
+    # value. This also stops the downstream parser from reading a spurious idle_pct.
+    # Op-attribution coverage is NOT nulled: the low percentage is accurate and is
+    # itself the evidence that coverage is poor; the attribution_reliable flag and
+    # the bypass_low_op_correlation warning carry the "op names/shapes unresolved"
+    # signal, and nulling it would only hide the real coverage (and contradict the
+    # appendix which reports the same figure).
     if not idle_reliable:
         exec_summary["gpu_idle_pct"] = None
         exec_summary["gpu_busy_pct"] = None
         system_signals["idle_pct"] = None
-    if not attribution_reliable:
-        exec_summary["attribution_pct"] = None
 
     # Top Hot Kernels rows. Displayed Eff% is the binding-side roofline
     # attainment.
@@ -891,15 +894,18 @@ def render_analysis_md(
         f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
     if data_reliability_reason:
-        _unreliable = [
-            name
-            for name, ok in (("idle", idle_reliable), ("op-attribution", attribution_reliable))
-            if not ok
-        ]
+        _notes = []
+        if not idle_reliable:
+            _notes.append("idle/busy shown as '-' (spurious under-recording artifact)")
+        if not attribution_reliable:
+            _notes.append(
+                "op-attribution coverage is low and op names/shapes for graph-replayed kernels "
+                "are largely unresolved"
+            )
         provenance += (
-            f" DATA RELIABILITY: {', '.join(_unreliable)} unreliable "
-            f"(reason={data_reliability_reason}); affected metrics shown as '-' and must not be "
-            "treated as authoritative — the upstream trace lacks the required data (not reconstructed)."
+            f" DATA RELIABILITY (reason={data_reliability_reason}): "
+            + "; ".join(_notes)
+            + ". These reflect missing upstream data and are not reconstructed."
         )
 
     extra = _render_bypass_extra_sections(

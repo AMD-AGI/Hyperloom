@@ -844,9 +844,17 @@ def main(argv: list[str] | None = None) -> int:
             # Workload totals cover all analyzed device kernels (not just top-k).
             _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
             _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
+            # Honest degradation: when idle is unreliable (incomplete CUDA-graph
+            # capture) the diffusion report must not derive gpu_busy_ratio from the
+            # spurious busy/idle, so null them here too (diffusion_roofline treats
+            # a missing busy_pct as gpu_busy_ratio=None, not a fabricated value).
+            _diff_timeline = dict(analyze.get("timeline") or {})
+            if not idle_reliable:
+                _diff_timeline["idle_pct"] = None
+                _diff_timeline["busy_pct"] = None
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),
-                analyze.get("timeline") or {},
+                _diff_timeline,
                 _diff_steps,
                 top_k,
                 totals=_workload_totals,
@@ -912,10 +920,13 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
-    # Mirror the idle-reliability flag inside the timeline block so consumers
-    # reading result["timeline"] directly also see that idle_pct is untrusted.
+    # Mirror the reliability flags inside their sub-blocks so consumers reading
+    # result["timeline"] / result["attribution"] directly also see the untrusted
+    # marker (not only the top-level flags).
     if isinstance(result.get("timeline"), dict):
         result["timeline"]["idle_reliable"] = idle_reliable
+    if isinstance(result.get("attribution"), dict):
+        result["attribution"]["attribution_reliable"] = attribution_reliable
 
     # Surfaced only when the opt-in manifest was produced (P0-A / WP-1).
     result["trace_shape_manifest"] = shape_manifest

@@ -76,6 +76,40 @@ _CUDAGRAPH_NO_KERNEL_TRACE_EVENTS = [
     ],
 ]
 
+# CUDA-graph trace with LOW idle (kernels packed contiguously) but LOW attribution
+# (mostly unlinked replay kernels). Isolates attribution degradation from idle:
+# idle stays reliable (sub-threshold), attribution is flagged unreliable.
+_CUDAGRAPH_LOW_ATTRIB_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 100}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 0, "External id": 100}},
+    {"cat": "kernel", "ph": "X", "name": "Cijk_gemm_HHS", "ts": 0, "dur": 5, "args": {"correlation": 0}},
+    *[
+        {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "args": {"correlation": 900 + k}}
+        for k in range(8)
+    ],
+    *[
+        {"cat": "kernel", "ph": "X", "name": "paged_attention_replay", "ts": 5 + j * 20, "dur": 20,
+         "args": {"correlation": 5000 + j}}
+        for j in range(20)
+    ],
+]
+
+# Healthy CUDA-graph trace: replays present but kernels are fully recorded
+# (contiguous, low idle) and fully attributed. Locks the chosen threshold
+# semantics — CUDA graph alone does NOT mark idle unreliable; only high idle does.
+_CUDAGRAPH_HEALTHY_TRACE_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 100}},
+    {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 200}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 0, "External id": 100}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 1, "External id": 200}},
+    *[
+        {"cat": "cuda_runtime", "name": "cudaGraphLaunch", "args": {"correlation": 900 + k}}
+        for k in range(4)
+    ],
+    {"cat": "kernel", "ph": "X", "name": "Cijk_gemm_HHS", "ts": 0, "dur": 100, "args": {"correlation": 0}},
+    {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 100, "dur": 100, "args": {"correlation": 1}},
+]
+
 
 def _run(argv, capsys):
     rc = bta.main(argv)
@@ -311,6 +345,56 @@ def test_normal_trace_stays_reliable(tmp_path, capsys, monkeypatch):
     assert "DATA RELIABILITY" not in md
     idle_row = next(ln for ln in md.splitlines() if ln.startswith("| GPU Idle %"))
     assert "%" in idle_row  # numeric percentage rendered, not the em-dash placeholder
+
+
+def test_cudagraph_attribution_degraded_but_idle_kept(tmp_path, capsys, monkeypatch):
+    # Attribution-only degradation: a cudagraph trace with low idle (kept reliable)
+    # but low attribution. The op-attribution coverage cell is NOT nulled (the low
+    # number is accurate evidence and must match the appendix); the flag + note
+    # convey unreliability, and idle stays numeric because idle is reliable.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "cg_lowattrib.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _CUDAGRAPH_LOW_ATTRIB_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["idle_reliable"] is True
+    assert result["attribution_reliable"] is False
+    assert result["data_reliability_reason"] == "cudagraph_incomplete_trace"
+    # flag mirrored into the attribution sub-block (not only top-level)
+    assert result["attribution"]["attribution_reliable"] is False
+    md = Path(result["artifact_paths"]["trace_report_path"]).read_text(encoding="utf-8")
+    assert "DATA RELIABILITY" in md and "op-attribution" in md
+    # idle kept numeric (reliable); attribution coverage kept numeric (accurate),
+    # and must not contradict the appendix by showing an em-dash.
+    idle_row = next(ln for ln in md.splitlines() if ln.startswith("| GPU Idle %"))
+    assert "%" in idle_row
+    cov_row = next(ln for ln in md.splitlines() if ln.startswith("| Op-attribution Coverage"))
+    assert "%" in cov_row and "—" not in cov_row
+
+
+def test_cudagraph_healthy_low_idle_stays_reliable(tmp_path, capsys, monkeypatch):
+    # Locks the chosen threshold semantics: CUDA-graph replays are detected, but a
+    # fully-recorded low-idle trace stays fully reliable — cudagraph alone does not
+    # mark idle unreliable; only a high (>threshold) idle does.
+    monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
+    trace = tmp_path / "cg_healthy.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _CUDAGRAPH_HEALTHY_TRACE_EVENTS}).encode("utf-8"))
+    rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert rc == 0
+    assert result["attribution"]["graph_launch_count"] == 4  # replays detected
+    assert result["idle_reliable"] is True
+    assert result["attribution_reliable"] is True
+    assert result["data_reliability_reason"] == ""
+    codes = {w["code"] for w in result["trace_health_warnings"]}
+    assert "bypass_cudagraph_replay" in codes  # detection still surfaced
+    assert "high_gpu_idle_pct" not in codes
+    assert result["hot_kernels"], "healthy cudagraph trace keeps candidates"
+    md = Path(result["artifact_paths"]["trace_report_path"]).read_text(encoding="utf-8")
+    assert "DATA RELIABILITY" not in md
+    idle_row = next(ln for ln in md.splitlines() if ln.startswith("| GPU Idle %"))
+    assert "%" in idle_row
 
 
 # ── diffusion workload roofline ──────────────────────────────────────────────
