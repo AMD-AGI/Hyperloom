@@ -10,10 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.jsonio import iter_sse_objects
+
 from hyperloom.agents.framework import pr_kb, pr_kb_slug
 from hyperloom.agents.framework.gbrain_page_client import (
     GbrainPageClient,
-    _iter_sse_objects,
     _select_mcp_response,
     build_gbrain_page_client_from_env,
 )
@@ -63,7 +64,7 @@ def test_repo_slug_parity_with_worker():
 
 
 def test_iter_sse_plain_json():
-    assert list(_iter_sse_objects('{"a": 1}')) == [{"a": 1}]
+    assert list(iter_sse_objects('{"a": 1}')) == [{"a": 1}]
 
 
 def test_iter_sse_multi_event_join():

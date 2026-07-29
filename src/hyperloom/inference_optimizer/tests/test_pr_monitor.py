@@ -29,12 +29,6 @@ def test_pr_monitor_client_from_args_disabled():
     assert c.enabled is False
 
 
-def test_pr_monitor_client_timeout_sec_ignored():
-    # timeout_sec is accepted for call-site compat but ignored.
-    c = PRMonitorClient.from_args(url="http://x/v1", timeout_sec=2.5)
-    assert c.enabled is True
-
-
 @pytest.fixture
 def plane_with_disabled_pr() -> KnowledgePlane:
     return KnowledgePlane.from_clients(

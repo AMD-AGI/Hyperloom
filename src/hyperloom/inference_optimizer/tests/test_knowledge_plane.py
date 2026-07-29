@@ -135,14 +135,13 @@ def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     class _Stub:
-        def __init__(self, url, enabled):
-            self.base_url = url or "https://example.test"
+        def __init__(self, enabled):
             self.enabled = enabled
 
     monkeypatch.setattr(
         pr_mod.PRMonitorClient,
         "from_args",
-        classmethod(lambda cls, **kw: _Stub(url=kw.get("url") or "", enabled=kw.get("enabled", True))),
+        classmethod(lambda cls, **kw: _Stub(enabled=kw.get("enabled", True))),
     )
     args = _build_args(pr_monitor_enabled=False, pr_degraded_reason="ir3_auto")
     _bootstrap_knowledge_plane(args, cortex_client=None, session_dir=tmp_path)
@@ -317,13 +316,12 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
-    constructed_urls: list[str] = []
+    constructed_enabled: list[bool] = []
 
     class _Stub:
-        def __init__(self, url: str, enabled: bool):
-            self.base_url = url or "https://default.test"
+        def __init__(self, enabled: bool):
             self.enabled = enabled
-            constructed_urls.append(self.base_url)
+            constructed_enabled.append(enabled)
 
         def healthz(self) -> bool:
             return True
@@ -334,12 +332,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     monkeypatch.setattr(
         pr_mod.PRMonitorClient,
         "from_args",
-        classmethod(
-            lambda cls, **kw: _Stub(
-                url=kw.get("url") or "",
-                enabled=kw.get("enabled", True),
-            ),
-        ),
+        classmethod(lambda cls, **kw: _Stub(enabled=kw.get("enabled", True))),
     )
 
     args = _parse_optimize_args(
@@ -357,6 +350,6 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
         cortex_client=None,
         session_dir=tmp_path,
     )
-    assert "my-pr-monitor.example" in constructed_urls[-1]
+    assert constructed_enabled[-1] is True
     # The plane does not store pr_feed_window_days; only the MCP URL round-trips.
     assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"

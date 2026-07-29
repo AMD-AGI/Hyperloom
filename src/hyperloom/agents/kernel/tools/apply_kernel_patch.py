@@ -117,10 +117,6 @@ def known_target_roots() -> tuple[str, ...]:
     return _CACHED_KNOWN_TARGET_ROOTS
 
 
-# Alias for tests / external imports.
-KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
-
-
 # Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
@@ -131,7 +127,7 @@ def _is_multi_node() -> bool:
     Relies solely on the trusted in-process ``$INFERENCE_OPTIMIZER_NODES``
     signal that the optimizer CLI exports at launch (inherited by this
     process). No state file is read, so a co-tenant cannot force multi-node
-    fan-out by planting a world-writable ``/tmp/multi_node_state.json``.
+    fan-out by planting a world-writable ``multi_node_state.json``.
 
     Returns:
         ``True`` when ``$INFERENCE_OPTIMIZER_NODES`` is ``>= 2``; ``False``

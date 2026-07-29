@@ -9,9 +9,9 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
 idempotent), ``kill-inference``, ``stop-multi-job``.
 
-State lives in ``$MULTI_NODE_STATE_FILE`` (default:
+State lives in ``$MULTI_NODE_STATE_FILE``, or
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
-when the session is pinned, else ``/tmp/multi_node_state.json``).
+when the session is pinned. There is no default; one of the two must be set.
 Credentials must already be in sandbox env; this module never invents
 URLs or keys.
 """
@@ -56,14 +56,13 @@ def _prior_rayjob_ids_from_state_files() -> list[str]:
 
     The idempotency guard must survive state-file path divergence. ``optimize``
     self-provisions using :func:`resolve_state_file` (session-dir), while a
-    separately-launched ``create-rayjob`` may pin
-    ``MULTI_NODE_STATE_FILE=/tmp/multi_node_state.json``; each writes its own
-    file, so a guard that reads only the current process's resolved path misses
-    the other invocation's ``rayjob_id`` and leaks a duplicate workload. Read
-    ``rayjob_id`` from all known locations (the resolved path, the session-dir
-    path, and the legacy ``/tmp`` file), de-duplicated and ordered
-    most-specific-first. Best-effort: missing / unreadable files are skipped and
-    never raise.
+    separately-launched ``create-rayjob`` may pin a different
+    ``$MULTI_NODE_STATE_FILE``; each writes its own file, so a guard that reads
+    only the current process's resolved path misses the other invocation's
+    ``rayjob_id`` and leaks a duplicate workload. Read ``rayjob_id`` from all
+    known locations (the resolved path and the session-dir path),
+    de-duplicated and ordered most-specific-first. Best-effort: missing /
+    unreadable files are skipped and never raise.
 
     Returns:
         list[str]: Distinct non-empty ``rayjob_id`` values, resolved-path first.
@@ -80,16 +79,13 @@ def _prior_rayjob_ids_from_state_files() -> list[str]:
     if primary:
         ids.append(primary)
 
-    # Additional canonical locations a *differently-configured* invocation may
-    # have written (state-path divergence): the session-dir file and the legacy
-    # /tmp file. De-dup by rayjob_id, so overlap with the primary path is fine.
-    from ..state_paths import legacy_state_file
-
+    # Additional canonical location a *differently-configured* invocation may
+    # have written (state-path divergence): the session-dir file. De-dup by
+    # rayjob_id, so overlap with the primary path is fine.
     extra_paths: list[Path] = []
     sess = os.environ.get(ENV_CURRENT_SESSION_DIR, "").strip()
     if sess:
         extra_paths.append(Path(sess) / "runtime" / "multi_node_state.json")
-    extra_paths.append(legacy_state_file())
     for p in extra_paths:
         try:
             if not p.is_file():
@@ -372,8 +368,8 @@ def cmd_create_rayjob(args: argparse.Namespace) -> int:
         # Idempotency guard: reuse any state ``rayjob_id`` that's still
         # non-terminal in SaFE (--recreate forces a fresh workload). Scan ALL
         # canonical state-file locations, not just this process's resolved path:
-        # a separately-launched create-rayjob (e.g. one that pinned
-        # MULTI_NODE_STATE_FILE=/tmp) and optimize's in-process provisioning
+        # a separately-launched create-rayjob (e.g. one that pinned its own
+        # MULTI_NODE_STATE_FILE) and optimize's in-process provisioning
         # (session-dir path) otherwise miss each other's rayjob_id and leak a
         # duplicate workload.
         wid: str | None = None

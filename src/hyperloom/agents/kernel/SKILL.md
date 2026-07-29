@@ -521,7 +521,7 @@ falls back to `NEEDS_REVIEW` with the missing fields listed in `reasons`.
 ## Multi-node mode
 
 When the workload runs with `--nodes >= 2`
-(`/tmp/multi_node_state.json` has `nodes >= 2`), the sandbox is
+(`$INFERENCE_OPTIMIZER_NODES >= 2`), the sandbox is
 CPU-only and the inference server lives only on RayJob pods. The
 kernel-agent flow adapts transparently:
 
