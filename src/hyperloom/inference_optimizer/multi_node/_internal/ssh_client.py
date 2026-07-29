@@ -24,12 +24,9 @@ Keys are session-scoped and ephemeral:
 from __future__ import annotations
 
 import base64
-import contextlib
-import os
 import shlex
 import subprocess
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 
 from .env_safety import assert_env_key_shapes, assert_forward_env_keys
@@ -75,33 +72,32 @@ def _ssh_common_opts(known_hosts: Path) -> list[str]:
     ]
 
 
-@contextlib.contextmanager
-def _ssh_identity_fd(key_path: Path | str) -> Iterator[tuple[str, int]]:
-    """Feed the private key to ssh via an inherited pipe fd, not an on-disk path.
+def _ssh_identity(key_path: Path | str) -> str:
+    """Return the identity path to hand to ``ssh -i``.
 
-    Reads the key into process memory and exposes it as ``/dev/fd/N`` (an
-    anonymous pipe) so the identity handed to ``ssh -i`` is a transient fd and
-    never a discoverable filesystem path on argv/env. The key is small (ed25519
-    /RSA < pipe buffer) so the single ``os.write`` never blocks; the write end
-    is closed immediately (buffered bytes remain readable until EOF).
+    This used to pipe the key through an inherited fd and pass ``/dev/fd/N`` as
+    the identity, so the key was never a discoverable path on argv. That cannot
+    work: ssh closes every inherited fd above stderr before it opens the
+    identity file, so the identity is always reported as
+
+        Warning: Identity file /dev/fd/N not accessible: No such file or directory.
+
+    and authentication falls through to ``Permission denied (publickey)``.
+    Verified against OpenSSH_8.9p1 with a regular-file fd, a pipe fd, and both
+    the ``/dev/fd/N`` and ``/proc/self/fd/N`` spellings -- all fail identically,
+    while the plain path succeeds (see tests/test_ssh_client.py).
+
+    Nothing is lost by using the path: the key is already a 0600 file on disk in
+    both modes -- ``generate_session_keypair`` writes it, and in external mode
+    the platform hands it over as a file (``HYPERLOOM_MN_EXT_SSH_KEY``).
 
     Args:
-        key_path: Path to the private SSH key to read into memory.
+        key_path: Path to the private SSH key.
 
-    Yields:
-        A ``(identity_path, pass_fd)`` pair: ``identity_path`` for ``ssh -i``
-        and ``pass_fd`` to hand to ``subprocess`` via ``pass_fds``.
+    Returns:
+        The identity path for ``ssh -i``.
     """
-    key_bytes = Path(key_path).read_bytes()
-    r, w = os.pipe()
-    try:
-        os.write(w, key_bytes)
-    finally:
-        os.close(w)
-    try:
-        yield f"/dev/fd/{r}", r
-    finally:
-        os.close(r)
+    return str(key_path)
 
 
 def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
@@ -188,28 +184,26 @@ def ssh_run(
     Returns:
         The completed SSH subprocess (not raised on non-zero exit).
     """
-    with _ssh_identity_fd(key_path) as (identity, pass_fd):
-        argv = [
-            "ssh",
-            *_ssh_common_opts(known_hosts),
-            "-o",
-            "IdentitiesOnly=yes",
-            "-i",
-            identity,
-            "-p",
-            str(port),
-            f"{user}@{host}",
-            "bash",
-            "-lc",
-            shlex.quote(command),
-        ]
-        return subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            pass_fds=(pass_fd,),
-        )
+    argv = [
+        "ssh",
+        *_ssh_common_opts(known_hosts),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        _ssh_identity(key_path),
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        "bash",
+        "-lc",
+        shlex.quote(command),
+    ]
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
 
 
 def ssh_run_script(
@@ -305,28 +299,26 @@ def ssh_run_bash_with_env(
         assert_env_key_shapes(env)
     prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
     full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
-    with _ssh_identity_fd(key_path) as (identity, pass_fd):
-        argv = [
-            "ssh",
-            *_ssh_common_opts(known_hosts),
-            "-o",
-            "IdentitiesOnly=yes",
-            "-i",
-            identity,
-            "-p",
-            str(port),
-            f"{user}@{host}",
-            "bash",
-            "-s",
-        ]
-        return subprocess.run(
-            argv,
-            input=full,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            pass_fds=(pass_fd,),
-        )
+    argv = [
+        "ssh",
+        *_ssh_common_opts(known_hosts),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-i",
+        _ssh_identity(key_path),
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        "bash",
+        "-s",
+    ]
+    return subprocess.run(
+        argv,
+        input=full,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
 
 
 def probe_ssh(

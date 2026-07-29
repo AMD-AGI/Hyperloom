@@ -37,36 +37,40 @@ def known_hosts(tmp_path):
 
 @pytest.fixture
 def key_file(tmp_path):
-    # ssh key bytes are read into memory and fed via /dev/fd, so the path must
-    # point at a real (dummy) key file.
     k = tmp_path / "mn_id_ed25519"
     k.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nDUMMY\n")
     return k
 
 
-def test_ssh_identity_fd_delivers_key_bytes_then_closes(key_file):
-    """_ssh_identity_fd exposes the key via /dev/fd and closes the fd on exit.
+def test_ssh_identity_is_the_on_disk_path(key_file):
+    """The identity handed to ``ssh -i`` must be the key's own path.
 
-    Guards the in-memory (anonymous-pipe) key transport: the identity path is a
-    /dev/fd/N pointing at the passed fd, reading it yields the exact key bytes,
-    and the fd is released after the context so nothing leaks.
+    Regression guard. This used to be a ``/dev/fd/N`` anonymous pipe so the key
+    was never a discoverable path on argv, but ssh closes every inherited fd
+    above stderr before opening the identity file, so it always reported
+
+        Warning: Identity file /dev/fd/N not accessible: No such file or directory
+
+    and fell through to ``Permission denied (publickey)`` -- which broke every
+    Infera restart-server SSH fan-out. Reproduced against OpenSSH_8.9p1 with a
+    regular-file fd, a pipe fd, and both the /dev/fd and /proc/self/fd
+    spellings: all fail identically, only the plain path authenticates.
     """
-    key_bytes = key_file.read_bytes()
-    with ssh_client._ssh_identity_fd(key_file) as (identity, pass_fd):
-        assert identity == f"/dev/fd/{pass_fd}"
-        # Re-opening the /dev/fd path reads the buffered key bytes back verbatim.
-        with open(identity, "rb") as fh:
-            assert fh.read() == key_bytes
-    # Context exit must close the fd handed to the subprocess (no descriptor leak).
-    with pytest.raises(OSError):
-        os.fstat(pass_fd)
+    assert ssh_client._ssh_identity(key_file) == str(key_file)
+    assert not ssh_client._ssh_identity(key_file).startswith("/dev/fd/")
 
 
-def test_ssh_identity_fd_missing_key_raises(tmp_path):
-    """A missing key path fails loudly (read into memory) instead of silently."""
-    with pytest.raises(OSError):
-        with ssh_client._ssh_identity_fd(tmp_path / "nope"):
-            pass
+def test_ssh_identity_does_not_pipe_fds_to_subprocess(monkeypatch, known_hosts, key_file):
+    """No ``pass_fds`` may be handed to ssh: it cannot use an inherited fd."""
+    captured = {}
+
+    def _run(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeCompleted(0, "out", "")
+
+    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
+    ssh_client.ssh_run("10.0.0.1", "echo hi", key_path=key_file, known_hosts=known_hosts)
+    assert "pass_fds" not in captured["kwargs"]
 
 
 def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts, key_file):
@@ -89,10 +93,8 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts, key_file):
     assert cp.returncode == 0
     argv = captured["argv"]
     assert argv[0] == "ssh"
-    # Identity is fed via an anonymous pipe fd, never the on-disk key path.
-    identity = argv[argv.index("-i") + 1]
-    assert identity.startswith("/dev/fd/")
-    assert str(key_file) not in argv
+    # Identity must be the key path itself; ssh cannot read an inherited fd.
+    assert argv[argv.index("-i") + 1] == str(key_file)
     assert "IdentitiesOnly=yes" in argv
     assert "-p" in argv and argv[argv.index("-p") + 1] == "2345"
     assert "root@10.0.0.1" in argv
@@ -101,7 +103,6 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts, key_file):
     assert str(known_hosts) in " ".join(argv)
     assert captured["kwargs"]["timeout"] == 42
     assert captured["kwargs"]["capture_output"] is True
-    assert tuple(captured["kwargs"]["pass_fds"])  # fd handed to subprocess
 
 
 def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts, key_file):
@@ -181,9 +182,9 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts,
     assert "echo body" in captured["input"]
     assert "set -uo pipefail" in captured["input"]
     assert not any("secret-123" in a for a in captured["argv"])
-    # Identity fed via /dev/fd, not the on-disk key path.
-    assert captured["argv"][captured["argv"].index("-i") + 1].startswith("/dev/fd/")
-    assert tuple(captured["kwargs"]["pass_fds"])
+    # Secrets still stay off argv (they go over stdin); the identity is the key path.
+    assert captured["argv"][captured["argv"].index("-i") + 1] == str(key_file)
+    assert "pass_fds" not in captured["kwargs"]
 
 
 def test_probe_ssh_true_on_marker(monkeypatch, known_hosts):
