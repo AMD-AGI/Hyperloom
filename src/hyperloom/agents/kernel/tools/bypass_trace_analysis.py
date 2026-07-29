@@ -647,11 +647,11 @@ def main(argv: list[str] | None = None) -> int:
                 "severity": "warning",
                 "graph_launch_count": graph_launch_count,
                 "message": (
-                    f"{graph_launch_count} CUDA-graph replay launches detected. Device kernels "
-                    "for graph replays are under-recorded and their launching runtime call "
-                    "carries no cpu_op link, so op-attribution coverage and idle_pct are "
-                    "unreliable for this trace; kernel-name classification and per-kernel GPU-time "
-                    "shares still apply."
+                    f"{graph_launch_count} CUDA-graph replay launches detected. Graph-replayed "
+                    "device kernels are under-recorded and their launching runtime call carries "
+                    "no cpu_op link; consult the idle_reliable / attribution_reliable flags for "
+                    "whether GPU-time and op-attribution are trustworthy for this trace. "
+                    "Kernel-name classification and per-kernel GPU-time shares still apply."
                 ),
             }
         )
