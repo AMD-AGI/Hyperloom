@@ -1488,7 +1488,7 @@ def untried_hot_reusable_kernels(
 
     # Sort by gpu_pct desc so dedup picks the strongest member of each
     # task_group.
-    rows: list[tuple[float, str, str, list[str], str]] = []
+    rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     for k in hot:
         if not isinstance(k, dict):
             continue
@@ -1507,13 +1507,32 @@ def untried_hot_reusable_kernels(
         group_info = kid_to_group.get(kid)
         members = sorted(group_info[0]) if group_info else [kid]
         group_key = group_info[1] if group_info else ""
-        rows.append((gpu_pct, kid, src, members, group_key))
+        # Identity of the underlying kernel, independent of the synthetic
+        # per-row kernel_id. Used only as a dedup fallback (see below).
+        identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
+        rows.append((gpu_pct, kid, src, members, group_key, identity))
     rows.sort(key=lambda x: x[0], reverse=True)
 
-    ranked: list[tuple[float, str, str, list[str], str]] = []
+    ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     seen_groups: set[str | tuple[str, ...]] = set()
+    seen_identities: set[tuple[str, str, float]] = set()
     for row in rows:
         dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
+        if dedup_key in seen_groups:
+            continue
+        # Fallback dedup: when the trace carries no ``task_groups`` metadata
+        # every row degenerates to its own group, so the SAME kernel appearing
+        # under several synthetic ids (identical source_file+name+gpu_pct, e.g.
+        # k001/k002) is treated as several distinct hot kernels. The first gets
+        # attempted and rejected while its twin stays forever "untried", so
+        # kernel_work_pending() never goes False and KERNEL_AGENT spins until
+        # the wall-clock cap -- while the twin is not even in the candidate
+        # registry, so no agent can ever act on it. Collapse by identity.
+        identity = row[5]
+        if identity[0] and identity[1]:
+            if identity in seen_identities:
+                continue
+            seen_identities.add(identity)
         if dedup_key in seen_groups:
             continue
         seen_groups.add(dedup_key)
@@ -1521,6 +1540,42 @@ def untried_hot_reusable_kernels(
     ranked = ranked[:top_n]
 
     untried: list[str] = []
+
+    def _attempt_for_member(member_id: str) -> dict[str, Any]:
+        """Ledger entry covering ``member_id``, tolerating synthetic-id churn.
+
+        ``current_kernel_id`` tracks whichever synthetic id the agent last
+        asked for, so for a kernel that shows up under several ids (k001/k002
+        for one CK GEMM) it flip-flops. Matching on it alone makes the entry
+        invisible under the *other* id, which is exactly how a rejected kernel
+        gets re-reported as untried forever. Fall back to the group membership
+        the ledger itself records.
+        """
+        for value in attempts.values():
+            if not isinstance(value, dict):
+                continue
+            if member_id in {
+                str(value.get("current_kernel_id") or ""),
+                str(value.get("kernel_id") or ""),
+                str(value.get("task_group_primary_kernel_id") or ""),
+            }:
+                return value
+            if member_id in {
+                str(m) for m in (value.get("task_group_kernel_ids") or []) if m
+            }:
+                return value
+        return {}
+
+    def _member_is_rejected(member_id: str) -> bool:
+        """True when ``member_id`` (or its ledger twin) is out of play."""
+        if member_id in rejected:
+            return True
+        attempt = _attempt_for_member(member_id)
+        if not attempt:
+            return False
+        if str(attempt.get("rejected_reason") or "").strip():
+            return True
+        return str(attempt.get("integration_status") or "").strip().lower() == "rejected"
 
     def _matches_current_task(member_id: str, group_key: str, source: str) -> bool:
         if group_key:
@@ -1535,28 +1590,15 @@ def untried_hot_reusable_kernels(
                 )
                 for attempt in attempts.values()
             )
-        attempt = next(
-            (
-                value
-                for value in attempts.values()
-                if isinstance(value, dict)
-                and str(
-                    value.get("current_kernel_id")
-                    or value.get("kernel_id")
-                    or ""
-                )
-                == member_id
-            ),
-            {},
-        )
+        attempt = _attempt_for_member(member_id)
         if not isinstance(attempt, dict) or not attempt:
             return False
         recorded_source = str(attempt.get("last_source_file") or "")
         return not source or not recorded_source or source == recorded_source
 
-    for _pct, kid, src, members, group_key in ranked:
+    for _pct, kid, src, members, group_key, _identity in ranked:
         if members and all(
-            member in rejected
+            _member_is_rejected(member)
             and _matches_current_task(member, group_key, src)
             for member in members
         ):
