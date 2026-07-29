@@ -114,11 +114,11 @@ def test_sqlite_connection_sync_round_trip(tmp_path):
     db = _new_db(tmp_path)
     sc = SqliteConnection(db)
     try:
-        with sc.transaction_sync() as cur:
-            cur.execute(
-                "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
-                ("m1", "Orchestration", "Kernel", "request", "{}", 1, "t"),
-            )
+        sc.raw.execute(
+            "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, priority, ts) VALUES (?,?,?,?,?,?,?)",
+            ("m1", "Orchestration", "Kernel", "request", "{}", 1, "t"),
+        )
+        sc.raw.commit()
         rows = sc.fetchall_sync("SELECT msg_id, topic FROM events")
         assert len(rows) == 1
         assert rows[0]["msg_id"] == "m1"

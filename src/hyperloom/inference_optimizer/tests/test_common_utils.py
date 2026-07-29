@@ -938,12 +938,6 @@ def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch
 def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
-    assert inf._infera_all_gpu_ips({"pd_mode": "disaggregated", "prefill_pod_ips": ["p"], "decode_pod_ips": ["d"]}) == [
-        "p",
-        "d",
-    ]
-    assert inf._infera_all_gpu_ips({"worker_pod_ips": ["w"]}) == ["w"]
-
     state = {
         "backend": "infera",
         "pd_mode": "aggregated",
@@ -1790,8 +1784,9 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import gbrain_page_client as gbrain
+    from hyperloom.common import jsonio
 
-    assert list(gbrain._iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
+    assert list(jsonio.iter_sse_objects('not json\n\ndata: {bad}\n\ndata: {"id":"1","result":{"ok":true}}\n\n')) == [
         {"id": "1", "result": {"ok": True}}
     ]
     assert gbrain._select_mcp_response('data: {"id":"0","result":{"fallback":true}}\n\n', want_id="missing") == {
@@ -2260,7 +2255,7 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch: pytest.MonkeyP
 # ---------------------------------------------------------------------------
 
 
-def test_multi_node_state_paths_resolution_and_migration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_multi_node_state_paths_resolution_and_binding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from hyperloom.inference_optimizer.multi_node import state_paths
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
@@ -2287,15 +2282,11 @@ def test_multi_node_state_paths_resolution_and_migration(monkeypatch: pytest.Mon
     unsafe.chmod(0o600)
     assert state_paths.state_file_safe_to_read(unsafe) is True
 
-    src = tmp_path / "source_state.json"
-    src.write_text('{"nodes": []}', encoding="utf-8")
-    src.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(src))
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "source_state.json"))
     bound = state_paths.bind_state_file_to_session(session)
     assert bound == session / "runtime" / "multi_node_state.json"
-    assert bound.read_text(encoding="utf-8") == '{"nodes": []}'
+    assert not bound.exists()
     assert state_paths.resolve_state_file() == bound
-    assert bound.stat().st_mode & 0o777 == 0o600
     assert bound.parent.stat().st_mode & 0o777 == 0o700
 
 
@@ -2304,13 +2295,6 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch: pytest.
 
     messages: list[str] = []
     monkeypatch.setattr(state_paths, "warn", messages.append)
-
-    class _BadPath:
-        def chmod(self, _mode):
-            raise OSError("chmod denied")
-
-    state_paths._chmod_state_file(_BadPath())
-    assert "could not chmod state file" in messages[-1]
 
     runtime_dir = tmp_path / "runtime"
     original_chmod = type(runtime_dir).chmod

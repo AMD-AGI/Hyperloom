@@ -953,8 +953,8 @@ def _snapshot_final(rec, st: Any) -> None:
 def _snapshot_explore_search(rec, st: Any) -> None:
     """Snapshot the ``explore_search`` singleton from ``st`` (no-op when empty).
 
-    Augments the base search dict with winner history, no-promote streak,
-    discovered flags, and synergy/backend-winner history pulled from ``st``.
+    Augments the base search dict with the no-promote streak, discovered
+    flags, and the ledger-owned synergy list.
 
     Args:
         rec: the recorder used to write the singleton.
@@ -963,11 +963,11 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = list(getattr(st, "params_winner_history", None) or [])
+    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
-    search["synergy_attempted"] = list(getattr(st, "synergy_attempted", None) or [])
-    search["backend_winners_history"] = list(getattr(st, "backend_winners_history", None) or [])
+    search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
+    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 

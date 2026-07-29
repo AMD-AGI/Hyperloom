@@ -1152,7 +1152,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
@@ -1236,7 +1236,7 @@ class _DeterministicClient:
 @pytest.fixture
 def critic_agent_root() -> Path:
     """Locate the real critic-agent checkout. Skip gracefully if absent."""
-    root = _resolve_critic_agent_root()
+    root = _resolve_agent_root("critic")
     if root is None:
         pytest.skip(
             "critic-agent runtime not found — set CRITIC_AGENT_ROOT or place critic-agent/ next to src/hyperloom/inference_optimizer/"

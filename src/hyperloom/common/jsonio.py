@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 # Fenced json block; shared by every model-reply extractor.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -201,4 +201,56 @@ def extract_first_json_with_key(
     return found
 
 
-__all__ = ["read_json", "read_jsonl", "coerce_dict", "extract_first_json_with_key"]
+def iter_sse_objects(raw: str) -> Iterator[Any]:
+    """Yield JSON objects decoded from an MCP HTTP response body.
+
+    Handles the three framings the gbrain ``/mcp`` endpoint uses:
+
+    * A plain JSON body (the whole payload is one object).
+    * A single ``text/event-stream`` event whose ``data`` field is split
+      across multiple ``data:`` lines (joined with ``\\n`` per the SSE spec,
+      one optional leading space after the colon stripped).
+    * Multiple SSE events in one response (e.g. a heartbeat before the result
+      event). Each event is decoded independently so a non-result event can
+      never corrupt the result parse.
+
+    Malformed / incomplete events are skipped, so this is safe to call on a
+    partially-read buffer.
+
+    Args:
+        raw (str): The raw response body.
+
+    Yields:
+        Any: Each successfully decoded JSON value, in body order.
+    """
+    text = raw.lstrip()
+    if text.startswith("{") or text.startswith("["):
+        try:
+            yield json.loads(text)
+        except json.JSONDecodeError:
+            # Malformed non-SSE payload: yield nothing.
+            return
+        return
+    for block in re.split(r"\r?\n\r?\n", raw):
+        parts: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                seg = line[5:]
+                parts.append(seg[1:] if seg.startswith(" ") else seg)
+        payload = "\n".join(parts).strip()
+        if not payload:
+            continue
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            # Skip a malformed SSE event block.
+            continue
+
+
+__all__ = [
+    "coerce_dict",
+    "extract_first_json_with_key",
+    "iter_sse_objects",
+    "read_json",
+    "read_jsonl",
+]

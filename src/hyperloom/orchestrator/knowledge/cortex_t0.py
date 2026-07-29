@@ -76,10 +76,6 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     return prefer
 
 
-def _row_best_config_source(row: Mapping[str, Any] | None) -> str:
-    return ""
-
-
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
     """Resolve which KB path actually supplied the applied warm recipe.
 

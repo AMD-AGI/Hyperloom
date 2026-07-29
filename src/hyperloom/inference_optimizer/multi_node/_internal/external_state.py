@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..state_paths import legacy_state_file, resolve_state_file, state_file_safe_to_read
+from ..state_paths import resolve_state_file, state_file_safe_to_read
 
 log = logging.getLogger(__name__)
 
@@ -61,8 +61,6 @@ def build_external_state_from_env() -> dict[str, Any]:
     nodes = _int_env("INFERENCE_OPTIMIZER_NODES", 1)
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-    if pd_mode in ("colocated", "mixed"):
-        pd_mode = "aggregated"
 
     try:
         from .infera_support import ssh_role_port_offset
@@ -184,8 +182,8 @@ def _read_state_file(path: Path) -> dict[str, Any]:
 def load_multi_node_state() -> dict[str, Any]:
     """Load multi-node state; external env wins over on-disk when SaFE is absent.
 
-    Normal (SaFE) flow: session ``multi_node_state.json`` wins, with legacy
-    ``/tmp/multi_node_state.json`` fallback, then ``{}``.
+    Normal (SaFE) flow: the resolved ``$MULTI_NODE_STATE_FILE`` / session
+    ``runtime/multi_node_state.json`` is the only source, else ``{}``.
 
     External flow (``HYPERLOOM_MN_EXT_SERVICE_URL`` set, SaFE creds absent):
     ``HYPERLOOM_MN_EXT_*`` env synthesis wins over any on-disk state so a
@@ -204,10 +202,6 @@ def load_multi_node_state() -> dict[str, Any]:
             except RuntimeError:
                 return ext_state
             disk = _read_state_file(path)
-            if not disk:
-                legacy = legacy_state_file()
-                if path != legacy:
-                    disk = _read_state_file(legacy)
             if disk and not disk.get("external"):
                 log.warning(
                     "external mode: HYPERLOOM_MN_EXT_* env overrides stale "
@@ -221,11 +215,4 @@ def load_multi_node_state() -> dict[str, Any]:
         path = resolve_state_file()
     except RuntimeError:
         return {}
-    data = _read_state_file(path)
-    if not data:
-        legacy = legacy_state_file()
-        if path != legacy:
-            data = _read_state_file(legacy)
-            if data:
-                log.warning("multi_node state file %s missing; using legacy %s", path, legacy)
-    return data
+    return _read_state_file(path)

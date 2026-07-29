@@ -23,7 +23,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
 from hyperloom.orchestrator.actions.executors._geak_sweep import (
-    _pareto_front,
     _parse_isl_osl,
     _serving_gpus,
     _write_benchmark_report,
@@ -522,21 +521,6 @@ def test_schema_has_geak_contract() -> None:
     # A few representative fields must be part of the declared shape.
     for field in ("engaged", "status", "error_class", "throughput_speedup", "accepted_kernels"):
         assert field in schema.Geak.__annotations__
-
-
-def test_pareto_front_drops_dominated_points() -> None:
-    entries = [
-        {"status": "succeeded", "output_throughput": 100.0, "ttft_mean_ms": 10.0},
-        # Dominated: lower throughput AND higher latency than the first.
-        {"status": "succeeded", "output_throughput": 80.0, "ttft_mean_ms": 20.0},
-        # On the front: higher throughput at the cost of higher latency.
-        {"status": "succeeded", "output_throughput": 150.0, "ttft_mean_ms": 25.0},
-        # Failed points are ignored entirely.
-        {"status": "failed", "output_throughput": 999.0, "ttft_mean_ms": 1.0},
-    ]
-    front = _pareto_front(entries)
-    tputs = sorted(e["output_throughput"] for e in front)
-    assert tputs == [100.0, 150.0]
 
 
 @pytest.mark.asyncio
