@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Tests for the KERNEL idle-spin wind-down (kernel_idle_no_progress).
 
 When candidates are exhausted, the kernel_agent cannot emit the
