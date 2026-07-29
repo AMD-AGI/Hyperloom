@@ -268,7 +268,11 @@ Env overrides:
   USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
   PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
-  PR is already merged into your clone)
+  PR is already merged into your clone),
+  MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
+    --concurrent-requests eval flag cannot be removed from a Magpie
+    benchmark script. Set 0 only when GSM8K accuracy eval is not
+    required — with the flag live, every RUN_EVAL=true baseline aborts)
 EOF
 }
 
@@ -800,12 +804,20 @@ ensure_magpie_atomic_scripts_patch() {
   log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
   # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
   # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
-  if MAGPIE_PATH="$MAGPIE_PATH" "$PYTHON" - <<'PY'
+  # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
+  # InferenceX ``benchmarks/`` copies Magpie executes and teach
+  # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
+  # MUST run after ensure_inferencex has exported INFERENCEX_PATH — see the
+  # call ordering at the bottom of this script.
+  if MAGPIE_PATH="$MAGPIE_PATH" INFERENCEX_PATH="${INFERENCEX_PATH:-}" "$PYTHON" - <<'PY'
 import os, sys
 from hyperloom.orchestrator.actions.executors._magpie_patcher import (
     magpie_scripts_patch_status,
 )
-status = magpie_scripts_patch_status(os.environ["MAGPIE_PATH"])
+status = magpie_scripts_patch_status(
+    os.environ["MAGPIE_PATH"],
+    os.environ.get("INFERENCEX_PATH") or None,
+)
 print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
       f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
@@ -821,11 +833,13 @@ if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
-# Redundant --concurrent-requests eval flag could not be stripped from a
-# generic benchmark script (unrecognised shape). Non-fatal: RUN_EVAL=true
-# baselines may abort on InferenceX's 'Unknown parameter', but the baseline
-# executor's eval-failure fallback re-runs with RUN_EVAL=false, so the run
-# still proceeds (without an accuracy gate). Distinct exit so install warns.
+# eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
+# survives in a caller script AND InferenceX's run_lm_eval would reject it
+# (a defence-in-depth patch that merely could not be applied, with no live
+# flag, is NOT counted as a failure -- install-time now matches the run-time
+# ensure_eval_concurrency_compat judgement). This is the genuinely fatal case:
+# every RUN_EVAL=true baseline aborts on 'Unknown parameter'. Distinct exit so
+# install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
 # Defensive catch-all: a not-ok status with none of the bits above set should
@@ -850,7 +864,19 @@ PY
     elif [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     elif [ "$rc" -eq 5 ]; then
-      warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line). RUN_EVAL=true baselines may abort on InferenceX's 'Unknown parameter: --concurrent-requests'; the baseline executor falls back to RUN_EVAL=false (no accuracy gate) so the run still proceeds. Review _magpie_patcher.py if accuracy eval is required."
+      # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
+      # RUN_EVAL=true baseline in InferenceX's run_lm_eval arg parser, no
+      # results*.json is written, and the baseline accuracy gate then stops the
+      # whole run with `baseline_accuracy_failed`. There is no salvage: the
+      # executor deliberately does NOT fall back to RUN_EVAL=false for a genuine
+      # baseline (a throughput-only baseline cannot satisfy the accuracy gate).
+      # Set MAGPIE_EVAL_FLAG_STRICT=0 only when accuracy eval is genuinely
+      # not required for this deployment.
+      if is_falsy "${MAGPIE_EVAL_FLAG_STRICT:-1}"; then
+        warn "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line); MAGPIE_EVAL_FLAG_STRICT=${MAGPIE_EVAL_FLAG_STRICT:-} (falsy), continuing anyway — RUN_EVAL=true baselines will abort on InferenceX's 'Unknown parameter: --concurrent-requests'."
+      else
+        die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
+      fi
     else
       # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
       # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
@@ -1131,9 +1157,17 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
   log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
 else
   ensure_magpie
-  ensure_magpie_atomic_scripts_patch
 fi
 ensure_inferencex
+# Ordering matters: the Magpie script patch also scrubs the redundant
+# `--concurrent-requests` eval flag from the InferenceX `benchmarks/` copies
+# Magpie actually executes, and teaches `benchmark_lib.sh::run_lm_eval` to
+# tolerate it. Both need $INFERENCEX_PATH, which only ensure_inferencex exports
+# — running the patch before it silently skipped those targets and left
+# RUN_EVAL=true baselines aborting on 'Unknown parameter'.
+if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
+  ensure_magpie_atomic_scripts_patch
+fi
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
 chain_kernel_agent

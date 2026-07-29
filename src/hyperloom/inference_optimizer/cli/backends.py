@@ -183,7 +183,10 @@ def _build_backends(
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
-    provider_openai_only = (not codex_follows_claude) and _official_openai_only()
+    provider_openai_only = (not codex_follows_claude) and (
+        _official_openai_only()
+        or os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
+    )
 
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()

@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import csv
 import functools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -18,6 +20,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
@@ -1110,6 +1113,103 @@ def _resolve_artifact_specs(
     return specs, errors
 
 
+def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
+    """Return whether an artifact is an AITER runtime GEMM model-config CSV."""
+    if spec.source.suffix.lower() != ".csv":
+        return False
+    kind = spec.kind.strip().lower()
+    target = spec.target.as_posix().lower()
+    filename = spec.target.name.lower()
+    is_aiter_model_config = "/aiter/configs/model_configs/" in target
+    return is_aiter_model_config and (
+        kind == "model_config" or "_tuned_gemm" in filename
+    )
+
+
+def _validate_aiter_gemm_artifacts(
+    specs: list[_ArtifactSpec],
+    *,
+    gpu_type: str | None,
+) -> list[dict[str, str]]:
+    """Reject AITER GEMM CSVs that cannot dispatch on the target GPU.
+
+    A model-config seed containing rows for another architecture, or placeholder
+    rows that still require an offline tuning step, has no runtime effect. Such
+    an artifact must not enter E2E promotion because benchmark variance could
+    otherwise attribute an unrelated gain to it.
+    """
+    identity = amd_gpu_dispatch_identity(gpu_type)
+    if identity is None:
+        return []
+    expected_gfx, expected_cu_num = identity
+    errors: list[dict[str, str]] = []
+    required_columns = {"gfx", "cu_num", "us", "kernelName"}
+
+    for spec in specs:
+        if not _is_aiter_gemm_model_config(spec):
+            continue
+        base_error = {
+            "artifact": str(spec.source),
+            "expected_gfx": expected_gfx,
+            "expected_cu_num": str(expected_cu_num),
+        }
+        try:
+            with spec.source.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = set(reader.fieldnames or [])
+                if not required_columns.issubset(fieldnames):
+                    errors.append(
+                        {
+                            **base_error,
+                            "error": "invalid_aiter_gemm_schema",
+                        }
+                    )
+                    continue
+                rows = list(reader)
+        except (OSError, UnicodeError, csv.Error):
+            errors.append({**base_error, "error": "invalid_aiter_gemm_csv"})
+            continue
+
+        def _cu_num_matches(row: dict[str, Any]) -> bool:
+            raw = str(row.get("cu_num") or "").strip()
+            if not raw:
+                return False
+            try:
+                return int(float(raw)) == expected_cu_num
+            except ValueError:
+                return False
+
+        target_rows = [
+            row
+            for row in rows
+            if str(row.get("gfx") or "").strip().lower() == expected_gfx
+            and _cu_num_matches(row)
+        ]
+        if not target_rows:
+            errors.append({**base_error, "error": "no_target_gpu_rows"})
+            continue
+
+        invalid_target_rows = 0
+        for row in target_rows:
+            kernel_name = str(row.get("kernelName") or "").strip().lower()
+            try:
+                runtime_us = float(str(row.get("us") or "0").strip())
+            except ValueError:
+                runtime_us = 0.0
+            if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
+                invalid_target_rows += 1
+        if invalid_target_rows:
+            errors.append(
+                {
+                    **base_error,
+                    "error": "target_gpu_rows_not_runtime_ready",
+                    "invalid_rows": str(invalid_target_rows),
+                    "target_rows": str(len(target_rows)),
+                }
+            )
+    return errors
+
+
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
     """Read and parse ``specialist_done.json`` from a workspace.
 
@@ -1738,6 +1838,38 @@ class IntegratePatchExecutor:
             explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
             done_payload=done_payload,
         )
+        target_gpu_type = str(
+            getattr(shared_state, "gpu_type", "")
+            or params.get("gpu_type")
+            or params.get("target_platform")
+            or ""
+        ).strip()
+        artifact_runtime_errors = _validate_aiter_gemm_artifacts(
+            artifact_specs,
+            gpu_type=target_gpu_type,
+        )
+        if artifact_runtime_errors:
+            await self._maybe_write_framework_kb_record(
+                done_payload=done_payload,
+                outcome="rejected_apply_fail",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
+            return {
+                "status": "apply_failed",
+                "error_class": "artifact_not_runtime_ready",
+                "error": artifact_runtime_errors,
+                "artifact_errors": artifact_runtime_errors,
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "artifacts_applied": [],
+                "config_changes_applied": {},
+                "reason": (
+                    "AITER GEMM model-config artifacts must contain measured, "
+                    "non-placeholder rows for the target GPU architecture and CU count"
+                ),
+            }
 
         _setup_ran = bool(setup_result.get("applied"))
         if (

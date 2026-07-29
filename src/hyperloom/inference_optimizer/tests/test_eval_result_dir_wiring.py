@@ -433,7 +433,12 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     assert calls[0][1]["RESULT_DIR"] == str(output_dir / "mn_warmup")
     assert calls[0][1]["EVAL_RESULT_DIR"] == str(output_dir / "mn_warmup" / "eval_output")
     assert calls[1][1]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
-    assert result.get("accuracy") is None
+    # The warmup keeps its eval output in its OWN slot (asserted above) so a
+    # measured round never grades against it by accident. It is still a usable
+    # accuracy source when it is the only one: accuracy is a property of the
+    # model, not of a cold-vs-hot benchmark window, and the baseline double-run
+    # now evaluates only in the warmup round.
+    assert result.get("accuracy") == pytest.approx(0.83)
 
 
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
