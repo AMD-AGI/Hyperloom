@@ -471,10 +471,21 @@ def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
     assert exc.value.rule == "specialist_gpu_pool_disabled"
 
 
-def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role):
+def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role, monkeypatch):
     """A bench-enabled (mode=patch & bench=true) specialist auto-defaults
     needs_gpu=True at dispatch; the gate must mirror that so it is rejected
-    when the pool is disabled."""
+    when the pool is disabled.
+
+    Both pools have to be empty for the denial to apply: a bench specialist
+    leases from the whole-machine pool, which the gate exempts from a zero
+    specialist ceiling whenever that pool has cards. The visible-device env is
+    therefore pinned empty -- otherwise the pool is resolved from the host's real
+    GPUs and the test only passes on a GPU-less machine.
+    """
+    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP",
+                 "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     gate = _gate_with_gpu_capacity(0)
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(

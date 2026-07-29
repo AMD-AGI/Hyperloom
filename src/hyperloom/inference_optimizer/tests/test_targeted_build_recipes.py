@@ -36,6 +36,29 @@ def _completed(stdout="", stderr="", returncode=0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
+@pytest.fixture(autouse=True)
+def _host_independent_toolchain(monkeypatch):
+    """Keep these tests independent of the host's ROCm install.
+
+    ``check_rocm_toolchain_alignment`` reads the real
+    ``<hipcc_root>/include/hip/hip_runtime_api.h``, and the mocked ``run``
+    resolves hipcc_root to ``/opt/rocm`` -- a real path on a ROCm host. So on a
+    host whose headers predate ``hipDeviceAttributePciChipId`` the check turns
+    fatal, every recipe short-circuits with
+    ``failure_class == "preflight_toolchain"``, and the branch each test means to
+    exercise is never reached. That filesystem read cannot be mocked through the
+    injected runner, so the check is stubbed here; it has its own coverage in
+    test_build_utils.py.
+    """
+    from hyperloom.orchestrator.framework import build_utils
+
+    monkeypatch.setattr(
+        build_utils,
+        "check_rocm_toolchain_alignment",
+        lambda **kw: (True, "ok"),
+    )
+
+
 def _noop_disk(*a, **kw):
     pass
 
