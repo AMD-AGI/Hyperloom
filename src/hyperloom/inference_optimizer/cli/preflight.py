@@ -572,7 +572,19 @@ def _unset_hip_visible_devices() -> None:
 
 
 def _check_gpu_visibility() -> None:
-    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent)."""
+    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent).
+
+    Skipped in external multi-node mode: there the server runs on remote GPU
+    pods and the benchmark drives the frontend over HTTP, so this
+    orchestrator-only sandbox legitimately has no local GPUs. Probing rocm-smi
+    here would emit a misleading "0 GPUs; benchmark will fail" warning.
+    """
+    # External multi-node: GPUs are on remote pods, not this sandbox.
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
+
+    if external_service_url():
+        print("Preflight: external multi-node mode; skipping local GPU visibility check (GPUs are on remote pods)")
+        return
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showid"],
