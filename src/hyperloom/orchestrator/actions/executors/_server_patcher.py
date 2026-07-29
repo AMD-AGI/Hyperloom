@@ -309,8 +309,7 @@ def ensure_sglang_patched_for_ck_blockscale(
 
     Args:
         kernelforge_root: KernelForge checkout root; falls back to
-            ``$FORGE_PATH`` / ``$KERNEL_FORGE_ROOT`` / ``$KERNEL_FORGE_PATH``
-            (in that order) when ``None``.
+            ``$FORGE_PATH`` when ``None``.
 
     Returns:
         True if the SGLang install carries the CK-routing patch at exit, False
@@ -736,12 +735,8 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# KernelForge root env aliases, in install.sh's precedence order.
-_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = (
-    "FORGE_PATH",
-    "KERNEL_FORGE_ROOT",
-    "KERNEL_FORGE_PATH",
-)
+# KernelForge root env var (single canonical var; CI/local both export it).
+_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = ("FORGE_PATH",)
 
 # CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the
 # KernelForge-owned patch; all three must be present to count as patched.
@@ -755,9 +750,8 @@ _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
 def _resolve_kernelforge_root(arg: Path | str | None) -> Path | None:
     """Resolve the KernelForge root from arg → env aliases → None; fail-soft.
 
-    Mirrors the env precedence in ``install.sh``
-    (``FORGE_PATH`` > ``KERNEL_FORGE_ROOT`` > ``KERNEL_FORGE_PATH``); returns
-    the first candidate that exists on disk, else ``None``.
+    Reads ``FORGE_PATH`` (the single canonical KernelForge root var); returns
+    it when it exists on disk, else ``None``.
 
     Args:
         arg: Explicit KernelForge root override, or ``None`` to read the env
@@ -800,7 +794,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     if kernelforge_root is None:
         log.info(
             "_server_patcher: KernelForge root unset/missing "
-            "(FORGE_PATH/KERNEL_FORGE_ROOT/KERNEL_FORGE_PATH) — skip SGLang "
+            "(FORGE_PATH) — skip SGLang "
             "fp8 block-scale CK patch (SGLANG_FP8_BLOCKSCALE_CK_MAX_M will "
             "no-op on the unpatched tree)"
         )
