@@ -245,6 +245,29 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
     assert result["artifact_files"] == ["foo.py"]
 
 
+def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
+    """kernel_repo must come from the root forge-fusion exported against (authoritative
+    for a non-git pip framework), NOT a git toplevel that would break patch apply."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
+        "validation": {"kept": True},
+        "artifacts": {
+            "patch": "diff --git a/vllm/x.py",
+            "changes": [{"path": "vllm/x.py"}],
+            "repo_root": "/venv/site-packages",
+        },
+        "fusion": {"source_file": str(output_dir / "x.py")},
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    # even if git would resolve a (wrong) project root, the manifest root wins
+    monkeypatch.setattr(forge_fusion, "_git_toplevel", lambda _path: "/some/git/project")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+    assert result["kernel_repo"] == "/venv/site-packages"
+
+
 def test_normalize_manifest_missing_file_reports_error(tmp_path):
     output_dir = tmp_path / "missing"
     output_dir.mkdir()
@@ -295,24 +318,49 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     assert result["requires_e2e_validation"] is True
 
 
-def test_git_toplevel_success(monkeypatch, tmp_path):
-    def fake_run(cmd, **kwargs):
-        class R:
-            returncode = 0
-            stdout = "/repo/root\n"
+def test_git_toplevel_success(tmp_path):
+    # A git-TRACKED file resolves to its work-tree root.
+    import subprocess as sp
 
-        return R()
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    src = repo / "pkg" / "foo.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "b"]):
+        sp.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    assert forge_fusion._git_toplevel(str(src)) == str(repo.resolve())
 
-    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel(str(tmp_path / "src/foo.py")) == "/repo/root"
+
+def test_git_toplevel_untracked_in_git_uses_package_root(tmp_path):
+    # venv-in-git: an UNTRACKED pip file must resolve to the package root, not the
+    # git project root, so the package-relative patch applies.
+    import subprocess as sp
+
+    project = tmp_path / "proj"
+    site = project / ".venv" / "site-packages"
+    d = site / "vllm" / "models"
+    d.mkdir(parents=True)
+    for p in (site / "vllm", d):
+        (p / "__init__.py").write_text("", encoding="utf-8")
+    src = d / "qwen3.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
+    (project / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    sp.run(["git", "-C", str(project), "add", ".gitignore"], check=True,
+           capture_output=True, text=True)
+    sp.run(["git", "-C", str(project), "-c", "user.email=a@b.c", "-c", "user.name=t",
+            "commit", "-qm", "b"], check=True, capture_output=True, text=True)
+    assert forge_fusion._git_toplevel(str(src)) == str(site.resolve())
 
 
 def test_git_toplevel_handles_subprocess_errors(monkeypatch):
+    # git unavailable -> fall back to the package root derived from the path.
     def fake_run(*_args, **_kwargs):
         raise OSError("git missing")
 
     monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel("/any/path.py") == ""
+    assert forge_fusion._git_toplevel("/any/path.py") == "/any"
 
 
 def test_main_invalid_json_returns_2(tmp_path, capsys):
@@ -499,7 +547,8 @@ def test_load_input_json_empty_path_returns_empty_dict():
     assert forge_fusion._load_input_json("") == {}
 
 
-def test_git_toplevel_returns_empty_on_nonzero_exit(monkeypatch, tmp_path):
+def test_git_toplevel_returns_package_root_when_not_git(monkeypatch, tmp_path):
+    # Not a git work tree -> use the package root (matches forge-fusion's export root).
     def fake_run(cmd, **kwargs):
         class R:
             returncode = 1
@@ -508,7 +557,7 @@ def test_git_toplevel_returns_empty_on_nonzero_exit(monkeypatch, tmp_path):
         return R()
 
     monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel(str(tmp_path / "foo.py")) == ""
+    assert forge_fusion._git_toplevel(str(tmp_path / "foo.py")) == str(tmp_path.resolve())
 
 
 def test_emit_without_output_dir_only_prints(capsys):
@@ -562,7 +611,7 @@ def test_git_toplevel_handles_subprocess_error(monkeypatch):
         raise forge_fusion.subprocess.SubprocessError("boom")
 
     monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
-    assert forge_fusion._git_toplevel("/x") == ""
+    assert forge_fusion._git_toplevel("/x") == "/"
 
 
 def test_terminate_process_tree_windows_uses_terminate(monkeypatch):
