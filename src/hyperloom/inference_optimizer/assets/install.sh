@@ -802,17 +802,35 @@ ensure_kernel_agents() {
 # optimization-potential estimable=NO). Nothing else in the stack needs
 # pandas>=3 (verified: no installed dist requires it), so <3 is conflict-free.
 #
-# rocprof-compute runs under the forge interpreter; KernelForge's resolve_rocpc()
-# probes sys.executable, then /usr/bin/python3, then `python3` on PATH. We pin
-# pandas in $PYTHON, which is the forge interpreter here; if a deployment splits
-# those, pin pandas<3 in whichever interpreter forge actually runs.
+# rocprof-compute runs under the interpreter KernelForge's resolve_rocpc() picks:
+# it probes sys.executable, then /usr/bin/python3, then `python3` on PATH, and
+# uses the FIRST that can run `rocprof-compute --help`. We mirror that probe and
+# pin pandas in exactly THAT interpreter (not blindly $PYTHON), so the pin cannot
+# be a silent no-op and the log names the env that will actually run the tool.
 #
 # Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
-_ensure_pandas_lt3_for_rocpc() {
-  local ver rc why
-  # Decide in Python (robust vs. bash numeric parsing under set -euo pipefail).
-  # exit 0 => pandas <3 (ok); exit 1 => pandas >=3 (too new); 3 => absent.
-  if ver="$("$PYTHON" - <<'PY'
+
+# Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
+# of $PYTHON, /usr/bin/python3, PATH python3 that can run `<libexec>/rocprof-
+# compute --help`. Returns non-zero with no output when none qualifies.
+_rocpc_effective_python() {
+  local libexec="$1" py seen=" "
+  for py in "$PYTHON" /usr/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+    [ -n "$py" ] || continue
+    case "$seen" in *" $py "*) continue ;; esac
+    seen="${seen}${py} "
+    if "$py" "${libexec}/rocprof-compute" --help >/dev/null 2>&1; then
+      printf '%s\n' "$py"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print pandas version under $1 and exit: 0 => <3 (ok); 1 => >=3; 3 => absent.
+# Decided in Python (robust vs. bash numeric parsing under set -euo pipefail).
+_pandas_major_ge3() {
+  "$1" - <<'PY'
 import sys
 try:
     import pandas
@@ -821,19 +839,21 @@ except Exception:
 print(pandas.__version__)
 sys.exit(1 if int(pandas.__version__.split(".")[0]) >= 3 else 0)
 PY
-)"; then rc=0; else rc=$?; fi
+}
+
+_ensure_pandas_lt3_for_rocpc() {
+  local py="${1:-$PYTHON}" ver rc why
+  if ver="$(_pandas_major_ge3 "$py")"; then rc=0; else rc=$?; fi
 
   if [ "$rc" -eq 0 ]; then
-    log "rocprof-compute: pandas ${ver} is <3 (compatible with rocprof-compute's CSV converter); no pin needed"
+    log "rocprof-compute: pandas ${ver} is <3 under ${py} (compatible with rocprof-compute's CSV converter); no pin needed"
     return 0
   fi
 
-  # rc==1 (pandas>=3) OR rc==3 (pandas absent): both need a pinned pandas<3 in
-  # this interpreter. Installing it now also forecloses a LATER unconstrained
-  # `pip install pandas` (e.g. datasets/evaluate pulled by ensure_bench_serving_
-  # deps / ensure_xdit_quality_deps) dragging pandas>=3 back in — pip will not
-  # upgrade an already-satisfying 2.x. (ensure_rocprof_compute is ALSO ordered
-  # after those steps, so in practice pandas is already present and >=3 here.)
+  # rc==1 (pandas>=3) OR rc==3 (pandas absent): pin pandas<3 in the interpreter
+  # that runs rocprof-compute. This runs LAST in install.sh (after
+  # chain_kernel_agent — the final pip-installing step), so no later step can
+  # re-pull pandas>=3, and the re-check below is the final, truthful state.
   if [ "$rc" -eq 3 ]; then
     why="pandas not yet installed"
   else
@@ -841,33 +861,25 @@ PY
   fi
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute: ${why}; check-only — would pin 'pandas>=2.2.3,<3'. Until fixed, forge profiling degrades to the PMC path."
+    warn "rocprof-compute: ${why} (interpreter ${py}); check-only — would pin 'pandas>=2.2.3,<3'. Until fixed, forge profiling degrades to the PMC path."
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: ${PYTHON} -m pip install 'pandas>=2.2.3,<3'  (${why})"
+    log "would run: ${py} -m pip install 'pandas>=2.2.3,<3'  (${why})"
     return 0
   fi
 
-  log "rocprof-compute: ${why}; installing 'pandas>=2.2.3,<3'"
-  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" 'pandas>=2.2.3,<3' \
-    || warn "rocprof-compute: 'pip install pandas>=2.2.3,<3' failed; forge profiling will stay on the PMC path. Check pip/network."
+  log "rocprof-compute: ${why}; installing 'pandas>=2.2.3,<3' into ${py}"
+  "$py" -m pip install --quiet "${PIP_EXTRA[@]}" 'pandas>=2.2.3,<3' \
+    || warn "rocprof-compute: 'pip install pandas>=2.2.3,<3' failed under ${py}; forge profiling will stay on the PMC path. Check pip/network."
 
-  # Re-check under the SAME interpreter so the logged outcome reflects reality.
-  if ver="$("$PYTHON" - <<'PY'
-import sys
-try:
-    import pandas
-except Exception:
-    sys.exit(3)
-print(pandas.__version__)
-sys.exit(1 if int(pandas.__version__.split(".")[0]) >= 3 else 0)
-PY
-)"; then rc=0; else rc=$?; fi
+  # Re-check the SAME interpreter, at the END of install.sh, so the logged
+  # outcome reflects what forge will actually import at runtime.
+  if ver="$(_pandas_major_ge3 "$py")"; then rc=0; else rc=$?; fi
   if [ "$rc" -eq 0 ]; then
-    log "rocprof-compute: pandas pinned OK to ${ver}; forge profiling can use rocprof-compute (roofline)"
+    log "rocprof-compute: pandas ${ver} in ${py}; forge profiling can use rocprof-compute (roofline)"
   else
-    warn "rocprof-compute: pandas still incompatible after pin (version='${ver}', rc=${rc}); forge profiling will degrade to the PMC path."
+    warn "rocprof-compute: pandas still incompatible in ${py} (version='${ver}', rc=${rc}); forge profiling will degrade to the PMC path."
   fi
   return 0
 }
@@ -927,10 +939,21 @@ ensure_rocprof_compute() {
   fi
 
   # --- Step 2: pin pandas<3 for rocprof-compute's CSV converter ---
-  # Run when the tool is present (else forge is on PMC anyway), or in check/dry-
-  # run to surface the plan even before the tool is there.
-  if [ -f "$base" ] || [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    _ensure_pandas_lt3_for_rocpc
+  # Pin in the interpreter resolve_rocpc() will actually run the tool under (probe
+  # mirrors KernelForge). Runs when the tool is present; in check/dry-run we
+  # surface the plan against $PYTHON even before the tool exists.
+  if [ -f "$base" ]; then
+    local rocpc_py
+    if rocpc_py="$(_rocpc_effective_python "$(dirname "$base")")"; then
+      [ "$rocpc_py" = "$PYTHON" ] \
+        || log "rocprof-compute: resolve_rocpc will run under ${rocpc_py} (not \$PYTHON=${PYTHON}); pinning pandas there"
+    else
+      rocpc_py="$PYTHON"
+      warn "rocprof-compute: could not confirm which interpreter runs 'rocprof-compute --help'; pinning pandas in \$PYTHON=${PYTHON} (best effort — verify forge's runtime interpreter has pandas<3)"
+    fi
+    _ensure_pandas_lt3_for_rocpc "$rocpc_py"
+  elif [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    _ensure_pandas_lt3_for_rocpc "$PYTHON"
   fi
   return 0
 }
@@ -1378,14 +1401,14 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
 fi
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
-# rocprof-compute + pandas<3 pin AFTER the pandas-pulling steps above
-# (ensure_bench_serving_deps / ensure_xdit_quality_deps drag pandas in via
-# datasets/evaluate). Running last means the pandas<3 pin has the final say and
-# is not clobbered by a later unconstrained `pip install pandas`. Gated on the
-# KernelForge checkout, not the backend, so it applies to the default-geak
-# install that a later forge session inherits.
-ensure_rocprof_compute
 chain_kernel_agent
+# rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
+# step (chain_kernel_agent included; nothing below installs packages). This makes
+# the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
+# and its own re-check the truthful end state, not a premature false-positive.
+# Gated on the KernelForge checkout (not the backend): the default-geak install a
+# later forge session inherits still gets rocprof-compute + pandas<3.
+ensure_rocprof_compute
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no
