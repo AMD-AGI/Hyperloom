@@ -49,13 +49,6 @@ BASH_KILL_SAFETY_PREAMBLE = (
 )
 
 
-# Soft cap on ``proposal_set`` size; re-exported so the prompt-side cap and the
-# runner-side hard truncate stay aligned.
-from hyperloom.orchestrator.policy.gate import (
-    DEFAULT_SPECIALIST_MAX_PROPOSALS,
-)
-
-
 # Per-domain focus templates: each injects a "Domain focus" block into
 # Section 1; a missing key falls back to the generic body.
 
@@ -690,8 +683,6 @@ class SpecialistPromptInputs:
     task_id: str
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
-    # Soft cap on ``proposal_set`` size (rendered into Sections 1 + 8).
-    max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
     # ``tp`` defaults to 0 (sentinel for "unspecified"), not 1, so
     # comm_specialist doesn't veto its own TP proposals.
@@ -821,7 +812,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
         "scored over quantity: cap your final ``proposal_set`` at the",
-        f"**top-{inp.max_proposals}** ranked picks (see Section 8).",
+        "**top-6** ranked picks (see Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1832,12 +1823,11 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "coupling across several proposals."
         ),
         (
-            f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
-            "entries. You are a curator, not a brainstormer: rank candidates "
-            "by expected gain x your confidence, drop everything that "
-            "contradicts ``kb_subgraph`` / ``pr_evidence`` already in "
-            f"your prompt, and only emit the surviving top {inp.max_proposals}. "
-            "Fewer is better than padding."
+            "- ``proposal_set`` MUST contain AT MOST **6** entries. You are a "
+            "curator, not a brainstormer: rank candidates by expected gain x "
+            "your confidence, drop everything that contradicts ``kb_subgraph`` "
+            "/ ``pr_evidence`` already in your prompt, and only emit the "
+            "surviving top 6. Fewer is better than padding."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "

@@ -281,8 +281,6 @@ def _whole_machine_pool_size() -> int:
     return len(resolve_whole_machine_devices())
 
 
-DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
-
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
 INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
     {

@@ -47,7 +47,6 @@ from .subprocess_ import (
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
-from ..policy.gate import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .profile import SpecialistProfile, resolve_specialist_profile
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
@@ -629,8 +628,6 @@ class SpecialistRunner:
                 # WS1 wall-clock budget so the specialist can self-throttle.
                 wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
-                # proposal_set self-curation target; shapes the prompt, not a hard cap.
-                max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -1183,9 +1180,9 @@ class SpecialistRunner:
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
-        Synthesises an empty payload when none was produced, sanitises and
-        truncates the proposal set, merges discovered patches and writes the
-        on-disk ``specialist_done.json``.
+        Synthesises an empty payload when none was produced, sanitises the
+        proposal set, merges discovered patches and writes the on-disk
+        ``specialist_done.json``.
 
         Args:
             ctx (RunnerContext): Dispatch context carrying the task.
@@ -1245,7 +1242,6 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        # ``max_proposals`` is a prompt-side target, not a hard cap.
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:

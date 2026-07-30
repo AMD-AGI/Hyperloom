@@ -1068,13 +1068,6 @@ class ExplorePhase(PhaseHandler):
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # proposal_set cap into params so SpecialistRunner reads it.
-        from hyperloom.orchestrator.policy.gate import (
-            DEFAULT_SPECIALIST_MAX_PROPOSALS,
-        )
-
-        params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
-
     async def _refresh_gaps(self, *, reason: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
 
@@ -1789,7 +1782,6 @@ class ExplorePhase(PhaseHandler):
         if not isinstance(proposals, list):
             proposals = []
         round_id = str((task.params or {}).get("round_id") or task.task_id)
-        truncated_from = done_payload.get("proposals_truncated_from")
         from ..specialists.domains import normalize_dispatch_tags
 
         # Knowledge-domain tags; reported tags win over dispatch params.
@@ -1818,6 +1810,4 @@ class ExplorePhase(PhaseHandler):
             entry["allocated_gpu_ids"] = [
                 int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
             ]
-        if isinstance(truncated_from, int) and truncated_from > len(proposals):
-            entry["proposals_truncated_from"] = truncated_from
         return entry
