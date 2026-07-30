@@ -81,6 +81,13 @@ benchmark:
     WP_QUALITY_SSIM_MIN_WORST: 0.90
     WP_QUALITY_LPIPS_MAX_WORST: 0.10
     WP_QUALITY_LPIPS_SAMPLES: 8
+    # Extra (seed, pose) configs the gate SCORES but does not TIME. A variant
+    # can reproduce the measured trajectory exactly and still break a different
+    # seed or camera path; one input cannot see that. Covers both axes: a second
+    # seed on the same trajectory, a second trajectory on the same seed. Each
+    # costs one generation (~27s at 61 frames) and stays out of the latency
+    # statistics. Set to "" to gate on the measured config alone.
+    WP_QUALITY_MATRIX: "7:w-15,1:d-15"
 
     # ── Environment ───────────────────────────────────────────────────
     WP_REPO: /primus/xiaofei/HY-WorldPlay

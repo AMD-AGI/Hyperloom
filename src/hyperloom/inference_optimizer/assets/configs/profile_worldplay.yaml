@@ -49,6 +49,8 @@ benchmark:
     XDIT_QUALITY_MSE_MAX: 0.002
     WP_QUALITY_SSIM_MIN_WORST: 0.90
     WP_QUALITY_LPIPS_MAX_WORST: 0.10
+    # No gate during profiling, so no reason to pay for extra generations.
+    WP_QUALITY_MATRIX: ""
 
     WP_REPO: /primus/xiaofei/HY-WorldPlay
     PYTORCH_ALLOC_CONF: "expandable_segments:True"
