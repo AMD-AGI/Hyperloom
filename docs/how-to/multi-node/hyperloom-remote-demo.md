@@ -21,10 +21,8 @@ Pick one; both serve the same model, differ in control plane:
 ## Hyperloom does not create the cluster
 
 The platform provisions the GPU pods before the optimizer starts — normally
-**[Primus-Claw](https://github.com/AMD-AGI/Primus-Claw)**, either through
-**[Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)** (AMD's open-source
-training and inference management platform) or straight against Kubernetes — and
-hands the running cluster over through `HYPERLOOM_MN_EXT_*` env vars. Hyperloom
+**[Primus-Claw](https://github.com/AMD-AGI/Primus-Claw)** — and hands the
+running cluster over through `HYPERLOOM_MN_EXT_*` env vars. Hyperloom
 adopts it, benchmarks it, and restarts the server on it each round. It never
 creates or releases the cluster, so the container image and per-pod CPU/memory
 are the platform's inputs, not `optimize` flags.
@@ -110,9 +108,8 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 |-----|---------|
 | `RANDOM_RANGE_RATIO` | Benchmark sequence-length jitter (env has a fallback; `ISL`/`OSL`/`CONC`/`GPU_TYPE`/`PRECISION` are flags — see FLAGS above) |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
-| `TRACELENS_INTERNAL_ROOT` | Optional `TraceLens-internal` checkout |
-| `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
-| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
+| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (Workload A only) |
+| `FORGE_PATH` | Kernel-Forge checkout, for the Kernel-Forge kernel backend (Workload B) |
 
 Platform-injected (do **not** set): every `HYPERLOOM_MN_EXT_*` var above, plus
 `USER_DATA_PATH`.
@@ -135,6 +132,5 @@ For rayjob, swap `--mn-backend rayjob`; the platform supplies
 
 - [Workload skill (copy-paste flags/env)](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
 - [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) — provisions the cluster and hands it over
-- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
 - [Multi-node CLI, SSH & hand-off semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
 - [Local single-node counterpart](https://github.com/AMD-AGI/Hyperloom/blob/main/examples/README.md)

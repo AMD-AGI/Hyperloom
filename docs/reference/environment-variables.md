@@ -163,9 +163,8 @@ over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
 ### Cluster hand-off variables
 
-`HYPERLOOM_MN_EXT_SERVICE_URL` is the only signal that a cluster is ready. It is
-independent of `SAFE_API_URL` / `SAFE_API_KEY`, which authenticate the LLM
-gateway and are set in essentially every platform sandbox.
+`HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable that tells the optimizer a
+cluster is ready; the rest describe how to reach it.
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|

@@ -25,8 +25,8 @@ Drive every action through the Python CLI. **Never `ray.init`, `kubectl`, or
 raw `curl` to a pod.** All state lives in the file resolved from
 `$MULTI_NODE_STATE_FILE`, else
 `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json` — one
-of the two MUST be set, there is no `/tmp` default (sandbox-local; synthesized
-from the hand-off env on first use, rewritten by each subcommand). Re-read it
+of the two MUST be set or the CLI raises (sandbox-local; synthesized from the
+hand-off env on first use, rewritten by each subcommand). Re-read it
 every turn — never cache `service_url` / `head_pod_ip` across actions (a
 re-provisioned cluster rewrites them).
 
