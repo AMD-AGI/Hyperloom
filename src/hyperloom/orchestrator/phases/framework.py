@@ -4346,7 +4346,11 @@ class FrameworkPhase(PhaseHandler):
             if candidate:
                 _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
                 repo_url = _repo or repo_url
-                ref = _ref or ref
+                # Take the resolved ref verbatim, including empty. An empty ref
+                # means "not checkoutable, autoselect a tag" (an issue citation),
+                # so falling back to the raw request here would hand the builder
+                # back the very string resolution just rejected.
+                ref = _ref
                 source_pr_url = _pr
             if not _repo_matches_targeted_build_component(repo_url, component):
                 log.warning(
