@@ -44,7 +44,7 @@ from ._internal.server_args_safety import (
     validate_server_args,
 )
 from .state_paths import resolve_state_file
-from ._internal.external_state import load_multi_node_state
+from ._internal.external_state import external_service_url, load_multi_node_state
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -157,11 +157,35 @@ def _infera_ssh_dir() -> Path:
 def _load_state() -> dict[str, Any]:
     """Load the CLI state file as a dict.
 
+    Every subcommand here drives a running cluster, so a multi-node state that
+    did not come from the platform's hand-off is refused rather than used: its
+    pod IPs and frontend URL describe a cluster this process cannot confirm
+    exists, and acting on them means SSHing into dead addresses. Callers that
+    merely ask about multi-node configuration read the state directly instead.
+
     Returns:
         dict[str, Any]: The parsed state, or an empty dict if the file is
         missing, unreadable, or fails the ownership/permission check.
+
+    Raises:
+        RuntimeError: When the run is multi-node, or the state file describes a
+            handed-over cluster, but no hand-off is present in the environment.
     """
-    return load_multi_node_state()
+    state = load_multi_node_state()
+    if not external_service_url():
+        try:
+            nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "") or 1)
+        except ValueError:
+            nodes = 1
+        if nodes >= 2 or state.get("external"):
+            raise RuntimeError(
+                "multi-node state requested without a cluster hand-off: "
+                "HYPERLOOM_MN_EXT_SERVICE_URL is unset"
+                + (" while the state file describes a handed-over cluster" if state.get("external") else "")
+                + ". The platform provisions the cluster and exports the HYPERLOOM_MN_EXT_* "
+                "vars; see multi_node/SKILL.md 'Cluster hand-off'."
+            )
+    return state
 
 
 def _save_state(state: dict[str, Any]) -> None:

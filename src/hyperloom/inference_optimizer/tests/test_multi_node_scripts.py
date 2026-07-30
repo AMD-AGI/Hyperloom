@@ -1030,9 +1030,46 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    # The head IP reaches a multi-node run through the hand-off, so supply it
+    # that way: state for >= 2 nodes is refused without one.
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     mne.export_ray_address_to_os()
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
+
+
+def test_subcommand_state_refuses_multi_node_without_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale state file must not stand in for a cluster hand-off.
+
+    The guard sits on the subcommand entry, not on the raw state read: callers
+    that only ask about multi-node configuration must stay unaffected.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node._internal import external_state
+
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"external": True, "head_pod_ip": "10.0.0.5"}), encoding="utf-8")
+    p.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+
+    # Triggered by the run declaring multi-node ...
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    with pytest.raises(RuntimeError, match="without a cluster hand-off"):
+        mn_cli._load_state()
+
+    # ... and by the file itself claiming to describe a handed-over cluster,
+    # which is what a standalone subcommand sees.
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    with pytest.raises(RuntimeError, match="describes a handed-over cluster"):
+        mn_cli._load_state()
+
+    # The raw read stays lenient so config-only callers keep working.
+    assert external_state.load_multi_node_state()["head_pod_ip"] == "10.0.0.5"
 
 
 # ---------------------------------------------------------------------------
