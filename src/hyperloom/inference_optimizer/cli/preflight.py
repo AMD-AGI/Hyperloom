@@ -554,6 +554,39 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
     print("Preflight: benchmark_serving client deps installed OK")
 
 
+# RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
+_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+
+def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
+
+    ``install.sh`` defers ``lm_eval`` to InferenceX's ``benchmark_lib.sh`` runtime
+    shim, but the multi-node ``magpie_bench_remote_compat`` client path runs
+    ``python -m lm_eval`` directly without that shim. On those runs ``lm_eval`` is
+    never installed, the eval subprocess dies with ``No module named lm_eval``,
+    and every ``RUN_EVAL=true`` baseline aborts with ``baseline_accuracy_failed``.
+    Ensure it here (preflight runs for all paths) with the benchmark interpreter.
+    Skipped when RUN_EVAL is explicitly disabled (default is enabled).
+
+    Args:
+        python_exe (str): The interpreter that will run ``python -m lm_eval``.
+        pip_extra (list[str]): Extra ``pip install`` arguments.
+    """
+    run_eval = os.environ.get("RUN_EVAL")
+    if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
+        return  # accuracy gate disabled; lm_eval not required
+    probe = subprocess.run([python_exe, "-c", "import lm_eval"], capture_output=True)
+    if probe.returncode == 0:
+        print("Preflight: lm_eval OK")
+        return
+    print("Preflight: installing lm_eval (accuracy gate) ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, "lm_eval"],
+        check=False,
+    )
+
+
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
 
@@ -1128,6 +1161,12 @@ def _preflight(
     # benchmark interpreter; ensure them there too so a bypass-only box whose
     # sys.executable differs from /opt/venv can still import the client.
     _ensure_bench_serving_deps(benchmark_python, pip_extra)
+
+    # 1c. lm_eval — GSM8K accuracy gate. The multi-node magpie remote-compat
+    # client path runs ``python -m lm_eval`` directly (no InferenceX runtime
+    # shim), so ensure it in the same benchmark interpreter or every
+    # RUN_EVAL=true baseline aborts with baseline_accuracy_failed.
+    _ensure_lm_eval_dep(benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the
