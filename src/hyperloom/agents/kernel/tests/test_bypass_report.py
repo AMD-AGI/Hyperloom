@@ -61,6 +61,92 @@ def test_build_candidates_routing():
     assert any(c["name"] == "aten::mm" for c in cands["skipped_kernels"])
 
 
+def _one(cand_kernel):
+    """Build candidates for a single kernel row and return its candidate dict."""
+    cands = report.build_candidates(_analyze([cand_kernel]), framework="sglang", target_platform="MI300X")
+    return cands["hot_kernels"][0]
+
+
+def test_shape_provenance_torch_trace_wins():
+    # A kernel with its own cpu_op Input Dims resolves to torch_trace even when
+    # backfill/launch-grid data is also present (waterfall priority).
+    c = _one(
+        {
+            "name": "_score_kernel",
+            "op_name": "aten::score",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[17, 7168]],
+            "op_dtypes": ["c10::BFloat16"],
+            "backfill_shapes": [[99, 99]],
+            "launch_grid": [17, 2, 1],
+            "launch_block": [512, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "torch_trace"
+    assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
+
+
+def test_shape_provenance_capture_backfill():
+    # No own cpu_op shape, but the same-name kernel resolved a shape at capture
+    # time: inherit it, tagged capture_backfill.
+    c = _one(
+        {
+            "name": "aiter::add_rmsnorm_quant_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[17, 7168]],
+            "backfill_dtypes": ["c10::BFloat16"],
+            "launch_grid": [17, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "capture_backfill"
+    assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
+
+
+def test_shape_provenance_launch_grid():
+    # No cpu_op shape and no backfill: fall to launch grid/block geometry.
+    c = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "launch_grid"
+    s = c["shapes"][0]["shape"]
+    assert "grid=(17,7,1)" in s and "block=(256,1,1)" in s
+    # Geometry must NOT feed the analytical roofline.
+    assert c["roofline_source"] == report._RL_PLACEHOLDER
+
+
+def test_shape_provenance_tile_name():
+    # No shape and no launch geometry: parse the BLOCK_SIZE_* tile from the name.
+    c = _one(
+        {
+            "name": "_gemm_a16_w16_kernel_BLOCK_SIZE_M_32_BLOCK_SIZE_N_32_BLOCK_SIZE_K_256_x",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+        }
+    )
+    assert c["shape_provenance"] == "tile_name"
+    s = c["shapes"][0]["shape"]
+    assert "M32" in s and "N32" in s and "K256" in s
+
+
+def test_shape_provenance_unresolved_when_no_signal():
+    # Nothing to go on: stays unresolved (unchanged behaviour).
+    c = _one({"name": "mystery_kernel", "op_name": "", "gpu_time_us": 100.0, "count": 1})
+    assert c["shape_provenance"] == "unresolved"
+    assert c["shapes"] == []
+
+
 def test_build_workload_roofline_totals_covers_all_kernels():
     # 20 kernels > any top-k cap: the workload totals must sum every device
     # kernel, not just the top-k candidate list.

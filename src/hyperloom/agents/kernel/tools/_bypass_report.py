@@ -147,6 +147,54 @@ def _trace_shape_entries(op_shapes: Any, op_dtypes: Any, call_count: int) -> lis
     return [{"call_num": int(call_count) if call_count else 1, "shape": "<br>".join(operands)}]
 
 
+# Triton autotune names embed the tile shape, e.g.
+# ``_gemm_a16_w16_kernel_BLOCK_SIZE_M_32_BLOCK_SIZE_N_32_BLOCK_SIZE_K_256_...``.
+_TILE_NAME_RE = re.compile(r"BLOCK_SIZE_([A-Za-z]+)_(\d+)")
+
+
+def _launch_grid_shape_entries(grid: Any, block: Any, call_count: int) -> list[dict[str, Any]]:
+    """Build a shape entry from a kernel's launch geometry (grid/block).
+
+    Fallback for kernels whose correlation->cpu_op chain is broken (Triton
+    direct-launch, graph replay): the launch grid/block is not the operand
+    tensor shape but a coarse, dispatchable geometry. Returns ``[]`` when no
+    positive dimension is present.
+    """
+    def _dims(v: Any) -> list[int]:
+        out: list[int] = []
+        for d in v if isinstance(v, (list, tuple)) else []:
+            try:
+                n = int(d)
+            except (TypeError, ValueError):
+                return []
+            out.append(n)
+        return out
+
+    g = _dims(grid)
+    b = _dims(block)
+    parts: list[str] = []
+    if any(x > 0 for x in g):
+        parts.append("grid=(" + ",".join(str(x) for x in g) + ")")
+    if any(x > 0 for x in b):
+        parts.append("block=(" + ",".join(str(x) for x in b) + ")")
+    if not parts:
+        return []
+    return [{"call_num": int(call_count) if call_count else 1, "shape": "<br>".join(parts)}]
+
+
+def _tile_name_shape_entries(kernel_name: str, call_count: int) -> list[dict[str, Any]]:
+    """Extract a tile shape from a Triton autotune kernel name (``BLOCK_SIZE_*``).
+
+    Lowest-priority fallback: yields a ``M32<br>N32<br>K256``-style tile shape
+    when the name encodes it. Returns ``[]`` when no tile token is present.
+    """
+    matches = _TILE_NAME_RE.findall(kernel_name or "")
+    if not matches:
+        return []
+    body = "<br>".join(f"{axis}{val}" for axis, val in matches)
+    return [{"call_num": int(call_count) if call_count else 1, "shape": body}]
+
+
 def _source_type_for_op(op_name: str) -> str:
     """Best-effort source-type guess from a launching op name.
 
@@ -374,11 +422,34 @@ def build_candidates(
             if source_file:
                 source_method = method
 
-        # Real per-arg dims/dtypes from the trace, rendered into the downstream
-        # shape-string contract.
+        # Shape resolution waterfall (provenance records the source):
+        #   1. torch_trace      -- this kernel's own cpu_op Input Dims (precise)
+        #   2. capture_backfill -- same-name kernel's capture-time shape
+        #   3. launch_grid      -- this kernel's launch grid/block geometry
+        #   4. tile_name        -- BLOCK_SIZE_* tile embedded in the kernel name
+        #   5. unresolved       -- none of the above
+        _count = k.get("count") or 0
         op_shapes = k.get("op_shapes") or []
         op_dtypes = k.get("op_dtypes") or []
-        shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
+        shape_entries = _trace_shape_entries(op_shapes, op_dtypes, _count)
+        shape_provenance = "torch_trace" if shape_entries else ""
+        if not shape_entries:
+            bf_shapes = k.get("backfill_shapes") or []
+            bf_dtypes = k.get("backfill_dtypes") or []
+            shape_entries = _trace_shape_entries(bf_shapes, bf_dtypes, _count)
+            if shape_entries:
+                op_dtypes = bf_dtypes
+                shape_provenance = "capture_backfill"
+        if not shape_entries:
+            shape_entries = _launch_grid_shape_entries(k.get("launch_grid"), k.get("launch_block"), _count)
+            if shape_entries:
+                shape_provenance = "launch_grid"
+        if not shape_entries:
+            shape_entries = _tile_name_shape_entries(kname, _count)
+            if shape_entries:
+                shape_provenance = "tile_name"
+        if not shape_provenance:
+            shape_provenance = "unresolved"
 
         # Benchmark discovery is opt-in; a routable kernel's on-disk
         # test/benchmark can seed downstream harness generation.
@@ -432,14 +503,22 @@ def build_candidates(
             "shapes": shape_entries,
             "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,
-            "shape_provenance": "torch_trace" if shape_entries else "unresolved",
+            "shape_provenance": shape_provenance,
         }
         # Analytical roofline: derive bound_type / AI / efficiency from captured
         # shapes + measured time for EVERY estimable kernel (rocprof enrichment
-        # later refines it to a measured roofline).
+        # later refines it to a measured roofline). Only precise operand shapes
+        # (torch_trace / capture_backfill) feed the AI math; launch-grid and
+        # tile-name fallbacks are geometry, not operand dims, so they would
+        # poison the roofline -- skip analytical estimation for them.
+        _roofline_shape = (
+            shape_entries[0]["shape"]
+            if shape_entries and shape_provenance in ("torch_trace", "capture_backfill")
+            else ""
+        )
         rl = compute_roofline(
             category=kc.category,
-            shape_str=shape_entries[0]["shape"] if shape_entries else "",
+            shape_str=_roofline_shape,
             gpu_time_us=float(cand["duration_us"] or 0.0),
             call_count=int(cand["call_count"] or 1),
             gpu_type=target_platform,
