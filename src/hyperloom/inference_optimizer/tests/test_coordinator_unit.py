@@ -203,7 +203,7 @@ def test_build_sweep_params_from_recipe_grid():
         },
     )
     p = Coordinator._build_sweep_params_from_recipe(st)
-    assert p["source"] == "cortex_recipe"
+    assert p["source"] == "recipe_kb"
     assert p["conc_values"] == [4, 8]
     assert p["isl_osl_configs"][0] == "1:1"
     assert p["isl_osl_configs"][1] == "32:64"

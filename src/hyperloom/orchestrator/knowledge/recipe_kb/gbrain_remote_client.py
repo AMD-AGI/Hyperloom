@@ -951,7 +951,7 @@ def build_gbrain_remote_from_env() -> GbrainRemoteRecipeClient | None:
     """Construct a client from ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``.
 
     Returns ``None`` when the env is not configured so the caller can
-    fall back to local-only or the cortex remote.
+    fall back to local-only or the recipe KB remote.
 
     Returns:
         A configured :class:`GbrainRemoteRecipeClient`, or ``None`` when the

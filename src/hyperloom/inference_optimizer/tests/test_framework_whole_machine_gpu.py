@@ -77,7 +77,7 @@ def _build_coord(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=None,
+        recipe_kb=None,
         knowledge_plane=None,
     )
 

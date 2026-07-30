@@ -391,14 +391,14 @@ def collect_telemetry(
     }
 
 
-# KB Provenance — Cortex KB integration audit
+# KB Provenance — Recipe KB integration audit
 def collect_kb_provenance(
     session_dir: Path,
     state: dict[str, Any],
     manifest: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the Cortex KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail.
+    """Collect the Recipe KB integration audit, merging SharedState warm-start fields, the NDJSON queue counts, and the audit-log status tail.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -412,12 +412,12 @@ def collect_kb_provenance(
         counts, audit-status tail, recipe-snapshot reads, and flusher status).
     """
     from ...session.session_paths import (
-        cortex_audit_jsonl as _audit_path,
-        cortex_dead_letter_ndjson as _dl_path,
-        cortex_flushed_ndjson as _flushed_path,
-        cortex_flusher_pid as _flusher_pid_path,
-        cortex_flusher_status_json as _flusher_status_path,
-        cortex_pending_ndjson as _pending_path,
+        recipe_kb_audit_jsonl as _audit_path,
+        recipe_kb_dead_letter_ndjson as _dl_path,
+        recipe_kb_flushed_ndjson as _flushed_path,
+        recipe_kb_flusher_pid as _flusher_pid_path,
+        recipe_kb_flusher_status_json as _flusher_status_path,
+        recipe_kb_pending_ndjson as _pending_path,
         pr_monitor_status_json as _pr_status_path,
         recipe_snapshot_audit_jsonl as _recipe_audit_path,
     )
@@ -493,7 +493,7 @@ def collect_kb_provenance(
     recipe_audit = _read_last_n_audit(_recipe_audit_path(session_dir), n=50)
     recipe_by_resolution: dict[str, int] = {}
     recipe_by_remote: dict[str, int] = {}
-    # Per-path (gbrain vs cortex) attribution. ``by_source`` counts contributed
+    # Per-path (gbrain vs recipe KB) attribution. ``by_source`` counts contributed
     # rows; ``best_config_by_source`` counts who supplied the champion config.
     recipe_by_source: dict[str, int] = {}
     recipe_best_config_by_source: dict[str, int] = {}
@@ -516,7 +516,7 @@ def collect_kb_provenance(
         ):
             recipe_best_config_by_source[str(src)] = recipe_best_config_by_source.get(str(src), 0) + 1
 
-    cortex_sid = (state.get("cortex_session_id") or "").strip()
+    recipe_kb_sid = (state.get("recipe_kb_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     # FINAL reference attribution: which path supplied the warm recipe that was
     # actually applied this session, per the WarmStartContext source tag set at T0.
@@ -528,7 +528,7 @@ def collect_kb_provenance(
     warm_replay_outcome = state.get("warm_replay_outcome") or {}
 
     out: dict[str, Any] = {
-        "cortex_session_id": cortex_sid,
+        "recipe_kb_session_id": recipe_kb_sid,
         "warm_start_ts": state.get("warm_start_ts") or "",
         "warm_start_recipe_seen": bool(warm and warm.get("raw")),
         "warm_start_recipe_tier": str(warm.get("tier") or "") if isinstance(warm, dict) else "",

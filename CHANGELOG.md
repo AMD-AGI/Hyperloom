@@ -7,15 +7,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
-- **Remote Cortex KB wiring**: Hyperloom no longer exposes `--cortex-kb-url` or
-  injects `CORTEX_KB_URL` into the Critic subprocess. Per-proposal
-  `/v2/reasoning/assess` enrichment is not wired by the optimizer CLI.
+- **Remote Cortex KB, end to end**: every path that could reach a remote Cortex
+  KB is gone, not just its CLI wiring. `--cortex-kb-url` is removed, and the
+  Critic's `/v2/reasoning/assess` client (`kb_assess_client.py`) is deleted
+  along with the bundle fields (`kb_assess_by_proposal`, `kb_assess_trace`),
+  the prompt injection, and the Langfuse `kb_assess` span. `CORTEX_KB_URL`,
+  `CORTEX_KB_HTTP_TIMEOUT_SEC` and `CORTEX_KB_ASSESS_INJECT` are no longer read
+  anywhere, so setting them in `.env` or the shell has no effect — previously
+  the Critic would still call out if the variable reached its environment by
+  any route. No Hyperloom code makes outbound requests to a Cortex KB.
 - **Specialist `cortex_kb` MCP**: Specialists no longer receive
   `mcp__cortex_kb__*` tools or a `cortex_kb` MCP server in
   `specialist_mcp.json`. PR Monitor MCP remains available when configured.
 - **IR-3 preflight**: Remote recipe-KB reachability probe removed; IR-3 now
   probes PR Monitor only. `--degraded-kb` no longer disables PR Monitor.
-- **Recipe KB with `--degraded-kb`**: T0/T2/T3/T4 are skipped (`cortex_kb=None`).
+- **Recipe KB with `--degraded-kb`**: T0/T2/T3/T4 are skipped (`recipe_kb=None`).
+- **PolicyGate R4 (`kb_write_unauthorized`)**: removed. `KB_WRITE_TOOL_NAMES`
+  was empty, so the rule could never fire while its comment still claimed it
+  guarded KB writes. Local Recipe KB writes go through direct Python calls
+  (`writeback.py` / `proposals.py`), which R4 never covered. R5
+  (`tool_whitelist_role`) is unchanged and still gates PR Monitor / Web tools.
+
+### Changed
+
+- **breaking: `cortex_*` renamed to `recipe_*`**. After the remote Cortex KB
+  was removed, the names left behind held a *local* `RecipeKB` and no longer
+  referred to anything called Cortex. Renamed across code, prompts and
+  serialized data:
+  - Python API: `Coordinator.cortex_kb` → `.recipe_kb`, `args.cortex_enabled` →
+    `args.recipe_kb_enabled`, `_bootstrap_cortex_kb()` → `_bootstrap_recipe_kb()`,
+    `cortex_finalize_recipe_and_journal()` → `finalize_recipe_and_journal()`,
+    `_cortex_t4_hook()` → `_recipe_kb_t4_hook()`, and the module
+    `orchestrator.knowledge.cortex_t0` → `.recipe_kb_t0`.
+  - CLI: `--cortex-strict-fingerprint` → `--recipe-kb-strict-fingerprint`.
+    No alias is kept; the legacy flag now fails argparse.
+  - Emitted data: SharedState `cortex_session_id` / `cortex_session_summary` →
+    `recipe_kb_*`; breakdown `kb_provenance.cortex_session_id` →
+    `recipe_kb_session_id`; stop reasons `cortex_t0_failed` /
+    `cortex_drain_failed` / `cortex_commit_failed` → `recipe_kb_*`; warm-recipe
+    source tag `cortex-kb` → `recipe-kb`; sweep grid source `cortex_recipe` →
+    `recipe_kb`. Consumers that parse these values need updating.
+  - On disk: `<session>/runtime/cortex/` → `<session>/runtime/recipe_kb/`.
+    No migration is provided and none is needed: this directory holds only
+    derived bookkeeping, while the authoritative recipe store is the local KB
+    root (mirrored to gbrain) outside the session tree. Resuming an older
+    session regenerates the snapshots on its next T0 anchor.
+
+  Note: this does **not** touch Primus Cortex (`agents/framework/sources/primus_cortex.py`,
+  `PRIMUS_CORTEX_PR_API`), which shares only the word "Cortex" with the removed
+  KB. It is the framework-agent's PR-candidate source and the backend behind
+  PR Monitor (`--pr-monitor-url` defaults to `$PRIMUS_CORTEX_PR_API`), which
+  this release keeps.
 
 ## [v1.0.0a2] - 2026-07-29
 Current packaged version (`pyproject.toml`). See

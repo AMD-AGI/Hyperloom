@@ -576,7 +576,7 @@ class LangfuseEmitter:
         unless live push is enabled.
 
         Args:
-            name (str): Span name (e.g. ``"kb_assess:iter_3"``).
+            name (str): Span name (e.g. ``"kb_priors:iter_3"``).
             agent (str): Owning agent (``"critic"`` / ``"recipe_kb"``).
             output (Any): The trace payload attached as the span output.
             phase (str): Phase bucket; defaults to ``(unphased)``.

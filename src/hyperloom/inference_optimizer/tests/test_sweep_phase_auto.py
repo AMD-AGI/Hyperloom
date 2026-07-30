@@ -638,7 +638,7 @@ def test_build_sweep_params_defaults_when_no_recipe():
 
 
 def test_build_sweep_params_full_recipe_override():
-    """Recipe with all three fields → all three overridden + source=cortex_recipe."""
+    """Recipe with all three fields → all three overridden + source=recipe_kb."""
     state = _BareState(
         warm_start_recipe={
             "sweep_grid": {
@@ -649,14 +649,14 @@ def test_build_sweep_params_full_recipe_override():
         },
     )
     out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "cortex_recipe"
+    assert out["source"] == "recipe_kb"
     assert out["conc_values"] == [8, 32, 128]
     assert out["isl_osl_configs"] == ["1024:1024", "4096:4096"]
     assert out["num_prompts_factor"] == 7
 
 
 def test_build_sweep_params_partial_recipe_per_field_fallback():
-    """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=cortex_recipe."""
+    """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=recipe_kb."""
     from hyperloom.orchestrator.actions.executors.sweep import (
         DEFAULT_ISL_OSL,
         DEFAULT_NUM_PROMPTS_FACTOR,
@@ -666,7 +666,7 @@ def test_build_sweep_params_partial_recipe_per_field_fallback():
         warm_start_recipe={"sweep_grid": {"conc_values": [256]}},
     )
     out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "cortex_recipe"
+    assert out["source"] == "recipe_kb"
     assert out["conc_values"] == [256]
     assert out["isl_osl_configs"] == DEFAULT_ISL_OSL
     assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
@@ -778,8 +778,8 @@ async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_internal_sweep_task_cortex_recipe_propagates(coord):
-    """Recipe-driven grid surfaces as source='cortex_recipe' on the task."""
+async def test_enqueue_internal_sweep_task_recipe_kb_recipe_propagates(coord):
+    """Recipe-driven grid surfaces as source='recipe_kb' on the task."""
     coord.shared_state.warm_start_recipe = {
         "sweep_grid": {
             "conc_values": [128],
@@ -787,7 +787,7 @@ async def test_enqueue_internal_sweep_task_cortex_recipe_propagates(coord):
         },
     }
     task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-    assert task.params["source"] == "cortex_recipe"
+    assert task.params["source"] == "recipe_kb"
     assert task.params["conc_values"] == [128]
     assert task.params["isl_osl_configs"] == ["1024:1024"]
 
@@ -974,7 +974,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=None,
+        recipe_kb=None,
         knowledge_plane=None,
     )
     # Seed state at KERNEL boundary as if a plateau_kernel just fired
@@ -1026,7 +1026,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=role_registry,
-        cortex_kb=None,
+        recipe_kb=None,
         knowledge_plane=None,
     )
     coord.shared_state.kernel_enabled = False
