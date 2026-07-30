@@ -1355,7 +1355,6 @@ class KBFlusherStatus(TypedDict, total=False):
     spawned: bool  # daemon was actually subprocess.Popen'd this boot
     alive: bool  # live pid probe at breakdown emit time
     pid: int | None
-    cortex_kb_url: str | None
     interval_sec: float
     batch_size: int
     reason: str  # boot-time spawn decision text

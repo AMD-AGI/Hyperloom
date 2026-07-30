@@ -1004,12 +1004,9 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
-def test_specialist_tool_denylist_excludes_kb_write_paths():
-    """The denylist still captures every cortex_kb write surface (Coordinator is the sole KB writer); Edit/Write/MultiEdit were lifted out so specialists can patch their isolated worktree."""
-    for forbidden in ("mcp__cortex_kb__propose_point",):
-        assert forbidden in SPECIALIST_TOOL_DENYLIST
-        assert forbidden not in DEFAULT_SPECIALIST_TOOLS
-    # Write tools are in the default whitelist, not the denylist.
+def test_specialist_tool_denylist_is_empty():
+    """KB write MCP tools were removed with specialist cortex_kb; denylist is empty."""
+    assert SPECIALIST_TOOL_DENYLIST == frozenset()
     for write_tool in ("Edit", "Write", "MultiEdit"):
         assert write_tool not in SPECIALIST_TOOL_DENYLIST
         assert write_tool in DEFAULT_SPECIALIST_TOOLS

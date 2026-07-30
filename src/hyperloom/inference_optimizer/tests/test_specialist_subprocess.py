@@ -268,10 +268,11 @@ def test_default_tools_include_write_capabilities():
         assert tool not in SPECIALIST_TOOL_DENYLIST
 
 
-def test_kb_write_tools_remain_denied():
-    """KB lifecycle stays Coordinator-owned (Inv-2 / Inv-6.1)."""
-    for kb_tool in ("mcp__cortex_kb__propose_point",):
-        assert kb_tool in SPECIALIST_TOOL_DENYLIST
+def test_kb_write_tools_not_in_default_specialist_tools():
+    """KB lifecycle stays Coordinator-owned; specialist cortex_kb MCP was removed."""
+    for kb_tool in ("mcp__cortex_kb__propose_point", "mcp__cortex_kb__lookup"):
+        assert kb_tool not in DEFAULT_SPECIALIST_TOOLS
+        assert kb_tool not in SPECIALIST_TOOL_DENYLIST
 
 
 def test_task_allowed_tools_override_default_patch_tools():

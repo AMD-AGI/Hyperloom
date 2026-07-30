@@ -4,18 +4,14 @@
 """KnowledgePlane facade for advisory knowledge inputs.
 
 Coordinator-side glue exposing the PR Monitor MCP URL for specialist tool
-whitelisting and the Cortex KB MCP for optional graph-query tools. Stateless.
-This facade only gates whether those MCP servers are advertised in the
-specialist tool whitelist.
+whitelisting. Stateless. This facade only gates whether the PR Monitor MCP
+server is advertised in the specialist tool whitelist.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass, field
-
-from hyperloom.common.env import is_truthy
+from dataclasses import dataclass
 
 from .pr_monitor import (
     DEFAULT_PR_MONITOR_MCP_URL,
@@ -26,31 +22,16 @@ from .pr_monitor import (
 log = logging.getLogger(__name__)
 
 
-def _has_persistent_secret_header(headers: dict[str, str]) -> bool:
-    """Return true when headers cannot be safely persisted in MCP config."""
-    return any(str(name).lower() == "authorization" for name in headers)
-
-
-def _allow_persistent_mcp_auth_headers() -> bool:
-    setting = os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
-    return True if setting is None else is_truthy(setting)
-
-
 @dataclass
 class KnowledgePlane:
     """Single facade for the knowledge sources.
 
-    Lives for one Coordinator run. Tracks whether the PR Monitor MCP and
-    Cortex KB MCP are wired so the specialist runner can gate the
-    corresponding tool groups.
+    Lives for one Coordinator run. Tracks whether the PR Monitor MCP is wired
+    so the specialist runner can gate the corresponding tool group.
     """
 
     pr_monitor: PRMonitorClient | None = None
     pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
-    # Read-only KB-graph (gbrain) MCP advertised as the ``cortex_kb`` server;
-    # empty strips the mcp__cortex_kb__* tools from the specialist whitelist.
-    cortex_kb_mcp_url: str = ""
-    cortex_kb_mcp_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_clients(
@@ -58,8 +39,6 @@ class KnowledgePlane:
         *,
         pr_monitor: PRMonitorClient | None = None,
         pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
-        cortex_kb_mcp_url: str = "",
-        cortex_kb_mcp_headers: dict[str, str] | None = None,
     ) -> "KnowledgePlane":
         """Construct a plane from injected clients and config.
 
@@ -67,10 +46,6 @@ class KnowledgePlane:
             pr_monitor (PRMonitorClient | None): Optional PR Monitor client
                 (used only to check ``enabled`` for tool whitelisting).
             pr_monitor_mcp_url (str): MCP URL advertised to specialists.
-            cortex_kb_mcp_url (str): Read-only KB-graph MCP URL advertised to
-                specialists as the ``cortex_kb`` server; empty disables it.
-            cortex_kb_mcp_headers (dict[str, str] | None): Optional auth headers
-                (e.g. ``Authorization: Bearer …``) for the KB-graph MCP server.
 
         Returns:
             KnowledgePlane: The constructed facade.
@@ -78,8 +53,6 @@ class KnowledgePlane:
         return cls(
             pr_monitor=pr_monitor,
             pr_monitor_mcp_url=(pr_monitor_mcp_url or DEFAULT_PR_MONITOR_MCP_URL).strip(),
-            cortex_kb_mcp_url=(cortex_kb_mcp_url or "").strip(),
-            cortex_kb_mcp_headers=dict(cortex_kb_mcp_headers or {}),
         )
 
     def reset_round_caches(self) -> None:
@@ -93,38 +66,6 @@ class KnowledgePlane:
             bool: ``True`` when a PR Monitor client is present and enabled.
         """
         return self.pr_monitor is not None and self.pr_monitor.enabled
-
-    @property
-    def cortex_enabled(self) -> bool:
-        """Whether the read-only ``cortex_kb`` KB-graph MCP is wired.
-
-        Returns:
-            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured and can
-            be written to the specialist MCP config without persisting secrets.
-        """
-        if not bool((self.cortex_kb_mcp_url or "").strip()):
-            return False
-        return not _has_persistent_secret_header(self.cortex_kb_mcp_headers) or _allow_persistent_mcp_auth_headers()
-
-    def cortex_specialist_mcp_url(self) -> str:
-        """KB-graph MCP URL to advertise as the specialist ``cortex_kb`` server.
-
-        Returns:
-            The configured URL, or ``""`` when the KB-graph MCP is disabled.
-        """
-        if not self.cortex_enabled:
-            return ""
-        return (self.cortex_kb_mcp_url or "").strip()
-
-    def cortex_specialist_mcp_headers(self) -> dict[str, str]:
-        """Auth headers for the specialist ``cortex_kb`` MCP server.
-
-        Returns:
-            A copy of the configured header map (``{}`` when none / disabled).
-        """
-        if not self.cortex_enabled:
-            return {}
-        return dict(self.cortex_kb_mcp_headers or {})
 
     def specialist_mcp_url(self) -> str:
         """MCP URL to advertise in the specialist tool whitelist.
