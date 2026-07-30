@@ -607,11 +607,11 @@ def test_normalize_dispatch_tags_keeps_valid_anchor_and_dedups():
     assert normalize_dispatch_tags({"tags": ["serving_specialist", "framework"]}) == ["framework"]
 
 
-def test_normalize_dispatch_tags_passes_garbage_through_for_rejection():
+def test_normalize_dispatch_tags_passes_garbage_through():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
 
     # Genuinely unknown tags are NOT invented into an anchor — they pass
-    # through verbatim so PolicyGate's specialist_unknown_domain still fires.
+    # through verbatim so the runner can synthesize an empty result.
     assert normalize_dispatch_tags({"tags": ["totally_bogus"]}) == ["totally_bogus"]
 
 
