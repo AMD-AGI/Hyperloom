@@ -173,18 +173,6 @@ def test_sweep_unknown_falls_back_to_mtime_gate(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # _resolve_timeout integration
 # ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def _no_ambient_model_path(monkeypatch):
-    """Keep ``_resolve_timeout`` off the server-ready floor in these tests.
-
-    The floor scales with checkpoint size read from ``$MODEL_PATH``, so an
-    operator shell that exports a real model would otherwise change the
-    timeouts these tests assert on.
-    """
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC", raising=False)
-
-
 def _cold_probe(*_a, **_k):
     return {
         "path": "/fake/jit",
