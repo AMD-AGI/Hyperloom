@@ -523,4 +523,3 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     )
     await force_coord._maybe_force_stalled_domain_specialist()
     force_coord._handle_intent.assert_not_awaited()
-
