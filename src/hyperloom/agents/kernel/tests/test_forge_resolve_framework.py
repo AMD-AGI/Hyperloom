@@ -27,6 +27,33 @@ def test_resolve_framework_from_kernel_path_when_candidate_silent():
     assert fw == "vllm"
 
 
+def test_resolve_framework_owning_package_not_deep_subdir():
+    # Kernel lives directly in vllm; the owning package (shallowest) wins, not a
+    # deep dir. Mirrors the arena side for the same operator.
+    fw = forge_submit._resolve_framework(
+        {}, "/ws/worktree/vllm/v1/attention/ops/paged.py")
+    assert fw == "vllm"
+
+
+def test_resolve_framework_aiter_meta_maps_to_aiter():
+    assert forge_submit._resolve_framework({"framework": "aiter_meta"}) == "aiter"
+    assert forge_submit._resolve_framework(
+        {}, "/ws/worktree/aiter_meta/csrc/gemm.cu") == "aiter"
+
+
+def test_resolve_framework_follows_kernel_sources_across_packages():
+    # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but
+    # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'
+    # to match the arena producer, not 'vllm' (the caller).
+    candidate = {
+        "kernel_sources": [
+            "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/unified.py"
+        ],
+    }
+    anchor = "/ws/worktree/vllm/attention/ops/entry.py"
+    assert forge_submit._resolve_framework(candidate, anchor) == "aiter"
+
+
 def test_resolve_framework_returns_empty_when_unknown():
     # Unresolvable -> "" so the caller OMITS --framework and forge-loop infers.
     # Fault tolerance: never raises, never guesses a wrong framework.

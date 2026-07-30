@@ -168,7 +168,24 @@ def _resolve_gpu_target(candidate: dict) -> str:
     )
 
 
-_KNOWN_FRAMEWORKS = ("vllm", "sglang", "aiter")
+# Framework aliases -> canonical KB framework identity. MUST stay in sync with
+# the arena launcher's _FRAMEWORK_ALIASES so producer/consumer agree. aiter_meta
+# is aiter's C++/CK companion package and shares aiter's identity.
+_FRAMEWORK_ALIASES = {
+    "vllm": "vllm",
+    "sglang": "sglang",
+    "aiter": "aiter",
+    "aiter_meta": "aiter",
+}
+
+
+def _framework_from_path(path: str) -> str:
+    """First (shallowest == owning package) known framework component in a path."""
+    for comp in Path(path).parts:
+        canon = _FRAMEWORK_ALIASES.get(comp.lower())
+        if canon:
+            return canon
+    return ""
 
 
 def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
@@ -181,24 +198,33 @@ def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
     and consumer (hyperloom) can have different workspace layouts — pinning the
     framework keeps both on the SAME kernel page. Resolution order:
 
-      1. an explicit, RECOGNIZED framework on the candidate
-         (``framework``/``backend`` — a language like ``triton`` is ignored, it
-         is not a framework);
-      2. a known framework directory in the kernel path;
-      3. "" (defer to forge-loop).
+      1. an explicit, RECOGNIZED framework on the candidate (``framework``/
+         ``backend`` — a language like ``triton`` is ignored; ``aiter_meta`` maps
+         to ``aiter``);
+      2. the owning package of a KERNEL SOURCE definition file
+         (``kernel_sources``) — this is where the real compute kernel lives,
+         which can be aiter even when the traced entry/anchor is a vLLM/SGLang
+         dispatch that merely CALLS it; matching the definition keeps the slug
+         aligned with the arena producer;
+      3. the owning framework package in the kernel path — scanned shallowest
+         first so a kernel that lives DIRECTLY in vllm/sglang (e.g.
+         ``.../vllm/model_executor/layers/fused_moe/...``) resolves to that
+         package, not a deep subdir name;
+      4. "" (defer to forge-loop).
     """
     raw = str(
         (candidate or {}).get("framework")
         or (candidate or {}).get("backend")
         or ""
     ).strip().lower()
-    if raw in _KNOWN_FRAMEWORKS:
-        return raw
-    parts = {p.lower() for p in Path(kernel_path).parts} if kernel_path else set()
-    for framework in _KNOWN_FRAMEWORKS:
-        if framework in parts:
+    canon = _FRAMEWORK_ALIASES.get(raw)
+    if canon:
+        return canon
+    for src in (candidate or {}).get("kernel_sources") or []:
+        framework = _framework_from_path(str(src))
+        if framework:
             return framework
-    return ""
+    return _framework_from_path(kernel_path)
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
