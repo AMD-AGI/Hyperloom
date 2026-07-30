@@ -51,9 +51,10 @@ relaunch `infera.engine.{sglang,vllm}`, so the aiter JIT cache survives
 restarts. No `bootstrap` / `verify` step. Benchmarks target the **Infera
 frontend `:8000`** (`state.service_url`), never sglang rank-0.
 * Image must carry the sshd layer (`docker/infera/Dockerfile.sshd`); sshd runs
-  on `$MN_SSH_PORT` (base **2222**, not 22). Under hostNetwork each GPU role
-  binds a distinct port — prefill/worker `2222+N`, decode `2232+N` (via
-  `LWS_WORKER_INDEX`) — so co-located roles don't collide.
+  on `$MN_SSH_PORT` (base **2233**, not 22 — avoids colliding with node sshd
+  on :2222). Under hostNetwork each GPU role binds a distinct port —
+  prefill/worker `2233+N`, decode `2243+N` (via `LWS_WORKER_INDEX`) — so
+  co-located roles don't collide.
 * **Aggregated** (default): `serviceRoles=[frontend, worker]`,
   `worker.replica = nodes`.
 * **PD-disaggregated**: `--pd-mode disaggregated --pd-prefill-nodes N
@@ -85,7 +86,7 @@ a `--nodes >= 2` run has nothing to drive and exits 2.
 | --- | --- | --- |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | **yes** | path to a private key already authorised on the pods (platform writes the file + bakes its public half at pod-create; never refreshed) |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` | **yes** (≥1) | comma-separated GPU pod IPs. PD uses `_PREFILL_IPS` + `_DECODE_IPS`; aggregated uses `_WORKER_IPS` |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | no | SSH base port (default **2222**; decode role-offset +10) |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | no | SSH base port (default **2233**; decode role-offset +10) |
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | no | known_hosts path (else lax host-key check) |
 
 infera **requires** SSH (`_SSH_KEY` + ≥1 `*_IPS`); missing → fails fast

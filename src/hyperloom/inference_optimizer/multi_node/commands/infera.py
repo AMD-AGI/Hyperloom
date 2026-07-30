@@ -3,10 +3,10 @@
 
 """Infera (InferaDeployment) idle-pod backend command cluster.
 
-Mirrors ``create-rayjob`` but provisions a SaFE InferaDeployment with idle
-worker pods (mn-idle.sh) and an SSH control plane instead of a RayJob with the
-Ray Dashboard. The benchmark entry point is the Infera frontend (:8000), NOT
-sglang rank-0 :8888. Each GPU role binds a distinct per-role sshd port
+Drives an InferaDeployment the platform already provisioned: idle worker pods
+(mn-idle.sh) and an SSH control plane instead of a RayJob with the Ray
+Dashboard. The benchmark entry point is the Infera frontend, NOT sglang rank-0
+:8888. Each GPU role binds a distinct per-role sshd port
 (decode offset by the role stride); ``restart-server`` SSH-fans-out
 ``launch_infera_node.py`` to every worker pod, which launches
 ``infera.engine.sglang`` / ``infera.engine.vllm`` per rank.
@@ -92,15 +92,19 @@ def _infera_require_state() -> dict[str, Any]:
     """
     state = _mn_cli._load_state()
     if state.get("backend") != "infera":
-        raise RuntimeError("state backend is not 'infera'; run create-infera first")
+        raise RuntimeError(
+            "state backend is not 'infera'; the platform selects the backend, check "
+            "INFERENCE_OPTIMIZER_MN_BACKEND and the HYPERLOOM_MN_EXT_* hand-off"
+        )
     has_gpu_pods = bool(_infera_all_gpu_targets(state))
     if not has_gpu_pods:
         raise RuntimeError(
-            "no GPU pod IPs in state; re-run create-infera (LWS pods may "
-            "not have had IPs yet when the workload reached Running)"
+            "no GPU pod IPs in state; check HYPERLOOM_MN_EXT_PREFILL_IPS / "
+            "_DECODE_IPS / _WORKER_IPS (LWS pods may not have had IPs yet when "
+            "the workload reached Running)"
         )
     if not state.get("ssh_key_path"):
-        raise RuntimeError("no ssh_key_path in state; re-run create-infera")
+        raise RuntimeError("no ssh_key_path in state; check HYPERLOOM_MN_EXT_SSH_KEY")
     return state
 
 

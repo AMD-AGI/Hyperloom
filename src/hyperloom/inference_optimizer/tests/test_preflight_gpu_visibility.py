@@ -12,7 +12,8 @@ from hyperloom.inference_optimizer.cli import preflight
 
 @pytest.fixture(autouse=True)
 def _clear_safe_and_ext(monkeypatch):
-    # external_service_url() only fires when SaFE creds are absent.
+    # Each test sets the hand-off itself; SAFE_API_* are cleared only to keep a
+    # developer's real credentials out of the run, they do not affect the mode.
     for key in ("SAFE_API_URL", "SAFE_API_KEY", "HYPERLOOM_MN_EXT_SERVICE_URL"):
         monkeypatch.delenv(key, raising=False)
 

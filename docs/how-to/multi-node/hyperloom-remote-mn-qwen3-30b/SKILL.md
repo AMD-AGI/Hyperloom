@@ -30,9 +30,11 @@ until a terminal `stop_reason` (`target_reached`, `global_converged`,
 
 The blocks below are written for Primus-Claw *and* `optimize`: Claw parses them to
 size and build the cluster, then the agent runs `optimize` with the same block.
-Four flags exist only for Claw and **must be dropped when composing the
-`optimize` command** — `optimize` has no such options and argparse will reject
-them:
+Four flags exist only for Claw and **should be dropped when composing the
+`optimize` command** — it has no such options. Passing them anyway is not fatal
+(`optimize` logs `ignoring unrecognised arguments` and continues), but that
+warning is also your only signal for a genuinely misspelled flag, so keep it
+clean:
 
 | Claw-only flag | What Claw does with it |
 |---|---|

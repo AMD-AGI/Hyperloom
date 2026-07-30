@@ -214,7 +214,7 @@ def _resolve_pd_args(
     # persists the raw arg (often 0), so a --resume that also lost the
     # ``$PD_*_NODES`` env would leave pn/dn at 0 and wrongly fail the
     # disaggregated gate below (e.g. auto-roofline after resume). Recover the
-    # group sizes from the discovered per-role pod lists that create-infera
+    # group sizes from the discovered per-role pod lists the hand-off
     # persisted (``prefill_pod_ips`` / ``decode_pod_ips``), which are the
     # authoritative pod counts for the running deployment.
     if pn <= 0:

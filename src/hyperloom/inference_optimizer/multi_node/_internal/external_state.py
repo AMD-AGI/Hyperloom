@@ -1,4 +1,4 @@
-"""SaFE-less external multi-node mode: synthesize state from HYPERLOOM_MN_EXT_* env vars."""
+"""Cluster hand-off: synthesize multi-node state from HYPERLOOM_MN_EXT_* env vars."""
 
 from __future__ import annotations
 
@@ -9,28 +9,23 @@ from pathlib import Path
 from typing import Any
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
+from .ssh_client import DEFAULT_SSH_PORT
 
 log = logging.getLogger(__name__)
 
 
-def safe_available() -> bool:
-    """True when SaFE API credentials are both present in the environment.
-
-    Returns:
-        bool: Whether the normal SaFE create flow should be used.
-    """
-    return bool(os.environ.get("SAFE_API_URL", "").strip()) and bool(os.environ.get("SAFE_API_KEY", "").strip())
-
-
 def external_service_url() -> str:
-    """Return the external benchmark URL when SaFE is absent, else empty.
+    """Return the handed-over cluster's benchmark URL, or empty when there is none.
+
+    The hand-off is the ONLY signal for external mode. It is deliberately not
+    gated on ``SAFE_API_*``: those credentials authenticate the LLM gateway and
+    are present in essentially every platform sandbox, so gating on them made a
+    handed-over cluster invisible exactly where the integration runs.
 
     Returns:
-        str: ``HYPERLOOM_MN_EXT_SERVICE_URL`` when SaFE is unavailable and the
-        value is an http(s) URL; ``""`` otherwise.
+        str: ``HYPERLOOM_MN_EXT_SERVICE_URL`` when it is an http(s) URL; ``""``
+        otherwise.
     """
-    if safe_available():
-        return ""
     u = os.environ.get("HYPERLOOM_MN_EXT_SERVICE_URL", "").strip()
     return u if u.startswith(("http://", "https://")) else ""
 
@@ -39,8 +34,8 @@ def build_external_state_from_env() -> dict[str, Any]:
     """Synthesize multi-node state purely from ``HYPERLOOM_MN_EXT_*`` env vars.
 
     Returns:
-        dict[str, Any]: Synthetic state mirroring SaFE create-infera/rayjob
-        output, or ``{}`` when not in external mode.
+        dict[str, Any]: Synthetic state in the same shape the infera / rayjob
+        commands read, or ``{}`` when no cluster was handed over.
     """
     url = external_service_url()
     if not url:
@@ -56,7 +51,7 @@ def build_external_state_from_env() -> dict[str, Any]:
             return default
 
     ssh_key = os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip()
-    ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", 2233)
+    ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", DEFAULT_SSH_PORT)
     known_hosts = os.environ.get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS", "").strip()
     nodes = _int_env("INFERENCE_OPTIMIZER_NODES", 1)
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
@@ -196,16 +191,15 @@ def _read_state_file(path: Path) -> dict[str, Any]:
 
 
 def load_multi_node_state() -> dict[str, Any]:
-    """Load multi-node state; external env wins over on-disk when SaFE is absent.
+    """Load multi-node state; a cluster hand-off wins over on-disk state.
 
-    Normal (SaFE) flow: the resolved ``$MULTI_NODE_STATE_FILE`` / session
+    Without a hand-off: the resolved ``$MULTI_NODE_STATE_FILE`` / session
     ``runtime/multi_node_state.json`` is the only source, else ``{}``.
 
-    External flow (``HYPERLOOM_MN_EXT_SERVICE_URL`` set, SaFE creds absent):
-    ``HYPERLOOM_MN_EXT_*`` env synthesis wins over any on-disk state so a
-    leftover SaFE state file cannot shadow updated pod IPs / service URL when
-    the operator switches to external mode mid-session (e.g. manual
-    ``restart-server`` without re-running ``optimize``).
+    With one (``HYPERLOOM_MN_EXT_SERVICE_URL`` set): ``HYPERLOOM_MN_EXT_*`` env
+    synthesis wins over any on-disk state, so a leftover state file cannot
+    shadow the updated pod IPs / service URL of the cluster actually handed
+    over (e.g. a manual ``restart-server`` without re-running ``optimize``).
 
     Returns:
         dict[str, Any]: The effective multi-node state for this process.

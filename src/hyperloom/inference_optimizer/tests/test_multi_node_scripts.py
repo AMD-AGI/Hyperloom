@@ -667,17 +667,24 @@ def test_infera_discover_role_pods_groups_prefill_decode():
             {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
         ]
     }
+    # Ports come off the default base, so assert against the constant: moving
+    # the default must not need this test edited.
+    base = infera_support.DEFAULT_SSH_PORT
+    stride = infera_support.ssh_role_port_offset("decode")
     r = infera_support.discover_role_pods(wl)
     assert [p["podIP"] for p in r["prefill"]] == ["10.0.1.0", "10.0.1.1"]
-    assert [p["sshPort"] for p in r["prefill"]] == [2222, 2223]
+    assert [p["sshPort"] for p in r["prefill"]] == [base, base + 1]
     assert [p["podIP"] for p in r["decode"]] == ["10.0.2.0"]
-    assert r["decode"][0]["sshPort"] == 2232
+    assert r["decode"][0]["sshPort"] == base + stride
     assert r["frontend"] and not r["worker"]
 
 
 def test_infera_ssh_port_role_stride_and_idle_entrypoint():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
+    from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
 
+    assert infera_support.ssh_port_for_pod("prefill", 0) == DEFAULT_SSH_PORT
+    assert infera_support.ssh_port_for_pod("decode", 0) == DEFAULT_SSH_PORT + infera_support.INFERA_SSH_PORT_ROLE_STRIDE
     assert infera_support.ssh_port_for_pod("prefill", 0, ssh_port_base=2222) == 2222
     assert infera_support.ssh_port_for_pod("decode", 0, ssh_port_base=2222) == 2232
     assert infera_support.ssh_port_for_pod("worker", 1, ssh_port_base=2222) == 2223
@@ -685,6 +692,8 @@ def test_infera_ssh_port_role_stride_and_idle_entrypoint():
     decode_ep = infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=2222)
     assert "2222" in prefill_ep and "LWS_WORKER_INDEX" in prefill_ep
     assert "2232" in decode_ep
+    default_prefill_ep = infera_support.idle_worker_entrypoint(role="prefill")
+    assert str(DEFAULT_SSH_PORT) in default_prefill_ep
 
 
 def test_infera_disagg_flags_and_launch_args():

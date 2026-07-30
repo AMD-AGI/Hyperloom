@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""External (SaFE-less) multi-node mode: env-synthesized state and provision skip."""
+"""Cluster hand-off: env-synthesized multi-node state and its adoption guards."""
 
 from __future__ import annotations
 
@@ -45,6 +45,22 @@ def test_build_external_state_from_env_pd_topology(_external_env: Path) -> None:
     assert state["decode_pod_ips"] == ["10.0.1.2"]
     assert state["last_restart_pd_prefill_nodes"] == 1
     assert state["last_restart_pd_decode_nodes"] == 1
+
+
+def test_external_state_default_ssh_port_matches_image(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the platform omits ``HYPERLOOM_MN_EXT_SSH_PORT``, use the image default."""
+    from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_PORT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.1.1")
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+
+    state = ext.build_external_state_from_env()
+    assert state["ssh_port"] == DEFAULT_SSH_PORT
+    assert state["prefill_pods"][0]["sshPort"] == DEFAULT_SSH_PORT
 
 
 def test_external_pod_ssh_ports_follow_the_lws_ordinal(
@@ -124,29 +140,40 @@ def test_load_multi_node_state_prefers_env_over_stale_disk(
     assert loaded.get("external") is True
 
 
-def test_load_multi_node_state_uses_disk_when_safe_present(
+def test_load_multi_node_state_honours_handoff_alongside_safe_creds(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SaFE creds present => external env ignored; on-disk state wins."""
+    """The platform sandbox case: LLM creds and a cluster hand-off coexist.
+
+    SAFE_API_* authenticate the LLM gateway and are set in essentially every
+    platform sandbox, so gating the hand-off on them made multi-node unusable
+    exactly where the integration runs. The hand-off must still win here.
+    """
     monkeypatch.setenv("SAFE_API_URL", "http://safe")
     monkeypatch.setenv("SAFE_API_KEY", "key")
     state_path = resolve_state_file()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
-        json.dumps({"backend": "infera", "service_url": "http://safe-cluster:8000"}),
+        json.dumps({"backend": "infera", "service_url": "http://stale-cluster:8000"}),
         encoding="utf-8",
     )
-    assert ext.load_multi_node_state()["service_url"] == "http://safe-cluster:8000"
+    loaded = ext.load_multi_node_state()
+    assert loaded["service_url"] == "http://frontend:8000"
+    assert loaded["prefill_pod_ips"] == ["10.0.1.1"]
+    assert loaded.get("external") is True
 
 
-def test_external_service_url_ignored_when_safe_present(
+def test_external_mode_signals_ignore_safe_creds(
+    _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Every external-mode signal keys off the hand-off, never off SaFE creds."""
     monkeypatch.setenv("SAFE_API_URL", "http://safe")
     monkeypatch.setenv("SAFE_API_KEY", "key")
-    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://frontend:8000")
-    assert ext.external_service_url() == ""
+    assert ext.external_service_url() == "http://frontend:8000"
+    assert ext.external_has_ssh_control() is True
+    assert ext.external_has_server_control() is True
 
 
 def test_provision_external_writes_state_and_skips_safe(
@@ -185,3 +212,39 @@ def test_provision_external_infera_requires_ssh(
     with pytest.raises(SystemExit) as ei:
         _prepare_multi_node_state(args)
     assert ei.value.code == 2
+
+
+def test_bootstrap_accepts_handed_over_rayjob_without_rayjob_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A handed-over RayJob has head_pod_ip but no rayjob_id; bootstrap must run.
+
+    Nothing writes rayjob_id now that the platform owns cluster creation, so
+    demanding it in the state guard rejected every external RayJob before the
+    first bootstrap could submit anything.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+
+    state = ext.load_multi_node_state()
+    assert state["head_pod_ip"] == "10.0.2.1"
+    assert not state.get("rayjob_id")
+
+    # Stop right after the guard: reaching the Ray Dashboard proves it passed.
+    class _Reached(RuntimeError):
+        pass
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise _Reached("reached the dashboard client")
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _boom)
+    args = argparse.Namespace(script=None, force=False, print_logs=False)
+    with pytest.raises(_Reached):
+        mncli.cmd_bootstrap(args)

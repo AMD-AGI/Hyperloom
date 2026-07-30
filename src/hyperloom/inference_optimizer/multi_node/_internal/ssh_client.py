@@ -104,7 +104,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     """Generate (or reuse) an ed25519 keypair under ``dest_dir``.
 
     Returns ``(private_key_path, public_key_str)``. Idempotent: if the key
-    already exists it is reused (so retries of ``create-infera`` keep the same
+    already exists it is reused (so retries keep the same
     authorized key that the running pods already trust).
 
     Args:

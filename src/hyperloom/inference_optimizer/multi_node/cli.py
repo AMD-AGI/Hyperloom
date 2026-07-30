@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI managing one session-scoped RayJob.
+"""``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI driving one handed-over cluster.
+
+The cluster is NOT created here. The platform provisions the RayJob or
+InferaDeployment and hands it over through ``HYPERLOOM_MN_EXT_*``; this CLI only
+drives what is already running and never creates or releases it.
 
 Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
-``create-rayjob`` (create via SaFE + wait for Running, checkpointing
-``rayjob_id`` so retries don't leak a second workload), ``bootstrap``,
-``verify``, ``restart-server`` (kill + relaunch nohup'd server,
-idempotent), ``kill-inference``, ``stop-multi-job``.
+``bootstrap``, ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
+idempotent), ``kill-inference``, ``apply-patch``, ``revert-patch``,
+``apply-tracelens-patch``, ``kernel-bench``, ``install-geak``.
 
 State lives in ``$MULTI_NODE_STATE_FILE``, or
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
@@ -103,21 +106,21 @@ def _normalize_extra_args(s: str | None) -> str:
 
 # Exit codes — part of the CLI's contract with the agent; keep stable.
 EXIT_OK = 0
-EXIT_TRANSIENT = 1  # network / SaFE 5xx / timeout — caller may retry
+EXIT_TRANSIENT = 1  # network / Ray Dashboard or SSH error / timeout — caller may retry
 EXIT_TERMINAL_FAILURE = 2  # workload entered Failed/Stopped/Cancelled — DO NOT retry; fix and recreate
 EXIT_CONFIG_ERROR = 3  # missing env / required arg — fix the call, don't retry blindly
 EXIT_INTERRUPT = 130  # Ctrl-C / SIGINT
 
 
 class WorkloadTerminalFailure(RuntimeError):
-    """Raised when SaFE reports a terminal failure phase (Failed/Stopped/Cancelled); carries the diag snapshot. Exit code -> 2."""
+    """Raised when the polled job reports a terminal failure state; carries the diag snapshot. Exit code -> 2."""
 
     def __init__(self, label: str, phase: str, diag: str, snapshot: dict[str, Any]) -> None:
         """Initialize the terminal-failure error.
 
         Args:
             label (str): The poll label that detected the failure.
-            phase (str): The terminal SaFE phase.
+            phase (str): The terminal state reported by the poll.
             diag (str): One-line human-readable diagnostic.
             snapshot (dict[str, Any]): Structured failure snapshot.
         """
@@ -129,7 +132,7 @@ class WorkloadTerminalFailure(RuntimeError):
 
 
 class TransientFailure(RuntimeError):
-    """Raised on poll timeout or repeated SaFE communication failure. Exit code -> 1; caller may retry."""
+    """Raised on poll timeout or repeated fetch failure. Exit code -> 1; caller may retry."""
 
 
 # State file
@@ -197,7 +200,8 @@ def _require_state(*keys: str) -> dict[str, Any]:
     missing = [k for k in keys if not state.get(k)]
     if missing:
         raise RuntimeError(
-            f"State file {_state_file()} missing required keys: {missing}. Have you run 'create-rayjob' first?"
+            f"State file {_state_file()} missing required keys: {missing}. The cluster is provisioned by the "
+            "platform and handed over via HYPERLOOM_MN_EXT_* -- check those are set (see multi_node/SKILL.md)."
         )
     return state
 
@@ -423,8 +427,8 @@ def _short_poll(
     """Run many short polls within one CLI invocation budget; returns the state_obj on success.
 
     ``fetch()`` returns ``(state_obj, summary_str)``; each poll is logged.
-    A ``quiet_fetch_error`` within the grace window logs at INFO (SaFE
-    post-create 404 lag). Terminal failure raises
+    A ``quiet_fetch_error`` within the grace window logs at INFO (a freshly
+    submitted job can 404 briefly). Terminal failure raises
     :class:`WorkloadTerminalFailure` (exit 2); timeout raises
     :class:`TransientFailure` (exit 1, safe to rerun).
 
@@ -503,12 +507,12 @@ def _short_poll(
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: create-infera (Infera idle-pod backend)
+# Infera idle-pod backend helpers
 #
-# Mirrors create-rayjob but provisions a SaFE InferaDeployment with idle
-# worker pods (mn-idle.sh) and an SSH control plane instead of a RayJob with
-# the Ray Dashboard. The benchmark entry point is the Infera frontend
-# (:8000), NOT sglang rank-0 :8888.
+# The platform deploys the InferaDeployment with idle worker pods (mn-idle.sh)
+# and an SSH control plane instead of a RayJob with the Ray Dashboard, so these
+# reach the pods over SSH. The benchmark entry point is the Infera frontend,
+# NOT sglang rank-0 :8888.
 
 
 def install_geak_on_pods_best_effort() -> int:
@@ -551,7 +555,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     Returns:
         int: ``0`` on success.
     """
-    state = _require_state("rayjob_id", "head_pod_ip")
+    # Only head_pod_ip: the Ray Dashboard client addresses the head pod directly,
+    # and rayjob_id no longer has a writer now that the platform owns creation --
+    # requiring it rejected every handed-over cluster. Matches verify /
+    # restart-server / kill-inference, which have always asked for head_pod_ip.
+    state = _require_state("head_pod_ip")
 
     if args.script:
         # Operator override: assume the path is pod-visible.
@@ -1321,7 +1329,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err("apply-patch requires head_pod_ip in state file; run create-rayjob first")
+        err("apply-patch requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
         return EXIT_CONFIG_ERROR
 
     patch_path = Path(args.patch_file)
@@ -1383,7 +1391,7 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err("revert-patch requires head_pod_ip in state file; run create-rayjob first")
+        err("revert-patch requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
         return EXIT_CONFIG_ERROR
 
     try:
@@ -1439,7 +1447,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err("apply-tracelens-patch requires head_pod_ip in state file; run create-rayjob first")
+        err("apply-tracelens-patch requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
         return EXIT_CONFIG_ERROR
 
     tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
@@ -1503,7 +1511,7 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err("kernel-bench requires head_pod_ip in state file; run create-rayjob first")
+        err("kernel-bench requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
         return EXIT_CONFIG_ERROR
 
     # Validate the optional files-b64 JSON before hitting the dashboard.
@@ -1542,8 +1550,8 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
-    Two paths, picked from state.json's ``nodes`` field (written by
-    create-rayjob):
+    Two paths, picked from state.json's ``nodes`` field (synthesized from the
+    platform's hand-off):
 
     * ``nodes <= 1`` (single-pod) — submit a bash entrypoint that runs
       kill_server.sh + launch_server.sh on the head pod. Same as the
@@ -1796,8 +1804,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         info(
             "ERROR --pd-mode disaggregated is not supported in single-node "
             "mode (state.json says nodes=1). PD requires >=2 nodes so "
-            "prefill and decode can run on disjoint pods. Re-create the "
-            "RayJob with `multi_node create-rayjob --nodes >=2` before "
+            "prefill and decode can run on disjoint pods. Re-run optimize with "
+            "--nodes >=2 so the platform provisions a multi-node cluster before "
             "asking for PD."
         )
         return 2
@@ -1908,7 +1916,6 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
         warn(f"kill-inference skipped: {type(exc).__name__}: {exc}")
 
 
-# Subcommand: stop-multi-job
 def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
     """Register the shared ``--poll-interval`` / ``--poll-timeout`` flags.
 
@@ -1937,10 +1944,9 @@ def _add_common_poll_flags(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with every subcommand.
 
-    Registers the ``create-rayjob`` / ``restart-server`` / ``kill-
+    Registers the ``bootstrap`` / ``verify`` / ``restart-server`` / ``kill-
     inference`` / ``apply-patch`` / ``revert-patch`` / ``apply-tracelens-
-    patch`` / ``kernel-bench`` / ``stop-multi-job`` subparsers and their
-    flags.
+    patch`` / ``kernel-bench`` / ``install-geak`` subparsers and their flags.
 
     Returns:
         argparse.ArgumentParser: The fully-configured argument parser.
@@ -1948,8 +1954,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python3 -m hyperloom.inference_optimizer.multi_node",
         description=(
-            "Manage a session-scoped SaFE RayJob for multi-node inference "
-            "optimization. State persists in $MULTI_NODE_STATE_FILE."
+            "Drive the multi-node cluster the platform provisioned and handed over "
+            "via HYPERLOOM_MN_EXT_*. State persists in $MULTI_NODE_STATE_FILE."
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2105,7 +2111,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_kill_inference)
 
-    # stop-multi-job
     # apply-patch (multi-node only)
     sp = sub.add_parser(
         "apply-patch",
