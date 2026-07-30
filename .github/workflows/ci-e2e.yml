@@ -25,6 +25,9 @@ on:
       head_ref:
         description: "Branch to run (defaults to the caller ref)"
         required: false
+      head_sha:
+        description: "Exact commit SHA to run (defaults to the resolved head_ref)"
+        required: false
 
 # A newer commit / retest on the same PR cancels the in-flight run; the cleanup step
 # below cancels the workload so no GPU is leaked.
@@ -82,6 +85,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
           DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -99,6 +103,14 @@ jobs:
             workflow_dispatch)
               run=true
               head_ref="${DISPATCH_HEAD_REF:-$REF_NAME}"
+              head_sha="${DISPATCH_HEAD_SHA:-}"
+              if [ -z "$head_sha" ]; then
+                ref_uri="$(printf '%s' "$head_ref" | jq -sRr @uri)"
+                commit_json="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "$API_URL/repos/$REPO/commits/$ref_uri")"
+                head_sha="$(printf '%s' "$commit_json" | jq -r '.sha // ""')"
+              fi
               ;;
             pull_request)
               if echo "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
@@ -132,6 +144,10 @@ jobs:
               run=true
               ;;
           esac
+          if [ "$run" = true ] && [ -z "$head_sha" ]; then
+            echo "failed to resolve head_sha for ref=$head_ref" >&2
+            exit 1
+          fi
           echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo"
           emit
 
@@ -180,6 +196,7 @@ jobs:
           CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '1' }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           # Tokenized clone URLs so the run can clone this PR branch. github.token is
           # ephemeral (expires with the run) and can read same-repo PRs.
           HEAD_REPO_URL: ${{ needs.resolve.outputs.head_repo && format('https://x-access-token:{0}@github.com/{1}.git', github.token, needs.resolve.outputs.head_repo) || '' }}

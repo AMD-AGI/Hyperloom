@@ -94,15 +94,12 @@ class _RetainedWorkspaceCollision(FileExistsError):
 def _ensure_forge_on_path() -> str:
     """Make `kernel_agents` (Kernel-Forge) importable from $FORGE_PATH.
 
-    Reads $FORGE_PATH (also accepts $KERNEL_FORGE_ROOT / $KERNEL_FORGE_PATH),
-    resolves the dir that contains the `kernel_agents` package (the repo root,
-    its `src/`, or the package dir itself) and prepends it to sys.path. When the
-    env var is unset, does nothing and relies on an installed `kernel_agents`.
-    Returns the path inserted, or "".
+    Reads $FORGE_PATH, resolves the dir that contains the `kernel_agents`
+    package (the repo root, its `src/`, or the package dir itself) and prepends
+    it to sys.path. When the env var is unset, does nothing and relies on an
+    installed `kernel_agents`. Returns the path inserted, or "".
     """
-    root = (
-        os.environ.get("FORGE_PATH") or os.environ.get("KERNEL_FORGE_ROOT") or os.environ.get("KERNEL_FORGE_PATH") or ""
-    ).strip()
+    root = (os.environ.get("FORGE_PATH") or "").strip()
     if not root:
         return ""
     for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
