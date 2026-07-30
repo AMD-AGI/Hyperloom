@@ -115,8 +115,24 @@ def prior_score(
     weights = [score for score, _ in associated]
     weight_sum = sum(weights) or 1.0
     avg_association = sum(weights) / len(weights)
-    gain = sum(to_float(rec.get("tps_delta_pct"), default=0.0) * w for w, rec in associated) / weight_sum
+
+    def _realized_gain(rec: dict[str, Any]) -> float:
+        """Throughput a record actually delivered, else 0.
+
+        A reverted candidate's throughput was never kept, and an accuracy
+        regression disqualifies it outright, so neither may raise the prior.
+        """
+        if str(rec.get("outcome") or "") != "integrated":
+            return 0.0
+        if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
+            return 0.0
+        return to_float(rec.get("tps_delta_pct"), default=0.0)
+
+    gain = sum(_realized_gain(rec) * w for w, rec in associated) / weight_sum
     gain_score = max(0.0, min(1.0, gain / 20.0))
+    accuracy_penalty = (
+        sum(w for w, rec in associated if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0) / weight_sum
+    )
     param_score = 0.0
     if candidate_params:
         param_hits = 0.0
@@ -138,7 +154,7 @@ def prior_score(
 
     apply_score = sum(_success_value(str(rec.get("outcome") or "")) * w for w, rec in associated) / weight_sum
     quality = 0.45 * apply_score + 0.35 * gain_score + 0.20 * param_score
-    score = min(1.0, avg_association) * quality
+    score = min(1.0, avg_association) * quality * (1.0 - accuracy_penalty)
     return round(max(0.0, min(1.0, score)), 4)
 
 
