@@ -110,6 +110,10 @@ if [ "${{1:-}}" = "-" ]; then
     *) echo "3.0.3"; exit 1 ;;
   esac
 fi
+# `<libexec>/rocprof-compute --help` probe from _rocpc_effective_python.
+case "${{1:-}}" in
+  *rocprof-compute) exit ${{PROBE_RC:-0}} ;;
+esac
 exit 0
 """
     py = tmp_path / "fake_python.sh"
@@ -149,6 +153,7 @@ def _run(
     pandas_state: str = "v3",
     pip_rc: int = 0,
     pip_fixes: bool = False,
+    probe_rc: int = 0,
     check_only: int = 0,
     dry_run: int = 0,
 ) -> dict:
@@ -190,10 +195,15 @@ export PIP_RC="{pip_rc}"
 export PIP_FIXES="{1 if pip_fixes else 0}"
 export APT_CREATES_TOOL="{1 if apt_creates_tool else 0}"
 export APT_RC="{apt_rc}"
+export PROBE_RC="{probe_rc}"
 {backend_line}
 {forge_line}
 
 {_extract_fn("_kernel_forge_root")}
+
+{_extract_fn("_rocpc_effective_python")}
+
+{_extract_fn("_pandas_major_ge3")}
 
 {_extract_fn("_ensure_pandas_lt3_for_rocpc")}
 
@@ -307,7 +317,7 @@ def test_pins_pandas_when_ge3(tmp_path: Path) -> None:
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pip_called"], f"pandas<3 pin should have run:\n{r['out']}"
     assert "installing 'pandas>=2.2.3,<3'" in r["out"]
-    assert "pandas pinned OK" in r["out"]
+    assert "forge profiling can use rocprof-compute (roofline)" in r["out"]
 
 
 def test_no_pin_when_pandas_lt3(tmp_path: Path) -> None:
@@ -325,7 +335,16 @@ def test_installs_pandas_when_absent_precludes_later_3x(tmp_path: Path) -> None:
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pip_called"], f"pandas<3 should be installed when absent:\n{r['out']}"
     assert "pandas not yet installed" in r["out"]
-    assert "pandas pinned OK" in r["out"]
+    assert "forge profiling can use rocprof-compute (roofline)" in r["out"]
+
+
+def test_probe_fallback_warns_but_still_pins(tmp_path: Path) -> None:
+    # If no candidate interpreter can run `rocprof-compute --help`, fall back to
+    # $PYTHON (best effort) with a warning — but still pin, never abort.
+    r = _run(tmp_path, tool_present=True, pandas_state="v3", pip_fixes=True, probe_rc=1)
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert "could not confirm which interpreter" in r["out"]
+    assert r["pip_called"], f"pin must still run on the $PYTHON fallback:\n{r['out']}"
 
 
 def test_failsoft_when_pip_pin_fails(tmp_path: Path) -> None:
@@ -333,7 +352,7 @@ def test_failsoft_when_pip_pin_fails(tmp_path: Path) -> None:
     r = _run(tmp_path, tool_present=True, pandas_state="v3", pip_rc=5, pip_fixes=False)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pip_called"], r["out"]
-    assert "still incompatible after pin" in r["out"]
+    assert "pandas still incompatible in" in r["out"]
 
 
 # --- CHECK_ONLY / DRY_RUN honour ------------------------------------------
@@ -364,14 +383,27 @@ def test_static_gated_on_checkout_not_backend() -> None:
     assert "backend not selected" not in body
 
 
-def test_static_call_ordered_after_pandas_pullers() -> None:
+def test_static_call_ordered_after_all_pip_steps() -> None:
     text = IO_INSTALL.read_text(encoding="utf-8")
-    # The bare top-level call must run after the deps that pull pandas, so the
-    # pandas<3 pin has the final say.
-    bench = text.rindex("\nensure_bench_serving_deps\n")
-    xdit = text.rindex("\nensure_xdit_quality_deps\n")
+    # The bare top-level call must run after EVERY pip-installing step (incl.
+    # chain_kernel_agent), so no later step can re-pull pandas>=3 and the pin's
+    # re-check is the truthful final state.
     call = text.rindex("\nensure_rocprof_compute\n")
-    assert call > bench and call > xdit, "ensure_rocprof_compute must be called last"
+    for earlier in (
+        "\nensure_bench_serving_deps\n",
+        "\nensure_xdit_quality_deps\n",
+        "\nchain_kernel_agent\n",
+    ):
+        assert call > text.rindex(earlier), f"ensure_rocprof_compute must run after {earlier.strip()}"
+
+
+def test_static_effective_python_probe_mirrors_resolve_rocpc() -> None:
+    body = _extract_fn("_rocpc_effective_python")
+    # Same candidate order KernelForge's resolve_rocpc() uses.
+    assert '"$PYTHON"' in body
+    assert "/usr/bin/python3" in body
+    assert "command -v python3" in body
+    assert "rocprof-compute" in body and "--help" in body
 
 
 def test_static_installs_rocprofiler_compute_and_verifies_resolve_path() -> None:
