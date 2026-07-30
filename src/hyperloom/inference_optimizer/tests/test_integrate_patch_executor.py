@@ -699,8 +699,8 @@ async def _run_enablement_integrate(
     before_signature=None,
     enablement_origin: str = "",
     accuracy_floor=None,
-    expected_fingerprint: str = "",
-    candidate_fingerprint: str = "",
+    accuracy_task: str = "gsm8k",
+    accuracy_metric: str = "exact_match",
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -718,9 +718,8 @@ async def _run_enablement_integrate(
         return bench_result, {
             "accuracy_pass": None,
             "enablement_accuracy": enablement_accuracy,
-            "enablement_accuracy_task": "gsm8k",
-            "enablement_accuracy_metric": "exact_match",
-            "enablement_eval_contract_fingerprint": candidate_fingerprint,
+            "enablement_accuracy_task": accuracy_task,
+            "enablement_accuracy_metric": accuracy_metric,
             "timed_out": False,
         }
 
@@ -742,8 +741,6 @@ async def _run_enablement_integrate(
         params["enablement_origin"] = enablement_origin
     if accuracy_floor is not None:
         params["enablement_accuracy_floor"] = accuracy_floor
-    if expected_fingerprint:
-        params["enablement_eval_contract_fingerprint"] = expected_fingerprint
     ctx = _make_ctx("t-int-en", params)
     return await executor(ctx), repo
 
@@ -825,33 +822,47 @@ async def test_enablement_eval_origin_keeps_at_or_above_floor(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
-async def test_enablement_eval_origin_reverts_on_fingerprint_drift(tmp_path: Path, monkeypatch):
+async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metric(
+    tmp_path: Path, monkeypatch
+):
+    """A score with no task/metric did not come from a real eval.
+
+    The candidate's own run is the only correctness authority; a bare number
+    with no provenance must not clear the gate.
+    """
     result, _ = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
         booted=True,
         enablement_accuracy=0.9,
         enablement_origin="eval",
-        expected_fingerprint="fp_baseline",
-        candidate_fingerprint="fp_changed",
+        accuracy_task="",
+        accuracy_metric="",
     )
     assert result["status"] == "reverted"
-    assert result["enablement_eval_contract_drift"] is True
+    assert result["correctness_verified"] is False
 
 
 @pytest.mark.asyncio
-async def test_enablement_eval_origin_keeps_when_fingerprint_matches(tmp_path: Path, monkeypatch):
+async def test_enablement_eval_origin_keeps_a_measured_accuracy(tmp_path: Path, monkeypatch):
+    """A measured, above-floor accuracy is KEPT.
+
+    Regression for the burned Kimi-Linear run: an unrelated eval-less
+    re-baseline used to poison the stored eval-contract fingerprint, which
+    vetoed every later candidate without ever reading its accuracy. Nothing
+    outside this candidate's own run may decide its correctness.
+    """
     result, _ = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
         booted=True,
         enablement_accuracy=0.9,
         enablement_origin="eval",
-        expected_fingerprint="fp_same",
-        candidate_fingerprint="fp_same",
+        accuracy_task="gsm8k",
+        accuracy_metric="exact_match,strict-match",
     )
     assert result["status"] == "kept"
-    assert result["enablement_eval_contract_drift"] is False
+    assert result["correctness_verified"] is True
 
 
 @pytest.mark.asyncio

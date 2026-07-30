@@ -2359,17 +2359,21 @@ class IntegratePatchExecutor:
         else:
             # Present but below floor / non-positive / non-finite.
             correctness_ok = False
-        # eval-origin only: a changed eval contract (dataset/task/metric/config)
-        # means the score is not comparable — fail closed.
-        expected_fp = str(params.get("enablement_eval_contract_fingerprint") or "")
-        candidate_fp = str(gate_evidence.get("enablement_eval_contract_fingerprint") or "")
-        fp_drift = eval_origin and bool(expected_fp) and bool(candidate_fp) and expected_fp != candidate_fp
-        if fp_drift:
+        # eval-origin only: a score with no task/metric did not come from a real
+        # eval, so it cannot clear the gate. This reads the candidate's OWN run
+        # (both keys are stamped beside the accuracy it is judging), unlike the
+        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
+        # field, so an eval-less re-baseline could poison the stored digest and
+        # veto every later candidate without ever consulting its accuracy.
+        if (
+            eval_origin
+            and correctness_ok
+            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+        ):
             correctness_ok = False
             log.warning(
-                "integrate_patch: eval-contract fingerprint drift (expected %s, got %s); reverting",
-                expected_fp,
-                candidate_fp,
+                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+                enablement_accuracy,
             )
         eval_provenance = {
             "enablement_origin": str(params.get("enablement_origin") or ""),
@@ -2377,8 +2381,6 @@ class IntegratePatchExecutor:
             "enablement_accuracy_floor": floor,
             "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
             "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
-            "enablement_eval_contract_fingerprint": candidate_fp,
-            "enablement_eval_contract_drift": fp_drift,
             "enablement_eval_failure_kind": accuracy_kind or "",
         }
 
@@ -2464,11 +2466,7 @@ class IntegratePatchExecutor:
                     "enablement": True,
                     "runnable": False,
                     "correctness_verified": correctness_ok is True,
-                    "reason": (
-                        "enablement eval-contract drift; reverted"
-                        if fp_drift
-                        else f"enablement not runnable: {run_reason}"
-                    ),
+                    "reason": f"enablement not runnable: {run_reason}",
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                     **eval_provenance,

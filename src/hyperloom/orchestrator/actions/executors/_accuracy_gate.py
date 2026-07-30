@@ -30,9 +30,16 @@ ACCURACY_THRESHOLD = 0.05  # allowed deviation
 # Enablement-on-eval-fail switch and shared accuracy floor. The floor is used by
 # BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two
 # never diverge.
+#
+# The default is non-zero because the floor is the ONLY correctness authority on
+# the enablement KEEP path. At 0.0 the gate degenerates to ``accuracy > 0``, which
+# admits a model that is answering essentially nothing: a real run KEPT a
+# candidate scoring gsm8k=0.00076 (0.08% of a 0.906 baseline) as "correct".
+# 0.05 is a floor of last resort -- it rejects the collapsed-output regime
+# without judging genuine quality, which belongs to the operator override below.
 ENABLEMENT_ON_EVAL_FAIL_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL"
 ENABLEMENT_ACCURACY_FLOOR_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR"
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.0
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.05
 
 # Result-dict keys stamped by the baseline executor on an eval-rooted failure and
 # read by writeback promotion/persistence.
