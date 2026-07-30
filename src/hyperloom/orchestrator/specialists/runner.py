@@ -251,7 +251,7 @@ class SpecialistRunResult:
     task_id: str
     domain: str
     gap_canonical_id: str
-    status: str  # "succeeded" / "stale" / "empty_synthesised" / "tool_violation"
+    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised" / "tool_violation"
     specialist_done: dict[str, Any]
     turns_used: int = 0
     workspace: str = ""
@@ -346,8 +346,7 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Satisfies PolicyGate R3 schema (``empty=true``, ``proposal_set=[]``,
-    non-empty summary).
+    Shape: ``empty=true``, ``proposal_set=[]``, non-empty summary.
 
     Args:
         gap_canonical_id: Canonical id of the gap the specialist addressed.
@@ -1340,9 +1339,8 @@ class SpecialistRunner:
 
         self._write_specialist_done(workspace, done_payload)
         recovered = bool(done_payload.get("_recovered_from_partial"))
-        # A payload salvaged after an infra failure is partial work, not a clean
-        # run. It reports ``partial`` so the failure stays visible without making
-        # the attempt retry-eligible, which would discard what was salvaged.
+        # ``partial`` keeps an infra failure visible without making the attempt
+        # retry-eligible, which would discard whatever was salvaged.
         status = "succeeded"
         if tool_violations:
             status = "tool_violation"

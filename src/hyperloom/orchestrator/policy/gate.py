@@ -133,7 +133,7 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 }
 
 
-# Specialist dispatch action name (central so R2 sub-rules enforce the contract uniformly).
+# Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
 
 # Orchestrator-side patch integration step (EXPLORE phase, gated by a Critic verdict).
@@ -396,12 +396,10 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 
 
 # kill_task sources; the other scheduling-police intents stay robustness-only.
-# Orchestration owns the strategic context for abandoning work it dispatched.
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
-# Ceiling on a single extend_lease step; repeated extensions stay possible but
-# each one has to be re-justified against the live task view.
+# Ceiling on a single extend_lease step; repeated extensions are allowed.
 EXTEND_LEASE_MAX_SEC: int = 3600
 
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
@@ -562,7 +560,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # operator-facing lifecycle event log; Coordinator-only writer so the
         # LLM cannot forge lifecycle events.
         "lifecycle",
-        # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
+        # specialist sub-agent ledger; Coordinator-only writer.
         "specialist_rounds",
         # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
@@ -872,7 +870,7 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # R2 ``specialist`` bypasses ActionRegistry; its contract is enforced by ``_validate_specialist_dispatch``.
+        # ``specialist`` bypasses ActionRegistry; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             if check_phase:
@@ -1616,9 +1614,8 @@ class PolicyGate:
             self._validate_freeform_specialist_dispatch(params)
             return
 
-        # Tag / scope coherence is observed, not enforced: resolve_specialist_profile
-        # re-infers the scope and SpecialistRunner synthesizes an empty result for an
-        # unresolvable anchor, so a denial here would only cost the planner a tick.
+        # Observed, not enforced: resolve_specialist_profile re-infers the scope
+        # and the runner synthesizes an empty result for an unresolvable anchor.
         if not tags:
             log.info("specialist dispatch declares a scope but no tags; profile will re-infer")
         unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
@@ -1732,8 +1729,7 @@ class PolicyGate:
         try:
             gpu_count = int(gpu_count_raw)
         except (TypeError, ValueError):
-            # The dispatcher re-parses with the same fallback, so a malformed
-            # value degrades to the default rather than losing a tick.
+            # The dispatcher re-parses with the same default.
             log.info("specialist dispatch gpu_count=%r not an integer; using %d", gpu_count_raw, default_gpu_count)
             gpu_count = int(default_gpu_count)
         if gpu_count <= 0:
@@ -2266,6 +2262,7 @@ __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
+    "EXTEND_LEASE_MAX_SEC",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",

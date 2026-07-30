@@ -38,6 +38,8 @@ class IntentType(str, Enum):
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"
     KILL_TASK = "kill_task"
+    # Robustness never emits this; kept in the mirror for the contract test.
+    EXTEND_LEASE = "extend_lease"
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
     # Robustness never emits this; kept in the mirror for the contract test.
@@ -739,14 +741,15 @@ INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
 # Required-field map for intents robustness never emits but the upstream
 # contract test still diffs against. No builder/validator: they are here only
 # to keep :data:`PAYLOAD_REQUIRED` byte-equal with upstream ``_PAYLOAD_REQUIRED``.
-# ``SPECIALIST_DONE`` is the specialist exit envelope (PolicyGate R3 validates
-# it); ``REVIEW_VERDICT`` enforces only the structural ``target_proposal_msg_id``
-# here (verdict/verdict_map mutual exclusion lives in upstream policy).
+# ``SPECIALIST_DONE`` is the specialist exit envelope; ``REVIEW_VERDICT``
+# enforces only the structural ``target_proposal_msg_id`` here
+# (verdict/verdict_map mutual exclusion lives in upstream policy).
 _REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
+    IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.SPECIALIST_DONE: (
         "gap_canonical_id",
         "domain",

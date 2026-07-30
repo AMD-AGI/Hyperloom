@@ -27,7 +27,6 @@ from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_v
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
-from ..bus.resource_lock import Lease
 from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
 from ..kernel.request_handlers import get_handler
 
@@ -803,8 +802,8 @@ class IntentRouter:
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time.
 
-        Refreshes both the task's own ``lease_ttl_sec`` (what the TTL watchdog
-        measures) and every lane row the task holds, so the two cannot drift.
+        Refreshes the task's ``lease_ttl_sec``, its lane rows and its GPU rows
+        together, preserving ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
 
         Args:
             source (str): The agent requesting the extension.
@@ -827,7 +826,12 @@ class IntentRouter:
                 },
             )
             return
-        lanes = await self._extend_task_lane_leases(task_id, new_ttl)
+        lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=new_ttl)
+        try:
+            gpus = await self.gpu_specialist_pool.extend(task_id, new_ttl)
+        except Exception:  # noqa: BLE001 — lane extension already landed
+            log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
+            gpus = 0
         await self._record_observation(
             "coordinator",
             "observation",
@@ -838,47 +842,10 @@ class IntentRouter:
                 "extra_sec": extra_sec,
                 "lease_ttl_sec": new_ttl,
                 "lanes": lanes,
+                "gpu_rows": gpus,
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )
-
-    async def _extend_task_lane_leases(self, task_id: str, ttl_sec: int) -> list[str]:
-        """Push every lane row this task holds out to ``ttl_sec`` from now.
-
-        Args:
-            task_id: The task whose lane rows should be refreshed.
-            ttl_sec: New lifetime in seconds from now.
-
-        Returns:
-            The lanes that were refreshed; empty when the task holds none.
-        """
-        try:
-            rows = await self.db.fetchall(
-                "SELECT lane, holder_id FROM leases WHERE task_id=?",
-                (task_id,),
-            )
-        except Exception:  # noqa: BLE001 — lane refresh is best-effort
-            log.exception("extend_lease: lease lookup failed for task=%s", task_id)
-            return []
-        by_holder: dict[str, list[str]] = {}
-        for r in rows or []:
-            by_holder.setdefault(str(r["holder_id"]), []).append(str(r["lane"]))
-        refreshed: list[str] = []
-        for holder_id, lanes in by_holder.items():
-            lease = Lease(
-                holder_id=holder_id,
-                task_id=task_id,
-                action="",
-                lanes=tuple(lanes),
-                acquired_at="",
-                expires_at="",
-            )
-            try:
-                await self.locks.heartbeat(lease, ttl_sec=ttl_sec)
-                refreshed.extend(lanes)
-            except Exception:  # noqa: BLE001 — a lost lease is not fatal here
-                log.warning("extend_lease: heartbeat failed for task=%s lanes=%s", task_id, lanes)
-        return sorted(refreshed)
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.
@@ -989,8 +956,9 @@ class IntentRouter:
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
         """Publish a free-form message onto the bus.
 
-        Soft-degrades an unknown topic to ``observation`` and
-        routes to the requested recipient (defaulting to broadcast).
+        Soft-degrades an unknown topic to ``observation`` and routes to the
+        requested recipient (defaulting to broadcast). A ``specialist:<id>``
+        recipient additionally gets the message in its workspace inbox.
 
         Args:
             source (str): The sending agent.
@@ -1033,7 +1001,9 @@ class IntentRouter:
         try:
             workspace = runs_dir(self.session_dir, "specialist", task_id)
             workspace.mkdir(parents=True, exist_ok=True)
-            inbox = workspace / "inbox.json"
+            # The prompt advertises the worktree when one exists; match it.
+            worktree = workspace / "worktree"
+            inbox = (worktree if worktree.is_dir() else workspace) / "inbox.json"
             existing: list[Any] = []
             if inbox.exists():
                 loaded = json.loads(inbox.read_text(encoding="utf-8"))
@@ -1046,6 +1016,7 @@ class IntentRouter:
                     "body": {k: v for k, v in payload.items() if k not in ("to", "topic")},
                 }
             )
+            # Keep the last 32 so the file stays prompt-sized.
             tmp = inbox.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
             tmp.replace(inbox)

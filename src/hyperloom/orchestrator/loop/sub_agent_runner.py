@@ -148,21 +148,25 @@ class SubAgentRunner:
         *,
         evidence: dict | None = None,
         context: str,
+        allow_terminal: bool = False,
     ) -> bool:
-        """Transition a task to ``new_state``, tolerating a lost or terminal row.
-
-        A long-running task's row can vanish (retention) or reach a terminal
-        state (a kill, a TTL reclaim) before the executor finishes; either way
-        the result is kept rather than dropped.
+        """Transition a task to ``new_state``, tolerating a row lost to retention.
 
         Args:
             task_id: The task to transition.
             new_state: The target state.
             evidence: Optional evidence dict recorded with the transition.
             context: Short label describing the transition call site.
+            allow_terminal: Also tolerate an already-terminal row. Only for
+                terminal transitions; on ``queued -> running`` the rejection is
+                the double-spawn guard and must propagate.
 
         Returns:
             ``True`` on success, ``False`` when the transition was swallowed.
+
+        Raises:
+            IllegalTransition: When the row is already terminal and
+                ``allow_terminal`` is False.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -179,9 +183,8 @@ class SubAgentRunner:
             )
             return False
         except IllegalTransition:
-            # The row reached a terminal state while the executor was still
-            # running (a kill or a TTL reclaim). Keep the result: the work is
-            # done and discarding it loses everything the task produced.
+            if not allow_terminal:
+                raise
             log.warning(
                 "sub_agent_runner: task_id=%s already terminal before "
                 "transition→%s (context=%s); keeping the executor result",
@@ -253,6 +256,7 @@ class SubAgentRunner:
                 "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
                 context="no_executor",
+                allow_terminal=True,
             )
             if prebound_lease is not None:
                 await self.locks.release(prebound_lease)
@@ -293,6 +297,7 @@ class SubAgentRunner:
                     "failed",
                     evidence={"error": repr(exc)},
                     context="executor_exception",
+                    allow_terminal=True,
                 )
                 return SubAgentResult(
                     task_id=task.task_id,
@@ -305,6 +310,7 @@ class SubAgentRunner:
                 "succeeded",
                 evidence={"result_keys": sorted(result_payload.keys())},
                 context="executor_success",
+                allow_terminal=True,
             )
             return SubAgentResult(
                 task_id=task.task_id,

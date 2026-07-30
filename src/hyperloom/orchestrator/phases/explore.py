@@ -698,9 +698,6 @@ class ExplorePhase(PhaseHandler):
     ) -> None:
         """Broadcast that an infra-failed specialist is being abandoned.
 
-        Without this the give-up is silent and the planner cannot tell a domain
-        that had nothing to say from one that timed out repeatedly.
-
         Args:
             task: The specialist task whose final attempt failed.
             ftype: The classified failure type.

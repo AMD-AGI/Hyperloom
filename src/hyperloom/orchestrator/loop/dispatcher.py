@@ -633,10 +633,6 @@ class DispatcherCollaborator:
     def _specialist_progress_publisher(self, task: Task) -> Any:
         """Build the callback that turns partial checkpoints into observations.
 
-        A dispatched specialist is otherwise silent until it terminates; this
-        republishes each checkpoint it writes so the planner sees direction
-        before the budget is spent.
-
         Args:
             task: The specialist task the callback reports for.
 
@@ -1269,7 +1265,7 @@ class DispatcherCollaborator:
             already-in-flight notice, or the rendered delegated_result line.
         """
 
-        # PolicyGate parity: validate synthetic delegate intent so phase/role/paths/red-line gates apply.
+        # PolicyGate parity: validate the synthetic delegate so phase/role/path gates apply.
         intent = Intent(
             type=IntentType.DELEGATE,
             payload={"action_name": action_name, "params": dict(params or {})},

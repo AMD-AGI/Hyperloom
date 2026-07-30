@@ -62,9 +62,10 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
+    IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # specialist exit envelope; per-variant schema enforced by PolicyGate R3.
+    # specialist exit envelope; the runner re-stamps and defaults the payload.
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
 

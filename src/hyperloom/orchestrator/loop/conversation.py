@@ -195,9 +195,6 @@ class ConversationCollaborator:
     def _context_running_tasks_reader(self) -> str:
         """Synchronous projection of in-flight tasks with their held resources.
 
-        A dispatched task is otherwise invisible between ``task_queued`` and its
-        terminal ``delegated_result``, which for a GPU specialist can be hours.
-
         Returns:
             One line per running task carrying elapsed time, lease expiry, held
             lanes, leased GPUs and heartbeat age, or a placeholder string.
@@ -219,11 +216,15 @@ class ConversationCollaborator:
                 return []
 
         lanes_by_task: dict[str, list[str]] = {}
+        # Soonest lane expiry: the first one to lapse is when reclaim starts.
         expiry_by_task: dict[str, str] = {}
         for r in _rows("SELECT lane, task_id, expires_at FROM leases"):
             tid = str(r["task_id"])
             lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
-            expiry_by_task.setdefault(tid, str(r["expires_at"]))
+            expires = str(r["expires_at"])
+            prev = expiry_by_task.get(tid)
+            if prev is None or expires < prev:
+                expiry_by_task[tid] = expires
         gpus_by_task: dict[str, list[int]] = {}
         for r in _rows("SELECT gpu_id, task_id FROM gpu_leases"):
             gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
@@ -611,7 +612,6 @@ class ConversationCollaborator:
                 "from your own running plan; do not re-derive it from scratch."
             )
 
-        # Both planners see in-flight specialist state and can act on it.
         if agent_name in ("orchestration", "robustness"):
             try:
                 stale = await self._scan_stale_specialists()
@@ -670,10 +670,7 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        # Render the full unread batch for this tick: prefer information
-        # completeness over prompt size. (Cross-tick history already consumed by
-        # the cursor is not replayed; see Critic augment below for the durable
-        # re-delivery of still-undecided proposals.)
+        # Full unread batch: events arriving in one tick must not be dropped.
         rendered = list(msgs)
         # Durable at-least-once-until-decided delivery of proposals to the
         # Critic: the inbox tail is lossy, so re-present every still-undecided

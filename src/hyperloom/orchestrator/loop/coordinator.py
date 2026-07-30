@@ -267,8 +267,7 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "tput_tok_s",
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
-# Audit notes worth surfacing: a run whose patches were all dropped otherwise
-# reads as a plain success.
+# Audit notes rendered per outcome line.
 _OUTCOME_NOTES_MAX: int = 3
 
 
@@ -872,7 +871,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_response": "router",
         "_handle_kill_task": "router",
         "_handle_extend_lease": "router",
-        "_extend_task_lane_leases": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router",

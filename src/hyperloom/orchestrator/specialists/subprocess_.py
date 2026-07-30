@@ -714,8 +714,7 @@ class SpecialistSubprocessDispatcher:
     ) -> float:
         """Forward a freshly-rewritten partial checkpoint to ``progress_cb``.
 
-        The specialist rewrites its best-so-far payload throughout the run; this
-        turns that file into a live uplink instead of a post-mortem fallback.
+        Publishes at most one file per call: worktree first, then workspace.
 
         Args:
             partial_files: Candidate checkpoint paths, worktree first.
@@ -802,14 +801,6 @@ class SpecialistSubprocessDispatcher:
             elapsed = now - started
             outcome["elapsed"] = elapsed
 
-            if progress_cb is not None:
-                last_partial_mtime = await self._publish_partial_progress(
-                    partial_files=partial_files,
-                    since_mtime=last_partial_mtime,
-                    elapsed=elapsed,
-                    progress_cb=progress_cb,
-                )
-
             # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in done_files):
                 grace_until = now + 30.0
@@ -827,6 +818,15 @@ class SpecialistSubprocessDispatcher:
                 outcome["exit_code"] = proc.returncode
                 outcome["elapsed"] = elapsed
                 break
+
+            # Still running: republish any checkpoint written since the last tick.
+            if progress_cb is not None:
+                last_partial_mtime = await self._publish_partial_progress(
+                    partial_files=partial_files,
+                    since_mtime=last_partial_mtime,
+                    elapsed=elapsed,
+                    progress_cb=progress_cb,
+                )
 
             # Liveness check: alive if EITHER heartbeat.json was refreshed OR
             # process.log is still growing. The hard wall-clock cap below still

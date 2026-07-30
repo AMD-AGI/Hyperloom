@@ -1917,7 +1917,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   try and optionally author patches.",
         ]
     return [
-        "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
+        "## 9. IRON RULES (Inv-5.1 / Inv-5.3)",
         "",
         *gpu_rule,
         "2. **You MAY** produce changes for integration, but stage them ONLY",

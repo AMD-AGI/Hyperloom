@@ -336,10 +336,11 @@ class TaskRegistry:
         return [Task.from_row(r) for r in rows]
 
     async def extend_lease(self, task_id: str, extra_sec: int) -> int:
-        """Grow a running task's ``lease_ttl_sec`` and restamp ``updated_at``.
+        """Grow a running task's ``lease_ttl_sec`` by ``extra_sec``.
 
-        The TTL watchdog measures age from ``updated_at``, so both are moved
-        together to buy the task a further ``extra_sec``.
+        ``updated_at`` is left alone: it marks when the task started running,
+        and both the TTL watchdog and the elapsed-time projections measure from
+        it.
 
         Args:
             task_id: The running task to extend.
@@ -361,8 +362,8 @@ class TaskRegistry:
                 raise IllegalTransition(f"cannot extend lease of {task_id!r} in state {row['state']!r}")
             new_ttl = int(row["lease_ttl_sec"] or 0) + max(0, int(extra_sec))
             cur.execute(
-                "UPDATE tasks SET lease_ttl_sec=?, updated_at=? WHERE task_id=?",
-                (new_ttl, _now_iso(), task_id),
+                "UPDATE tasks SET lease_ttl_sec=? WHERE task_id=?",
+                (new_ttl, task_id),
             )
         return new_ttl
 

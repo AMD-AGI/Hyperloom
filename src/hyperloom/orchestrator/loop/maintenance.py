@@ -194,10 +194,8 @@ class MaintenanceCollaborator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Authoritative growth signal is the context-token water level (soft
-        # budget); the char count is a fallback for backends that don't report
-        # token usage. No emergency ceiling / anti-thrash floor: the soft budget
-        # and cadence triggers drive compaction directly.
+        # Growth signal is the context-token water level; char count is the
+        # fallback for backends that don't report token usage.
         if (
             not force
             and not self._checkpoint_policy.should_checkpoint(

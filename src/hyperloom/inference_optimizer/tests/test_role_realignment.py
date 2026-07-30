@@ -435,6 +435,8 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
 
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
+        # updated_at marks when the task started running; extending must not move it.
+        assert updated.updated_at == (await c.tasks.get(task.task_id)).updated_at
         rows = await c.db.fetchall("SELECT lane FROM leases WHERE task_id=?", (task.task_id,))
         assert [r["lane"] for r in rows] == ["research_lane"]
     finally:
@@ -494,5 +496,40 @@ async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
         assert len(entries) == 1
         assert entries[0]["from"] == "orchestration"
         assert "prefill" in entries[0]["body"]["body_md"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
+    """The GPU lease is extended with the lane rows so the TTL ordering holds."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={"needs_gpu": True},
+            idempotency_key="k-extend-gpu",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        await c.db.execute(
+            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (0, "h-gpu", task.task_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:30:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+
+        rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
+        assert rows and rows[0]["expires_at"] > "2026-01-01T00:30:00+00:00"
     finally:
         await c.stop()

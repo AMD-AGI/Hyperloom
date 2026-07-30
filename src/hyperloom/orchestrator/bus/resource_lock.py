@@ -331,6 +331,28 @@ class SqliteLeaseBackend:
             if cur.rowcount != len(lease.lanes):
                 raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
 
+    async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
+        """Refresh every lane row a task holds, whoever the holder is.
+
+        Args:
+            task_id: The task whose lane rows should be refreshed.
+            ttl_sec: New lifetime in seconds from now.
+
+        Returns:
+            The lanes that were refreshed, sorted.
+        """
+        new_expires_iso = datetime.fromtimestamp(time.time() + ttl_sec, tz=timezone.utc).isoformat()
+        now_iso = _now_iso()
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))
+            lanes = sorted(str(r["lane"]) for r in cur.fetchall())
+            if lanes:
+                cur.execute(
+                    "UPDATE leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
+                    (new_expires_iso, now_iso, task_id),
+                )
+        return lanes
+
     async def release(self, lease: Lease) -> int:
         """Drop every (lane, holder_id) row this lease owns.
 
@@ -591,6 +613,18 @@ class ResourceLockManager:
             None: Delegates to :meth:`SqliteLeaseBackend.heartbeat`.
         """
         return await self.backend.heartbeat(lease, ttl_sec=ttl_sec)
+
+    async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
+        """Refresh every lane row a task holds.
+
+        Args:
+            task_id (str): The task whose lane rows should be refreshed.
+            ttl_sec (int): New lifetime in seconds.
+
+        Returns:
+            list[str]: The lanes that were refreshed.
+        """
+        return await self.backend.heartbeat_by_task(task_id, ttl_sec=ttl_sec)
 
     async def release(self, lease: Lease) -> int:
         """Release a lease and bump each lane's release counter.

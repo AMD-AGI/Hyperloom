@@ -296,7 +296,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_inbox",
         "Return inbox events addressed to orchestration. Pass since_seq to "
-        "page from a given sequence; omit for the recent tail.",
+        "page from a given sequence; omit for the full history.",
         _SINCE_SCHEMA,
         "inbox",
     ),
