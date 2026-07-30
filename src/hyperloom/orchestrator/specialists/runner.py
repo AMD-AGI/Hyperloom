@@ -297,8 +297,10 @@ def classify_specialist_failure(
     type + retry-eligibility flag.
 
     ``status == 'stale'`` marks a subprocess that died with a ``backend_error``
-    (timeout / stale-heartbeat / crash); ``empty_synthesised`` means it exited
-    cleanly without a usable ``specialist_done``.
+    (timeout / stale-heartbeat / crash) and left nothing usable behind;
+    ``partial`` means it died the same way but a checkpoint was salvaged, so the
+    failure is reported without discarding the work; ``empty_synthesised`` means
+    it exited cleanly without a usable ``specialist_done``.
 
     Args:
         runner_status: The :class:`SpecialistRunResult` status string.
@@ -313,6 +315,13 @@ def classify_specialist_failure(
         return SpecialistFailureType.NONE, False
     if status == "tool_violation":
         return SpecialistFailureType.TOOL_VIOLATION, False
+    if status == "partial":
+        # Salvaged work: classify the failure but never retry over it.
+        if "timeout" in err:
+            return SpecialistFailureType.TIMEOUT, False
+        if "stale_heartbeat" in err:
+            return SpecialistFailureType.STALE_HEARTBEAT, False
+        return SpecialistFailureType.CRASH, False
     if status == "stale":
         if "timeout" in err:
             ftype = SpecialistFailureType.TIMEOUT
@@ -1135,13 +1144,16 @@ class SpecialistRunner:
         )
 
         # Decode subprocess error: backend_error → 'stale', clean miss → empty_synthesised.
+        # The classifier keys off the leading token; the reaper's own text is kept
+        # after it so the reader sees the elapsed/threshold numbers.
+        detail = (sub_result.error or "").strip()
         backend_error = ""
         if sub_result.timed_out:
-            backend_error = "subprocess_timeout"
+            backend_error = f"subprocess_timeout: {detail}" if detail else "subprocess_timeout"
         elif sub_result.stale_heartbeat:
-            backend_error = "subprocess_stale_heartbeat"
-        elif sub_result.error:
-            backend_error = f"subprocess_error:{sub_result.error}"
+            backend_error = f"subprocess_stale_heartbeat: {detail}" if detail else "subprocess_stale_heartbeat"
+        elif detail:
+            backend_error = f"subprocess_error:{detail}"
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
@@ -1326,10 +1338,18 @@ class SpecialistRunner:
         notes.extend(safety.notes())
 
         self._write_specialist_done(workspace, done_payload)
+        recovered = bool(done_payload.get("_recovered_from_partial"))
+        # A payload salvaged after an infra failure is partial work, not a clean
+        # run. It reports ``partial`` so the failure stays visible without making
+        # the attempt retry-eligible, which would discard what was salvaged.
         status = "succeeded"
         if tool_violations:
             status = "tool_violation"
             notes.append(f"tool_violations:{tool_violations}")
+        elif backend_error or recovered:
+            status = "partial"
+        if recovered:
+            notes.append("recovered_from_partial")
 
         return SpecialistRunResult(
             task_id=ctx.task.task_id,
@@ -1341,6 +1361,7 @@ class SpecialistRunner:
             workspace=str(workspace) if workspace else "",
             transcript_path=str(self._transcript_path(workspace)) if workspace else "",
             done_path=str(self._done_path(workspace)) if workspace else "",
+            error=backend_error,
             notes=notes,
         )
 

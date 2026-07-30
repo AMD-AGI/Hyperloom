@@ -604,7 +604,9 @@ async def test_subprocess_recovers_partial_when_no_final(
     ctx = _make_runner_ctx("t-spec-partial")
 
     result = await runner.run(ctx)
-    assert result.status == "succeeded"
+    # Salvaged work keeps the findings but must not read as a clean run.
+    assert result.status == "partial"
+    assert "recovered_from_partial" in result.notes
     assert result.specialist_done["empty"] is False
     assert result.specialist_done.get("_recovered_from_partial") is True
     assert result.specialist_done["proposal_set"]

@@ -734,7 +734,9 @@ class ExplorePhase(PhaseHandler):
 
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
-        error = str(result.error or "")
+        # The specialist executor never raises, so the reason lives in the
+        # result envelope rather than on SubAgentResult.
+        error = str(result.error or result_dict.get("error") or "")
         ftype, retry_eligible = classify_specialist_failure(runner_status, error)
         if not retry_eligible:
             return False

@@ -266,7 +266,10 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "throughput",
     "tput_tok_s",
 )
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+# Audit notes worth surfacing: a run whose patches were all dropped otherwise
+# reads as a plain success.
+_OUTCOME_NOTES_MAX: int = 3
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -346,6 +349,7 @@ def _format_inbox_event(m: "Message") -> str:
         error = payload.get("error")
         result = payload.get("result")
         parts = [head, f"kind={kind!r}", f"state={state!r}"]
+        notes: list[Any] = []
         if isinstance(result, dict):
             status = _first_present(result, _OUTCOME_STATUS_KEYS)
             gain = _first_present(result, _OUTCOME_GAIN_KEYS)
@@ -359,8 +363,18 @@ def _format_inbox_event(m: "Message") -> str:
                 parts.append(f"gain={gain}")
             if tput is not None:
                 parts.append(f"tput={tput}")
+            # Executors that never raise report the failure inside the result
+            # envelope, leaving the top-level error None.
+            if not error:
+                error = result.get("error")
+            raw_notes = result.get("notes")
+            if isinstance(raw_notes, list):
+                notes = [n for n in raw_notes if n]
         if error:
             parts.append(f"error={str(error)[:200]!r}")
+        if notes:
+            shown = "; ".join(str(n) for n in notes[:_OUTCOME_NOTES_MAX])
+            parts.append(f"notes[{len(notes)}]={shown[:300]!r}")
         return " ".join(parts)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
