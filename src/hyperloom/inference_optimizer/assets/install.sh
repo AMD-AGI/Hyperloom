@@ -1274,6 +1274,48 @@ _XDIT_QUALITY_DEPS=(
   "lpips:lpips"
 )
 
+# Load-bearing packages an OPTIONAL dep install must never move. On a ROCm pod
+# these are vendor ROCm builds from a private index; letting pip's resolver pull
+# a PyPI (CUDA) torch to satisfy e.g. lpips' `torch>=0.4.0` silently bricks GPU
+# access for EVERY framework sharing this venv (that is exactly how this brick
+# shipped: a CUDA torch replaced the ROCm one, exit 0, no visible error).
+_XDIT_CORE_PINS=(torch torchvision torchaudio triton)
+
+# Write a pip constraints file pinning each installed core package to its exact
+# current version. `pip install -c <file>` then forbids the resolver from moving
+# them, while still letting the requested deps pull their OTHER (safe) deps.
+_write_core_constraints() {
+  local dest="$1" pkg ver
+  : > "$dest"
+  for pkg in "${_XDIT_CORE_PINS[@]}"; do
+    ver="$("$PYTHON" -c "import importlib.metadata as m; print(m.version('$pkg'))" 2>/dev/null || true)"
+    [ -n "$ver" ] && printf '%s==%s\n' "$pkg" "$ver" >> "$dest"
+  done
+  return 0
+}
+
+# torch's ROCm/HIP version string (empty if torch is absent OR is a non-ROCm
+# build). The tripwire below reads it before and after the optional install.
+_torch_hip_version() {
+  "$PYTHON" -c "import torch; print(torch.version.hip or '')" 2>/dev/null || true
+}
+
+# Tripwire: if torch was a ROCm build before the optional install but is now a
+# non-ROCm (CUDA-only) build, the resolver swapped the load-bearing wheel. Try a
+# best-effort rollback to the pinned versions, then abort HARD — a silent warn
+# here is exactly how this poison reached every co-tenant framework before.
+_guard_torch_not_clobbered() {
+  local constraints="$1" hip_before="$2" hip_after
+  [ -n "$hip_before" ] || return 0
+  hip_after="$(_torch_hip_version)"
+  [ -n "$hip_after" ] && return 0
+  warn "xDiT quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
+  "$PYTHON" -m pip install --quiet --no-cache-dir --force-reinstall --no-deps \
+    "${PIP_EXTRA[@]}" -r "$constraints" \
+    || warn "rollback reinstall failed (pinned ROCm wheels may need the vendor index); restore torch manually"
+  die "optional xDiT quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _XDIT_CORE_PINS."
+}
+
 ensure_xdit_quality_deps() {
   log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
   local missing=()
@@ -1298,9 +1340,18 @@ ensure_xdit_quality_deps() {
     return 0
   fi
   log "installing missing xDiT quality deps: ${missing[*]}"
-  "$PYTHON" -m pip install --quiet --no-cache-dir \
+  # Pin the load-bearing core so this optional install can never move
+  # torch/torchvision/triton, and snapshot torch's ROCm build so the tripwire
+  # can abort loudly if it got swapped anyway.
+  local constraints hip_before
+  constraints="$(mktemp)"
+  _write_core_constraints "$constraints"
+  hip_before="$(_torch_hip_version)"
+  "$PYTHON" -m pip install --quiet --no-cache-dir -c "$constraints" \
     "${PIP_EXTRA[@]}" "${missing[@]}" \
     || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+  _guard_torch_not_clobbered "$constraints" "$hip_before"
+  rm -f "$constraints"
   for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
     import_name="${pair##*:}"
     "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
