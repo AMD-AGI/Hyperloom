@@ -686,6 +686,65 @@ class ExplorePhase(PhaseHandler):
                 Intent(type=intent.type, payload=sub_payload),
             )
 
+    async def _record_specialist_retry_exhausted(
+        self,
+        *,
+        task: "Task",
+        ftype: Any,
+        error: str,
+        attempts_used: int,
+        cap: int,
+        detail: str,
+    ) -> None:
+        """Broadcast that an infra-failed specialist is being abandoned.
+
+        Without this the give-up is silent and the planner cannot tell a domain
+        that had nothing to say from one that timed out repeatedly.
+
+        Args:
+            task: The specialist task whose final attempt failed.
+            ftype: The classified failure type.
+            error: The failure reason carried by the attempt.
+            attempts_used: Retry attempts already spent.
+            cap: Configured retry ceiling.
+            detail: Why no further retry was scheduled.
+        """
+        params = task.params or {}
+        needs_gpu_raw = params.get("needs_gpu", False)
+        needs_gpu = (
+            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
+            if isinstance(needs_gpu_raw, str)
+            else bool(needs_gpu_raw)
+        )
+        try:
+            wall_budget_sec = float(self._specialist_wall_budget_sec(needs_gpu=needs_gpu))
+        except Exception:  # noqa: BLE001 — telemetry only
+            wall_budget_sec = 0.0
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "specialist_auto_retry_exhausted",
+                "task_id": task.task_id,
+                "domain": str(params.get("domain") or ""),
+                "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
+                "attempts_used": attempts_used,
+                "max_attempts": cap,
+                "failure_type": getattr(ftype, "value", str(ftype)),
+                "reason": error[:200],
+                "wall_budget_sec": wall_budget_sec,
+                "detail": detail,
+            },
+        )
+        log.warning(
+            "specialist auto-retry exhausted: task=%s failure=%s attempts=%d/%d (%s)",
+            task.task_id,
+            getattr(ftype, "value", ftype),
+            attempts_used,
+            cap,
+            detail,
+        )
+
     async def _maybe_auto_retry_specialist(
         self,
         task: "Task",
@@ -743,6 +802,14 @@ class ExplorePhase(PhaseHandler):
         params = task.params or {}
         attempt = int(params.get("_auto_retry_attempt", 0) or 0)
         if attempt >= cap:
+            await self._record_specialist_retry_exhausted(
+                task=task,
+                ftype=ftype,
+                error=error,
+                attempts_used=attempt,
+                cap=cap,
+                detail="retry cap reached",
+            )
             return False
         next_attempt = attempt + 1
 
@@ -790,6 +857,14 @@ class ExplorePhase(PhaseHandler):
         )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
+            await self._record_specialist_retry_exhausted(
+                task=task,
+                ftype=ftype,
+                error=error,
+                attempts_used=attempt,
+                cap=cap,
+                detail="retry slot already taken",
+            )
             return False
         await self._record_observation(
             "coordinator",

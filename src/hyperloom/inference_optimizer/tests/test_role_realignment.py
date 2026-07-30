@@ -373,3 +373,29 @@ def test_to_phase_budget_telemetry_handles_empty_history():
     s = SharedState()
     out = s.to_phase_budget_telemetry()
     assert out == "(no phase history yet)"
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mocks):
+    """A running task is visible with its elapsed time and idempotency key."""
+    c = coordinator_with_mocks
+    try:
+        assert "no tasks in flight" in c._context_running_tasks_reader()
+        task = await c.tasks.create(
+            kind="specialist",
+            params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
+            idempotency_key="k-running-1",
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        out = c._context_running_tasks_reader()
+        assert "=== Tasks in flight ===" in out
+        assert task.task_id in out
+        assert "kind='specialist'" in out
+        assert "domain='serving_specialist'" in out
+        assert "gap='gap.x'" in out
+        assert "idempotency_key='k-running-1'" in out
+        assert "lease_ttl_sec=1800" in out
+        assert "running_sec=" in out
+    finally:
+        await c.stop()

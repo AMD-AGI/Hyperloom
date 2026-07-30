@@ -47,6 +47,7 @@ class ContextProvider:
     analysis_reader: Callable[[], str] | None = None
     denial_reader: Callable[[int], str] | None = None
     recent_outcomes_reader: Callable[[int], str] | None = None
+    running_tasks_reader: Callable[[], str] | None = None
     # Whitelisted lane-light action runner; ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
 
@@ -169,6 +170,17 @@ class ContextProvider:
         if self.recent_outcomes_reader is None:
             return "(recent outcomes reader not wired)"
         return self._safe(lambda: self.recent_outcomes_reader(top_k), "recent_outcomes")
+
+    def running_tasks(self) -> str:
+        """Return the in-flight task set with the resources each one holds.
+
+        Returns:
+            The running-task summary, or a not-wired marker when no reader is
+            bound.
+        """
+        if self.running_tasks_reader is None:
+            return "(running tasks reader not wired)"
+        return self._safe(self.running_tasks_reader, "running_tasks")
 
     def run_action_now(
         self,
@@ -297,6 +309,17 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "waiting for the next-tick delta. Pass top_k to widen the window.",
         _TOPK_SCHEMA,
         "recent_outcomes",
+    ),
+    (
+        "get_running_tasks",
+        "Return the tasks currently in flight and what each one holds: "
+        "elapsed running seconds, specialist domain / gap, idempotency key, "
+        "lease TTL and remaining time, held lanes, leased GPU ids, and "
+        "heartbeat age. A dispatched task is otherwise invisible until it "
+        "terminates, so use this to judge whether to keep waiting on it, "
+        "plan around it, or escalate.",
+        _NO_ARGS_SCHEMA,
+        "running_tasks",
     ),
     (
         "run_action_now",

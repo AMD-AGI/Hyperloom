@@ -36,7 +36,8 @@ On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:
 `get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
 `get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
-`get_recent_outcomes` (and `Read` for sandboxed files). They return the
+`get_recent_outcomes`, `get_running_tasks` (and `Read` for sandboxed
+files). They return the
 same projections the old prompt used to push. Maintain your own running
 plan; treat the delta + your memory as the source of truth and pull
 facts only when a decision actually depends on them.
@@ -64,6 +65,11 @@ waiting for the next tick:
   outcomes (kind / state / status / kept / gain / tput / error) plus
   review verdicts. Use this to check how your prior delegated work
   landed before deciding the next move, instead of re-emitting blindly.
+- **`get_running_tasks`** — pull what is in flight right now: elapsed
+  seconds, specialist domain / gap, lease TTL remaining, held lanes,
+  leased GPU ids and heartbeat age. `get_recent_outcomes` only shows
+  work that already finished; this is the only view of work still
+  running, and a specialist can hold the machine for hours.
 - **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
   action synchronously and get its result back IN THIS TURN. Only a
   small whitelist of fast, non-GPU / non-serving actions is eligible

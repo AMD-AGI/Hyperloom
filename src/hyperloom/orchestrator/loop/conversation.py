@@ -15,6 +15,9 @@ from ..trace.conversation_trace import ConversationRecord, append_conversation
 from .coordinator import (
     _format_inbox_event,
 )
+from .coordinator_helpers import _parse_iso_unix
+from ..state.task_registry import Task
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -125,6 +128,7 @@ class ConversationCollaborator:
                 inbox_reader=self._context_inbox_reader,
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
+                running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
             )
             setter(provider)
@@ -187,6 +191,111 @@ class ConversationCollaborator:
         lines = ["=== Recent action outcomes (newest last) ==="]
         lines.extend(_format_inbox_event(m) for m in msgs)
         return "\n".join(lines)
+
+    def _context_running_tasks_reader(self) -> str:
+        """Synchronous projection of in-flight tasks with their held resources.
+
+        A dispatched task is otherwise invisible between ``task_queued`` and its
+        terminal ``delegated_result``, which for a GPU specialist can be hours.
+
+        Returns:
+            One line per running task carrying elapsed time, lease expiry, held
+            lanes, leased GPUs and heartbeat age, or a placeholder string.
+        """
+        try:
+            rows = self.bus.db.fetchall_sync(
+                "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+                (),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"(running tasks unavailable: {exc!r})"
+        if not rows:
+            return "(no tasks in flight)"
+
+        def _rows(sql: str) -> list[Any]:
+            try:
+                return list(self.bus.db.fetchall_sync(sql, ()) or [])
+            except Exception:  # noqa: BLE001 — resource detail is best-effort
+                return []
+
+        lanes_by_task: dict[str, list[str]] = {}
+        expiry_by_task: dict[str, str] = {}
+        for r in _rows("SELECT lane, task_id, expires_at FROM leases"):
+            tid = str(r["task_id"])
+            lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
+            expiry_by_task.setdefault(tid, str(r["expires_at"]))
+        gpus_by_task: dict[str, list[int]] = {}
+        for r in _rows("SELECT gpu_id, task_id FROM gpu_leases"):
+            gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
+
+        now_unix = time.time()
+        lines = ["=== Tasks in flight ==="]
+        for row in rows:
+            task = Task.from_row(row)
+            params = task.params or {}
+            started = _parse_iso_unix(task.updated_at)
+            running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
+            parts = [
+                f"  - task_id={task.task_id}",
+                f"kind={task.kind!r}",
+                f"running_sec={int(running_sec)}",
+            ]
+            domain = str(params.get("domain") or "")
+            gap = str(params.get("gap_canonical_id") or "")
+            if domain:
+                parts.append(f"domain={domain!r}")
+            if gap:
+                parts.append(f"gap={gap!r}")
+            parts.append(f"idempotency_key={task.idempotency_key!r}")
+            if task.lease_ttl_sec:
+                parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
+            expires_at = expiry_by_task.get(task.task_id, "")
+            if expires_at:
+                exp_unix = _parse_iso_unix(expires_at)
+                if exp_unix > 0:
+                    parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
+            lanes = lanes_by_task.get(task.task_id)
+            if lanes:
+                parts.append(f"lanes={sorted(lanes)}")
+            gpus = gpus_by_task.get(task.task_id)
+            if gpus:
+                parts.append(f"gpu_ids={sorted(gpus)}")
+            hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
+            if hb_age is not None:
+                parts.append(f"heartbeat_age_sec={int(hb_age)}")
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
+
+    def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
+        """Age of a specialist's freshest liveness file, mirroring the reaper.
+
+        The reap loop treats either ``heartbeat.json`` or ``process.log`` as
+        proof of life; this reports the same signal.
+
+        Args:
+            task: The running task to probe.
+            now_unix: Current wall-clock epoch seconds.
+
+        Returns:
+            Seconds since the most recent liveness write, or ``None`` when no
+            workspace file is readable.
+        """
+        if self.session_dir is None or (task.kind or "").strip() != "specialist":
+            return None
+        try:
+            ws = runs_dir(self.session_dir, "specialist", task.task_id)
+        except Exception:  # noqa: BLE001 — path policy rejects unknown actions
+            return None
+        newest = 0.0
+        for name in ("heartbeat.json", "process.log"):
+            try:
+                mtime = (ws / name).stat().st_mtime
+            except OSError:
+                continue
+            newest = max(newest, mtime)
+        if newest <= 0:
+            return None
+        return max(0.0, now_unix - newest)
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text.
@@ -488,8 +597,8 @@ class ConversationCollaborator:
                 "with the read-only context tools: get_shared_state, "
                 "get_gaps, get_warm_start, get_proposal_scores, "
                 "get_intervention_mix, why_denied, show_analysis_md, "
-                "get_inbox. Reason from your own running plan; do not "
-                "re-derive it from scratch."
+                "get_inbox, get_recent_outcomes, get_running_tasks. Reason "
+                "from your own running plan; do not re-derive it from scratch."
             )
 
         # Both planners see in-flight specialist state; only Robustness can act on it.
