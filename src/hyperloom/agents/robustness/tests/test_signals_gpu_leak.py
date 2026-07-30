@@ -72,7 +72,7 @@ def test_first_tick_with_all_full_no_owner_is_silent():
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
     out = det.evaluate(_ctx(), _data(_full_gpus()))
     assert out == []
-    assert det.consecutive_hits == 1
+    assert det._consecutive_hits == 1
 
 
 def test_two_consecutive_full_ticks_with_no_owner_emits_high():
@@ -112,7 +112,7 @@ def test_full_but_live_engine_core_owner_is_silent():
     ]
     assert det.evaluate(_ctx(0), _data(_full_gpus(), procs)) == []
     assert det.evaluate(_ctx(1), _data(_full_gpus(), procs)) == []
-    assert det.consecutive_hits == 0
+    assert det._consecutive_hits == 0
 
 
 def test_full_with_unrelated_process_still_fires():
@@ -135,18 +135,18 @@ def test_partial_full_is_silent():
     }
     assert det.evaluate(_ctx(0), _data(snap)) == []
     assert det.evaluate(_ctx(1), _data(snap)) == []
-    assert det.consecutive_hits == 0
+    assert det._consecutive_hits == 0
 
 
 def test_reset_after_one_clean_tick():
     """full -> clean -> full -> full: detector emits only on the 4th tick."""
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
     assert det.evaluate(_ctx(0), _data(_full_gpus())) == []
-    assert det.consecutive_hits == 1
+    assert det._consecutive_hits == 1
     assert det.evaluate(_ctx(1), _data(_half_full_gpus())) == []
-    assert det.consecutive_hits == 0
+    assert det._consecutive_hits == 0
     assert det.evaluate(_ctx(2), _data(_full_gpus())) == []
-    assert det.consecutive_hits == 1
+    assert det._consecutive_hits == 1
     out = det.evaluate(_ctx(3), _data(_full_gpus()))
     assert out and out[0].name == "gpu_memory_leaked"
 
@@ -154,9 +154,9 @@ def test_reset_after_one_clean_tick():
 def test_no_gpu_data_is_silent_and_resets_counter():
     det = GpuLeakDetector(GpuLeakConfig(min_consecutive_ticks=2))
     assert det.evaluate(_ctx(0), _data(_full_gpus())) == []
-    assert det.consecutive_hits == 1
+    assert det._consecutive_hits == 1
     assert det.evaluate(_ctx(1), _data({})) == []
-    assert det.consecutive_hits == 0
+    assert det._consecutive_hits == 0
 
 
 def test_free_mb_threshold_fires_when_util_mem_pct_missing():

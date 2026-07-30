@@ -34,8 +34,6 @@ from _task_group_contract import (  # noqa: E402
     build_operator_identity,
     build_task_group_shape_cases,
     legacy_operator_identity_keys,
-    native_operation_key,
-    normalize_operation_key,
     operator_identity_key,
 )
 
@@ -1869,28 +1867,6 @@ def _is_native_source(path: str) -> bool:
         ``True`` for C/C++/HIP/CUDA source files.
     """
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
-
-
-def _normalize_operation_key(operation: str) -> str:
-    """Canonicalize a TraceLens operation name for task-group keying.
-
-    Strips balanced ``<...>`` template-argument lists (nested-safe) so the same
-    kernel profiled at different dtypes/shapes groups together, while distinct
-    kernels (different base names) stay separate.
-
-    Args:
-        operation: The TraceLens operation name.
-
-    Returns:
-        The canonicalized operation name, or the original string when
-        stripping leaves nothing.
-    """
-    return normalize_operation_key(operation)
-
-
-def _native_operation_key(operation: str) -> str:
-    """Return a stable native operator identity across template instances."""
-    return native_operation_key(operation)
 
 
 def aggregate_by_source_function(

@@ -208,7 +208,7 @@ class SpecialistSubprocessResult:
 
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     """Intel/tool calls (``{"tool", "query"}``) recovered from the same
-    stream-json log (WebSearch / WebFetch / pr_monitor / cortex_kb / ...).
+    stream-json log (WebSearch / WebFetch / pr_monitor / ...).
     Empty when none were made or the log was missing/truncated."""
 
     turn_usages: list[dict[str, int | None]] = field(default_factory=list)
@@ -303,8 +303,7 @@ _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
 def _ray_specialist_pending_deadline_sec() -> float:
     """Max seconds to wait for a GPU-specialist actor to schedule before failing.
 
-    Mirrors ``_ray_serving._RAY_SPECIALIST_SCHED_TIMEOUT_SEC`` (same env var) so
-    the async dispatch path and the legacy blocking ``start()`` agree. A pending
+    Reads ``INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC``. A pending
     request that exceeds this becomes a structured task failure rather than an
     unbounded stall (§3.3 / invariant §6.4: pending time is bounded and tracked
     separately from the running wall budget).

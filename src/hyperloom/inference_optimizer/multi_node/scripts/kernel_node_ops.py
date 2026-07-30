@@ -30,7 +30,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from patch_path_safety import (  # noqa: E402
+    atomic_write_bytes,
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
@@ -61,37 +61,6 @@ def _safe_name(value: str) -> str:
     """
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "patch"
-
-
-def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Atomically write ``data`` to ``target`` via a temp file and ``os.replace``.
-
-    Args:
-        target (Path): the destination file path (parent dirs are created).
-        data (bytes): the bytes to write.
-
-    Raises:
-        Exception: re-raised if writing fails (the temp file is removed first).
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, target)
-    except Exception:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                # Temp file already gone; the original error is re-raised below.
-                pass
-        raise
 
 
 def _emit(payload: dict) -> int:
@@ -141,7 +110,7 @@ def _do_apply(a: argparse.Namespace) -> int:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
     except Exception as exc:  # noqa: BLE001
         return _emit({"status": "failed", "host": host, "error": f"patch_b64 not valid base64: {exc!r}"})
-    _atomic_write_bytes(target, data)
+    atomic_write_bytes(target, data)
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
     if target.suffix.lower() == ".py":
         try:

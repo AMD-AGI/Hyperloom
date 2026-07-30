@@ -81,12 +81,6 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         def specialist_mcp_url(self) -> str:
             return "http://pr-monitor.invalid/mcp"
 
-        def cortex_specialist_mcp_url(self) -> str:
-            return "http://cortex.invalid/mcp"
-
-        def cortex_specialist_mcp_headers(self) -> dict:
-            return {"authorization": "Bearer x"}
-
     executor = _build_specialist_executor(
         _spec_args("subprocess"),
         session_dir=tmp_path,

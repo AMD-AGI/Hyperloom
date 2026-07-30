@@ -29,55 +29,6 @@ DEFAULT_EP = 1
 DEFAULT_PRECISION = "bf16"
 
 
-class _RetiredFlag(argparse.Action):
-    """Argparse action that hard-fails on a retired CLI flag with a migration hint (exits 2)."""
-
-    def __init__(
-        self,
-        option_strings: list[str],
-        dest: str,
-        *,
-        hint: str,
-        **kwargs,
-    ) -> None:
-        """Register the retired flag as a zero-argument, hidden action.
-
-        Args:
-            option_strings (list[str]): The flag spellings this action handles.
-            dest (str): The argparse destination name (unused; suppressed).
-            hint (str): One-line migration hint shown in the error message when
-                the retired flag is used.
-            **kwargs: Passed through to :class:`argparse.Action`; ``nargs``,
-                ``default``, and ``help`` are defaulted so the flag takes no
-                value and stays out of ``--help``.
-        """
-        kwargs.setdefault("nargs", 0)
-        kwargs.setdefault("default", argparse.SUPPRESS)
-        kwargs.setdefault("help", argparse.SUPPRESS)
-        self._hint = hint
-        super().__init__(option_strings, dest, **kwargs)
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values,
-        option_string: str | None = None,
-    ) -> None:
-        """Abort parsing with a migration hint when the retired flag is seen.
-
-        Args:
-            parser (argparse.ArgumentParser): The parser invoking this action.
-            namespace (argparse.Namespace): The in-progress parse namespace.
-            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
-            option_string (str | None): The exact flag spelling that triggered this.
-
-        Raises:
-            SystemExit: Always — ``parser.error`` prints the message and exits 2.
-        """
-        parser.error(f"{option_string} was removed. {self._hint}")
-
-
 def _positive_int_arg(value: str) -> int:
     """argparse type for positive integer knobs."""
     try:
@@ -243,7 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Total number of GPU nodes for the inference RayJob. "
         "1 (default) keeps the legacy single-pod path. "
         ">=2: `optimize` provisions the SaFE RayJob before preflight "
-        "(unless already in /tmp/multi_node_state.json), runs bootstrap "
+        "(unless already in the session multi_node_state.json), runs bootstrap "
         "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
         "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
         "stop-multi-job` when you want to release it. Requires "
@@ -350,10 +301,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--pd-mode",
-        choices=("colocated", "disaggregated"),
-        default="colocated",
+        choices=("aggregated", "disaggregated"),
+        default="aggregated",
         help="Prefill-Decode disaggregation mode. ALWAYS defaults to "
-        "`colocated` regardless of any inherited $PD_MODE env, so "
+        "`aggregated` regardless of any inherited $PD_MODE env, so "
         "PD only turns on when the agent explicitly passes "
         "`--pd-mode disaggregated` (driven by the prompt's "
         "Environment block having a PD_MODE=disaggregated line). "
@@ -850,33 +801,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB flag (Critic agent only).
-    opt.add_argument(
-        "--cortex-kb-url",
-        dest="cortex_kb_url",
-        type=str,
-        default=None,
-        help="Cortex KB base URL for this run, used only by the Critic "
-        "agent's per-proposal assess enrichment (/v2/reasoning/assess). "
-        "This flag is the single source of truth: the CLI no longer reads a "
-        "$CORTEX_KB_URL env fallback (the flag value is forwarded to the "
-        "critic subprocess as CORTEX_KB_URL). This is NOT the recipe KB — "
-        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
-        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
-        "enrichment entirely.",
-    )
-    opt.add_argument(
-        "--specialist-kb-mcp-url",
-        dest="specialist_kb_mcp_url",
-        type=str,
-        default=None,
-        help="Read-only KB-graph (cortex_kb) MCP endpoint advertised to "
-        "specialist subprocesses; also settable via "
-        "$HYPERLOOM_SPECIALIST_KB_MCP_URL (bearer token from "
-        "$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN). When unset, falls back to "
-        "the gbrain MCP derived from $GBRAIN_BASE_URL (+ /mcp) with a "
-        "$GBRAIN_TOKEN bearer. Specialist KB writes always stay local.",
-    )
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -884,7 +808,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Filesystem root for the local recipe-snapshot KB store. "
         "All writes (put_recipe / append_attempt / delete_recipe) go "
-        "here regardless of --cortex-kb-url. Defaults to "
+        "here. Defaults to "
         "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
         "then /workspace/hyperloom/kb. Layout is a 5-level "
         "directory tree keyed by canonical_id components "
@@ -899,11 +823,10 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="degraded_kb",
         action="store_true",
         default=False,
-        help="Skip the Cortex KB integration entirely (T0/T2/T3/T4 become "
-        "no-ops). Also short-circuits the IR-3 KB probe. IR-3 sets "
-        "this automatically when kb-service is unreachable (soft "
-        "degrade); manifest records the reason as ``explicit_flag`` "
-        "vs ``ir3_auto``.",
+        help="Skip the recipe KB integration entirely (T0/T2/T3/T4 become "
+        "no-ops). Also short-circuits any legacy IR-3 KB probe marker. "
+        "Manifest records the reason as ``explicit_flag`` when set "
+        "explicitly.",
     )
     opt.add_argument(
         "--cortex-strict-fingerprint",
@@ -1045,12 +968,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
-    # Retired flag: hard-fail with a migration hint instead of an opaque error.
-    opt.add_argument(
-        "--enable-proposal-scoring",
-        action=_RetiredFlag,
-        hint="Use ``--proposal-scoring`` (default off) / ``--no-proposal-scoring`` instead.",
-    )
     # specialist sub-agent backend selection: Claude (default), inherits orchestration model.
     opt.add_argument(
         "--specialist-model",
@@ -1097,7 +1014,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional path to an MCP config JSON forwarded to the "
-        "subprocess claude (`--mcp-config`). Used to wire kb / pr "
+        "subprocess claude (`--mcp-config`). Used to wire PR Monitor "
         "MCP servers into specialists. Default: None.",
     )
 
@@ -1276,29 +1193,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "backstop. No effect when --explore-variant-timeout-sec is "
         "set to a positive value.",
     )
-    # Controls a resumed session's leftover legacy scoreboard (action_scores).
-    opt.add_argument(
-        "--legacy-action-scores",
-        dest="legacy_action_scores",
-        type=str,
-        choices=("drop", "warn"),
-        default="drop",
-        help="Resume-mode handling of the legacy scoreboard "
-        "(``action_scores`` and friends). 'drop' (default) "
-        "silently discards. 'warn' logs a WARNING + adds a "
-        "breakdown.warnings entry. KB_design §3.9 §7.",
-    )
-    # SharedState migration controls.
-    opt.add_argument(
-        "--migration-mode",
-        dest="migration_mode",
-        type=str,
-        choices=("strict", "lenient"),
-        default="strict",
-        help="Strictness of the legacy → v0.8 state.json migration. "
-        "'strict' (default) aborts on fact-layer field loss; "
-        "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
-    )
     opt.add_argument(
         "--reset-state",
         dest="reset_state",
@@ -1306,8 +1200,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
-        "from a blank SharedState. Cortex KB is NOT touched. "
-        "KB_design §3.10 §5.3.",
+        "from a blank SharedState. Cortex KB is NOT touched.",
     )
     # observability
     opt.add_argument(
@@ -1445,7 +1338,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="strict_phase",
         action="store_true",
         default=True,
-        help="(v0.8 M2 default) Enforce PolicyGate R1 phase_incompatible. "
+        help="Enforce PolicyGate R1 phase_incompatible. "
         "Action proposals outside the current phase's allowlist "
         "return policy_denied so the LLM self-corrects.",
     )

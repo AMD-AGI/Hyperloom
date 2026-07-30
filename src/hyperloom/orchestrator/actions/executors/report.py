@@ -446,9 +446,6 @@ def _build_summary_dict(
         "stop_reason_explanation": _explain_stop_reason(stop_reason),
         "baseline_tput": state.baseline_tput,
         "baseline_accuracy": state.baseline_accuracy,
-        # Remaining-gaps assessment verdict + history.
-        "remaining_gaps_assessment": dict(state.last_remaining_gaps_assessment or {}),
-        "remaining_gaps_assessments_history": list(state.remaining_gaps_assessments or []),
         "current_best": state.current_best,
         "cumulative_gain": state.cumulative_gain,
         # Validated gain (what the run actually delivered).
@@ -592,8 +589,6 @@ def _format_md(summary: dict[str, Any]) -> str:
 
     lines.extend(_format_degraded_mode_section(summary))
 
-    lines.extend(_format_steward_section(summary))
-
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
         lines.extend(_format_roofline_comparison_section(roofline_cmp))
@@ -668,43 +663,6 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
         lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
-    lines.append("")
-    return lines
-
-
-def _format_steward_section(summary: dict[str, Any]) -> list[str]:
-    """Render the remaining-gaps assessment verdict + history when present.
-
-    Reads ``last_remaining_gaps_assessment`` from state.json.
-
-    Args:
-        summary: The summary payload built by :func:`_build_summary_dict`.
-
-    Returns:
-        Markdown lines for the steward assessment section, or ``[]`` when no
-        assessment/history is present.
-    """
-    assessment = summary.get("remaining_gaps_assessment") or {}
-    history = summary.get("remaining_gaps_assessments_history") or []
-    if not assessment and not history:
-        return []
-    lines: list[str] = ["## Remaining gaps (steward assessment)", ""]
-    if assessment:
-        rec = assessment.get("recommendation", "")
-        ts = assessment.get("ts", "")
-        potential = assessment.get("remaining_potential_pct_estimate", 0.0) or 0.0
-        rationale = (assessment.get("rationale", "") or "").strip()
-        next_gap = assessment.get("next_gap_canonical_id", "")
-        lines.append(f"- final verdict: `{rec}` at `{ts}`")
-        lines.append(f"- remaining_potential_pct_estimate: `{potential:.2f}%`")
-        if next_gap:
-            lines.append(f"- next_gap_canonical_id: `{next_gap}`")
-        if rationale:
-            lines.append("")
-            lines.append("> " + rationale.replace("\n", "\n> "))
-            lines.append("")
-    if len(history) > 1:
-        lines.append(f"- prior assessments: {len(history) - 1}")
     lines.append("")
     return lines
 

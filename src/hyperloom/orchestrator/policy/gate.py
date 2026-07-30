@@ -122,9 +122,6 @@ class PolicyDenied(RuntimeError):
         self.hint = hint
 
 
-_GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
-
-
 # Per-action delegate source allowlist; unlisted actions fall through to the general delegate rules.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
     "recover": frozenset({"robustness"}),
@@ -325,36 +322,7 @@ SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 # R4 / R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
 
 #: KB *write* surfaces. R4 ``kb_write_unauthorized`` denies any intent invoking one.
-KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "mcp__cortex_kb__propose_point",
-    }
-)
-
-#: KB *readonly* surfaces (the ``cortex_kb`` MCP server is the gbrain knowledge
-#: graph; these are its read-only tools). R5 ``tool_whitelist_role`` requires a
-#: specialist sub-agent caller. Write tools (put_page / delete_page / add_tag /
-#: revert_version / submit_job / …) are deliberately omitted so they never enter
-#: ``--allowedTools``; the local-first write contract is preserved.
-CORTEX_KB_READ_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "mcp__cortex_kb__query",
-        "mcp__cortex_kb__search",
-        "mcp__cortex_kb__recall",
-        "mcp__cortex_kb__get_page",
-        "mcp__cortex_kb__list_pages",
-        "mcp__cortex_kb__get_chunks",
-        "mcp__cortex_kb__resolve_slugs",
-        "mcp__cortex_kb__traverse_graph",
-        "mcp__cortex_kb__get_links",
-        "mcp__cortex_kb__get_backlinks",
-        "mcp__cortex_kb__get_tags",
-        "mcp__cortex_kb__get_timeline",
-        "mcp__cortex_kb__find_experts",
-        "mcp__cortex_kb__find_trajectory",
-        "mcp__cortex_kb__extract_facts",
-    }
-)
+KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset()
 
 #: PR Monitor *readonly* surfaces. R5 same role gating.
 PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
@@ -379,7 +347,7 @@ WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
 #: Role→allowed-toolset map (R5). Only the specialist sub-agent touches external knowledge tools.
 TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
-    "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | CORTEX_KB_READ_TOOL_NAMES),
+    "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
     "kernel_agent": frozenset(),
@@ -389,7 +357,7 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
 
 #: Convenience superset of every known external tool name (R4 collision check).
 ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
-    KB_WRITE_TOOL_NAMES | CORTEX_KB_READ_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
+    KB_WRITE_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 )
 
 

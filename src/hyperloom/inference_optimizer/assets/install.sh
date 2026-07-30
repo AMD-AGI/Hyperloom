@@ -658,12 +658,10 @@ PY
 
 # --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
 _forge_gemm_tune_candidates() {
-  # Explicit override first.
+  # Explicit gemm-tune override first.
   [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root aliases used by Hyperloom's forge backend.
+  # KernelForge root (single canonical var: FORGE_PATH).
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
 }
 
 _resolve_forge_gemm_tune_root() {
@@ -710,6 +708,273 @@ ensure_forge_gemm_tune() {
       log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
     fi
   fi
+}
+
+# --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
+# forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
+# Unlike forge_gemm_tune / forge_fusion — which have standalone sub-pyprojects and
+# get pip-installed by the carrier from their sub-package dirs — `kernel_agents`
+# is only packaged by the KernelForge *root* pyproject and was never installed
+# here. So forge-loop relied entirely on $FORGE_PATH being present and prepended to
+# the child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
+# unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
+# `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
+# attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
+# import succeed regardless of FORGE_PATH (root install also covers the two
+# sub-packages, so the carrier's later import checks short-circuit).
+_kernel_forge_root() {
+  # KernelForge repo root that actually contains kernel_agents. Keyed on
+  # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
+  # var that forge_submit reads at runtime and local_setup.sh exports).
+  local c="${FORGE_PATH:-}"
+  [ -n "$c" ] || return 1
+  if [ -f "${c%/}/pyproject.toml" ] && [ -f "${c%/}/src/kernel_agents/__init__.py" ]; then
+    printf '%s\n' "${c%/}"
+    return 0
+  fi
+  return 1
+}
+
+ensure_kernel_agents() {
+  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
+  # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
+  # default geak backend, so a backend gate here would skip the install; a later
+  # forge session whose child has no FORGE_PATH would then still hit
+  # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
+  # "checkout present at install time, FORGE_PATH absent at runtime" case.
+  local root
+  if ! root="$(_kernel_forge_root)"; then
+    log "kernel_agents: FORGE_PATH not set / no KernelForge checkout there; skipping optional forge-loop install"
+    return 0
+  fi
+  if "$PYTHON" -c "import kernel_agents.cli" >/dev/null 2>&1; then
+    log "kernel_agents already importable; skipping install"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "kernel_agents not importable (check-only; would install from ${root})"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install ${root}"
+    return 0
+  fi
+  log "ensuring kernel_agents from ${root} (forge-loop backend)"
+  # Deliberately NON-editable (no -e): ${root} is a shared, often read-only
+  # KernelForge checkout used by concurrent sessions. A non-editable install
+  # builds in a temp dir and never writes egg-info/build artifacts back into the
+  # checkout, so parallel runs can't race on it — this mirrors the carrier's
+  # own forge_fusion/forge_gemm_tune install (see _incontainer.sh: "Non-editable
+  # installs build in a temp dir and never write to the read-only shared
+  # checkout"). Installing the root also provides forge_gemm_tune + forge_fusion,
+  # so the carrier's later `import forge_fusion` guard short-circuits (verified:
+  # it logs "forge kernel backend ready" with no reinstall).
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}"
+  "$PYTHON" -c "import kernel_agents, kernel_agents.cli" \
+    && log "kernel_agents installed OK from ${root}" \
+    || die "kernel_agents import failed after install from ${root}"
+}
+
+# --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
+# forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
+# and only falls back to the thin rocprofv3 "PMC" path when the tool is absent.
+# KernelForge's resolve_rocpc() looks for the tool at
+# `<ROCM_PATH>/libexec/rocprofiler-compute/rocprof_compute_base.py`; the stock
+# vllm/sglang ROCm serving images ship rocprofv3 but NOT rocprofiler-compute, so
+# every forge run silently degrades to PMC (no roofline -> optimization-potential
+# is always estimable=NO). The Python deps rocprof-compute needs are already
+# pulled in by the KernelForge root install (its base deps cover dash/kaleido/
+# matplotlib/plotille/tqdm); the only missing piece is the system tool itself,
+# which pip cannot provide — it comes from the ROCm apt package.
+#
+# This step is FAIL-SOFT by design: forge still works on the PMC path, so a
+# missing/failed rocprof-compute must NOT abort the install. Every branch logs
+# (with the concrete "profiling will degrade to PMC" consequence) so the
+# post-mortem observability question — "why did this run profile on PMC?" — is
+# answerable from the install log alone.
+# rocprof-compute's CSV converter (utils/utils.py, v3->v2) assumes pandas'
+# legacy 'object' string dtype. pandas>=3.0 defaults future.infer_string=True,
+# so the rocprofv3 counter CSV's Agent_Id ("Agent 9") is read as the new
+# StringDtype; the converter's `dtype == "object"` guard then skips its int
+# coercion and the subsequent Agent_Id<->Node_Id merge dies ("merge on str and
+# int64"). Every counter file is dropped -> rocprof-compute reports "No
+# profiling data found" -> forge silently degrades to the PMC path (no roofline;
+# optimization-potential estimable=NO). Nothing else in the stack needs
+# pandas>=3 (verified: no installed dist requires it), so <3 is conflict-free.
+#
+# rocprof-compute runs under the interpreter KernelForge's resolve_rocpc() picks:
+# it probes sys.executable, then /usr/bin/python3, then `python3` on PATH, and
+# uses the FIRST that can run `rocprof-compute --help`. We mirror that probe and
+# pin pandas in exactly THAT interpreter (not blindly $PYTHON), so the pin cannot
+# be a silent no-op and the log names the env that will actually run the tool.
+#
+# Two known, accepted deltas vs. resolve_rocpc() (neither is a correctness bug —
+# both fall back safely and only affect which interpreter gets pinned):
+#   * First candidate: we probe $PYTHON where resolve_rocpc probes the RUNTIME
+#     sys.executable. $PYTHON is install-time sys.executable and, in the shared
+#     -venv carrier flow, is the SAME interpreter forge runs under, so they agree.
+#     If a deployment splits install-time and runtime Python, the pin may land on
+#     a non-preferred interpreter — the fallback + warn below make that visible.
+#   * `--help` passing proves rocprof-compute's deps import, NOT that its CSV
+#     conversion works on this pandas; the pandas<3 pin (below) is what closes
+#     that gap. A deeper check (pandas major inside the probe) would belong in
+#     KernelForge's resolve_rocpc(), not here.
+#
+# Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
+
+# Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
+# of $PYTHON (install-time sys.executable), /usr/bin/python3, PATH python3 that
+# can run `<libexec>/rocprof-compute --help`. Non-zero + no output if none do.
+_rocpc_effective_python() {
+  local libexec="$1" py seen=" "
+  for py in "$PYTHON" /usr/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+    [ -n "$py" ] || continue
+    case "$seen" in *" $py "*) continue ;; esac
+    seen="${seen}${py} "
+    if "$py" "${libexec}/rocprof-compute" --help >/dev/null 2>&1; then
+      printf '%s\n' "$py"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print pandas version under $1 and exit: 0 => <3 (ok); 1 => >=3; 3 => absent.
+# Decided in Python (robust vs. bash numeric parsing under set -euo pipefail).
+_pandas_major_ge3() {
+  "$1" - <<'PY'
+import sys
+try:
+    import pandas
+except Exception:
+    sys.exit(3)
+print(pandas.__version__)
+sys.exit(1 if int(pandas.__version__.split(".")[0]) >= 3 else 0)
+PY
+}
+
+_ensure_pandas_lt3_for_rocpc() {
+  local py="${1:-$PYTHON}" ver rc why
+  if ver="$(_pandas_major_ge3 "$py")"; then rc=0; else rc=$?; fi
+
+  if [ "$rc" -eq 0 ]; then
+    log "rocprof-compute: pandas ${ver} is <3 under ${py} (compatible with rocprof-compute's CSV converter); no pin needed"
+    return 0
+  fi
+
+  # rc==1 (pandas>=3) OR rc==3 (pandas absent): pin pandas<3 in the interpreter
+  # that runs rocprof-compute. This runs LAST in install.sh (after
+  # chain_kernel_agent — the final pip-installing step), so no later step can
+  # re-pull pandas>=3, and the re-check below is the final, truthful state.
+  if [ "$rc" -eq 3 ]; then
+    why="pandas not yet installed"
+  else
+    why="pandas ${ver} (>=3) breaks rocprof-compute's CSV converter (Agent_Id StringDtype)"
+  fi
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute: ${why} (interpreter ${py}); check-only — would pin 'pandas>=2.2.3,<3'. Until fixed, forge profiling degrades to the PMC path."
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${py} -m pip install 'pandas>=2.2.3,<3'  (${why})"
+    return 0
+  fi
+
+  log "rocprof-compute: ${why}; installing 'pandas>=2.2.3,<3' into ${py}"
+  "$py" -m pip install --quiet "${PIP_EXTRA[@]}" 'pandas>=2.2.3,<3' \
+    || warn "rocprof-compute: 'pip install pandas>=2.2.3,<3' failed under ${py}; forge profiling will stay on the PMC path. Check pip/network."
+
+  # Re-check the SAME interpreter, at the END of install.sh, so the logged
+  # outcome reflects what forge will actually import at runtime.
+  if ver="$(_pandas_major_ge3 "$py")"; then rc=0; else rc=$?; fi
+  if [ "$rc" -eq 0 ]; then
+    log "rocprof-compute: pandas ${ver} in ${py}; forge profiling can use rocprof-compute (roofline)"
+  else
+    warn "rocprof-compute: pandas still incompatible in ${py} (version='${ver}', rc=${rc}); forge profiling will degrade to the PMC path."
+  fi
+  return 0
+}
+
+ensure_rocprof_compute() {
+  # Gate on the KernelForge checkout ONLY (via _kernel_forge_root, mirroring
+  # ensure_kernel_agents), NOT on KERNEL_OPT_BACKEND_ORDER. install.sh runs at
+  # setup time under the default geak backend — the carrier sets
+  # KERNEL_OPT_BACKEND_ORDER=forge only later on the optimize command, AFTER
+  # install.sh has finished (_incontainer.sh) — so a backend gate here would skip
+  # the install and a later forge session would still profile on the PMC path.
+  # rocprof-compute (~11 MB) + pandas<3 are only useful for forge but harmless
+  # otherwise (pandas<3 is conflict-free), so keying on the checkout is the safe,
+  # ordering-independent choice. The backend value is logged for context only.
+  local root
+  if ! root="$(_kernel_forge_root)"; then
+    log "rocprof-compute: FORGE_PATH not set / no KernelForge checkout there; skipping optional roofline-profiling deps (forge, if enabled later, uses the PMC fallback)"
+    return 0
+  fi
+  log "rocprof-compute: KernelForge checkout present at ${root} (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}'); ensuring roofline profiling deps"
+
+  local rocm_root base
+  rocm_root="${ROCM_PATH:-/opt/rocm}"
+  base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+
+  # --- Step 1: ensure the rocprof-compute tool exists ---
+  # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
+  # install when the file KernelForge's resolve_rocpc() checks is already present.
+  if [ -f "$base" ]; then
+    log "rocprof-compute already present at ${base}"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute not found at ${base} (check-only; would apt-get install rocprofiler-compute). Forge profiling would degrade to the PMC path."
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+  elif ! command -v apt-get >/dev/null 2>&1; then
+    # No apt (RHEL/Alpine/etc.): cannot install the system package here.
+    warn "rocprof-compute: apt-get unavailable; cannot install rocprofiler-compute. Forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Bake rocprofiler-compute into the image to enable roofline profiling."
+  else
+    log "installing rocprofiler-compute (forge profiling backend) via apt into ${rocm_root}"
+    # Fail-soft throughout: never let apt failures (locked dpkg, offline mirror,
+    # missing package) abort the install. Capture output to a log so a failure is
+    # diagnosable (do not swallow apt errors). Try once, refresh index, retry.
+    local apt_log="${TMPDIR:-/tmp}/rocpc_apt_$$.log"
+    export DEBIAN_FRONTEND=noninteractive
+    if ! apt-get install -y --no-install-recommends rocprofiler-compute >"$apt_log" 2>&1; then
+      apt-get update -qq >>"$apt_log" 2>&1 || true
+      apt-get install -y --no-install-recommends rocprofiler-compute >>"$apt_log" 2>&1 || true
+    fi
+    # Verify against the SAME path KernelForge's resolve_rocpc() checks.
+    if [ -f "$base" ]; then
+      log "rocprof-compute installed OK: ${base} present"
+    else
+      warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
+      # Guard BOTH the missing-file case and pipefail: if the redirect above never
+      # created $apt_log (e.g. an unwritable TMPDIR), a bare `tail | while` exits
+      # non-zero and set -euo pipefail would abort install.sh — the very
+      # fail-soft invariant this diagnostic exists to serve. Only tail when the
+      # file exists, and swallow any residual pipe failure.
+      if [ -f "$apt_log" ]; then
+        tail -n 6 "$apt_log" 2>/dev/null | while IFS= read -r _ln; do warn "  apt| ${_ln}"; done || true
+      fi
+    fi
+    rm -f "$apt_log" 2>/dev/null || true
+  fi
+
+  # --- Step 2: pin pandas<3 for rocprof-compute's CSV converter ---
+  # Pin in the interpreter resolve_rocpc() will actually run the tool under (probe
+  # mirrors KernelForge). Runs when the tool is present; in check/dry-run we
+  # surface the plan against $PYTHON even before the tool exists.
+  if [ -f "$base" ]; then
+    local rocpc_py
+    if rocpc_py="$(_rocpc_effective_python "$(dirname "$base")")"; then
+      [ "$rocpc_py" = "$PYTHON" ] \
+        || log "rocprof-compute: resolve_rocpc will run under ${rocpc_py} (not \$PYTHON=${PYTHON}); pinning pandas there"
+    else
+      rocpc_py="$PYTHON"
+      warn "rocprof-compute: could not confirm which interpreter runs 'rocprof-compute --help'; pinning pandas in \$PYTHON=${PYTHON} (best effort — verify forge's runtime interpreter has pandas<3)"
+    fi
+    _ensure_pandas_lt3_for_rocpc "$rocpc_py"
+  elif [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    _ensure_pandas_lt3_for_rocpc "$PYTHON"
+  fi
+  return 0
 }
 
 # --- 2. Magpie ---
@@ -1009,6 +1274,48 @@ _XDIT_QUALITY_DEPS=(
   "lpips:lpips"
 )
 
+# Load-bearing packages an OPTIONAL dep install must never move. On a ROCm pod
+# these are vendor ROCm builds from a private index; letting pip's resolver pull
+# a PyPI (CUDA) torch to satisfy e.g. lpips' `torch>=0.4.0` silently bricks GPU
+# access for EVERY framework sharing this venv (that is exactly how this brick
+# shipped: a CUDA torch replaced the ROCm one, exit 0, no visible error).
+_XDIT_CORE_PINS=(torch torchvision torchaudio triton)
+
+# Write a pip constraints file pinning each installed core package to its exact
+# current version. `pip install -c <file>` then forbids the resolver from moving
+# them, while still letting the requested deps pull their OTHER (safe) deps.
+_write_core_constraints() {
+  local dest="$1" pkg ver
+  : > "$dest"
+  for pkg in "${_XDIT_CORE_PINS[@]}"; do
+    ver="$("$PYTHON" -c "import importlib.metadata as m; print(m.version('$pkg'))" 2>/dev/null || true)"
+    [ -n "$ver" ] && printf '%s==%s\n' "$pkg" "$ver" >> "$dest"
+  done
+  return 0
+}
+
+# torch's ROCm/HIP version string (empty if torch is absent OR is a non-ROCm
+# build). The tripwire below reads it before and after the optional install.
+_torch_hip_version() {
+  "$PYTHON" -c "import torch; print(torch.version.hip or '')" 2>/dev/null || true
+}
+
+# Tripwire: if torch was a ROCm build before the optional install but is now a
+# non-ROCm (CUDA-only) build, the resolver swapped the load-bearing wheel. Try a
+# best-effort rollback to the pinned versions, then abort HARD — a silent warn
+# here is exactly how this poison reached every co-tenant framework before.
+_guard_torch_not_clobbered() {
+  local constraints="$1" hip_before="$2" hip_after
+  [ -n "$hip_before" ] || return 0
+  hip_after="$(_torch_hip_version)"
+  [ -n "$hip_after" ] && return 0
+  warn "xDiT quality deps swapped the ROCm torch for a non-ROCm build; attempting rollback to: $(tr '\n' ' ' < "$constraints")"
+  "$PYTHON" -m pip install --quiet --no-cache-dir --force-reinstall --no-deps \
+    "${PIP_EXTRA[@]}" -r "$constraints" \
+    || warn "rollback reinstall failed (pinned ROCm wheels may need the vendor index); restore torch manually"
+  die "optional xDiT quality deps clobbered the load-bearing ROCm torch (was hip=${hip_before}, now a non-ROCm build). Aborting instead of poisoning every framework in this shared venv. Preinstall scikit-image/lpips in the image, or extend _XDIT_CORE_PINS."
+}
+
 ensure_xdit_quality_deps() {
   log "ensuring xDiT image-quality gate deps (SSIM/LPIPS) in $PYTHON"
   local missing=()
@@ -1033,9 +1340,18 @@ ensure_xdit_quality_deps() {
     return 0
   fi
   log "installing missing xDiT quality deps: ${missing[*]}"
-  "$PYTHON" -m pip install --quiet --no-cache-dir \
+  # Pin the load-bearing core so this optional install can never move
+  # torch/torchvision/triton, and snapshot torch's ROCm build so the tripwire
+  # can abort loudly if it got swapped anyway.
+  local constraints hip_before
+  constraints="$(mktemp)"
+  _write_core_constraints "$constraints"
+  hip_before="$(_torch_hip_version)"
+  "$PYTHON" -m pip install --quiet --no-cache-dir -c "$constraints" \
     "${PIP_EXTRA[@]}" "${missing[@]}" \
     || warn "failed to install xDiT quality deps: ${missing[*]} (gate degrades to MSE-only)"
+  _guard_torch_not_clobbered "$constraints" "$hip_before"
+  rm -f "$constraints"
   for pair in "${_XDIT_QUALITY_DEPS[@]}"; do
     import_name="${pair##*:}"
     "$PYTHON" -c "import ${import_name}" >/dev/null 2>&1 \
@@ -1122,6 +1438,7 @@ chain_kernel_agent() {
 
 ensure_inference_optimizer
 ensure_forge_gemm_tune
+ensure_kernel_agents
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
@@ -1155,6 +1472,13 @@ fi
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
 chain_kernel_agent
+# rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
+# step (chain_kernel_agent included; nothing below installs packages). This makes
+# the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
+# and its own re-check the truthful end state, not a premature false-positive.
+# Gated on the KernelForge checkout (not the backend): the default-geak install a
+# later forge session inherits still gets rocprof-compute + pandas<3.
+ensure_rocprof_compute
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no

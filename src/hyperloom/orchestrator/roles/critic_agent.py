@@ -283,10 +283,6 @@ class CriticAgentBackend:
     kb_env:
         Extra env vars merged into the runtime.cli subprocess env when
         ``kb_mode == "live"``.
-    cortex_kb_url:
-        Optional cortex kb-service base URL. When set, exported as
-        ``CORTEX_KB_URL`` into the runtime.cli subprocess env for the critic
-        runtime's optional ``/v2/reasoning/assess`` enrichment.
     runtime_caller_factory:
         Test seam returning a :data:`RuntimeCaller`.
     static_context:
@@ -303,7 +299,6 @@ class CriticAgentBackend:
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None
-    cortex_kb_url: str | None = None
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
@@ -817,12 +812,6 @@ class CriticAgentBackend:
         # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
-
-        # Propagate the --cortex-kb-url flag into the subprocess env; the flag is
-        # the single source of truth (no env fallback in the parent).
-        cortex_kb_url = (self.cortex_kb_url or "").strip()
-        if cortex_kb_url:
-            env["CORTEX_KB_URL"] = cortex_kb_url
 
         if self.kb_mode == "live":
             for k, v in (self.kb_env or {}).items():

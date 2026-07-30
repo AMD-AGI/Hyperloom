@@ -151,6 +151,8 @@ def _bootstrap_cortex_kb(
     the dispatcher. KB unavailability never aborts the launch; a hard T0
     failure warns and continues warm-start-empty.
 
+    Returns ``None`` when ``--degraded-kb`` is set (T0/T2/T3/T4 become no-ops).
+
     Args:
         args: Parsed CLI arguments.
         session_dir: The current session directory.
@@ -158,8 +160,13 @@ def _bootstrap_cortex_kb(
         resume: Whether this launch is resuming an existing session.
 
     Returns:
-        Any: The configured ``RecipeKB`` dispatcher.
+        Any | None: The configured ``RecipeKB`` dispatcher, or ``None`` when
+        KB hooks are disabled.
     """
+    if bool(getattr(args, "degraded_kb", False)):
+        print("Recipe KB       : DISABLED (--degraded-kb)")
+        return None
+
     kb = _build_recipe_kb_dispatcher(args)
     _attach_recipe_audit_hook(kb, session_dir)
 
@@ -242,10 +249,9 @@ def _bootstrap_knowledge_plane(
     )
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip() or None
     pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
 
-    pr_client = PRMonitorClient.from_args(url=pr_url, enabled=pr_enabled)
+    pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:
         reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
         status_text = f"disabled ({reason})"
@@ -288,47 +294,7 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
-    # Read-only KB-graph MCP advertised to specialists as ``cortex_kb``. Default
-    # is the gbrain MCP; HYPERLOOM_SPECIALIST_KB_MCP_URL / _TOKEN override it.
-    # Empty => disabled (mcp__cortex_kb__* tools stripped from the whitelist).
-    kb_mcp_url, kb_mcp_headers = _resolve_specialist_kb_mcp(args)
-    if kb_mcp_url:
-        print(f"Specialist KB MCP: {kb_mcp_url} (cortex_kb, read-only)")
-    else:
-        print("Specialist KB MCP: DISABLED (no GBRAIN_* / HYPERLOOM_SPECIALIST_KB_MCP_URL)")
-
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,
-        cortex_kb_mcp_url=kb_mcp_url,
-        cortex_kb_mcp_headers=kb_mcp_headers,
     )
-
-
-def _resolve_specialist_kb_mcp(args: Any) -> tuple[str, dict[str, str]]:
-    """Resolve the specialist read-only KB-graph (``cortex_kb``) MCP endpoint.
-
-    Precedence: explicit ``--specialist-kb-mcp-url`` /
-    ``$HYPERLOOM_SPECIALIST_KB_MCP_URL`` (token from
-    ``$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN``), else the gbrain MCP derived from
-    ``$GBRAIN_BASE_URL`` (+ ``/mcp``) with a bearer ``$GBRAIN_TOKEN``.
-
-    Args:
-        args: Parsed CLI namespace.
-
-    Returns:
-        A ``(url, headers)`` pair; ``("", {})`` when nothing is configured.
-    """
-    override = (getattr(args, "specialist_kb_mcp_url", None) or "").strip() or (
-        os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_URL", "") or ""
-    ).strip()
-    if override:
-        token = (os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "") or "").strip()
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        return override, headers
-
-    gbrain_base = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip().rstrip("/")
-    gbrain_token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
-    if gbrain_base and gbrain_token:
-        return f"{gbrain_base}/mcp", {"Authorization": f"Bearer {gbrain_token}"}
-    return "", {}

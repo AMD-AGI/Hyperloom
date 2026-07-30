@@ -268,10 +268,11 @@ def test_default_tools_include_write_capabilities():
         assert tool not in SPECIALIST_TOOL_DENYLIST
 
 
-def test_kb_write_tools_remain_denied():
-    """KB lifecycle stays Coordinator-owned (Inv-2 / Inv-6.1)."""
-    for kb_tool in ("mcp__cortex_kb__propose_point",):
-        assert kb_tool in SPECIALIST_TOOL_DENYLIST
+def test_kb_write_tools_not_in_default_specialist_tools():
+    """KB lifecycle stays Coordinator-owned; specialist cortex_kb MCP was removed."""
+    for kb_tool in ("mcp__cortex_kb__propose_point", "mcp__cortex_kb__lookup"):
+        assert kb_tool not in DEFAULT_SPECIALIST_TOOLS
+        assert kb_tool not in SPECIALIST_TOOL_DENYLIST
 
 
 def test_task_allowed_tools_override_default_patch_tools():
@@ -750,7 +751,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 
 # ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
 class _FakeGpuSpecialistLease:
-    """Fake GpuSpecialistLease: start() writes done.json + log, then 'exits'."""
+    """Fake GpuSpecialistLease: start_async() writes done.json + log, then 'exits'."""
 
     def __init__(self, workspace: Path):
         self._workspace = workspace
@@ -775,12 +776,6 @@ class _FakeGpuSpecialistLease:
 
     def pending_seconds(self) -> float:
         return 0.0
-
-    def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
-        self.start_async(cmd, env=env, cwd=cwd, log_path=log_path)
-        pid = self.poll_started()
-        assert pid is not None
-        return pid
 
     def is_alive(self) -> bool:
         return self.alive

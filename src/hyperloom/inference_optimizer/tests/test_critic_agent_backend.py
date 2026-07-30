@@ -214,48 +214,6 @@ def _make_backend(
     return backend, fake_client
 
 
-def test_cortex_kb_url_propagated_to_runtime_env(fake_critic_root, fake_session_dir, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-        cortex_kb_url="http://kb.local/",
-    )
-    env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://kb.local/"
-
-
-def test_explicit_cortex_kb_url_flag_wins_over_inherited_env(fake_critic_root, fake_session_dir, monkeypatch):
-    # The --cortex-kb-url flag is authoritative: the endpoint is a CLI concern
-    # with no env fallback, so the flag value overrides any inherited
-    # CORTEX_KB_URL in the parent env when building the subprocess env.
-    # The --cortex-kb-url flag is authoritative and overrides inherited env.
-    monkeypatch.setenv("CORTEX_KB_URL", "http://from-env.local")
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-        cortex_kb_url="http://from-flag.local",
-    )
-    env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://from-flag.local"
-
-
-def test_no_cortex_kb_url_leaves_env_unset(fake_critic_root, fake_session_dir, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-    )
-    env = backend._build_runtime_env()
-    assert "CORTEX_KB_URL" not in env
-
-
 # _extract_review_json
 def test_extract_review_json_fenced():
     text = """Reasoning prose.
@@ -1152,7 +1110,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
@@ -1236,7 +1194,7 @@ class _DeterministicClient:
 @pytest.fixture
 def critic_agent_root() -> Path:
     """Locate the real critic-agent checkout. Skip gracefully if absent."""
-    root = _resolve_critic_agent_root()
+    root = _resolve_agent_root("critic")
     if root is None:
         pytest.skip(
             "critic-agent runtime not found — set CRITIC_AGENT_ROOT or place critic-agent/ next to src/hyperloom/inference_optimizer/"
