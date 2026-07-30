@@ -85,8 +85,9 @@ path.
 --pd-prefill-tp 8 --pd-decode-tp 8 \
 --pd-prefill-ep 8 --pd-decode-ep 8 \
 --pd-transfer-backend mooncake \
---pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache  --load-balance-method round_robin --watchdog-timeout 3600 --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --trust-remote-code --disaggregation-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7" \
---pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code --disaggregation-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7" \
+--pd-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 \
+--pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --load-balance-method round_robin --watchdog-timeout 3600 --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192" \
+--pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024" \
 --mn-image <INFERA_SSHD_IMAGE> \
 --cpus-per-node 90 \
 --mem-per-node 1024 \
@@ -113,15 +114,22 @@ Large-model MoE cold start may need a longer poll budget:
 
 ## Workload B — RayJob aggregated
 
-`--mn-backend rayjob` (no PD flags). Same model / topology / Environment as
-Workload A; the differences are:
+`--mn-backend rayjob` (no PD flags). Same model / Environment as Workload A; the
+differences are:
 
 - Drop all `--pd-*` flags.
 - Replace `--pd-*-extra-args` with a single `--server-args` (applied each restart).
 - `--mn-image` is a standard Ray image (no sshd layer needed).
-- No pod-side env needed, so no `--extra-env`. The `Environment` block below is
-  sandbox-side only and never reaches the pods.
 - Drop the `SGLANG_DISAGGREGATION_*` env vars (PD-only).
+- **`--tp` covers the whole cluster, not one node.** One server spans every pod
+  here, so `--tp` must be `nodes * gpus-per-node` (16) — sglang receives
+  `--tp <n> --nnodes 2` and splits the ranks, so `--tp 8` would leave half of
+  each pod's GPUs idle. Workload A differs because each PD role owns one node,
+  where `--pd-*-tp 8` fills all 8 of its GPUs.
+- Pod-side env reaches the GPU pods only through `--extra-env`, which Claw bakes
+  in at create time (Claw-only, see the table above — drop it from the `optimize`
+  command). Cross-node tensor parallel needs the RoCE GID there. The
+  `Environment` block below is sandbox-side only and never reaches the pods.
 
 ### FLAGS
 
@@ -133,15 +141,15 @@ Workload A; the differences are:
 --framework=sglang \
 --nodes 2 \
 --gpus-per-node 8 \
---tp 8 --ep 8 \
+--tp 16 --ep 16 \
 --isl 1024 --osl 1024 --conc 128 \
 --gpu-type mi325x \
 --precision bf16 \
---no-framework-agent \
---server-args "--attention-backend aiter --mem-fraction-static 0.8 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code" \
+--server-args "--attention-backend aiter --mem-fraction-static 0.8 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024" \
 --mn-image <RAYJOB_IMAGE> \
 --cpus-per-node 90 \
---mem-per-node 1024
+--mem-per-node 1024 \
+--extra-env NCCL_IB_GID_INDEX=3
 ```
 
 Optional model pins (omit to use the deployment defaults):
