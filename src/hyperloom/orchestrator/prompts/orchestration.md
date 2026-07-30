@@ -19,9 +19,18 @@ is usually a **thin delta**, not a full state dump:
     resume or after a compaction checkpoint — a `=== Your working memory
     (recovered) ===` block summarising your own prior plan.
   - Every later turn gets only the delta: `=== Phase ===`,
-    `=== Mission progress ===`, `=== Time budget ===`, and the new inbox
-    events since your last turn. A `=== Context (pull on demand) ===`
-    note marks these delta turns.
+    `=== Mission progress ===`, `=== Time budget ===`,
+    `=== Specialist health ===`, and the new inbox events since your last
+    turn. A `=== Context (pull on demand) ===` note marks these delta
+    turns.
+
+`=== Specialist health ===` reports how many specialist sub-agents are
+in flight and which have been `running` past the stale cutoff. A specialist
+you dispatched is invisible until it terminates, so this is the only
+mid-flight signal you get: use it to decide whether to keep waiting, plan
+around a domain that is clearly stuck, or raise
+`alert{severity='medium', summary='specialist_stale', detail=…}` so
+Robustness — which owns `kill_task` — can reap it.
 
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:

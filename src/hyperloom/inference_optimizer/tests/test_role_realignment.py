@@ -321,12 +321,14 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_robustness_renders_specialist_health(
+@pytest.mark.parametrize("agent_name", ["robustness", "orchestration"])
+async def test_compose_prompt_renders_specialist_health(
     coordinator_with_mocks,
+    agent_name,
 ):
     c = coordinator_with_mocks
     try:
-        prompt = await c._compose_prompt("robustness")
+        prompt = await c._compose_prompt(agent_name)
         assert "=== Specialist health ===" in prompt
         assert "running=0 stale=0" in prompt
         assert "stale_threshold_sec=600" in prompt

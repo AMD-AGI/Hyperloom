@@ -492,18 +492,8 @@ class ConversationCollaborator:
                 "re-derive it from scratch."
             )
 
-        # Robustness gets phase budget telemetry + specialist health for medium-severity alerts.
-        if agent_name == "robustness":
-            try:
-                budget_block = self.shared_state.to_phase_budget_telemetry(
-                    budget_pct=self._phase_budget_pct,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: phase budget telemetry failed")
-                budget_block = ""
-            if budget_block:
-                sections.append("=== Phase budget telemetry ===")
-                sections.append(budget_block)
+        # Both planners see in-flight specialist state; only Robustness can act on it.
+        if agent_name in ("orchestration", "robustness"):
             try:
                 stale = await self._scan_stale_specialists()
                 running = await self.tasks.running()
@@ -517,8 +507,24 @@ class ConversationCollaborator:
                 f"running={specialist_running} stale={len(stale)} stale_threshold_sec={int(self._specialist_stale_sec)}"
             )
             if stale_lines:
-                sections.append("stale specialists (consider kill_task):")
+                if agent_name == "robustness":
+                    sections.append("stale specialists (consider kill_task):")
+                else:
+                    sections.append("stale specialists (Robustness owns kill_task; escalate if this blocks the plan):")
                 sections.extend(stale_lines)
+
+        # Robustness gets phase budget telemetry for medium-severity alerts.
+        if agent_name == "robustness":
+            try:
+                budget_block = self.shared_state.to_phase_budget_telemetry(
+                    budget_pct=self._phase_budget_pct,
+                )
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: phase budget telemetry failed")
+                budget_block = ""
+            if budget_block:
+                sections.append("=== Phase budget telemetry ===")
+                sections.append(budget_block)
 
             # Conversation no-progress circuit-breaker; Robustness is the external safety net.
             try:
