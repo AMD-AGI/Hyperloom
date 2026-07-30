@@ -14,10 +14,14 @@ unusable. Two things break it on a stock ROCm serving image:
      ``object`` string dtype; pandas>=3.0 (future.infer_string=True) makes its
      Agent_Id merge fail -> "No profiling data found" -> silent PMC fallback.
 
-``ensure_rocprof_compute()`` (gated on the forge backend being selected AND
-FORGE_PATH set) apt-installs the tool and pins ``pandas<3`` in the forge
-interpreter. Every branch is FAIL-SOFT: a missing tool / failed apt / failed pin
-logs and returns 0 (forge still runs on PMC) — it must never abort install.sh.
+``ensure_rocprof_compute()`` apt-installs the tool and pins ``pandas<3`` in the
+forge interpreter. Crucially it is gated on the **KernelForge checkout**
+(``_kernel_forge_root`` / FORGE_PATH), NOT on ``KERNEL_OPT_BACKEND_ORDER``:
+install.sh runs at setup time under the default geak backend and the carrier only
+sets ``KERNEL_OPT_BACKEND_ORDER=forge`` later on the optimize command, so a
+backend gate would skip the install and a later forge session would still profile
+on PMC. Every branch is FAIL-SOFT: a missing tool / failed apt / failed pin logs
+and returns 0 (forge still runs on PMC) — it must never abort install.sh.
 
 Regression cover for the 2026-07-30 investigation where every forge run profiled
 on PMC (optimization-potential estimable=NO): first because rocprof-compute was
@@ -69,6 +73,18 @@ def _curated_bindir(tmp_path: Path, *, with_apt: bool, apt_stub: Path | None) ->
     return bindir
 
 
+def _make_checkout(tmp_path: Path, *, with_kernel_agents: bool) -> Path:
+    """A fake KernelForge checkout root that _kernel_forge_root() probes for."""
+    root = tmp_path / "KernelForge"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'kernel-agents'\n", encoding="utf-8")
+    if with_kernel_agents:
+        ka = root / "src" / "kernel_agents"
+        ka.mkdir(parents=True, exist_ok=True)
+        (ka / "__init__.py").write_text("", encoding="utf-8")
+    return root
+
+
 def _fake_python(tmp_path: Path) -> Path:
     """Stub ``$PYTHON``.
 
@@ -107,6 +123,8 @@ def _fake_apt(tmp_path: Path, tool_base: Path) -> Path:
     apt_marker = tmp_path / APT_MARKER
     body = f"""#!/usr/bin/env bash
 : > "{apt_marker}"
+# Emit a diagnostic line (like real apt) so the caller's failure tail has content.
+echo "apt-get $*: E: simulated apt output" >&2
 if [ "${{APT_CREATES_TOOL:-0}}" = "1" ] && [ "${{1:-}}" = "install" ]; then
   mkdir -p "{tool_base.parent}"
   : > "{tool_base}"
@@ -122,8 +140,8 @@ exit ${{APT_RC:-0}}
 def _run(
     tmp_path: Path,
     *,
-    backend_order: str | None = "forge",
-    forge_path: str | None = "/some/KernelForge",
+    checkout: str = "valid",  # "valid" | "no_kernel_agents" | "unset"
+    backend_order: str | None = "geak",
     tool_present: bool = False,
     apt_available: bool = True,
     apt_creates_tool: bool = False,
@@ -141,6 +159,12 @@ def _run(
         tool_base.parent.mkdir(parents=True, exist_ok=True)
         tool_base.write_text("", encoding="utf-8")
 
+    if checkout == "unset":
+        forge_line = "unset FORGE_PATH || true"
+    else:
+        root = _make_checkout(tmp_path, with_kernel_agents=(checkout == "valid"))
+        forge_line = f'export FORGE_PATH="{root}"'
+
     fake_py = _fake_python(tmp_path)
     apt_stub = _fake_apt(tmp_path, tool_base)
     bindir = _curated_bindir(tmp_path, with_apt=apt_available, apt_stub=apt_stub)
@@ -149,11 +173,6 @@ def _run(
         f'export KERNEL_OPT_BACKEND_ORDER="{backend_order}"'
         if backend_order is not None
         else "unset KERNEL_OPT_BACKEND_ORDER || true"
-    )
-    forge_line = (
-        f'export FORGE_PATH="{forge_path}"'
-        if forge_path is not None
-        else "unset FORGE_PATH || true"
     )
 
     harness = f"""#!/usr/bin/env bash
@@ -174,7 +193,7 @@ export APT_RC="{apt_rc}"
 {backend_line}
 {forge_line}
 
-{_extract_fn("_forge_backend_selected")}
+{_extract_fn("_kernel_forge_root")}
 
 {_extract_fn("_ensure_pandas_lt3_for_rocpc")}
 
@@ -204,28 +223,45 @@ echo "[harness] reached-end rc=$?"
     }
 
 
-# --- Gate -----------------------------------------------------------------
+# --- Gate: checkout, NOT backend (the ordering fix) -----------------------
 
 
-def test_skip_when_backend_not_forge(tmp_path: Path) -> None:
-    r = _run(tmp_path, backend_order="geak")
+def test_installs_under_default_geak_when_checkout_present(tmp_path: Path) -> None:
+    # THE key regression: install.sh runs under geak (forge is set only later at
+    # optimize time), so a checkout-present geak install MUST still set forge up.
+    r = _run(
+        tmp_path,
+        checkout="valid",
+        backend_order="geak",
+        tool_present=False,
+        apt_creates_tool=True,
+        pandas_state="v3",
+        pip_fixes=True,
+    )
     assert r["rc"] == 0 and r["reached_end"], r["out"]
-    assert not r["apt_called"] and not r["pip_called"], r["out"]
-    assert "forge backend not selected" in r["out"]
-
-
-def test_forge_matched_as_substring_in_ladder(tmp_path: Path) -> None:
-    # "geak,forge" must count as forge selected (ladder ordering).
-    r = _run(tmp_path, backend_order="geak,forge", tool_present=True, pandas_state="v2")
-    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert r["apt_called"], f"tool must install even under geak:\n{r['out']}"
+    assert r["pip_called"], f"pandas pin must run even under geak:\n{r['out']}"
     assert "forge backend not selected" not in r["out"]
 
 
-def test_skip_when_forge_but_no_forge_path(tmp_path: Path) -> None:
-    r = _run(tmp_path, backend_order="forge", forge_path=None)
+def test_installs_when_backend_unset(tmp_path: Path) -> None:
+    r = _run(tmp_path, checkout="valid", backend_order=None, tool_present=True, pandas_state="v2")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert "KernelForge checkout present" in r["out"]
+
+
+def test_skip_when_forge_path_unset(tmp_path: Path) -> None:
+    r = _run(tmp_path, checkout="unset")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert not r["apt_called"] and not r["pip_called"], r["out"]
-    assert "FORGE_PATH unset" in r["out"]
+    assert "FORGE_PATH not set" in r["out"]
+
+
+def test_skip_when_checkout_lacks_kernel_agents(tmp_path: Path) -> None:
+    r = _run(tmp_path, checkout="no_kernel_agents")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert not r["apt_called"] and not r["pip_called"], r["out"]
+    assert "no KernelForge checkout" in r["out"]
 
 
 # --- Tool install (Step 1) ------------------------------------------------
@@ -234,8 +270,7 @@ def test_skip_when_forge_but_no_forge_path(tmp_path: Path) -> None:
 def test_installs_tool_when_absent(tmp_path: Path) -> None:
     r = _run(tmp_path, tool_present=False, apt_creates_tool=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
-    assert r["apt_called"], r["out"]
-    assert r["tool_exists"], r["out"]
+    assert r["apt_called"] and r["tool_exists"], r["out"]
     assert "rocprof-compute installed OK" in r["out"]
 
 
@@ -257,9 +292,9 @@ def test_failsoft_when_apt_fails_to_produce_tool(tmp_path: Path) -> None:
     # apt runs but does not create the tool (e.g. package unavailable / rc!=0).
     r = _run(tmp_path, tool_present=False, apt_creates_tool=False, apt_rc=100)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
-    assert r["apt_called"], r["out"]
-    assert not r["tool_exists"], r["out"]
+    assert r["apt_called"] and not r["tool_exists"], r["out"]
     assert "did not produce" in r["out"]
+    assert "apt| " in r["out"], f"apt output tail should be surfaced:\n{r['out']}"
     # No tool -> pandas pin must not run (forge is on PMC anyway).
     assert not r["pip_called"], r["out"]
 
@@ -271,7 +306,7 @@ def test_pins_pandas_when_ge3(tmp_path: Path) -> None:
     r = _run(tmp_path, tool_present=True, pandas_state="v3", pip_fixes=True)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pip_called"], f"pandas<3 pin should have run:\n{r['out']}"
-    assert "pinning to 'pandas>=2.2.3,<3'" in r["out"]
+    assert "installing 'pandas>=2.2.3,<3'" in r["out"]
     assert "pandas pinned OK" in r["out"]
 
 
@@ -282,19 +317,23 @@ def test_no_pin_when_pandas_lt3(tmp_path: Path) -> None:
     assert "no pin needed" in r["out"]
 
 
+def test_installs_pandas_when_absent_precludes_later_3x(tmp_path: Path) -> None:
+    # Regression for the ordering window: if pandas is not yet installed, we must
+    # proactively install pandas<3 (not skip) so a later unconstrained
+    # `pip install pandas` (datasets/evaluate) cannot drag pandas>=3 back in.
+    r = _run(tmp_path, tool_present=True, pandas_state="absent", pip_fixes=True)
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert r["pip_called"], f"pandas<3 should be installed when absent:\n{r['out']}"
+    assert "pandas not yet installed" in r["out"]
+    assert "pandas pinned OK" in r["out"]
+
+
 def test_failsoft_when_pip_pin_fails(tmp_path: Path) -> None:
     # pandas>=3, pip install exits non-zero, version stays >=3.
     r = _run(tmp_path, tool_present=True, pandas_state="v3", pip_rc=5, pip_fixes=False)
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["pip_called"], r["out"]
     assert "still incompatible after pin" in r["out"]
-
-
-def test_failsoft_when_pandas_not_importable(tmp_path: Path) -> None:
-    r = _run(tmp_path, tool_present=True, pandas_state="absent")
-    assert r["rc"] == 0 and r["reached_end"], r["out"]
-    assert not r["pip_called"], r["out"]
-    assert "pandas not importable" in r["out"]
 
 
 # --- CHECK_ONLY / DRY_RUN honour ------------------------------------------
@@ -307,25 +346,37 @@ def test_dry_run_installs_nothing(tmp_path: Path) -> None:
     assert "would run" in r["out"]
 
 
-def test_check_only_installs_nothing(tmp_path: Path) -> None:
-    r = _run(tmp_path, tool_present=False, check_only=1, pandas_state="v3")
+def test_check_only_installs_nothing_and_warns_pandas(tmp_path: Path) -> None:
+    r = _run(tmp_path, tool_present=True, check_only=1, pandas_state="v3")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert not r["apt_called"] and not r["pip_called"], r["out"]
+    assert "would pin 'pandas>=2.2.3,<3'" in r["out"]
 
 
 # --- Static guards: keep the fix wired in ---------------------------------
 
 
-def test_static_gated_on_forge_and_forge_path() -> None:
+def test_static_gated_on_checkout_not_backend() -> None:
     body = _extract_fn("ensure_rocprof_compute")
-    assert "_forge_backend_selected" in body
-    assert "FORGE_PATH" in body
+    assert "_kernel_forge_root" in body, "must gate on the KernelForge checkout"
+    # Must NOT gate on the backend order (that was the ordering bug).
+    assert "_forge_backend_selected" not in body
+    assert "backend not selected" not in body
+
+
+def test_static_call_ordered_after_pandas_pullers() -> None:
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    # The bare top-level call must run after the deps that pull pandas, so the
+    # pandas<3 pin has the final say.
+    bench = text.rindex("\nensure_bench_serving_deps\n")
+    xdit = text.rindex("\nensure_xdit_quality_deps\n")
+    call = text.rindex("\nensure_rocprof_compute\n")
+    assert call > bench and call > xdit, "ensure_rocprof_compute must be called last"
 
 
 def test_static_installs_rocprofiler_compute_and_verifies_resolve_path() -> None:
     body = _extract_fn("ensure_rocprof_compute")
     assert "rocprofiler-compute" in body, "apt package name must stay wired"
-    # verifies against the exact path KernelForge's resolve_rocpc() checks
     assert "libexec/rocprofiler-compute/rocprof_compute_base.py" in body
 
 
@@ -336,10 +387,9 @@ def test_static_pins_pandas_lt3() -> None:
 
 def test_static_fail_soft_no_hard_abort() -> None:
     # Neither function may hard-abort the installer: no die, and no bash-level
-    # `exit` STATEMENT (a line whose first token is `exit`). This deliberately
-    # ignores `sys.exit(...)` inside the embedded Python version probe (that is
-    # the fail-soft mechanism — it returns a code to the surrounding `if`) and
-    # any "exit" mentioned in comments.
+    # `exit` STATEMENT (a line whose first token is `exit`). This ignores
+    # `sys.exit(...)` inside the embedded Python probe (the fail-soft mechanism —
+    # it returns a code to the surrounding `if`) and "exit" mentioned in comments.
     for name in ("ensure_rocprof_compute", "_ensure_pandas_lt3_for_rocpc"):
         body = _extract_fn(name)
         assert "die " not in body, f"{name} must be fail-soft (no die)"
