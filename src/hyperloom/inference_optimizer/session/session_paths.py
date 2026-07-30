@@ -683,8 +683,7 @@ def cortex_flusher_status_json(session_dir: Path) -> Path:
     spawn decision; merged with the live pid check for
     kb_provenance.flusher_status.
 
-    Schema: ``{enabled, spawned, pid, cmd, cortex_kb_url, interval_sec,
-    batch_size, reason, ts}``.
+    Schema: ``{enabled, spawned, pid, interval_sec, batch_size, reason, ts}``.
 
     Args:
         session_dir: The session root directory.

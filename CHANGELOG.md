@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **Remote Cortex KB wiring**: Hyperloom no longer exposes `--cortex-kb-url` or
+  injects `CORTEX_KB_URL` into the Critic subprocess. Per-proposal
+  `/v2/reasoning/assess` enrichment is not wired by the optimizer CLI.
+- **Specialist `cortex_kb` MCP**: Specialists no longer receive
+  `mcp__cortex_kb__*` tools or a `cortex_kb` MCP server in
+  `specialist_mcp.json`. PR Monitor MCP remains available when configured.
+- **IR-3 preflight**: Remote recipe-KB reachability probe removed; IR-3 now
+  probes PR Monitor only. `--degraded-kb` no longer disables PR Monitor.
+- **Recipe KB with `--degraded-kb`**: T0/T2/T3/T4 are skipped (`cortex_kb=None`).
+
 ## [v1.0.0a2] - 2026-07-29
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
