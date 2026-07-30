@@ -4652,9 +4652,7 @@ def _tracelens_checkout_complete(tl_root: Path) -> bool:
     """
     if (tl_root / ".git").exists():
         return True
-    return (tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md").exists() or (
-        tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
-    ).exists()
+    return (tl_root / "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md").exists()
 
 
 def _rmtree_quiet(path: Path) -> None:
@@ -6029,14 +6027,10 @@ def main() -> int:
                 log_path=log_path,
                 timeout_s=max(60, int(args.budget_minutes * 60)),
             )
-            # Prefer the Agent/Analysis skill path, then the legacy layout.
-            skill = tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
+            # Read and follow the analysis-orchestrator skill entry point.
+            skill = tl_root / "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
             if not skill.exists():
-                skill = tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
-            if not skill.exists():
-                raise FileNotFoundError(
-                    f"TraceLens standalone skill not found (tried Agent/Analysis and AgenticMode/Standalone paths): {skill}"
-                )
+                raise FileNotFoundError(f"TraceLens analysis-orchestrator skill not found: {skill}")
             append_log(log_path, f"TraceLens skill: {skill}")
 
             tracelens_dir = run_dir / "tracelens"
