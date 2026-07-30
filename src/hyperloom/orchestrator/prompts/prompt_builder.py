@@ -496,6 +496,59 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     return lines
 
 
+# Per-framework tuning vocabulary, surfaced to the orchestrator so a variant is
+# proposed in the knobs the workload actually has. Without this a server-less
+# framework gets serving-shaped variants: on a worldplay session the model
+# proposed seven consecutive generic ROCm env knobs (tunableop, hipblaslt,
+# kernarg, inductor autotune), none of them faster and two of them crashing,
+# while the +34.5% knob (WP_OFFLOADING=false) sat untried in the seed grid.
+_FRAMEWORK_TUNING_VOCABULARY: dict[str, tuple[str, ...]] = {
+    "worldplay": (
+        "### worldplay tuning surface (server-less video diffusion)",
+        "",
+        "There is NO server, so `extra_server_args` is NOT a server-arg surface:",
+        "it is appended to the bench script's argv and an unknown flag makes the",
+        "run fail. Tune through `extra_envs` instead. The knobs that exist:",
+        "",
+        "- `WP_OFFLOADING` (true|false) — CPU offloading of the transformer.",
+        "  Peak VRAM is ~44GB of 288GB, so offloading buys headroom that is not",
+        "  a constraint; `false` measured +34.5% with bit-exact output.",
+        "- `WP_RESIDENT_AR_ROLLOUT` (true|false) — keep the transformer resident",
+        "  for the whole AR rollout instead of moving it per chunk.",
+        "- `WP_TORCH_COMPILE` (true|false) — measured +15.6% but FAILED the",
+        "  quality gate on a second camera trajectory. Do not re-propose it",
+        "  without also proposing something that restores the output.",
+        "- `WP_VAE_PARALLEL` (true|false) — VAE spatial tiling. Measured 2.3x",
+        "  SLOWER on one GPU (VAE decode 6.6s -> 15.0s) and degraded. Skip it.",
+        "- `WP_NUM_FRAMES` / `WP_POSE` — workload shape; they must stay paired",
+        "  (61 with w-15, 125 with w-31) and changing them changes the workload,",
+        "  so they are not a speedup.",
+        "",
+        "LOCKED, and rejected before the model loads: `WP_USE_SAGEATTN`,",
+        "`WP_USE_FP8_GEMM`, `WP_NUM_STEPS` != 4, `PYTORCH_TUNABLEOP_*`",
+        "(faults the GPU on gfx950), `TRITON_HIP_USE_ASYNC_COPY`.",
+        "",
+        "Time is ~55% AR rollout (denoise 32% of GPU time, growing per-chunk",
+        "KV-cache update 9%) and ~32% 3D VAE decode, of which `Im3d2Col` alone",
+        "is 10% — so a variant that only touches attention leaves a third of the",
+        "wall clock untouched.",
+        "",
+    ),
+}
+
+
+def _section_framework_vocabulary(framework: str) -> list[str]:
+    """Return the tuning-knob vocabulary block for ``framework`` (empty if none).
+
+    Args:
+        framework (str): Session framework name, matched case-insensitively.
+
+    Returns:
+        list[str]: Markdown lines, or ``[]`` for frameworks with no entry.
+    """
+    return list(_FRAMEWORK_TUNING_VOCABULARY.get((framework or "").strip().lower(), ()))
+
+
 def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
@@ -887,6 +940,7 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
+        _section_framework_vocabulary(framework_norm),
         _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
