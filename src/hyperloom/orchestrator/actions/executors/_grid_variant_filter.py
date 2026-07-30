@@ -271,17 +271,101 @@ _WORLDPLAY_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# The knobs the HY-WorldPlay bench wrapper actually accepts as CLI flags.
+# Everything else a variant might carry in ``extra_server_args`` is a
+# serving-framework habit (``--attention-backend``, ``--enable-*``) that
+# argparse rejects, so the run dies 50s into the model load with an exit code
+# that looks like a benchmark failure rather than a bad variant.
+_WORLDPLAY_KNOWN_CLI_FLAGS: frozenset[str] = frozenset(
+    {
+        "--model_path",
+        "--action_ckpt",
+        "--image_path",
+        "--prompt",
+        "--output_dir",
+        "--pose",
+        "--video_length",
+        "--width",
+        "--height",
+        "--resolution",
+        "--aspect_ratio",
+        "--num_inference_steps",
+        "--few_step",
+        "--model_type",
+        "--rewrite",
+        "--sr",
+        "--transformer_resident_ar_rollout",
+        "--offloading",
+        "--enable_torch_compile",
+        "--use_sageattn",
+        "--use_fp8_gemm",
+        "--use_vae_parallel",
+        "--warmup",
+        "--iterations",
+        "--seed",
+        "--stage_timing",
+        "--result_dir",
+        "--result_filename",
+        "--report_path",
+        "--quality_ref",
+        "--quality_ref_write",
+        "--quality_ssim_min",
+        "--quality_ssim_min_worst",
+        "--quality_lpips_max",
+        "--quality_lpips_max_worst",
+        "--quality_mse_max",
+        "--quality_lpips_samples",
+        "--save_video",
+    }
+)
+
+
+def worldplay_unknown_cli_flags(extra_server_args: str | None) -> list[str]:
+    """Return the ``--flags`` in ``extra_server_args`` the bench script rejects.
+
+    Args:
+        extra_server_args (str | None): The variant's extra CLI args.
+
+    Returns:
+        list[str]: Unknown flag tokens, in order of appearance.
+    """
+    tokens = str(extra_server_args or "").split()
+    unknown: list[str] = []
+    for tok in tokens:
+        if not tok.startswith("--"):
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag not in _WORLDPLAY_KNOWN_CLI_FLAGS:
+            unknown.append(flag)
+    return unknown
+
+
 def worldplay_blacklist_reason(
     extra_envs: dict[str, str] | None,
+    extra_server_args: str | None = None,
 ) -> str | None:
     """Return a drop reason if a variant trips the HY-WorldPlay blacklist.
 
+    Also rejects serving-style CLI flags the bench script does not define.
+    WorldPlay is tuned through ``WP_*`` **envs**, not server args -- it has no
+    server. Catching that here costs nothing; letting it through costs a
+    50s model load and produces a failure that reads like a broken benchmark.
+
     Args:
         extra_envs (dict[str, str] | None): The variant's env overrides.
+        extra_server_args (str | None): The variant's extra CLI args.
 
     Returns:
         str | None: A human-readable reason when blacklisted, else ``None``.
     """
+    unknown = worldplay_unknown_cli_flags(extra_server_args)
+    if unknown:
+        return (
+            f"unknown bench CLI flag(s) {' '.join(unknown)}: worldplay is server-less and is "
+            "tuned via extra_envs WP_* knobs (WP_OFFLOADING, WP_RESIDENT_AR_ROLLOUT, "
+            "WP_TORCH_COMPILE, WP_VAE_PARALLEL, WP_NUM_FRAMES/WP_POSE), not via "
+            "extra_server_args"
+        )
     envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
     for key, (bad_values, reason) in _WORLDPLAY_ENV_BLACKLIST.items():
         if key not in envs:
@@ -465,7 +549,7 @@ def apply_compatibility_filter(
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
         elif is_worldplay:
-            skip_reason = worldplay_blacklist_reason(getattr(v, "extra_envs", None))
+            skip_reason = worldplay_blacklist_reason(getattr(v, "extra_envs", None), args)
             blacklist_source = "worldplay_blacklist"
         if skip_reason:
             dropped.append(
