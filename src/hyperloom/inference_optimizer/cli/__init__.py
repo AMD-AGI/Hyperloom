@@ -2298,12 +2298,22 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(line_buffering=True)
 
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    # Tolerate unrecognised arguments instead of exiting 2: the provisioning
+    # platform (Primus-Claw) hands the same FLAGS block to both itself and
+    # `optimize`, and the flags it consumes on its own side (cluster image,
+    # per-pod cpu/mem, pod env) are not declared here. They are inert for us.
+    args, unknown_args = parser.parse_known_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
     )
+    # Warn only after basicConfig, so logging here cannot pre-empt the root
+    # handler and silently discard the -v level chosen above. Loud on purpose:
+    # a misspelled real flag also lands here and would otherwise run for hours
+    # with the default value.
+    if unknown_args:
+        log.warning("ignoring unrecognised arguments: %s", " ".join(unknown_args))
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
