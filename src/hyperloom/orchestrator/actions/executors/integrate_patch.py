@@ -44,6 +44,7 @@ from ._nogit_patch import (
     _revert_patches_no_git,
     _strip_path_prefix,
 )
+from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -2646,6 +2647,10 @@ class IntegratePatchExecutor:
             )
         gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
         acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), acc_baseline)
+        cfg_fingerprint = canonical_fingerprint(
+            params.get("extra_server_args"),
+            params.get("extra_envs"),
+        )
 
         if not gate_pass:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2667,6 +2672,7 @@ class IntegratePatchExecutor:
                 tps_delta_pct=float(delta_pct or 0.0),
                 extra=extra,
                 accuracy_delta_pct=acc_delta_pct,
+                config_fingerprint=cfg_fingerprint,
             )
             return _with_stash_restore(
                 framework_root,
@@ -2727,6 +2733,7 @@ class IntegratePatchExecutor:
                     tps_delta_pct=float(delta_pct or 0.0),
                     extra=extra,
                     accuracy_delta_pct=acc_delta_pct,
+                config_fingerprint=cfg_fingerprint,
                 )
                 return _with_stash_restore(
                     framework_root,
@@ -2762,6 +2769,7 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
             accuracy_delta_pct=acc_delta_pct,
+            config_fingerprint=cfg_fingerprint,
         )
         # Commit the KEEP so a later REVERT checkout fallback can't wipe this
         # win (best-effort, non-fatal). Non-git roots (e.g. a pip-installed
@@ -2884,6 +2892,7 @@ class IntegratePatchExecutor:
         tps_delta_pct: float,
         extra: dict[str, Any],
         accuracy_delta_pct: float | None = None,
+        config_fingerprint: str = "",
     ) -> None:
         """Append a JSONL record to ``lessons.jsonl`` when the patch
         came from the FRAMEWORK_AGENT phase.
@@ -2900,6 +2909,8 @@ class IntegratePatchExecutor:
                 session id).
             accuracy_delta_pct: Measured accuracy delta; overrides the payload
                 value when supplied.
+            config_fingerprint: Content fingerprint of the applied server
+                args / envs, recorded so a retried config can be recognised.
         """
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
@@ -2950,9 +2961,10 @@ class IntegratePatchExecutor:
                 model_class=str(getattr(shared_state, "model_class", "") if shared_state is not None else "").strip(),
                 gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
                 precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
-                applicability=str(
-                    proposal.get("applicability") or (done_payload or {}).get("applicability") or ""
-                ).strip(),
+                applicability=(
+                    config_fingerprint
+                    or str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip()
+                ),
                 provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
                 accuracy_delta_pct=accuracy_delta_pct,
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],

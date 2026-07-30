@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
+from hyperloom.common.coerce import to_float
 from ..loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
@@ -1606,6 +1607,8 @@ class ExplorePhase(PhaseHandler):
         sid = str(task.task_id or "").strip()
         if not sid:
             return
+        if config_levers and self._config_lever_known_bad(config_levers):
+            return
         # Already ruled on (e.g. after resume) — nothing to do.
         try:
             if self.shared_state.get_specialist_patch_verdict(sid):
@@ -1721,6 +1724,36 @@ class ExplorePhase(PhaseHandler):
                 "FRAMEWORK: save after config autosubmit failed for task=%s",
                 sid,
             )
+
+    def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
+        """True when this exact config already lost an accuracy gate.
+
+        Different upstream PRs often reduce to the same server args / envs, so
+        the ledger is keyed by content fingerprint rather than by PR.
+        """
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+
+        try:
+            from hyperloom.agents.framework.kb import read_pr_ledger
+
+            fingerprint = canonical_fingerprint(
+                config_levers.get("extra_server_args"),
+                config_levers.get("extra_envs"),
+            )
+            for rec in read_pr_ledger():
+                if str(rec.get("applicability") or "") != fingerprint:
+                    continue
+                if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
+                    log.info(
+                        "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
+                        fingerprint,
+                        to_float(rec.get("accuracy_delta_pct"), default=0.0),
+                        rec.get("pr_url") or "a prior candidate",
+                    )
+                    return True
+        except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
+            log.debug("FRAMEWORK: config-lever ledger check failed", exc_info=True)
+        return False
 
     def _build_specialist_round_entry(
         self,
