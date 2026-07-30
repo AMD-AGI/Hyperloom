@@ -154,6 +154,7 @@ def _run(
     pip_rc: int = 0,
     pip_fixes: bool = False,
     probe_rc: int = 0,
+    tmpdir: str | None = None,
     check_only: int = 0,
     dry_run: int = 0,
 ) -> dict:
@@ -196,6 +197,7 @@ export PIP_FIXES="{1 if pip_fixes else 0}"
 export APT_CREATES_TOOL="{1 if apt_creates_tool else 0}"
 export APT_RC="{apt_rc}"
 export PROBE_RC="{probe_rc}"
+{f'export TMPDIR="{tmpdir}"' if tmpdir is not None else "true"}
 {backend_line}
 {forge_line}
 
@@ -307,6 +309,24 @@ def test_failsoft_when_apt_fails_to_produce_tool(tmp_path: Path) -> None:
     assert "apt| " in r["out"], f"apt output tail should be surfaced:\n{r['out']}"
     # No tool -> pandas pin must not run (forge is on PMC anyway).
     assert not r["pip_called"], r["out"]
+
+
+def test_failsoft_when_apt_log_never_created(tmp_path: Path) -> None:
+    # Regression: an unwritable TMPDIR makes the `>"$apt_log"` redirect fail, so
+    # the log is never created. The diagnostic `tail "$apt_log" | while ...` must
+    # NOT abort install.sh under set -euo pipefail (bare pipe + pipefail would).
+    missing_tmp = tmp_path / "no_such_tmpdir"  # deliberately never created
+    r = _run(
+        tmp_path,
+        tool_present=False,
+        apt_available=True,
+        apt_creates_tool=False,
+        tmpdir=str(missing_tmp),
+    )
+    assert r["rc"] == 0 and r["reached_end"], (
+        f"missing apt_log must stay fail-soft (no abort):\n{r['out']}"
+    )
+    assert "did not produce" in r["out"]
 
 
 # --- pandas pin (Step 2) --------------------------------------------------
