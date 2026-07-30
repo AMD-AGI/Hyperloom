@@ -20,8 +20,9 @@ def _record_runner(monkeypatch, *, lm_eval_present: bool):
             returncode = 0
 
         r = _R()
-        # The probe imports lm_eval; return non-zero when it should be missing.
-        if cmd[1:3] == ["-c", "import lm_eval"]:
+        # The probe imports lm_eval + tenacity (the API extra); return non-zero
+        # when they should be missing so the install path fires.
+        if cmd[1:3] == ["-c", "import lm_eval, tenacity"]:
             r.returncode = 0 if lm_eval_present else 1
         return r
 
@@ -33,7 +34,7 @@ def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     monkeypatch.delenv("RUN_EVAL", raising=False)  # default => enabled
     calls = _record_runner(monkeypatch, lm_eval_present=False)
     preflight._ensure_lm_eval_dep("py", ["--break-system-packages"])
-    assert any(c[:4] == ["py", "-m", "pip", "install"] and "lm_eval" in c for c in calls)
+    assert any(c[:4] == ["py", "-m", "pip", "install"] and "lm_eval[api]" in c for c in calls)
 
 
 def test_lm_eval_skipped_when_present(monkeypatch):

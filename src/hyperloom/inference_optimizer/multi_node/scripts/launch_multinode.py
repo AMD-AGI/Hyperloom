@@ -29,7 +29,7 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-# Inference port. Bound by rank 0 in colocated mode, by the router in
+# Inference port. Bound by rank 0 in aggregated mode, by the router in
 # disaggregated mode (which proxies to the internal prefill/decode ports).
 _INFERENCE_PORT = 8888
 # Loopback-only internal ports for disaggregated PD server groups (router
@@ -760,7 +760,7 @@ def main() -> int:
     """Parse CLI arguments and launch the multi-node server group(s).
 
     Connects to the in-pod Ray cluster, discovers and rank-orders nodes,
-    spawns one launcher actor per rank (colocated or PD-disaggregated),
+    spawns one launcher actor per rank (aggregated or PD-disaggregated),
     emits a JSON summary to stdout, and optionally waits for rank-0
     ``/health``.
 
@@ -805,13 +805,13 @@ def main() -> int:
         "`--enable-expert-parallel`. Caller (orchestrator "
         "helper) is responsible for ensuring ep <= tp.",
     )
-    # PD disaggregation args: `colocated` is one TP group; `disaggregated` splits
+    # PD disaggregation args: `aggregated` is one TP group; `disaggregated` splits
     # into prefill/decode groups fronted by the router.
     p.add_argument(
         "--pd-mode",
-        choices=("colocated", "disaggregated"),
-        default="colocated",
-        help="PD disaggregation mode (default colocated)",
+        choices=("aggregated", "disaggregated"),
+        default="aggregated",
+        help="PD disaggregation mode (default aggregated)",
     )
     p.add_argument(
         "--pd-prefill-nodes",
@@ -860,7 +860,7 @@ def main() -> int:
         return 2
 
     # Validate PD args; populate defaults.
-    pd_mode = (args.pd_mode or "colocated").lower()
+    pd_mode = (args.pd_mode or "aggregated").lower()
     if pd_mode == "disaggregated":
         pn = int(args.pd_prefill_nodes or 0)
         dn = int(args.pd_decode_nodes or 0)
@@ -977,7 +977,7 @@ def main() -> int:
             )
             refs.append((f"decode_{grp_rank}", actor_ref))
     else:
-        # Colocated: single server group spans all nodes.
+        # Aggregated: single server group spans all nodes.
         for rank, node in enumerate(nodes):
             actor_ref = SpawnActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
@@ -1016,8 +1016,8 @@ def main() -> int:
                     pass
             return 1
 
-    # Health-tail probe targets the leader: rank_0 (colocated) / prefill_0 (PD).
-    leader_tag = "rank_0" if pd_mode == "colocated" else "prefill_0"
+    # Health-tail probe targets the leader: rank_0 (aggregated) / prefill_0 (PD).
+    leader_tag = "rank_0" if pd_mode == "aggregated" else "prefill_0"
     _log_rank0_post_spawn(Path(args.log_dir), pids.get(leader_tag))
 
     summary: dict[str, Any] = {

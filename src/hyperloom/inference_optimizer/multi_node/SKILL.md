@@ -22,10 +22,13 @@ drives an **already-running** cluster and never creates or tears one down; the
 platform reclaims it when the session ends.
 
 Drive every action through the Python CLI. **Never `ray.init`, `kubectl`, or
-raw `curl` to a pod.** All state lives in `/tmp/multi_node_state.json`
-(sandbox-local; synthesized from the hand-off env on first use, rewritten by
-each subcommand). Re-read it every turn — never cache `service_url` /
-`head_pod_ip` across actions (a re-provisioned cluster rewrites them).
+raw `curl` to a pod.** All state lives in the file resolved from
+`$MULTI_NODE_STATE_FILE`, else
+`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json` — one
+of the two MUST be set, there is no `/tmp` default (sandbox-local; synthesized
+from the hand-off env on first use, rewritten by each subcommand). Re-read it
+every turn — never cache `service_url` / `head_pod_ip` across actions (a
+re-provisioned cluster rewrites them).
 
 | Action         | Use               | Never                                     |
 |----------------|-------------------|-------------------------------------------|

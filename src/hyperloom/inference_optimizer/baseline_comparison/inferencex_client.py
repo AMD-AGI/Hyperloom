@@ -229,7 +229,7 @@ def find_reference_rows(
     Alignment is **strict** on ``hardware``, ``isl`` and ``osl`` — the whole
     point of the comparison is that the shapes match. Disaggregated and
     multinode rows are dropped as well: their per-GPU throughput is not
-    comparable to a single-node colocated run (they use a different serving
+    comparable to a single-node aggregated run (they use a different serving
     topology). ``precision`` is **also strict when supplied**: rows of a
     different precision are dropped rather than substituted, so an fp4 run is
     never compared against fp8 numbers. When ``precision`` is empty the filter

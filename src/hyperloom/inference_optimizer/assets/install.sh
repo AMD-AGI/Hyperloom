@@ -658,12 +658,10 @@ PY
 
 # --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
 _forge_gemm_tune_candidates() {
-  # Explicit override first.
+  # Explicit gemm-tune override first.
   [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root aliases used by Hyperloom's forge backend.
+  # KernelForge root (single canonical var: FORGE_PATH).
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
-  [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
 }
 
 _resolve_forge_gemm_tune_root() {
@@ -710,6 +708,71 @@ ensure_forge_gemm_tune() {
       log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
     fi
   fi
+}
+
+# --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
+# forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
+# Unlike forge_gemm_tune / forge_fusion — which have standalone sub-pyprojects and
+# get pip-installed by the carrier from their sub-package dirs — `kernel_agents`
+# is only packaged by the KernelForge *root* pyproject and was never installed
+# here. So forge-loop relied entirely on $FORGE_PATH being present and prepended to
+# the child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
+# unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
+# `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
+# attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
+# import succeed regardless of FORGE_PATH (root install also covers the two
+# sub-packages, so the carrier's later import checks short-circuit).
+_kernel_forge_root() {
+  # KernelForge repo root that actually contains kernel_agents. Keyed on
+  # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
+  # var that forge_submit reads at runtime and local_setup.sh exports).
+  local c="${FORGE_PATH:-}"
+  [ -n "$c" ] || return 1
+  if [ -f "${c%/}/pyproject.toml" ] && [ -f "${c%/}/src/kernel_agents/__init__.py" ]; then
+    printf '%s\n' "${c%/}"
+    return 0
+  fi
+  return 1
+}
+
+ensure_kernel_agents() {
+  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
+  # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
+  # default geak backend, so a backend gate here would skip the install; a later
+  # forge session whose child has no FORGE_PATH would then still hit
+  # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
+  # "checkout present at install time, FORGE_PATH absent at runtime" case.
+  local root
+  if ! root="$(_kernel_forge_root)"; then
+    log "kernel_agents: FORGE_PATH not set / no KernelForge checkout there; skipping optional forge-loop install"
+    return 0
+  fi
+  if "$PYTHON" -c "import kernel_agents.cli" >/dev/null 2>&1; then
+    log "kernel_agents already importable; skipping install"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "kernel_agents not importable (check-only; would install from ${root})"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install ${root}"
+    return 0
+  fi
+  log "ensuring kernel_agents from ${root} (forge-loop backend)"
+  # Deliberately NON-editable (no -e): ${root} is a shared, often read-only
+  # KernelForge checkout used by concurrent sessions. A non-editable install
+  # builds in a temp dir and never writes egg-info/build artifacts back into the
+  # checkout, so parallel runs can't race on it — this mirrors the carrier's
+  # own forge_fusion/forge_gemm_tune install (see _incontainer.sh: "Non-editable
+  # installs build in a temp dir and never write to the read-only shared
+  # checkout"). Installing the root also provides forge_gemm_tune + forge_fusion,
+  # so the carrier's later `import forge_fusion` guard short-circuits (verified:
+  # it logs "forge kernel backend ready" with no reinstall).
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}"
+  "$PYTHON" -c "import kernel_agents, kernel_agents.cli" \
+    && log "kernel_agents installed OK from ${root}" \
+    || die "kernel_agents import failed after install from ${root}"
 }
 
 # --- 2. Magpie ---
@@ -817,11 +880,13 @@ if not status.atomic_ok:
     sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
-# Redundant --concurrent-requests eval flag could not be stripped from a
-# generic benchmark script (unrecognised shape). Non-fatal: RUN_EVAL=true
-# baselines may abort on InferenceX's 'Unknown parameter', but the baseline
-# executor's eval-failure fallback re-runs with RUN_EVAL=false, so the run
-# still proceeds (without an accuracy gate). Distinct exit so install warns.
+# eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
+# survives in a caller script AND InferenceX's run_lm_eval would reject it
+# (a defence-in-depth patch that merely could not be applied, with no live
+# flag, is NOT counted as a failure -- install-time now matches the run-time
+# ensure_eval_concurrency_compat judgement). This is the genuinely fatal case:
+# every RUN_EVAL=true baseline aborts on 'Unknown parameter'. Distinct exit so
+# install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
 # Defensive catch-all: a not-ok status with none of the bits above set should
@@ -1120,6 +1185,7 @@ chain_kernel_agent() {
 
 ensure_inference_optimizer
 ensure_forge_gemm_tune
+ensure_kernel_agents
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).

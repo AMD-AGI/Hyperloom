@@ -30,7 +30,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 # colliding with a still-dying prior server (the cause of "Rank N scheduler
 # died during initialization (exit -6)" + NCCL "TCPStore shut down too early"
 # on restart). dist-init defaults to $RAYJOB_DIST_INIT_PORT else 29500; 8888 is
-# the colocated inference port; 30000/30001 are the PD prefill/decode ports.
+# the aggregated inference port; 30000/30001 are the PD prefill/decode ports.
 _DEFAULT_DIST_INIT_PORT = 29500
 
 # _kill_remote runs SIGTERM -> sleep(grace) -> SIGKILL sequentially per pid file,
@@ -340,7 +340,7 @@ def _kill_remote(
 ) -> dict:
     """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary.
 
-    One sweep covers both colocated and PD-disaggregated modes (unused
+    One sweep covers both aggregated and PD-disaggregated modes (unused
     patterns are no-ops). After signalling, block until every killed process
     truly exits, the rendezvous/serving ports drain, and the GPUs reclaim their
     VRAM, so the next launch's rank-0 binds its TCPStore + HTTP and inits its
@@ -579,7 +579,7 @@ def main() -> int:
         drain_ports = [int(x) for x in args.drain_ports.split(",") if x.strip().isdigit()]
     else:
         dist_port = int(os.environ.get("RAYJOB_DIST_INIT_PORT", _DEFAULT_DIST_INIT_PORT) or _DEFAULT_DIST_INIT_PORT)
-        # dist-init/TCPStore + colocated HTTP + PD prefill/decode HTTP.
+        # dist-init/TCPStore + aggregated HTTP + PD prefill/decode HTTP.
         drain_ports = sorted({dist_port, 8888, 30000, 30001})
 
     _log(

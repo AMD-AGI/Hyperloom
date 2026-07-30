@@ -576,13 +576,16 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
         return  # accuracy gate disabled; lm_eval not required
-    probe = subprocess.run([python_exe, "-c", "import lm_eval"], capture_output=True)
+    # The multi-node client uses ``--model local-completions`` (an lm_eval API
+    # model), which needs the ``[api]`` extra (e.g. ``tenacity``) on top of the
+    # base package. Probe both so a base-only install still triggers the extra.
+    probe = subprocess.run([python_exe, "-c", "import lm_eval, tenacity"], capture_output=True)
     if probe.returncode == 0:
-        print("Preflight: lm_eval OK")
+        print("Preflight: lm_eval[api] OK")
         return
-    print("Preflight: installing lm_eval (accuracy gate) ...")
+    print("Preflight: installing lm_eval[api] (accuracy gate) ...")
     subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, "lm_eval"],
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, "lm_eval[api]"],
         check=False,
     )
 

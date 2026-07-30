@@ -1991,7 +1991,7 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
     distinct bottleneck (prefill: compute / TTFT; decode: memory-bandwidth /
     TPOT) and the KV-transfer path, instead of treating the server as one pool.
     Reads the multi-node state directly; returns ``[]`` on the single-node /
-    colocated paths so the section is dropped.
+    aggregated paths so the section is dropped.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs (unused; the

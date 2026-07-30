@@ -2,12 +2,14 @@
 
 Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
 (RayJob). Keeps patch targets under framework install roots and backups under
-``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default ``/var/kernel_patch_backups``).
+``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default ``/var/kernel_patch_backups``), and
+hosts the atomic write both apply paths use to land a patched file.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 _DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
@@ -173,3 +175,35 @@ def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
     """
     assert_target_path_allowed(target, must_exist=False)
     assert_backup_path_allowed(backup)
+
+
+def atomic_write_bytes(target: Path, data: bytes) -> None:
+    """Write ``data`` to ``target`` atomically (tmp file in-dir + ``os.replace``).
+
+    Args:
+        target (Path): Destination file path (parent dirs are created).
+        data (bytes): Bytes to write.
+
+    Raises:
+        OSError: If writing the temp file or replacing the target fails; the
+            temp file is removed first.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, target)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                # Temp file already gone; the original error is re-raised below.
+                pass
+        raise

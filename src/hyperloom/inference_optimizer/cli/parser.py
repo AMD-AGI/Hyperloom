@@ -29,55 +29,6 @@ DEFAULT_EP = 1
 DEFAULT_PRECISION = "bf16"
 
 
-class _RetiredFlag(argparse.Action):
-    """Argparse action that hard-fails on a retired CLI flag with a migration hint (exits 2)."""
-
-    def __init__(
-        self,
-        option_strings: list[str],
-        dest: str,
-        *,
-        hint: str,
-        **kwargs,
-    ) -> None:
-        """Register the retired flag as a zero-argument, hidden action.
-
-        Args:
-            option_strings (list[str]): The flag spellings this action handles.
-            dest (str): The argparse destination name (unused; suppressed).
-            hint (str): One-line migration hint shown in the error message when
-                the retired flag is used.
-            **kwargs: Passed through to :class:`argparse.Action`; ``nargs``,
-                ``default``, and ``help`` are defaulted so the flag takes no
-                value and stays out of ``--help``.
-        """
-        kwargs.setdefault("nargs", 0)
-        kwargs.setdefault("default", argparse.SUPPRESS)
-        kwargs.setdefault("help", argparse.SUPPRESS)
-        self._hint = hint
-        super().__init__(option_strings, dest, **kwargs)
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values,
-        option_string: str | None = None,
-    ) -> None:
-        """Abort parsing with a migration hint when the retired flag is seen.
-
-        Args:
-            parser (argparse.ArgumentParser): The parser invoking this action.
-            namespace (argparse.Namespace): The in-progress parse namespace.
-            values (Any): Parsed values for the flag (always empty; ``nargs=0``).
-            option_string (str | None): The exact flag spelling that triggered this.
-
-        Raises:
-            SystemExit: Always — ``parser.error`` prints the message and exits 2.
-        """
-        parser.error(f"{option_string} was removed. {self._hint}")
-
-
 def _positive_int_arg(value: str) -> int:
     """argparse type for positive integer knobs."""
     try:
@@ -313,10 +264,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument(
         "--pd-mode",
-        choices=("colocated", "disaggregated"),
-        default="colocated",
+        choices=("aggregated", "disaggregated"),
+        default="aggregated",
         help="Prefill-Decode disaggregation mode. ALWAYS defaults to "
-        "`colocated` regardless of any inherited $PD_MODE env, so "
+        "`aggregated` regardless of any inherited $PD_MODE env, so "
         "PD only turns on when the agent explicitly passes "
         "`--pd-mode disaggregated` (driven by the prompt's "
         "Environment block having a PD_MODE=disaggregated line). "
@@ -1008,12 +959,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "(OpenAI-compatible only) or when the model list is empty. "
         "Advisory only; never gates.",
     )
-    # Retired flag: hard-fail with a migration hint instead of an opaque error.
-    opt.add_argument(
-        "--enable-proposal-scoring",
-        action=_RetiredFlag,
-        hint="Use ``--proposal-scoring`` (default off) / ``--no-proposal-scoring`` instead.",
-    )
     # specialist sub-agent backend selection: Claude (default), inherits orchestration model.
     opt.add_argument(
         "--specialist-model",
@@ -1239,29 +1184,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "backstop. No effect when --explore-variant-timeout-sec is "
         "set to a positive value.",
     )
-    # Controls a resumed session's leftover legacy scoreboard (action_scores).
-    opt.add_argument(
-        "--legacy-action-scores",
-        dest="legacy_action_scores",
-        type=str,
-        choices=("drop", "warn"),
-        default="drop",
-        help="Resume-mode handling of the legacy scoreboard "
-        "(``action_scores`` and friends). 'drop' (default) "
-        "silently discards. 'warn' logs a WARNING + adds a "
-        "breakdown.warnings entry. KB_design §3.9 §7.",
-    )
-    # SharedState migration controls.
-    opt.add_argument(
-        "--migration-mode",
-        dest="migration_mode",
-        type=str,
-        choices=("strict", "lenient"),
-        default="strict",
-        help="Strictness of the legacy → v0.8 state.json migration. "
-        "'strict' (default) aborts on fact-layer field loss; "
-        "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
-    )
     opt.add_argument(
         "--reset-state",
         dest="reset_state",
@@ -1269,8 +1191,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
-        "from a blank SharedState. Cortex KB is NOT touched. "
-        "KB_design §3.10 §5.3.",
+        "from a blank SharedState. Cortex KB is NOT touched.",
     )
     # observability
     opt.add_argument(
@@ -1408,7 +1329,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="strict_phase",
         action="store_true",
         default=True,
-        help="(v0.8 M2 default) Enforce PolicyGate R1 phase_incompatible. "
+        help="Enforce PolicyGate R1 phase_incompatible. "
         "Action proposals outside the current phase's allowlist "
         "return policy_denied so the LLM self-corrects.",
     )

@@ -72,7 +72,6 @@ def test_baseline_allowed_without_target_analysis(session_dir):
     coord = Coordinator(
         session_dir,
         backends=_backends_full(),
-        compare_against_gpu="b300",
     )
     assert coord._sequence_denial_for_action("baseline") is None
     assert coord._sequence_denial_for_action("target_analysis") is None

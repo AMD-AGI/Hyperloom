@@ -33,6 +33,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_int
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ._grid_base import pareto_front
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -162,43 +163,6 @@ def _result_dict(v: VariantResult) -> dict[str, Any]:
     d["isl"] = int(envs.get("ISL", 0))
     d["osl"] = int(envs.get("OSL", 0))
     return d
-
-
-def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max output_throughput, min e2el_mean_ms).
-
-    Args:
-        entries (list[dict[str, Any]]): Sweep result entries to filter.
-
-    Returns:
-        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
-    """
-    succ = [
-        e
-        for e in entries
-        if e["status"] == "succeeded"
-        and isinstance(e.get("output_throughput"), (int, float))
-        and isinstance(e.get("e2el_mean_ms"), (int, float))
-    ]
-    front: list[dict[str, Any]] = []
-    for cand in succ:
-        dominated = False
-        for other in succ:
-            if other is cand:
-                continue
-            if (
-                other["output_throughput"] >= cand["output_throughput"]
-                and other["e2el_mean_ms"] <= cand["e2el_mean_ms"]
-                and (
-                    other["output_throughput"] > cand["output_throughput"]
-                    or other["e2el_mean_ms"] < cand["e2el_mean_ms"]
-                )
-            ):
-                dominated = True
-                break
-        if not dominated:
-            front.append(cand)
-    return front
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +336,7 @@ class SweepExecutor:
         # Surface skipped combos so the grid stays complete; they never enter
         # Pareto / best selections.
         entries.extend(skipped_variants)
-        front = _pareto_front(entries)
+        front = pareto_front(entries)
 
         # Best per CONC.
         best_for_each_conc: dict[int, dict[str, Any]] = {}

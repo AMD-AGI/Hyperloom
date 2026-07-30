@@ -707,6 +707,10 @@ def test_infera_disagg_flags_and_launch_args():
     assert "--extra-args" in la and "decode" in la
 
 
+# ---------------------------------------------------------------------------
+# infera_support pure-helper tests (Infera backend SSH fan-out).
+
+
 def test_infera_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
@@ -718,7 +722,7 @@ def test_infera_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
             {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
         ]
     }
-    w = infera_support.discover_worker_pods(wl)
+    w = infera_support.discover_role_pods(wl, pd_mode="aggregated")["worker"]
     assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
     assert [p["lwsIndex"] for p in w] == [0, 1]
 
@@ -1111,7 +1115,7 @@ def test_multinode_launch_entrypoint_neutralizes_malicious_extra_args(monkeypatc
         no_wait_health=False,
         extra_args="--foo 1; touch /tmp/pwned",
         ep=1,
-        pd_mode="colocated",
+        pd_mode="aggregated",
     )
     ep = mn_cli._build_multinode_launch_entrypoint(ns, nnodes=2, pid_dir="/tmp/pids", log_dir="/tmp/logs")
     assert "1; touch /tmp/pwned" not in ep

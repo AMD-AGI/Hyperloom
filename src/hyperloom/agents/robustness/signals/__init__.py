@@ -13,7 +13,7 @@ from .aiter_jit import (
     AiterJitDetector,
 )
 from .budget import BudgetConfig, evaluate_budget_signals
-from .classifier import Classifier, SignalSpec, signal_registry_config_attrs
+from .classifier import Classifier, SignalSpec
 from .cluster_fault import evaluate_cluster_fault_signals
 from .crash import evaluate_crash_signals
 from .critic_health import (
@@ -89,7 +89,6 @@ __all__ = [
     "Symptom",
     "SymptomSeverity",
     "TraceLensCliFiredOnce",
-    "signal_registry_config_attrs",
     "evaluate_budget_signals",
     "evaluate_cluster_fault_signals",
     "evaluate_cold_start_signals",
