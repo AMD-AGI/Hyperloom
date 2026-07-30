@@ -38,7 +38,6 @@ def _ns(**overrides: object) -> argparse.Namespace:
     """Build a Namespace with the KB-related fields the helpers read; per-test overrides win."""
     fields: dict[str, object] = {
         "local_kb_root": None,
-        "cortex_kb_url": None,
         "degraded_kb": False,
     }
     fields.update(overrides)
@@ -110,7 +109,7 @@ def test_build_dispatcher_returns_recipe_kb(
     env_clean: None,
     tmp_path: Path,
 ) -> None:
-    args = _ns(local_kb_root=str(tmp_path), cortex_kb_url=None)
+    args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
     assert isinstance(kb, RecipeKB)
     assert isinstance(kb.local, LocalRecipeStore)
@@ -124,7 +123,6 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
     """``--degraded-kb`` short-circuits remote regardless of configuration."""
     args = _ns(
         local_kb_root=str(tmp_path),
-        cortex_kb_url="http://kb.example",
         degraded_kb=True,
     )
     kb = _build_recipe_kb_dispatcher(args)
@@ -137,19 +135,6 @@ def test_build_dispatcher_no_remote_when_gbrain_unconfigured(
 ) -> None:
     """No gbrain configured → local-only; the dispatcher wires ``remote=None``."""
     args = _ns(local_kb_root=str(tmp_path))
-    kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is None
-
-
-def test_build_dispatcher_cortex_url_does_not_wire_recipe_remote(
-    env_clean: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """CORTEX_KB_URL / --cortex-kb-url feed the critic agent, NOT the recipe
-    KB; without gbrain the recipe dispatcher stays local-only."""
-    monkeypatch.setenv("CORTEX_KB_URL", "http://env-kb.example")
-    args = _ns(local_kb_root=str(tmp_path), cortex_kb_url="http://flag-kb.example")
     kb = _build_recipe_kb_dispatcher(args)
     assert kb.remote is None
 

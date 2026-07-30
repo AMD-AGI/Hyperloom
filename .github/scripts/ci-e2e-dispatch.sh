@@ -17,6 +17,7 @@
 #   MAX_HOURS         optimizer time budget (hours)    (default 0.5)
 #   PR_NUMBER         PR number (for the job name)
 #   HEAD_REF          PR head branch name (the code to run)
+#   HEAD_SHA          immutable PR head commit SHA (the exact code to run)
 #   HEAD_REPO_URL     PR head repo clone url (for forks)
 #   BASE_REPO_URL     base repo clone url
 #   MODEL_BASE        local model base dir (optional; backend fills if empty)
@@ -48,6 +49,11 @@ POLL_MAX="${POLL_MAX:-120}"
 : "${E2E_API_KEY:?E2E_API_KEY is required}"
 : "${E2E_INFRA_TYPE:?E2E_INFRA_TYPE is required}"
 : "${HEAD_REF:?HEAD_REF (PR head branch) is required}"
+: "${HEAD_SHA:?HEAD_SHA (immutable PR head commit) is required}"
+if [ "$E2E_INFRA_TYPE" != "kubernetes" ]; then
+  echo "CI E2E supports only E2E_INFRA_TYPE=kubernetes; source-SHA pinning is not implemented for '$E2E_INFRA_TYPE'" >&2
+  exit 2
+fi
 API="${E2E_API_BASE%/}/api/v1/orchestration/workloads"
 
 # Fork PRs: the head branch lives in the contributor's fork, so clone from the head
@@ -56,12 +62,13 @@ SRC_REPO="${BASE_REPO_URL:-}"
 if [ -n "${HEAD_REPO_URL:-}" ] && [ "${HEAD_REPO_URL}" != "${BASE_REPO_URL:-}" ]; then
   SRC_REPO="${HEAD_REPO_URL}"
 fi
-# Where the launcher puts this PR's source: a stable, inspectable per-PR path under a
-# shared base (<base>/pr_<N>/hyperloom). Override the base with CI_E2E_PR_CHECK_BASE,
-# or point CI_E2E_SOURCE_DIR at an existing checkout to skip cloning. Re-triggered runs
-# pick up new commits because the launcher refreshes this checkout when HL_CI_E2E=1.
+# The exact commit is part of the source path. Do not reuse a branch-only checkout:
+# a later push must never make this CI run test a different commit from the one its
+# GitHub status is attached to. The default is Kubernetes Job-local /tmp, which is
+# discarded when the Job ends. CI_E2E_SOURCE_DIR is an explicit persistent override;
+# its owner is responsible for retention and cleanup.
 PR_CHECK_BASE="${CI_E2E_PR_CHECK_BASE:-/tmp/ci-e2e}"
-SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/hyperloom}"
+SRC_DIR="${CI_E2E_SOURCE_DIR:-${PR_CHECK_BASE%/}/pr_${PR_NUMBER:-manual}/${HEAD_SHA}/hyperloom}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 auth=(-H "Authorization: Bearer ${E2E_API_KEY}")
@@ -150,6 +157,7 @@ report_upsert() { # result_md (e.g. "✅ Succeeded")
 | model | \`${MODEL}\` (${MODEL_CLASS:-dense}) |
 | resources | ${GPUS}× GPU, TP=${TP} |
 | PR branch | \`${HEAD_REF}\` |
+| commit | \`${HEAD_SHA}\` |
 | session_id | \`${UID_}\` |
 | queue → dispatch | ${qd:-–} |
 | run time | ${rt:-–} |
@@ -173,10 +181,13 @@ ${actions}"
 # ---- submit ---------------------------------------------------------------
 params="$(jq -n \
   --arg repo_id "$MODEL" --arg tp "$TP" --arg mh "$MAX_HOURS" \
-  --arg ref "$HEAD_REF" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
+  --arg ref "$HEAD_REF" --arg sha "$HEAD_SHA" --arg srcrepo "$SRC_REPO" --arg srcdir "$SRC_DIR" \
+  --arg task_source "github-e2e-ci" --arg pr_number "${PR_NUMBER:-}" \
   --arg mc "$MODEL_CLASS" --arg mbase "${MODEL_BASE:-}" \
   '{REPO_ID:$repo_id, TP:$tp, MAX_HOURS:$mh,
-    HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir}
+    HYPERLOOM_SOURCE_REF:$ref, HYPERLOOM_SOURCE_SHA:$sha,
+    HYPERLOOM_SOURCE_REPO:$srcrepo, HYPERLOOM_SOURCE_DIR:$srcdir,
+    HYPERLOOM_TASK_SOURCE:$task_source, HYPERLOOM_SOURCE_PR:$pr_number}
    + (if $mc == "" then {} else {MODEL_CLASS:$mc} end)
    + (if $mbase == "" then {} else {HL_MODEL_BASE:$mbase} end)')"
 body="$(jq -n \
@@ -187,7 +198,7 @@ body="$(jq -n \
     gpu_per_replica:$gpus, template:{params:$params, env:{HL_CI_E2E:"1"}}}
    + (if $uname == "" then {} else {user_name:$uname} end)')"
 
-echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
+echo "[ci-e2e] submitting: model=$MODEL ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS tp=$TP max_hours=$MAX_HOURS"
 resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
   "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
 code="$(printf '%s' "$resp" | tail -n1)"
@@ -209,13 +220,13 @@ echo "session_id=$UID_" >> "${GITHUB_OUTPUT:-/dev/null}"
 echo "$UID_" > "${E2E_UID_FILE:-${RUNNER_TEMP:-/tmp}/e2e_session_uid}" 2>/dev/null || true
 
 # Seed the live commit status (no-op unless GH_STATUS_* are set).
-post_status "pending" "submitted; uid=${UID_}; model=${MODEL} ref=${HEAD_REF}"
+post_status "pending" "submitted; uid=${UID_}; model=${MODEL}; ref=${HEAD_REF}; sha=${HEAD_SHA:0:12}"
 last_push="$(date +%s)"
 
 # On cancellation (e.g. a newer commit via concurrency cancel-in-progress),
 # best-effort cancel the workload so we don't leak a GPU run.
 cleanup() { curl -sS "${tls[@]}" -X DELETE "$API/$UID_" "${auth[@]}" >/dev/null 2>&1 || true; }
-trap 'echo "[ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled (newer commit or manual stop); uid=${UID_}"; cleanup; exit 1' INT TERM
+trap 'echo "[ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"; cleanup; exit 1' INT TERM
 
 # ---- poll -----------------------------------------------------------------
 i=0
@@ -236,21 +247,21 @@ while [ "$i" -lt "$POLL_MAX" ]; do
   case "$phase" in
     Succeeded)
       summary "✅ **PASS** — run completed. session_id=\`$UID_\` job=\`$jobref\`"
-      post_status "success" "PASS — Succeeded; uid=${UID_}; job=${jobref}"
+      post_status "success" "PASS — uid=${UID_}; job=${jobref}; sha=${HEAD_SHA:0:12}"
       report_upsert "✅ Succeeded"
       exit 0 ;;
     Failed)
       err="$(printf '%s' "$detail" | jq -r '.orchestration.last_error // (.orchestration.conditions[-1].message) // "unknown"' 2>/dev/null)"
       summary "❌ **FAIL** — session_id=\`$UID_\` job=\`$jobref\` node=\`$node\`"
       summary "reason: $err"
-      post_status "failure" "$(humanize_reason "$err")"
+      post_status "failure" "FAIL (${HEAD_SHA:0:12}): $(humanize_reason "$err")"
       report_upsert "❌ Failed"
       exit 1 ;;
   esac
   # Throttled live status: push at most once per STATUS_INTERVAL_S (default 5min).
   now_s="$(date +%s)"
   if [ $((now_s - last_push)) -ge "$STATUS_INTERVAL_S" ]; then
-    post_status "pending" "running phase=${phase} (poll ${i}/${POLL_MAX}); job=${jobref}; uid=${UID_}"
+    post_status "pending" "running ${phase}; job=${jobref}; uid=${UID_}; sha=${HEAD_SHA:0:12}"
     last_push="$now_s"
   fi
   sleep "$POLL_INTERVAL_S"
@@ -258,7 +269,7 @@ done
 
 err="not terminal after $((POLL_MAX * POLL_INTERVAL_S))s"
 summary "❌ **FAIL (timeout)** — ${err}. session_id=\`$UID_\`"
-post_status "failure" "FAIL (timeout) after $((POLL_MAX * POLL_INTERVAL_S))s; uid=${UID_}"
+post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
 report_upsert "❌ Timeout"
 cleanup
 exit 1

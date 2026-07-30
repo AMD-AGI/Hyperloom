@@ -801,33 +801,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     opt.add_argument("--kernel-prompt", type=str, default=None, help="Override Kernel system prompt")
-    # Cortex KB flag (Critic agent only).
-    opt.add_argument(
-        "--cortex-kb-url",
-        dest="cortex_kb_url",
-        type=str,
-        default=None,
-        help="Cortex KB base URL for this run, used only by the Critic "
-        "agent's per-proposal assess enrichment (/v2/reasoning/assess). "
-        "This flag is the single source of truth: the CLI no longer reads a "
-        "$CORTEX_KB_URL env fallback (the flag value is forwarded to the "
-        "critic subprocess as CORTEX_KB_URL). This is NOT the recipe KB — "
-        "recipe reads are served by gbrain ($GBRAIN_*) and writes always "
-        "go to --local-kb-root. Leave it UNSET to skip Critic assess "
-        "enrichment entirely.",
-    )
-    opt.add_argument(
-        "--specialist-kb-mcp-url",
-        dest="specialist_kb_mcp_url",
-        type=str,
-        default=None,
-        help="Read-only KB-graph (cortex_kb) MCP endpoint advertised to "
-        "specialist subprocesses; also settable via "
-        "$HYPERLOOM_SPECIALIST_KB_MCP_URL (bearer token from "
-        "$HYPERLOOM_SPECIALIST_KB_MCP_TOKEN). When unset, falls back to "
-        "the gbrain MCP derived from $GBRAIN_BASE_URL (+ /mcp) with a "
-        "$GBRAIN_TOKEN bearer. Specialist KB writes always stay local.",
-    )
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -835,7 +808,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Filesystem root for the local recipe-snapshot KB store. "
         "All writes (put_recipe / append_attempt / delete_recipe) go "
-        "here regardless of --cortex-kb-url. Defaults to "
+        "here. Defaults to "
         "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
         "then /workspace/hyperloom/kb. Layout is a 5-level "
         "directory tree keyed by canonical_id components "
@@ -850,11 +823,10 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="degraded_kb",
         action="store_true",
         default=False,
-        help="Skip the Cortex KB integration entirely (T0/T2/T3/T4 become "
-        "no-ops). Also short-circuits the IR-3 KB probe. IR-3 sets "
-        "this automatically when kb-service is unreachable (soft "
-        "degrade); manifest records the reason as ``explicit_flag`` "
-        "vs ``ir3_auto``.",
+        help="Skip the recipe KB integration entirely (T0/T2/T3/T4 become "
+        "no-ops). Also short-circuits any legacy IR-3 KB probe marker. "
+        "Manifest records the reason as ``explicit_flag`` when set "
+        "explicitly.",
     )
     opt.add_argument(
         "--cortex-strict-fingerprint",
@@ -1042,7 +1014,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional path to an MCP config JSON forwarded to the "
-        "subprocess claude (`--mcp-config`). Used to wire kb / pr "
+        "subprocess claude (`--mcp-config`). Used to wire PR Monitor "
         "MCP servers into specialists. Default: None.",
     )
 

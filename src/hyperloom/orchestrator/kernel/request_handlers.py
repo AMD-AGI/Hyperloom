@@ -260,7 +260,14 @@ _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
-_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 3 * 60 * 60
+# Outer subprocess/global cap for the whole GEMM-tuning run (all shapes/tuners).
+# 5h (was 3h): large models have many more GEMM shapes -- vllm_dense_tunableop
+# already hit ~4512s (>1h) at 312 shapes, and bigger models push past 3h -- so 3h
+# was silently killing the run (rc124) or skipping lower-priority tuners. Kept
+# strictly above the per-group aiter timeout (FORGE_TUNE_TASK_TIMEOUT=2h) so a
+# single hung group is isolated and the rest still tune. NOT tied to the session
+# --max-hours budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC.
+_DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 

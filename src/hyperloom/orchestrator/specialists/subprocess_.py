@@ -208,7 +208,7 @@ class SpecialistSubprocessResult:
 
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     """Intel/tool calls (``{"tool", "query"}``) recovered from the same
-    stream-json log (WebSearch / WebFetch / pr_monitor / cortex_kb / ...).
+    stream-json log (WebSearch / WebFetch / pr_monitor / ...).
     Empty when none were made or the log was missing/truncated."""
 
     turn_usages: list[dict[str, int | None]] = field(default_factory=list)

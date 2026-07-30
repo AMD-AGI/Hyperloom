@@ -559,6 +559,41 @@ def test_baseline_current_best_reuses_recorded_profile_runtime():
     assert state.current_profile_workload_context() == state.last_profile_workload
 
 
+def test_profile_trace_matches_workload_with_server_args():
+    """Regression (H1): profile_trace_matches_workload() with no explicit target
+    must compare the recorded profile against the *current-best* runtime identity,
+    not the bare profile_workload_context() (which reports server_args="" and
+    skips the current_best backfill). Otherwise any workload carrying server
+    args/extra envs reads its own fresh profile as stale on every run and the
+    forge shape resolvers discard a perfectly good TraceLens profile."""
+    state = SharedState(
+        framework="vllm",
+        precision="fp8",
+        model_path="/models/qwen",
+        last_profile_status="succeeded",
+        current_best={
+            "action": "gemm_tuning",
+            "tput": 120.0,
+            "extra_server_args": "--tp 8 --attention-backend TRITON",
+            "extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        },
+    )
+    state.record_profile_workload(
+        {
+            "base_extra_args": "--tp 8 --attention-backend TRITON",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER_LINEAR": "1"},
+        }
+    )
+
+    # The recorded profile matches the active current-best runtime, so freshness
+    # with no explicit target must hold.
+    assert state.current_profile_workload_context() == state.last_profile_workload
+    assert state.profile_trace_matches_workload() is True
+    # The bare context really does disagree (server_args=""), which is exactly why
+    # defaulting to it would falsely flag this fresh profile as stale.
+    assert state.last_profile_workload != state.profile_workload_context()
+
+
 def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
     """A runtime measured off a tuned arm must not read as still active."""
     state = SharedState(
