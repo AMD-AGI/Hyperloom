@@ -7,6 +7,7 @@ the empty ``<think>`` block SGLang prepends even with thinking disabled).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -18,8 +19,10 @@ from hyperloom.orchestrator.knowledge.recipe_kb.memo_remote_client import (
     MemoRemoteRecipeClient,
     build_memo_remote_from_env,
     hyperloom_model_slug,
+    load_coverage_manifest,
     memo_model_key,
     parse_best_config,
+    parse_lessons,
     parse_throughput,
     strip_think,
 )
@@ -408,8 +411,8 @@ def test_config_withheld_by_default():
     assert row is not None
     assert row["best_throughput"] == pytest.approx(5864.7)
     assert row["best_config"] == {}
-    # The config question is not even asked: one round trip, not two.
-    assert len(completions.calls) == 1
+    # The config question is not even asked, so no tokens are spent on it.
+    assert not any("best recorded configuration" in call for call in completions.calls)
 
 
 def test_config_emitted_when_explicitly_allowed():
@@ -425,7 +428,7 @@ def test_config_emitted_when_explicitly_allowed():
     row = client.get_recipe(canonical_id=CID)
 
     assert row["best_config"]["extra_server_args"] == "--quantization fp8"
-    assert len(completions.calls) == 2
+    assert any("best recorded configuration" in call for call in completions.calls)
 
 
 def test_no_throughput_and_no_config_is_a_miss():
@@ -548,3 +551,185 @@ def test_chain_search_falls_through_and_closes_all():
     assert chain.search(label_match={}) == [{"canonical_id": CID}]
     chain.close()
     assert first.closed and second.closed
+
+
+# ------------------------------------------------------------ coverage manifest
+_ANSWER = {
+    "best measured serving throughput": (
+        "The best measured serving throughput is 5864.7 tokens/second."
+    )
+}
+_CID_KEY = "qwen3-32b|mi300x|sglang|0.5.11|fp8"
+
+
+def test_identity_inside_coverage_is_asked():
+    client, completions = _client_with(_ANSWER)
+    client._coverage = frozenset({_CID_KEY})  # noqa: SLF001 - test seam
+
+    assert client.get_recipe(canonical_id=CID) is not None
+    assert completions.calls
+
+
+def test_identity_outside_coverage_is_skipped_without_a_round_trip():
+    """The point of the manifest: no request, so no fabricated answer to filter."""
+    client, completions = _client_with(_ANSWER)
+    client._coverage = frozenset({"someone-else|mi300x|sglang|0.5.11|fp8"})  # noqa: SLF001
+
+    assert client.get_recipe(canonical_id=CID) is None
+    assert completions.calls == []
+
+
+def test_coverage_match_ignores_case():
+    client, completions = _client_with(_ANSWER)
+    client._coverage = frozenset({_CID_KEY.upper().casefold()})  # noqa: SLF001
+
+    assert client.get_recipe(canonical_id=CID) is not None
+    assert completions.calls
+
+
+def test_empty_coverage_asks_every_identity():
+    """An absent manifest must not turn the MEM off."""
+    client, completions = _client_with(_ANSWER)
+    assert client._coverage == frozenset()  # noqa: SLF001
+    assert client.get_recipe(canonical_id=CID) is not None
+    assert completions.calls
+
+
+def test_coverage_gate_and_local_guard_stay_independent():
+    """A covered identity still abstains when the local store already answers it."""
+    client, completions = _client_with(_ANSWER)
+    client._coverage = frozenset({_CID_KEY})  # noqa: SLF001
+    client.set_local_guard(
+        _FakeLocalStore(known={CID}, row={"best_throughput": 5000.0, "authority": "MEASURED"})
+    )
+
+    assert client.get_recipe(canonical_id=CID) is None
+    assert completions.calls == []
+
+
+def test_load_coverage_manifest_reads_identity_list(tmp_path):
+    path = tmp_path / "coverage.json"
+    path.write_text(json.dumps({"count": 2, "identities": [_CID_KEY, "A|B|C|D|E"]}))
+
+    coverage = load_coverage_manifest(str(path))
+    assert _CID_KEY in coverage
+    assert "a|b|c|d|e" in coverage
+
+
+@pytest.mark.parametrize("payload", ['{"identities": "not-a-list"}', "not json at all"])
+def test_load_coverage_manifest_degrades_to_empty(tmp_path, payload):
+    """A broken manifest disables the gate rather than blocking every read."""
+    path = tmp_path / "coverage.json"
+    path.write_text(payload)
+    assert load_coverage_manifest(str(path)) == frozenset()
+
+
+def test_load_coverage_manifest_tolerates_missing_file():
+    assert load_coverage_manifest("/nonexistent/coverage.json") == frozenset()
+    assert load_coverage_manifest("") == frozenset()
+
+
+# ------------------------------------------------------------------- lessons
+_POSITIVES = (
+    "The highest-value tested changes for qwen3-32b on mi300x with sglang 0.5.11 "
+    "at fp8 precision were `--kv-cache-dtype fp8_e4m3 --stream-interval 50` "
+    "(+12.8%); `--cuda-graph-max-bs 64` (+2.8%)."
+)
+_THROUGHPUT_ANSWER = "The best measured serving throughput is 5864.7 tokens/second."
+
+
+def test_parse_lessons_keeps_deltas_in_order():
+    lessons = parse_lessons(_POSITIVES)
+    assert [entry["statement"] for entry in lessons] == [
+        "--kv-cache-dtype fp8_e4m3 --stream-interval 50",
+        "--cuda-graph-max-bs 64",
+    ]
+
+
+def test_parse_lessons_leaves_measured_impact_empty():
+    """A correct delta usually carries a wrong gain, so no number is propagated."""
+    assert all(entry["measured_impact"] == "" for entry in parse_lessons(_POSITIVES))
+
+
+def test_parse_lessons_deduplicates_and_tolerates_junk():
+    assert parse_lessons("`--a` and again `--a`") == [
+        {"statement": "--a", "measured_impact": ""}
+    ]
+    assert parse_lessons("no backticks here") == []
+    assert parse_lessons("") == []
+
+
+def test_lessons_attached_to_a_qualifying_row():
+    client, completions = _client_with(
+        {
+            "best measured serving throughput": _THROUGHPUT_ANSWER,
+            "positive evidence": _POSITIVES,
+        },
+        allow_config=False,
+    )
+    row = client.get_recipe(canonical_id=CID)
+
+    assert row is not None
+    assert [entry["statement"] for entry in row["lessons"]] == [
+        "--kv-cache-dtype fp8_e4m3 --stream-interval 50",
+        "--cuda-graph-max-bs 64",
+    ]
+
+
+def test_lessons_alone_never_makes_a_hit():
+    """The row must still miss, so the chain reaches a backend with real rows."""
+    client, completions = _client_with({"positive evidence": _POSITIVES})
+
+    assert client.get_recipe(canonical_id=CID) is None
+    assert not any("positive evidence" in call for call in completions.calls)
+
+
+def test_lessons_can_be_disabled():
+    client, completions = _client_with(
+        {"best measured serving throughput": _THROUGHPUT_ANSWER,
+         "positive evidence": _POSITIVES},
+        allow_config=False,
+    )
+    client._allow_lessons = False  # noqa: SLF001 - test seam
+
+    row = client.get_recipe(canonical_id=CID)
+    assert row is not None and row["lessons"] == []
+    assert not any("positive evidence" in call for call in completions.calls)
+
+
+def test_lessons_empty_when_the_mem_says_nothing_usable():
+    client, _ = _client_with(
+        {"best measured serving throughput": _THROUGHPUT_ANSWER}, allow_config=False
+    )
+    row = client.get_recipe(canonical_id=CID)
+    assert row is not None and row["lessons"] == []
+
+
+def test_build_from_env_enables_lessons_by_default(monkeypatch):
+    monkeypatch.setenv("MEMO_KB_URL", "http://memo.invalid/v1")
+    monkeypatch.delenv("MEMO_KB_ALLOW_LESSONS", raising=False)
+    client = build_memo_remote_from_env()
+    assert client is not None
+    assert client._allow_lessons is True  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("0", False), ("false", False), ("off", False), ("1", True)]
+)
+def test_build_from_env_lessons_opt_out(monkeypatch, value, expected):
+    monkeypatch.setenv("MEMO_KB_URL", "http://memo.invalid/v1")
+    monkeypatch.setenv("MEMO_KB_ALLOW_LESSONS", value)
+    client = build_memo_remote_from_env()
+    assert client is not None
+    assert client._allow_lessons is expected  # noqa: SLF001
+
+
+def test_build_from_env_wires_the_coverage_manifest(monkeypatch, tmp_path):
+    path = tmp_path / "coverage.json"
+    path.write_text(json.dumps({"identities": [_CID_KEY]}))
+    monkeypatch.setenv("MEMO_KB_URL", "http://memo.invalid/v1")
+    monkeypatch.setenv("MEMO_KB_COVERAGE", str(path))
+
+    client = build_memo_remote_from_env()
+    assert client is not None
+    assert client._coverage == frozenset({_CID_KEY})  # noqa: SLF001

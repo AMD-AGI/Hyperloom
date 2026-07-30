@@ -26,14 +26,30 @@ Three contracts keep the lossy source from corrupting measured knowledge:
     admits a config on confidence alone — so a fabricated launch recipe would be
     applied to a live server. Withholding it makes that gate skip with
     ``best_config_empty`` while the throughput still flows for observation.
+  * **Lessons ride along, they never win.** ``lessons`` is filled only for a row
+    that already qualified on throughput or config. Any experiential list makes a
+    row actionable to T0, so answering with lessons alone would stop the chain and
+    trade a backend's complete row for advisory text.
 
 The MEM does not abstain: for an identity it never saw during training it still
-emits a confident, fabricated number. Callers that need a capability boundary
-must gate on an external manifest; this client does not attempt to guess.
+emits a confident, fabricated number, and training it to refuse does not fix
+this. A checkpoint fine-tuned on 2,679 refusal examples refuses for 93% of the
+identities it was trained to refuse and 3% of identities absent from its corpus,
+because refusal is learned as one more identity-to-answer mapping rather than as
+a boundary. Its token probabilities do not expose the difference either: the
+configs it invents are drawn from the same high-frequency pool as the ones it
+recalls, so likelihood measures fluency, not grounding.
+
+The extent itself, however, is a finite known set. Passing ``coverage`` -- the
+identity manifest emitted beside the checkpoint -- makes the client skip any
+identity the MEM was not trained on and fall through to a store holding real
+rows. That is the only exact boundary available, so callers needing one should
+supply it; without it the prior behaviour is unchanged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -61,6 +77,33 @@ _THROUGHPUT_RE = re.compile(
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 _ENV_SPLIT_RE = re.compile(r"\|\s*env:\s*", re.IGNORECASE)
 _ENV_PAIR_RE = re.compile(r"(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>\S+)")
+
+
+def load_coverage_manifest(path: str) -> frozenset[str]:
+    """Load the identity manifest emitted beside a MEM checkpoint.
+
+    Args:
+        path: Manifest file holding ``{"identities": [...]}``.
+
+    Returns:
+        Casefolded identity keys, or an empty set when the path is unset or
+        unreadable. Empty disables the check rather than blocking every read: a
+        missing manifest must not silently turn the MEM off.
+    """
+    if not (path or "").strip():
+        return frozenset()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:  # noqa: BLE001 - an unreadable manifest must not break reads
+        log.warning("memo_recipe: unreadable coverage manifest %r", path, exc_info=True)
+        return frozenset()
+    identities = payload.get("identities") if isinstance(payload, dict) else payload
+    if not isinstance(identities, list):
+        log.warning("memo_recipe: coverage manifest %r has no identity list", path)
+        return frozenset()
+    log.info("memo_recipe: coverage manifest loaded, %d identities", len(identities))
+    return frozenset(str(item).casefold() for item in identities)
 
 
 def hyperloom_model_slug(raw: str) -> str:
@@ -200,6 +243,54 @@ def _throughput_question(ctx: dict[str, str]) -> str:
     )
 
 
+def _lessons_question(ctx: dict[str, str]) -> str:
+    """Build the closed-book question for per-identity positive evidence.
+
+    Wording matches the MEM's ``positive_summary`` training type verbatim. This
+    fills ``lessons``, which a MEM hit would otherwise leave empty: RecipeKB
+    stops at the first non-empty remote, so a hit suppresses the backend holding
+    the real qualitative priors and the specialist prompt renders them as NONE.
+
+    Args:
+        ctx: Identity fields, as in :func:`_throughput_question`.
+
+    Returns:
+        The question to send to the MEM.
+    """
+    return (
+        f"What optimizations have positive evidence for {ctx['model']} on "
+        f"{ctx['hardware']} with {ctx['framework']} {ctx['framework_version']} "
+        f"at {ctx['precision']} precision?"
+    )
+
+
+def parse_lessons(answer: str) -> list[dict[str, Any]]:
+    """Extract arbor ``lessons`` entries from a positive-evidence answer.
+
+    The answer lists one to three backticked deltas, each followed by a gain
+    percentage. Only the deltas are kept. Measured on 250 covered identities,
+    80.4% of emitted deltas are genuinely recorded for that identity, but the
+    gain beside a correct delta is usually wrong, so ``measured_impact`` is left
+    empty rather than carrying a fabricated number into ``expected_gain_pct``.
+
+    Args:
+        answer: Raw completion text.
+
+    Returns:
+        One ``{"statement", "measured_impact"}`` dict per delta, in the order the
+        MEM ranked them, or ``[]`` when nothing parses.
+    """
+    seen: set[str] = set()
+    lessons: list[dict[str, Any]] = []
+    for span in _BACKTICK_RE.findall(strip_think(answer) or ""):
+        statement = span.strip()
+        if not statement or statement.casefold() in seen:
+            continue
+        seen.add(statement.casefold())
+        lessons.append({"statement": statement, "measured_impact": ""})
+    return lessons
+
+
 def _best_config_question(ctx: dict[str, str]) -> str:
     """Build the closed-book best-config question for one identity tuple.
 
@@ -234,6 +325,8 @@ class MemoRemoteRecipeClient:
         timeout: float = DEFAULT_TIMEOUT_SEC,
         local_guard: Any = None,
         allow_config: bool = False,
+        allow_lessons: bool = True,
+        coverage: frozenset[str] | None = None,
     ) -> None:
         """Configure the MEM client.
 
@@ -250,6 +343,13 @@ class MemoRemoteRecipeClient:
             allow_config: Emit ``best_config``. Off by default because a
                 fabricated launch recipe would clear the warm-replay gate on
                 confidence alone. See the module docstring.
+            allow_lessons: Emit ``lessons``. On by default, unlike
+                ``allow_config``: a wrong config is *applied* to a live server,
+                while a wrong lesson is only advisory text in a prompt, and the
+                alternative is the specialist seeing no priors at all.
+            coverage: Identity keys the MEM was trained on. When non-empty, any
+                identity outside the set is skipped without a round trip. Empty
+                or ``None`` keeps the prior behaviour of asking regardless.
         """
         self._base_url = (base_url or "").strip()
         self._api_key = api_key or "dummy"
@@ -259,6 +359,8 @@ class MemoRemoteRecipeClient:
         self._timeout = float(timeout)
         self._local_guard = local_guard
         self._allow_config = bool(allow_config)
+        self._allow_lessons = bool(allow_lessons)
+        self._coverage = coverage or frozenset()
         self._model_hint = ""
         self._client: Any = None
 
@@ -338,6 +440,37 @@ class MemoRemoteRecipeClient:
 
         return bool(_recipe_is_actionable(row))
 
+    def _covered(self, ctx: dict[str, str]) -> bool:
+        """Whether the MEM was trained on this identity.
+
+        The key is built from the same fields, in the same order, that the
+        manifest generator writes, using the MEM's model spelling rather than the
+        canonical slug because that is what the corpus was keyed on.
+
+        Args:
+            ctx: Identity fields as sent to the MEM.
+
+        Returns:
+            ``True`` when no manifest is configured, or when the identity is
+            listed. ``False`` means the MEM has nothing to recall and would
+            fabricate, so the caller should fall through.
+        """
+        if not self._coverage:
+            return True
+        key = "|".join(
+            (
+                ctx["model"],
+                ctx["hardware"],
+                ctx["framework"],
+                ctx["framework_version"],
+                ctx["precision"],
+            )
+        ).casefold()
+        if key in self._coverage:
+            return True
+        log.debug("memo_recipe: identity outside MEM coverage, skipping: %s", key)
+        return False
+
     @property
     def enabled(self) -> bool:
         """Whether the client is configured well enough to serve reads.
@@ -390,6 +523,8 @@ class MemoRemoteRecipeClient:
             "framework_version": framework_version,
             "precision": precision,
         }
+        if not self._covered(ctx):
+            return None
         throughput = parse_throughput(self._ask(_throughput_question(ctx)))
         best_config = (
             parse_best_config(self._ask(_best_config_question(ctx)))
@@ -398,6 +533,15 @@ class MemoRemoteRecipeClient:
         )
         if not throughput and not best_config:
             return None
+
+        # Strictly additive, and only past the miss gate above. A row carrying
+        # lessons alone would still count as actionable to T0 and would stop the
+        # chain, trading a backend's complete row for advisory text only.
+        lessons = (
+            parse_lessons(self._ask(_lessons_question(ctx)))
+            if self._allow_lessons
+            else []
+        )
 
         return {
             "canonical_id": canonical_id,
@@ -408,6 +552,7 @@ class MemoRemoteRecipeClient:
             "precision": precision,
             "best_config": best_config,
             "best_throughput": throughput,
+            "lessons": lessons,
             "authority": "INFERRED",
             "confidence": self._confidence,
             "provenance": {
@@ -517,12 +662,12 @@ def build_memo_remote_from_env() -> MemoRemoteRecipeClient | None:
         timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT_SEC
     except ValueError:
         timeout = DEFAULT_TIMEOUT_SEC
-    allow_config = (os.environ.get("MEMO_KB_ALLOW_CONFIG", "") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    truthy = {"1", "true", "yes", "on"}
+    allow_config = (
+        os.environ.get("MEMO_KB_ALLOW_CONFIG", "") or ""
+    ).strip().lower() in truthy
+    raw_lessons = (os.environ.get("MEMO_KB_ALLOW_LESSONS", "") or "").strip().lower()
+    allow_lessons = raw_lessons in truthy if raw_lessons else True
     return MemoRemoteRecipeClient(
         base_url=base_url,
         api_key=(os.environ.get("MEMO_KB_TOKEN", "") or "dummy").strip() or "dummy",
@@ -530,13 +675,19 @@ def build_memo_remote_from_env() -> MemoRemoteRecipeClient | None:
         confidence=confidence,
         timeout=timeout,
         allow_config=allow_config,
+        allow_lessons=allow_lessons,
+        coverage=load_coverage_manifest(
+            (os.environ.get("MEMO_KB_COVERAGE", "") or "").strip()
+        ),
     )
 
 
 __all__ = [
     "MemoRemoteRecipeClient",
     "build_memo_remote_from_env",
+    "load_coverage_manifest",
     "parse_best_config",
+    "parse_lessons",
     "parse_throughput",
     "strip_think",
 ]
