@@ -41,9 +41,6 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
         return
     dst["enablement_origin"] = origin
     dst["enablement_accuracy_floor"] = float(src.get("enablement_accuracy_floor") or 0.0)
-    fp = str(src.get("enablement_eval_contract_fingerprint") or "")
-    if fp:
-        dst["enablement_eval_contract_fingerprint"] = fp
     cfg = str(src.get("enablement_probe_config_path") or "")
     if cfg:
         dst["enablement_probe_config_path"] = cfg

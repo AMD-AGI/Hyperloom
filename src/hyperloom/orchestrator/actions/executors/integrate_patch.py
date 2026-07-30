@@ -30,7 +30,6 @@ from ._accuracy_gate import (
     accuracy_passed,
     classify_accuracy_failure,
     enablement_accuracy_floor,
-    eval_contract_fingerprint,
     parse_eval_results,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
@@ -3245,36 +3244,25 @@ class IntegratePatchExecutor:
         enablement_accuracy: float | None = None
         enablement_accuracy_task = ""
         enablement_accuracy_metric = ""
-        candidate_fingerprint = ""
-        if bool(params.get("enablement")):
-            # Compute the candidate fingerprint from the materialized config
-            # regardless of bench outcome — eval crash must still produce a
-            # comparable fingerprint.
-            candidate_fingerprint = eval_contract_fingerprint(
-                config_path=config_path,
-                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                model=resolved_model,
-            )
-            if bench.get("status") == "succeeded":
-                try:
-                    eval_results = parse_eval_results(
-                        eval_search_root,
-                        framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                    )
-                    acc = eval_results.get("accuracy")
-                    if isinstance(acc, (int, float)):
-                        enablement_accuracy = float(acc)
-                    enablement_accuracy_task = str(eval_results.get("task") or "")
-                    enablement_accuracy_metric = str(eval_results.get("metric") or "")
-                except Exception:  # noqa: BLE001 — eval may not produce a result
-                    log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
+        if bool(params.get("enablement")) and bench.get("status") == "succeeded":
+            try:
+                eval_results = parse_eval_results(
+                    eval_search_root,
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                )
+                acc = eval_results.get("accuracy")
+                if isinstance(acc, (int, float)):
+                    enablement_accuracy = float(acc)
+                enablement_accuracy_task = str(eval_results.get("task") or "")
+                enablement_accuracy_metric = str(eval_results.get("metric") or "")
+            except Exception:  # noqa: BLE001 — eval may not produce a result
+                log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
         return bench, {
             "accuracy_pass": accuracy_pass,
             "enablement_accuracy": enablement_accuracy,
             "enablement_accuracy_task": enablement_accuracy_task,
             "enablement_accuracy_metric": enablement_accuracy_metric,
-            "enablement_eval_contract_fingerprint": candidate_fingerprint,
         }
 
     @staticmethod

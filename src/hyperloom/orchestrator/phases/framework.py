@@ -132,9 +132,6 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
     if cfg:
         out["enablement_probe_config_path"] = cfg
-    fp = str(getattr(state, "enablement_eval_contract_fingerprint", "") or "")
-    if fp:
-        out["enablement_eval_contract_fingerprint"] = fp
     return out
 
 
