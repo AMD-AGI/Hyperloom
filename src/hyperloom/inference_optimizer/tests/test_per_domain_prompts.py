@@ -687,122 +687,6 @@ def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
     )
 
 
-# 4. PolicyGate R3 — specialist_done_source
-def test_R3_specialist_done_from_specialist_agent_ok(gate):
-    gate.validate_intent(
-        f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-        Intent(type=IntentType.SPECIALIST_DONE, payload=_valid_done_payload()),
-    )
-
-
-def test_R3_specialist_done_from_orchestration_denied(gate):
-    """Non-``specialist:*`` agents cannot emit specialist_done (the role-matrix gate fires)."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.SPECIALIST_DONE,
-                payload=_valid_done_payload(),
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
-def test_R3_specialist_done_missing_gap_denied(gate):
-    payload = _valid_done_payload()
-    payload.pop("gap_canonical_id")
-    payload["gap_canonical_id"] = ""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_done_unknown_domain_denied(gate):
-    payload = _valid_done_payload(domain="nonsense_specialist")
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_done_empty_true_requires_reason(gate):
-    payload = _valid_done_payload(empty=True, proposals=[])
-    payload["summary"] = ""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_done_empty_with_proposals_denied(gate):
-    payload = _valid_done_payload(
-        empty=True,
-        proposals=[{"name": "should_not_be_here"}],
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_done_variant_missing_name_denied(gate):
-    payload = _valid_done_payload(
-        empty=False,
-        proposals=[{"extra_args": "--no-name"}],
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_can_emit_send_message_heartbeat(gate):
-    gate.validate_intent(
-        f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-        Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "still thinking"}),
-    )
-
-
-def test_R3_specialist_cannot_emit_propose_action(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "explore", "predicted_gain_pct": 0.0}),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_missing_task_id_suffix_denied(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            SPECIALIST_FROM_AGENT_PREFIX,  # no suffix
-            Intent(type=IntentType.SPECIALIST_DONE, payload=_valid_done_payload()),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
-def test_R3_specialist_done_confidence_out_of_range_denied(gate):
-    payload = _valid_done_payload()
-    payload["confidence"] = 1.5
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            f"{SPECIALIST_FROM_AGENT_PREFIX}task-abc",
-            Intent(type=IntentType.SPECIALIST_DONE, payload=payload),
-        )
-    assert exc.value.rule == "specialist_done_source"
-
-
 # research_lane lane registration.
 def test_research_lane_in_known_lanes():
     assert "research_lane" in KNOWN_LANES
@@ -946,12 +830,6 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
     assert result.specialist_done["domain"] == "serving_specialist"
     assert "max_turns_exhausted" in result.specialist_done.get("reason", "")
     assert result.turns_used == 2  # max_turns reached
-    # The synthesised payload is still valid against PolicyGate R3.
-    gate = PolicyGate(role_registry=default_role_registry())
-    gate.validate_intent(
-        f"{SPECIALIST_FROM_AGENT_PREFIX}task-stale",
-        Intent(type=IntentType.SPECIALIST_DONE, payload=result.specialist_done),
-    )
 
 
 @pytest.mark.asyncio
@@ -1015,18 +893,18 @@ def test_specialist_tool_denylist_excludes_kb_write_paths():
         assert write_tool in DEFAULT_SPECIALIST_TOOLS
 
 
-def test_build_empty_specialist_done_is_R3_valid():
-    """The failure-path helper must always produce a payload PolicyGate R3 accepts."""
+def test_build_empty_specialist_done_shape():
+    """The failure-path helper must always produce a well-formed done payload."""
     done = build_empty_specialist_done(
         gap_canonical_id="gap.x",
         domain="serving_specialist",
         reason="example reason",
     )
-    gate = PolicyGate(role_registry=default_role_registry())
-    gate.validate_intent(
-        f"{SPECIALIST_FROM_AGENT_PREFIX}task-test",
-        Intent(type=IntentType.SPECIALIST_DONE, payload=done),
-    )
+    assert done["gap_canonical_id"] == "gap.x"
+    assert done["domain"] == "serving_specialist"
+    assert done["proposal_set"] == []
+    assert done["empty"] is True
+    assert done["summary"]
 
 
 # 8. SharedState specialist round bookkeeping

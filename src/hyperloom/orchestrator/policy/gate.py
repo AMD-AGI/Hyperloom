@@ -374,25 +374,6 @@ ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
 )
 
 
-# Synthetic stub used as ``role`` for specialist path-containment checks (only ``name`` is needed).
-class _SpecialistPseudoRole:
-    """Minimal stand-in role used when path-validating specialist intents.
-
-    Specialist intents are routed through ``_validate_specialist_*`` rather
-    than the conventional ``role.allowed_intents`` matrix, so the path
-    containment check only needs a ``name`` attribute for its error
-    messages. This stub supplies that single field.
-
-    Attributes:
-        name (str): the synthetic role name, always ``"specialist"``.
-    """
-
-    name = "specialist"
-
-
-_SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
-
-
 # REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
@@ -675,25 +656,13 @@ class PolicyGate:
         """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source).
 
         Args:
-            from_agent (str): the identity of the emitting agent; a
-                ``specialist:<task_id>`` prefix routes to the specialist
-                validators.
+            from_agent (str): the identity of the emitting agent.
             intent (Intent): the parsed intent to validate.
 
         Raises:
             PolicyDenied: when the intent is not permitted; the ``rule``
                 attribute identifies which guard fired.
         """
-        # specialist sub-agents emit under an ephemeral ``specialist:<task_id>`` identity routed to a synthetic role.
-        if from_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            self._validate_specialist_intent(from_agent, intent)
-            self._validate_payload_paths(
-                _SPECIALIST_PSEUDO_ROLE,
-                intent.type,
-                intent.payload or {},
-            )
-            return
-
         role = self.role_registry.get(from_agent)
         if role is None:
             raise PolicyDenied(f"unknown agent {from_agent!r}", rule="role")
@@ -1988,152 +1957,6 @@ class PolicyGate:
                 f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
                 rule="specialist_freeform_description_too_long",
             )
-
-    # R3 ``specialist_done_source``
-    def _validate_specialist_intent(
-        self,
-        from_agent: str,
-        intent: Intent,
-    ) -> None:
-        """Validate any intent emitted under a ``specialist:<task_id>`` identity (Inv-5.2: only SEND_MESSAGE, ALERT, and one SPECIALIST_DONE).
-
-        Args:
-            from_agent (str): the ``specialist:<task_id>`` identity of the
-                emitter.
-            intent (Intent): the intent emitted under that identity.
-
-        Raises:
-            PolicyDenied: when the task_id suffix is missing or the intent type
-                is not one a specialist may emit.
-        """
-        task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
-        if not task_id:
-            raise PolicyDenied(
-                f"specialist from_agent missing task_id suffix (got {from_agent!r})",
-                rule="specialist_done_source",
-                hint=(
-                    "Specialist sub-agents must stamp "
-                    "from_agent='specialist:<task_id>' where <task_id> "
-                    "matches the dispatched task."
-                ),
-            )
-        if intent.type == IntentType.SPECIALIST_DONE:
-            self._validate_specialist_done_payload(task_id, intent.payload or {})
-            return
-        # Allowed ancillary intents (heartbeat / advice / alert).
-        if intent.type in (
-            IntentType.SEND_MESSAGE,
-            IntentType.ALERT,
-        ):
-            return
-        raise PolicyDenied(
-            f"specialist={from_agent!r} cannot emit intent_type={intent.type.value!r}",
-            rule="specialist_done_source",
-            hint=(
-                "Specialists may only emit specialist_done (exit), "
-                "send_message (heartbeat/advice), or alert. Use "
-                "specialist_done with proposal_set + summary instead."
-            ),
-        )
-
-    def _validate_specialist_done_payload(
-        self,
-        task_id: str,
-        payload: dict[str, Any],
-    ) -> None:
-        """Per-field R3 structural checks for the ``specialist_done`` payload (gap_canonical_id, domain ∈ keys, proposal_set, empty+reason, summary ≤4096, confidence ∈ [0,1]).
-
-        Args:
-            task_id (str): the specialist task id taken from the emitting
-                identity.
-            payload (dict[str, Any]): the specialist_done payload to validate.
-
-        Raises:
-            PolicyDenied: when any required field is missing or malformed (gap
-                id, domain, proposal_set, empty+reason, summary length, or
-                confidence range).
-        """
-        gap = str(payload.get("gap_canonical_id") or "").strip()
-        if not gap:
-            raise PolicyDenied(
-                "specialist_done missing gap_canonical_id",
-                rule="specialist_done_source",
-                hint=(
-                    "Payload must echo the gap_canonical_id that was "
-                    "passed to delegate{action='specialist'} so "
-                    "Coordinator can cross-check the dispatch."
-                ),
-            )
-        domain = str(payload.get("domain") or "").strip()
-        if not domain:
-            raise PolicyDenied(
-                "specialist_done missing domain",
-                rule="specialist_done_source",
-            )
-        if domain not in SPECIALIST_DOMAIN_KEYS:
-            raise PolicyDenied(
-                f"specialist_done: unknown domain={domain!r}",
-                rule="specialist_done_source",
-                hint=(f"domain must be one of {sorted(SPECIALIST_DOMAIN_KEYS)!r}"),
-            )
-        proposal_set = payload.get("proposal_set")
-        if not isinstance(proposal_set, list):
-            raise PolicyDenied(
-                "specialist_done.proposal_set must be a list",
-                rule="specialist_done_source",
-                hint="set proposal_set=[] when empty=true",
-            )
-        empty_flag = bool(payload.get("empty"))
-        if empty_flag:
-            if proposal_set:
-                raise PolicyDenied(
-                    "specialist_done: empty=true implies proposal_set=[]",
-                    rule="specialist_done_source",
-                )
-            reason_field = str(payload.get("reason") or payload.get("summary") or "").strip()
-            if not reason_field:
-                raise PolicyDenied(
-                    "specialist_done: empty=true requires a reason / summary describing why no proposals were emitted",
-                    rule="specialist_done_source",
-                )
-        else:
-            for i, variant in enumerate(proposal_set):
-                if not isinstance(variant, dict):
-                    raise PolicyDenied(
-                        f"specialist_done.proposal_set[{i}] must be a dict",
-                        rule="specialist_done_source",
-                    )
-                if not str(variant.get("name") or "").strip():
-                    raise PolicyDenied(
-                        f"specialist_done.proposal_set[{i}].name required",
-                        rule="specialist_done_source",
-                        hint=(
-                            "Every variant needs a unique name "
-                            "(round-scoped). See §3.4 §5.1 for the full "
-                            "variant schema."
-                        ),
-                    )
-        summary = str(payload.get("summary") or "")
-        if len(summary) > 4096:
-            raise PolicyDenied(
-                f"specialist_done.summary too long ({len(summary)} > 4096 chars)",
-                rule="specialist_done_source",
-                hint="KB_design §3.5 §7 caps summary at ~500 chars; 4096 is the defensive hard limit.",
-            )
-        confidence_raw = payload.get("confidence")
-        if confidence_raw is not None:
-            try:
-                confidence = float(confidence_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    f"specialist_done.confidence must be float, got {confidence_raw!r}",
-                    rule="specialist_done_source",
-                ) from exc
-            if not 0.0 <= confidence <= 1.0:
-                raise PolicyDenied(
-                    f"specialist_done.confidence={confidence} not in [0, 1]",
-                    rule="specialist_done_source",
-                )
 
     def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``KILL_TASK`` intent (robustness-only).

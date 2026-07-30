@@ -26,7 +26,6 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
 from ..bus.message_bus import Message
 from ..policy.gate import PolicyDenied
-from ..state.task_registry import Task
 from ..kernel.request_handlers import get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
@@ -39,8 +38,6 @@ log = __import__("logging").getLogger(__name__)
 # IntentType -> the ``Coordinator`` handler method it dispatches to. Replaces the
 # former 12-branch if/elif in :meth:`IntentRouter._handle_intent`; an unknown
 # type falls through to the observation fallback (see the ``else`` branch there).
-# ``SPECIALIST_DONE`` is a terminal specialist intent (R3 already validated); its
-# handler only bookkeeps (defense-in-depth).
 _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.PROPOSE_ACTION: "_handle_propose_action",
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
@@ -53,7 +50,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.SEND_MESSAGE: "_handle_send_message",
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
-    IntentType.SPECIALIST_DONE: "_handle_specialist_done",
 }
 
 
@@ -505,41 +501,6 @@ class IntentRouter:
                 "event",
                 {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
             )
-        )
-
-    async def _handle_specialist_done(
-        self,
-        source: str,
-        intent: Intent,
-    ) -> None:
-        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
-
-        Args:
-            source: The emitting agent, expected as ``specialist:<task_id>``.
-            intent: The SPECIALIST_DONE intent carrying the done payload.
-        """
-        payload = dict(intent.payload or {})
-        task_id = self._task_id_from_specialist_source(source)
-        task: Task | None = None
-        if task_id:
-            try:
-                task = await self.tasks.get(task_id)
-            except Exception:  # noqa: BLE001 — TaskNotFound and friends
-                task = None
-        if task is None:
-            # PolicyGate R3 should have caught this; log defensively but don't crash.
-            log.warning(
-                "specialist_done from source=%r references unknown "
-                "task_id=%r; skipping bookkeeping (R3 should have "
-                "denied; defense in depth)",
-                source,
-                task_id,
-            )
-            return
-        await self._record_specialist_result(
-            task=task,
-            done_payload=payload,
-            source=source,
         )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
