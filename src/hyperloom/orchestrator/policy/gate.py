@@ -395,8 +395,9 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Robustness-only: kill_task + scheduling-police intents
-KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
+# kill_task sources; the other scheduling-police intents stay robustness-only.
+# Orchestration owns the strategic context for abandoning work it dispatched.
+KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(

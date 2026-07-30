@@ -25,12 +25,16 @@ is usually a **thin delta**, not a full state dump:
     turns.
 
 `=== Specialist health ===` reports how many specialist sub-agents are
-in flight and which have been `running` past the stale cutoff. A specialist
-you dispatched is invisible until it terminates, so this is the only
-mid-flight signal you get: use it to decide whether to keep waiting, plan
-around a domain that is clearly stuck, or raise
-`alert{severity='medium', summary='specialist_stale', detail=…}` so
-Robustness — which owns `kill_task` — can reap it.
+in flight and which have been `running` past the stale cutoff. Pull
+`get_running_tasks` for the per-task detail behind it (elapsed seconds,
+lease TTL remaining, held lanes, leased GPUs, heartbeat age).
+
+You may reap one yourself with
+`kill_task{task_id=<id>, scope='task', reason=…}`. A killed task still
+reports whatever it had produced, so this costs the remaining budget, not
+the work already done. Prefer it over waiting out a specialist that is
+clearly chasing a dead end; a GPU specialist can hold the machine for
+hours.
 
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:
@@ -257,9 +261,11 @@ on the next tick.
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
-  (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
-  `kill_task` (Robustness-only); read or write KB
-  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
+  (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
+  directly (Critic owns it). You **CAN** emit `kill_task` with
+  `scope='task'` to reap work you dispatched (server / process kills stay
+  out — those go through Robustness `delegate(recover)`), and
+  `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
   PolicyGate allows this intent from both Robustness and Orchestration —

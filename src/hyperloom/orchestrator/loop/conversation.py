@@ -611,7 +611,7 @@ class ConversationCollaborator:
                 "from your own running plan; do not re-derive it from scratch."
             )
 
-        # Both planners see in-flight specialist state; only Robustness can act on it.
+        # Both planners see in-flight specialist state and can act on it.
         if agent_name in ("orchestration", "robustness"):
             try:
                 stale = await self._scan_stale_specialists()
@@ -626,10 +626,7 @@ class ConversationCollaborator:
                 f"running={specialist_running} stale={len(stale)} stale_threshold_sec={int(self._specialist_stale_sec)}"
             )
             if stale_lines:
-                if agent_name == "robustness":
-                    sections.append("stale specialists (consider kill_task):")
-                else:
-                    sections.append("stale specialists (Robustness owns kill_task; escalate if this blocks the plan):")
+                sections.append("stale specialists (consider kill_task):")
                 sections.extend(stale_lines)
 
         # Robustness gets phase budget telemetry for medium-severity alerts.

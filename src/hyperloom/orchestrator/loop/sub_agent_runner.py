@@ -21,7 +21,7 @@ import logging
 from hyperloom.inference_optimizer.session.session_paths import _runs_actions, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
-from ..state.task_registry import Task, TaskNotFound, TaskRegistry
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
@@ -149,11 +149,11 @@ class SubAgentRunner:
         evidence: dict | None = None,
         context: str,
     ) -> bool:
-        """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
+        """Transition a task to ``new_state``, tolerating a lost or terminal row.
 
-        A long-running task's row can vanish before its terminal
-        transition; swallowing TaskNotFound keeps the pipeline running.
-        Returns True on success, False on the swallowed-TaskNotFound branch.
+        A long-running task's row can vanish (retention) or reach a terminal
+        state (a kill, a TTL reclaim) before the executor finishes; either way
+        the result is kept rather than dropped.
 
         Args:
             task_id: The task to transition.
@@ -162,8 +162,7 @@ class SubAgentRunner:
             context: Short label describing the transition call site.
 
         Returns:
-            ``True`` on success, ``False`` on the swallowed-``TaskNotFound``
-            branch.
+            ``True`` on success, ``False`` when the transition was swallowed.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
@@ -174,6 +173,18 @@ class SubAgentRunner:
                 "transition→%s (context=%s); continuing so the executor "
                 "result is not lost. See sub_agent_runner._transition_"
                 "resilient docstring for the disappearing-row hypothesis.",
+                task_id,
+                new_state,
+                context,
+            )
+            return False
+        except IllegalTransition:
+            # The row reached a terminal state while the executor was still
+            # running (a kill or a TTL reclaim). Keep the result: the work is
+            # done and discarding it loses everything the task produced.
+            log.warning(
+                "sub_agent_runner: task_id=%s already terminal before "
+                "transition→%s (context=%s); keeping the executor result",
                 task_id,
                 new_state,
                 context,
