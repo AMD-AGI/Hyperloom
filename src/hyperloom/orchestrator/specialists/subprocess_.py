@@ -128,8 +128,8 @@ class SpecialistSubprocessConfig:
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
 
-    The first existing root becomes the worktree base; the rest are
-    read-only ``--add-dir`` entries (writes still need the worktree).
+    The first existing root becomes the worktree base; the rest are exposed
+    to the CLI as additional ``--add-dir`` entries.
     """
 
     mcp_config_path: str | None = None

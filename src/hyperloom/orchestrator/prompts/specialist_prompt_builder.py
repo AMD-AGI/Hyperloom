@@ -918,9 +918,8 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "- Write and run arbitrary scripts — autotune harnesses, "
         + "microbenchmarks, profilers (rocprof / torch.profiler / your own "
         + "breakdown).",
-        "- Start / restart a real server on your own cards (any port that is "
-        + "NOT the production serving port 8888) and benchmark it however you "
-        + "see fit.",
+        "- Start / restart a real server on your own cards and benchmark it "
+        + "however you see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
         + "on the static roofline snapshot you were handed.",
         "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
@@ -931,9 +930,8 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         + "not a requirement.",
         "",
         "Optional helper: a ``rebench`` convenience reuses the real Magpie "
-        + "serving + benchmark path on your leased cards + a non-8888 port, so "
-        + "you can get numbers directly comparable to the ``integrate_patch`` "
-        + "gate in one call:",
+        + "serving + benchmark path on your leased cards, so you can get numbers "
+        + "directly comparable to the ``integrate_patch`` gate in one call:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
         "        --config <magpie.yaml> --output ./scratch/rebench " + "[--extra-args '<server args>']",
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
@@ -1891,12 +1889,11 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         gpu_rule = [
             f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
             "   those cards do whatever you want: edit code, build, start/stop",
-            "   your own servers (on any port that is NOT 8888), profile,",
-            "   autotune, install tuned artifacts, run real benchmark loops.",
-            "   The ONE thing you must NOT do: touch the production serving",
-            "   process, its cards, or port 8888 — co-residing on them would",
-            "   corrupt both your measurement and production. Manage only",
-            "   processes YOU started, by their own PID/PGID.",
+            "   your own servers, profile, autotune, install tuned artifacts,",
+            "   and run real benchmark loops. The ONE thing you must NOT do:",
+            "   touch the production serving process or its cards — co-residing",
+            "   on them would corrupt both your measurement and production.",
+            "   Manage only processes YOU started, by their own PID/PGID.",
         ]
     else:
         gpu_rule = [
