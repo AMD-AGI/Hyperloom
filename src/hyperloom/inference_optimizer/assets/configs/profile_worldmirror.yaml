@@ -1,0 +1,61 @@
+# Magpie profile benchmark config for WorldMirror (HunyuanWorld-Mirror).
+# Same contract as baseline_worldmirror.yaml but with torch_profiler enabled so
+# the loop can attribute time across the ViT backbone GEMMs, the GS renderer,
+# and the DPT/normal heads. Resolved by `_default_profile_config()` when
+# $FRAMEWORK=worldmirror.
+#
+# WorldMirror is SCRIPTABLE (server-less), like xDiT: no OpenAI server, no
+# benchmark_serving.py client, no server_lifecycle reuse. The wrapper
+# worldmirror_{runner_type}.sh runs one forward pass per scene under the
+# torch profiler and writes benchmark_report.json + the trace directly.
+#
+# Fallback-only fields (overridden at runtime by the executor):
+#   - `benchmark.model`       <- --model / $MODEL_PATH (the HY-World checkout)
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+# At materialize time Hyperloom pins benchmark_script to
+# worldmirror_{runner_type}.sh, so it is intentionally NOT set here.
+
+benchmark:
+  framework: worldmirror
+  workload_kind: scriptable        # drives server-less branching in the loop
+  # benchmark_script: worldmirror_mi355x.sh  # uncomment to force a script
+  model: /path/to/HY-World-2.0     # OVERRIDDEN at runtime; see header.
+  precision: bf16                  # LOCKED for a worldmirror session
+  run_mode: local
+
+  envs:
+    TP: 1
+    WM_TARGET_SIZE: 518            # input image resize (model default)
+    WM_NUM_ITERATIONS: 2           # fewer timed iters under the profiler
+    WM_WARMUP_CALLS: 3
+    WM_SCENES: ""                  # empty = sweep all bundled examples/ scenes
+    WM_COND_FLAGS: "0 0 0"         # [depth, rays, camera] conditioning
+    # torch.compile knob (explorable; see baseline_worldmirror.yaml). Profiling
+    # runs eager by default so the trace shows real per-kernel time; the loop
+    # flips WM_USE_TORCH_COMPILE=1 on the variants it wants to profile compiled.
+    WM_USE_TORCH_COMPILE: 0
+    WM_TORCH_COMPILE_MODE: default
+    # Geometry-quality gate (same semantics as baseline_worldmirror.yaml).
+    XDIT_QUALITY_REF: ""           # reference output dir; empty = gate skipped
+    WM_QUALITY_REL_MAX: 0.2        # max relative-L1 per head; all heads must pass
+    # PROFILE=1 makes worldmirror_{runner_type}.sh emit a torch trace into
+    # $VLLM_TORCH_PROFILER_DIR (injected by the profile executor).
+    PROFILE: 1
+    # /opt/rocm/bin is REQUIRED so AITER's runtime JIT can find `hipcc`.
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false                    # executor pins via ROCR_VISIBLE_DEVICES
+
+  server_lifecycle:
+    enabled: false                 # server-less: no reuse
+
+  timeout_seconds: 7200            # 120 min hard cap (load + warmup + iters)
+
+  profiler:
+    torch_profiler:
+      enabled: true                # collect *.pt.trace.json.gz for TraceLens
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: true

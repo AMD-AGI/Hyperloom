@@ -103,6 +103,21 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
+    # WorldMirror (HunyuanWorld-Mirror): a ~1.2B feed-forward 3D reconstruction
+    # model (ViT backbone + DPT/GS heads). It runs a single forward pass per
+    # scene, so it is a SCRIPTABLE (server-less) workload like xDiT: the wrapper
+    # worldmirror_{runner_type}.sh runs the benchmark once per variant, parses
+    # e2el latency, runs a quality gate (LPIPS/SSIM/MSE vs a BF16 reference), and
+    # writes benchmark_report.json. primary_metric_name() -> "e2el_mean_ms" is
+    # derived automatically from kind=SCRIPTABLE.
+    "worldmirror": FrameworkSpec(
+        name="worldmirror",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_WORLDMIRROR_ARGS",
+        repo_url="https://github.com/Tencent-Hunyuan/HY-World-2.0.git",
+        supports_server_reuse=False,
+        throughput_unit="recon/s",
+    ),
 }
 
 DEFAULT_FRAMEWORK = "sglang"

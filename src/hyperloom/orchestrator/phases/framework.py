@@ -2958,6 +2958,8 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             An order-preserving, deduped list of repo URLs to query.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         from ..framework import client as _fa_client
         from ..specialists.domains import PR_QUERY_REPOS
 
@@ -2976,11 +2978,17 @@ class FrameworkPhase(PhaseHandler):
         # Primary: the framework's own repo.
         _add(_fa_client.repo_url_for_framework(framework))
 
-        # Global allowlist (owner/name -> URL).
-        for repo in PR_QUERY_REPOS:
-            repo = str(repo or "").strip()
-            if repo and "/" in repo:
-                _add(f"https://github.com/{repo}.git")
+        # Global allowlist (owner/name -> URL). This is a serving/infra PR set
+        # (sglang/vllm/pytorch/...) meant for cross-porting between serving
+        # frameworks. Scriptable frameworks (e.g. worldmirror, xDiT) can never
+        # git-apply a serving diff, so querying it only surfaces irrelevant
+        # candidates that burn FRAMEWORK-phase time — scout the framework's own
+        # repo only.
+        if not framework_registry.is_scriptable(framework):
+            for repo in PR_QUERY_REPOS:
+                repo = str(repo or "").strip()
+                if repo and "/" in repo:
+                    _add(f"https://github.com/{repo}.git")
 
         if not urls:
             # Last-ditch: let phase_discover resolve from framework itself.
