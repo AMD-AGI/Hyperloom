@@ -2354,17 +2354,24 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Enablement gate: runnability + minimal-correctness.
 
-        Three states:
-          accuracy > floor      -> correctness_ok=True  (KEEP, verified)
-          accuracy <= floor/NaN -> correctness_ok=False (REVERT, garbage)
-          accuracy is None      -> correctness_ok=None  (KEEP but provisional)
+        The verdict depends on the trigger origin, because the two origins have
+        different evidence available:
+
+        * ``accuracy >= floor`` -> ``correctness_ok=True`` (KEEP, verified).
+          eval-origin additionally requires the score to carry a task + metric;
+          without them it did not come from a real eval and fails closed.
+        * present but below floor / non-positive / non-finite ->
+          ``correctness_ok=False`` (REVERT, garbage output).
+        * ``accuracy is None`` -> eval-origin fails closed
+          (``correctness_ok=False``): the trigger *was* an accuracy failure, so a
+          candidate that produces no score has not shown it fixed anything.
+          boot-origin stays ``None`` (KEEP but provisional) — it only ever
+          claimed to make the model boot, and eval-less runs must not be blocked.
 
         On KEEP, when an attempt runtime was provisioned, the stack action is
         recorded in the result (``enablement_kept_stack_action``) so it survives
         rearm. On REVERT / non-KEEP, the attempt runtime dir is GC'd.
         """
-        import math as _math
-
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
 
