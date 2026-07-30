@@ -267,7 +267,7 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "tput_tok_s",
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
-# Audit notes rendered per outcome line.
+# Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
 
 
@@ -368,12 +368,12 @@ def _format_inbox_event(m: "Message") -> str:
                 error = result.get("error")
             raw_notes = result.get("notes")
             if isinstance(raw_notes, list):
-                notes = [n for n in raw_notes if n]
+                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
         if error:
             parts.append(f"error={str(error)[:200]!r}")
         if notes:
-            shown = "; ".join(str(n) for n in notes[:_OUTCOME_NOTES_MAX])
-            parts.append(f"notes[{len(notes)}]={shown[:300]!r}")
+            shown = "; ".join(str(n) for n in notes)
+            parts.append(f"notes={shown[:300]!r}")
         return " ".join(parts)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):

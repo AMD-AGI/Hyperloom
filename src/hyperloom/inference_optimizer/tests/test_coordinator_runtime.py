@@ -1367,9 +1367,9 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
     assert ran["called"] is True
     assert res.state == "succeeded"
     assert res.result == {"tput": 1.0}
-    assert any(
-        "vanished" in rec.message.lower() and "_transition_resilient" in rec.message for rec in caplog.records
-    ), "expected the disappearing-row warning to fire"
+    assert any("vanished" in rec.message.lower() for rec in caplog.records), (
+        "expected the disappearing-row warning to fire"
+    )
     db.close()
 
 

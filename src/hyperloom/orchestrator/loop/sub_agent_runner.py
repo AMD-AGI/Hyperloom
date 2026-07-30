@@ -149,7 +149,7 @@ class SubAgentRunner:
         evidence: dict | None = None,
         context: str,
         allow_terminal: bool = False,
-    ) -> bool:
+    ) -> None:
         """Transition a task to ``new_state``, tolerating a row lost to retention.
 
         Args:
@@ -161,27 +161,20 @@ class SubAgentRunner:
                 terminal transitions; on ``queued -> running`` the rejection is
                 the double-spawn guard and must propagate.
 
-        Returns:
-            ``True`` on success, ``False`` when the transition was swallowed.
-
         Raises:
             IllegalTransition: When the row is already terminal and
                 ``allow_terminal`` is False.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
-            return True
         except TaskNotFound:
             log.warning(
                 "sub_agent_runner: tasks row for task_id=%s vanished before "
-                "transition→%s (context=%s); continuing so the executor "
-                "result is not lost. See sub_agent_runner._transition_"
-                "resilient docstring for the disappearing-row hypothesis.",
+                "transition→%s (context=%s); keeping the executor result",
                 task_id,
                 new_state,
                 context,
             )
-            return False
         except IllegalTransition:
             if not allow_terminal:
                 raise
@@ -192,7 +185,6 @@ class SubAgentRunner:
                 new_state,
                 context,
             )
-            return False
 
     async def run_task(
         self,

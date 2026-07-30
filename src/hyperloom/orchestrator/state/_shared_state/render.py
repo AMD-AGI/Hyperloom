@@ -322,30 +322,24 @@ class _RenderMixin:
         Returns:
             str: One line per pool / lane dimension.
         """
+        from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
         from ...policy.gate import (
             _effective_gpu_specialist_pool_size,
+            _serving_tp_for_policy,
             _whole_machine_pool_size,
             gpu_specialist_ceiling,
         )
 
-        try:
-            serving_tp = max(0, int(self.tp or 0))
-        except (TypeError, ValueError):
-            serving_tp = 0
-        ceiling = gpu_specialist_ceiling(self)
-        disjoint = _effective_gpu_specialist_pool_size(self)
-        whole_machine = _whole_machine_pool_size()
-        try:
-            research_capacity = max(0, int(self.research_lane_capacity or 0))
-        except (TypeError, ValueError):
-            research_capacity = 0
         lines = [
-            f"serving_tp={serving_tp}",
-            f"gpu_specialist_capacity={ceiling}",
-            f"serving_disjoint_gpu_pool={disjoint}  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={whole_machine}  (bench / framework-authoring specialists admit against this)",
-            f"research_lane_capacity={research_capacity}  (concurrent specialists)",
-            "gpu_research_lane_capacity=1  (mutually exclusive with serving / benchmark / profile)",
+            f"serving_tp={_serving_tp_for_policy(self)}",
+            f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
+            f"serving_disjoint_gpu_pool={_effective_gpu_specialist_pool_size(self)}"
+            "  (non-bench needs_gpu specialists admit against this)",
+            f"whole_machine_gpu_pool={_whole_machine_pool_size()}"
+            "  (bench / framework-authoring specialists admit against this)",
+            f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
+            f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
+            "  (mutually exclusive with serving / benchmark / profile)",
         ]
         return "\n".join(lines)
 

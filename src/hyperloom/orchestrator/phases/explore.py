@@ -20,6 +20,7 @@ from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..loop.sub_agent_runner import SubAgentResult
+from ..specialists.runner import SpecialistFailureType
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
@@ -690,7 +691,7 @@ class ExplorePhase(PhaseHandler):
         self,
         *,
         task: "Task",
-        ftype: Any,
+        ftype: SpecialistFailureType,
         error: str,
         attempts_used: int,
         cap: int,
@@ -707,16 +708,6 @@ class ExplorePhase(PhaseHandler):
             detail: Why no further retry was scheduled.
         """
         params = task.params or {}
-        needs_gpu_raw = params.get("needs_gpu", False)
-        needs_gpu = (
-            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-            if isinstance(needs_gpu_raw, str)
-            else bool(needs_gpu_raw)
-        )
-        try:
-            wall_budget_sec = float(self._specialist_wall_budget_sec(needs_gpu=needs_gpu))
-        except Exception:  # noqa: BLE001 — telemetry only
-            wall_budget_sec = 0.0
         await self._record_observation(
             "coordinator",
             "observation",
@@ -727,16 +718,15 @@ class ExplorePhase(PhaseHandler):
                 "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
                 "attempts_used": attempts_used,
                 "max_attempts": cap,
-                "failure_type": getattr(ftype, "value", str(ftype)),
+                "failure_type": ftype.value,
                 "reason": error[:200],
-                "wall_budget_sec": wall_budget_sec,
                 "detail": detail,
             },
         )
         log.warning(
             "specialist auto-retry exhausted: task=%s failure=%s attempts=%d/%d (%s)",
             task.task_id,
-            getattr(ftype, "value", ftype),
+            ftype.value,
             attempts_used,
             cap,
             detail,

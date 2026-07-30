@@ -1626,12 +1626,15 @@ class PolicyGate:
                 sorted(KNOWLEDGE_DOMAIN_TAG_SET),
             )
 
-        scope = str(params.get("scope") or "").strip().lower()
-        if scope and scope not in SPECIALIST_SCOPE_VALUES:
-            log.info("specialist dispatch scope=%r not in %r; re-inferred from tags", scope, sorted(SPECIALIST_SCOPE_VALUES))
-        elif scope == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
+        if scope_raw and scope_raw not in SPECIALIST_SCOPE_VALUES:
+            log.info(
+                "specialist dispatch scope=%r not in %r; re-inferred from tags",
+                scope_raw,
+                sorted(SPECIALIST_SCOPE_VALUES),
+            )
+        elif scope_raw == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
             log.info("specialist dispatch scope='domains' with %d tag(s)=%r", len(tags), tags)
-        elif scope == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
+        elif scope_raw == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
             log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()

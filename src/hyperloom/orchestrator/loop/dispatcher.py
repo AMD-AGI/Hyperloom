@@ -647,6 +647,7 @@ class DispatcherCollaborator:
                 payload: The checkpoint payload the specialist wrote.
                 elapsed: Seconds since the subprocess was spawned.
             """
+            params = task.params or {}
             proposals = payload.get("proposal_set")
             findings = payload.get("new_findings")
             questions = payload.get("residual_questions")
@@ -658,8 +659,8 @@ class DispatcherCollaborator:
                     {
                         "kind": "specialist_progress",
                         "task_id": task.task_id,
-                        "domain": str((task.params or {}).get("domain") or ""),
-                        "gap_canonical_id": str((task.params or {}).get("gap_canonical_id") or ""),
+                        "domain": str(params.get("domain") or ""),
+                        "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
                         "elapsed_sec": int(elapsed),
                         "summary": str(payload.get("summary") or "")[:400],
                         "proposals_so_far": len(proposals) if isinstance(proposals, list) else 0,

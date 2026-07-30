@@ -28,6 +28,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
 from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
+from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
@@ -814,7 +815,7 @@ class IntentRouter:
         extra_sec = int(intent.payload.get("extra_sec") or 0)
         try:
             new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
-        except Exception as exc:  # noqa: BLE001 — unknown/terminal task
+        except (TaskNotFound, IllegalTransition) as exc:
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -996,7 +997,7 @@ class IntentRouter:
             payload (dict[str, Any]): The send_message payload.
         """
         task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
-        if not task_id or self.session_dir is None:
+        if not task_id:
             return
         try:
             workspace = runs_dir(self.session_dir, "specialist", task_id)

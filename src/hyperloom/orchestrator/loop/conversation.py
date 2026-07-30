@@ -186,7 +186,6 @@ class ConversationCollaborator:
             return "(no recent outcomes)"
 
         # Flip newest-first query to newest-last for chronological reading.
-        # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
         lines.extend(_format_inbox_event(m) for m in msgs)
@@ -209,16 +208,10 @@ class ConversationCollaborator:
         if not rows:
             return "(no tasks in flight)"
 
-        def _rows(sql: str) -> list[Any]:
-            try:
-                return list(self.bus.db.fetchall_sync(sql, ()) or [])
-            except Exception:  # noqa: BLE001 — resource detail is best-effort
-                return []
-
         lanes_by_task: dict[str, list[str]] = {}
         # Soonest lane expiry: the first one to lapse is when reclaim starts.
         expiry_by_task: dict[str, str] = {}
-        for r in _rows("SELECT lane, task_id, expires_at FROM leases"):
+        for r in self.bus.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
             tid = str(r["task_id"])
             lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
             expires = str(r["expires_at"])
@@ -226,7 +219,7 @@ class ConversationCollaborator:
             if prev is None or expires < prev:
                 expiry_by_task[tid] = expires
         gpus_by_task: dict[str, list[int]] = {}
-        for r in _rows("SELECT gpu_id, task_id FROM gpu_leases"):
+        for r in self.bus.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
             gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
 
         now_unix = time.time()
@@ -281,12 +274,9 @@ class ConversationCollaborator:
             Seconds since the most recent liveness write, or ``None`` when no
             workspace file is readable.
         """
-        if self.session_dir is None or (task.kind or "").strip() != "specialist":
+        if (task.kind or "").strip() != "specialist":
             return None
-        try:
-            ws = runs_dir(self.session_dir, "specialist", task.task_id)
-        except Exception:  # noqa: BLE001 — path policy rejects unknown actions
-            return None
+        ws = runs_dir(self.session_dir, "specialist", task.task_id)
         newest = 0.0
         for name in ("heartbeat.json", "process.log"):
             try:
@@ -462,16 +452,9 @@ class ConversationCollaborator:
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
-            # Capacities a needs_gpu dispatch is admitted against; session-locked,
-            # so a SEED-turn push is enough.
-            try:
-                pools_block = self.shared_state.to_resource_pools_summary()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: resource pools summary failed")
-                pools_block = ""
-            if pools_block:
-                sections.append("=== Resource pools ===")
-                sections.append(pools_block)
+            # Capacities a needs_gpu dispatch is admitted against.
+            sections.append("=== Resource pools ===")
+            sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
             # target_gap_pct is the gain still needed for --target-gain.
             obj = getattr(self, "_current_objective", None)
