@@ -235,13 +235,11 @@ def test_freeform_destructive_text_allowed(gate, orchestration_role, desc):
     )
 
 
-def test_freeform_empty_wave_rejected(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform", "tasks": []}),
-        )
-    assert exc.value.rule == "specialist_freeform_wave_invalid"
+def test_freeform_empty_wave_falls_through_to_single_task(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "tasks": [], "task_description": "probe"}),
+    )
 
 
 def test_freeform_wave_too_large_rejected(gate, orchestration_role):
@@ -254,22 +252,18 @@ def test_freeform_wave_too_large_rejected(gate, orchestration_role):
     assert exc.value.rule == "specialist_freeform_wave_too_large"
 
 
-def test_freeform_wave_non_dict_task_rejected(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
-        )
-    assert exc.value.rule == "specialist_freeform_task_invalid"
+def test_freeform_wave_non_dict_task_skipped(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
+    )
 
 
-def test_freeform_wave_empty_task_description_rejected(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
-        )
-    assert exc.value.rule == "specialist_freeform_empty_description"
+def test_freeform_wave_empty_task_description_skipped(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -279,19 +273,17 @@ _REAL_TAGS = sorted(KNOWLEDGE_DOMAIN_TAG_SET)
 
 
 @pytest.mark.skipif(len(_REAL_TAGS) < 1, reason="no knowledge-domain tags")
-def test_domains_scope_requires_multiple_tags(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch(
-                {
-                    "scope": "domains",
-                    "tags": [_REAL_TAGS[0]],
-                    "gap_canonical_id": "gap.x.session-1",
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_scope_too_narrow"
+def test_domains_scope_with_one_tag_allowed(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "domains",
+                "tags": [_REAL_TAGS[0]],
+                "gap_canonical_id": "gap.x.session-1",
+            }
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -356,19 +348,17 @@ def test_gap_backfill_noop_when_no_anchor_match_still_rejects(orchestration_role
 
 
 @pytest.mark.skipif(len(_REAL_TAGS) < 2, reason="need >=2 knowledge-domain tags")
-def test_single_domain_scope_rejects_multiple_tags(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch(
-                {
-                    "scope": "domain",
-                    "tags": _REAL_TAGS[:2],
-                    "gap_canonical_id": "gap.x.session-1",
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_scope_mismatch"
+def test_single_domain_scope_with_multiple_tags_allowed(gate, orchestration_role):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "domain",
+                "tags": _REAL_TAGS[:2],
+                "gap_canonical_id": "gap.x.session-1",
+            }
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -646,19 +636,18 @@ def test_dispatch_with_domain_key_tag_no_longer_rejected(gate, orchestration_rol
     )
 
 
-def test_dispatch_with_genuine_garbage_tag_still_rejected(gate, orchestration_role):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch(
-                {
-                    "scope": "domain",
-                    "tags": ["totally_bogus"],
-                    "gap_canonical_id": "gap.x.session-1",
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_unknown_domain"
+def test_dispatch_with_garbage_tag_allowed(gate, orchestration_role):
+    """An out-of-vocabulary tag is observed, not denied; the runner synthesizes an empty result."""
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch(
+            {
+                "scope": "domain",
+                "tags": ["totally_bogus"],
+                "gap_canonical_id": "gap.x.session-1",
+            }
+        ),
+    )
 
 
 def test_specialist_emit_hint_lists_all_eight_llm_domains():

@@ -1561,7 +1561,7 @@ class PolicyGate:
         role: "AgentRole",
         payload: dict[str, Any],
     ) -> None:
-        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, tags ∈ vocab, gap_canonical_id required, max_turns ≤ cap.
+        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, gap_canonical_id required, max_turns ≤ cap.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -1570,8 +1570,8 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: when the role may not dispatch, params are malformed,
-                tags are unknown, the scope is invalid, the gap id is missing,
-                or max_turns is out of range.
+                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+                scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -1609,49 +1609,26 @@ class PolicyGate:
             self._validate_freeform_specialist_dispatch(params)
             return
 
+        # Tag / scope coherence is observed, not enforced: resolve_specialist_profile
+        # re-infers the scope and SpecialistRunner synthesizes an empty result for an
+        # unresolvable anchor, so a denial here would only cost the planner a tick.
         if not tags:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: at least one tag is "
-                "required (params.tags or the legacy params.domain alias)",
-                rule="specialist_unknown_domain",
-                hint=(f"set params.tags to a non-empty subset of {sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"),
-            )
-        # Each tag must belong to the controlled knowledge-domain vocabulary.
+            log.info("specialist dispatch declares a scope but no tags; profile will re-infer")
         unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
         if unknown_tags:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: unknown knowledge-domain tag(s)={unknown_tags!r}",
-                rule="specialist_unknown_domain",
-                hint=(f"every tag must be one of {sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"),
+            log.info(
+                "specialist dispatch carries out-of-vocabulary tag(s)=%r (known: %r)",
+                unknown_tags,
+                sorted(KNOWLEDGE_DOMAIN_TAG_SET),
             )
 
-        # ``scope`` dial (domain | domains | freeform). Absent => single-domain
-        # default. ``domains`` requires >1 distinct tag; ``domain`` is single-tag.
         scope = str(params.get("scope") or "").strip().lower()
         if scope and scope not in SPECIALIST_SCOPE_VALUES:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: unknown scope={scope!r}",
-                rule="specialist_scope_invalid",
-                hint=(f"scope must be one of {sorted(SPECIALIST_SCOPE_VALUES)!r}"),
-            )
-        if scope == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: scope='domains' is the "
-                "cross-domain channel and requires at least 2 distinct "
-                f"tags; got {tags!r}",
-                rule="specialist_scope_too_narrow",
-                hint=(
-                    "Declare every domain the patch must touch together in "
-                    "params.tags, or use scope='domain' for a single-domain "
-                    "specialist."
-                ),
-            )
-        if scope == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: scope='domain' is single-domain but got {len(tags)} tags {tags!r}",
-                rule="specialist_scope_mismatch",
-                hint=("Use scope='domains' for a cross-domain specialist, or pass a single tag."),
-            )
+            log.info("specialist dispatch scope=%r not in %r; re-inferred from tags", scope, sorted(SPECIALIST_SCOPE_VALUES))
+        elif scope == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
+            log.info("specialist dispatch scope='domains' with %d tag(s)=%r", len(tags), tags)
+        elif scope == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
+            log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
@@ -1677,15 +1654,15 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            # ``max_turns=0`` means unbounded (depth bounded by wall-clock);
-            # negatives and values above the hard cap are rejected.
-            if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+            # The in-process backend's turn loop has no wall-clock check, so this
+            # cap is the only bound on that path.
+            if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"outside [0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
+                    f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
                     rule="specialist_dispatch_source",
                     hint=(
-                        f"max_turns must be in [0, {SPECIALIST_MAX_TURNS_HARD_CAP}] "
+                        f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
                         "(0 = unbounded; depth is bounded by the wall-clock "
                         "budget, so omit max_turns unless capping a probe early)."
                     ),
@@ -1747,11 +1724,11 @@ class PolicyGate:
             gpu_count_raw = default_gpu_count
         try:
             gpu_count = int(gpu_count_raw)
-        except (TypeError, ValueError) as exc:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: gpu_count must be an integer, got {gpu_count_raw!r}",
-                rule="specialist_gpu_request_invalid",
-            ) from exc
+        except (TypeError, ValueError):
+            # The dispatcher re-parses with the same fallback, so a malformed
+            # value degrades to the default rather than losing a tick.
+            log.info("specialist dispatch gpu_count=%r not an integer; using %d", gpu_count_raw, default_gpu_count)
+            gpu_count = int(default_gpu_count)
         if gpu_count <= 0:
             raise PolicyDenied(
                 "delegate{action='specialist'}: gpu_count must be > 0 when needs_gpu=true",
@@ -1901,17 +1878,9 @@ class PolicyGate:
         # ceiling as a domain specialist.
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
-        if wave is not None:
-            if not isinstance(wave, list) or not wave:
-                raise PolicyDenied(
-                    "delegate{action='specialist',scope='freeform'}: params.tasks must be a non-empty list",
-                    rule="specialist_freeform_wave_invalid",
-                    hint=(
-                        "Pass tasks=[{task_description: ...}, ...] or a single "
-                        "params.task_description for a one-off freeform "
-                        "specialist."
-                    ),
-                )
+        # A malformed or empty wave falls through to the single-task path in the
+        # fan-out, which re-checks shape per entry.
+        if isinstance(wave, list) and wave:
             if len(wave) > SPECIALIST_FREEFORM_WAVE_MAX:
                 raise PolicyDenied(
                     f"delegate{{action='specialist',scope='freeform'}}: wave "
@@ -1922,12 +1891,10 @@ class PolicyGate:
                 )
             for i, task in enumerate(wave):
                 if not isinstance(task, dict):
-                    raise PolicyDenied(
-                        f"delegate{{action='specialist',scope='freeform'}}: tasks[{i}] must be an object",
-                        rule="specialist_freeform_task_invalid",
-                    )
+                    continue
                 desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                if desc:
+                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")

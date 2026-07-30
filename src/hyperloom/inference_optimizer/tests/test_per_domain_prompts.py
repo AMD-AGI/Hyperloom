@@ -571,23 +571,21 @@ def test_R2_robustness_cannot_dispatch_specialist(gate):
     assert "Orchestration" in (exc.value.hint or "")
 
 
-def test_R2_unknown_domain_denied(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {
-                        "domain": "fake_specialist",
-                        "gap_canonical_id": "gap.x",
-                    },
+def test_R2_unknown_domain_allowed(gate):
+    """An unknown domain tag is observed, not denied; SpecialistRunner synthesizes an empty result."""
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": {
+                    "domain": "fake_specialist",
+                    "gap_canonical_id": "gap.x",
                 },
-            ),
-        )
-    assert exc.value.rule == "specialist_unknown_domain"
-    assert "tag" in (exc.value.hint or "")
+            },
+        ),
+    )
 
 
 def test_R2_missing_gap_denied(gate):
@@ -644,23 +642,22 @@ def test_R2_max_turns_zero_allowed_unbounded(gate):
     )
 
 
-def test_R2_max_turns_negative_denied(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {
-                        "domain": "serving_specialist",
-                        "gap_canonical_id": "gap.x",
-                        "max_turns": -1,
-                    },
+def test_R2_max_turns_negative_allowed(gate):
+    """A negative max_turns is self-limiting (empty turn range), so it is not denied."""
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": {
+                    "domain": "serving_specialist",
+                    "gap_canonical_id": "gap.x",
+                    "max_turns": -1,
                 },
-            ),
-        )
-    assert exc.value.rule == "specialist_dispatch_source"
+            },
+        ),
+    )
 
 
 def test_R2_specialist_action_skips_unknown_action_registry_path(gate):
