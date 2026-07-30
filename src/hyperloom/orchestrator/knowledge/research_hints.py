@@ -65,6 +65,111 @@ def _hint_key(hint: dict[str, Any]) -> str:
     return f"{hint['what'].lower()}::{hint['source'].lower()}"
 
 
+# ---------------------------------------------------------------------------
+# Built-in advisory priors (source-backed) — symptom→lever tuning model and the
+# ROCm lever catalog distilled from the cph-perf-tuning playbook (KNOWLEDGE.md
+# §0.2.1 + conf/legal_axes.yaml). Seeded at PRELUDE alongside the scout's own
+# hints. ADVISORY ONLY: they render into the specialist "KB CONTEXT" section and
+# seed advisory gaps[]; the Critic still gates every final answer, and nothing
+# here can reject a config. Every entry carries a ``source`` so it survives
+# ``_coerce_hint``.
+# ---------------------------------------------------------------------------
+_BUILTIN_HINTS: tuple[dict[str, Any], ...] = (
+    {
+        "what": "Throughput-bound (GPU saturated, tput below target): raise "
+        "--max-num-batched-tokens (try 8192-65536), raise --max-num-seqs, raise "
+        "--gpu-memory-utilization toward 0.95, set --kv-cache-dtype fp8. The AITER "
+        "master switch VLLM_ROCM_USE_AITER=1 (off by default) must be on to enable "
+        "AITER GEMM/RMSNorm/MoE kernels — required even when --attention-backend is "
+        "set explicitly.",
+        "expected_impact": "throughput",
+        "accuracy_risk": "fp8 KV cache: validate accuracy per model (some fp8-KV bugs)",
+        "source": "cph-perf-tuning:KNOWLEDGE.md#0.2.1",
+        "domain_tags": ["framework"],
+        "status": "proposed",
+    },
+    {
+        "what": "ITL/TPOT-bound (per-token decode latency high): pick an AITER "
+        "attention backend — ROCM_AITER_FA is 2.8-4.6x faster TPOT vs legacy "
+        "ROCM_ATTN; ROCM_AITER_UNIFIED_ATTN is within ~5% of FA. Lower "
+        "--max-num-batched-tokens (e.g. 2048) so fewer prefills interrupt decode. "
+        "Requires VLLM_ROCM_USE_AITER=1. NOTE: ROCM_AITER_FA is incompatible with "
+        "gpt-oss attention-sink models — use UNIFIED_ATTN there.",
+        "expected_impact": "tpot",
+        "accuracy_risk": "none expected (kernel swap); gate accuracy after change",
+        "source": "cph-perf-tuning:KNOWLEDGE.md#0.2.1",
+        "domain_tags": ["kernel_switch_specialist"],
+        "status": "proposed",
+    },
+    {
+        "what": "MoE models: enable expert-parallel (--enable-expert-parallel, EP<=TP), "
+        "select --moe-backend (aiter for the AITER MoE path), set "
+        "VLLM_ROCM_USE_AITER_MOE=1, and ensure a tuned fused_moe tile config exists "
+        "for (num_experts, intermediate_size, GPU, dtype) — a missing config silently "
+        "falls back to generic Triton tiles, a major throughput gap.",
+        "expected_impact": "throughput",
+        "accuracy_risk": "none expected; gate accuracy after backend change",
+        "source": "cph-perf-tuning:KNOWLEDGE.md#0.2.1+2.2",
+        "domain_tags": ["kernel_switch_specialist"],
+        "status": "proposed",
+    },
+    {
+        "what": "Speculative decoding (ngram / MTP) is the biggest single lever for "
+        "low-concurrency latency-bound decode (small M, memory-bound): it validates "
+        "several drafted tokens per forward pass. For vLLM try --speculative-config "
+        "with method=ngram (num_speculative_tokens ~3, prompt_lookup_max/min). "
+        "CAVEAT: MTP/speculative is incompatible with prefix caching — disable "
+        "--enable-prefix-caching when using MTP.",
+        "expected_impact": "throughput+tpot (validated +46% on gpt-oss-120b vllm mi355x)",
+        "accuracy_risk": "none (spec-decode verifies against the base model)",
+        "source": "session:gpt-oss-120b/20260729T193315Z",
+        "domain_tags": ["framework"],
+        "status": "proposed",
+    },
+    {
+        "what": "GEMM-bound (large linear layers): set TORCH_BLAS_PREFER_HIPBLASLT=1 and "
+        "PYTORCH_TUNABLEOP_ENABLED=1 (auto-tune GEMMs), and prefer tuned AITER GEMM "
+        "configs. Plain Triton GEMM loses to tuned Tensile/asm on bf16 decode-GEMV "
+        "(single-launch cross-CU split-K in asm is not expressible in Triton), so do "
+        "NOT expect a hand-authored Triton dense GEMM to beat the vendor baseline on "
+        "memory-bound decode shapes.",
+        "expected_impact": "throughput",
+        "accuracy_risk": "TunableOp: first-run tuning cost; results cached",
+        "source": "cph-perf-tuning:KNOWLEDGE.md#0.2.1;session:gpt-oss-120b/20260729T193315Z",
+        "domain_tags": ["kernel_switch_specialist"],
+        "status": "proposed",
+    },
+    {
+        "what": "MXFP4 caveat: native FP4 acceleration needs gfx950 (MI350X/MI355X). On "
+        "gfx942 (MI300X/MI325X) MXFP4 runs in dequant-to-bf16 EMULATION, so electively "
+        "quantizing to MXFP4 there buys no memory/throughput benefit. BUT models shipped "
+        "natively in MXFP4 (e.g. gpt-oss-120b) MUST keep --quantization mxfp4 — it is how "
+        "the model fits. gfx942+AITER footgun: an MXFP4 model can crash at startup "
+        "(MXFP4 not supported on gfx942); set VLLM_ROCM_USE_AITER_FP4BMM=0 to disable just "
+        "the FP4 path while keeping AITER on.",
+        "expected_impact": "correctness/enablement (prevents OOM / startup crash)",
+        "accuracy_risk": "stripping baked-in mxfp4 -> 4x memory -> OOM",
+        "source": "cph-perf-tuning:KNOWLEDGE.md#0.2.1",
+        "domain_tags": ["framework"],
+        "status": "proposed",
+    },
+)
+
+
+def builtin_hints() -> list[dict[str, Any]]:
+    """Return a fresh copy of the built-in advisory priors (validated shape).
+
+    Returns:
+        The normalized built-in hint dicts (source-backed; advisory only).
+    """
+    out: list[dict[str, Any]] = []
+    for raw in _BUILTIN_HINTS:
+        coerced = _coerce_hint(raw)
+        if coerced is not None:
+            out.append(coerced)
+    return out
+
+
 def load_hints(session_dir: Path) -> list[dict[str, Any]]:
     """Return the structured hints written so far (empty on miss/parse error).
 
@@ -123,17 +228,43 @@ def _render_md(hints: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def ensure_builtin_hints_seeded(session_dir: Path) -> int:
+    """Merge the committed built-in advisory priors into the session hints.
+
+    Idempotent and order-independent: dedups on ``(claim, source)`` and never
+    overwrites scout-collected hints. Safe to call whether or not the hint
+    artifacts already exist.
+
+    Args:
+        session_dir: Session directory to seed.
+
+    Returns:
+        The number of built-in hints newly added this call.
+    """
+    existing = load_hints(session_dir)
+    seen = {_hint_key(h) for h in existing}
+    added = 0
+    for h in builtin_hints():
+        key = _hint_key(h)
+        if key not in seen:
+            seen.add(key)
+            existing.append(h)
+            added += 1
+    if added or not session_paths.research_hints_md(session_dir).exists():
+        _persist(session_dir, existing)
+    return added
+
+
 def write_hints_skeleton(session_dir: Path) -> None:
-    """Ensure both hint artifacts exist before the scout returns (PRELUDE invariant; preserves prior hints).
+    """Ensure both hint artifacts exist AND the built-in priors are seeded (PRELUDE invariant; preserves prior hints).
 
     Args:
         session_dir: Session directory whose hint artifacts are ensured.
     """
-    md_path = session_paths.research_hints_md(session_dir)
-    if md_path.exists():
-        return
-    existing = load_hints(session_dir)
-    _persist(session_dir, existing)
+    # Seed the committed built-in advisory priors (symptom→lever model + ROCm
+    # lever catalog) so they are present from PRELUDE even before the scout runs.
+    # Order-independent: works whether or not the md artifact already exists.
+    ensure_builtin_hints_seeded(session_dir)
 
 
 def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
@@ -622,6 +753,8 @@ def summarise_for_prompt(
 
 __all__ = [
     "append_hints",
+    "builtin_hints",
+    "ensure_builtin_hints_seeded",
     "full_gap_summary",
     "gap_analysis",
     "load_competitor_target",

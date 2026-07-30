@@ -71,8 +71,14 @@ def test_write_hints_skeleton(tmp_path):
     rh.write_hints_skeleton(tmp_path)
     md = session_paths.research_hints_md(tmp_path)
     assert md.exists()
-    assert "No proven priors" in md.read_text(encoding="utf-8")
+    # The skeleton now seeds the committed built-in advisory priors, so the MD
+    # is no longer the empty placeholder; it renders the seeded hints.
+    text = md.read_text(encoding="utf-8")
+    assert "No proven priors" not in text
+    assert "# Research Hints" in text
+    # Idempotent: a second call does not duplicate the built-in seed.
     rh.write_hints_skeleton(tmp_path)
+    assert len(rh.load_hints(tmp_path)) == len(rh.builtin_hints())
 
 
 def test_render_md_with_hints():

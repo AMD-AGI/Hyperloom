@@ -202,6 +202,82 @@ _CHECKLIST: tuple[ChecklistEntry, ...] = (
         ),
         evidence=("vllm#46545", "MiniMax-M3-shared-expert-fusion-MI355X-mxfp8"),
     ),
+    ChecklistEntry(
+        id="rocm.fp4.moe_tuned_tile_config_gap",
+        applies_when={"gpu": "rocm", "precision": "fp4"},
+        detect=(
+            "For MXFP4/FP4 MoE models (e.g. GptOssForCausalLM), grep the tuned "
+            "fused-MoE tile-config directory "
+            "(vllm/model_executor/layers/fused_moe/configs/) for a file keyed to "
+            "THIS model+GPU: `E=<num_experts>,N=<intermediate_size>,"
+            "device_name=<gfx950/MI355X>,dtype=fp4`. Confirm whether a matching "
+            "tuned config exists, or the MoE grouped-GEMM falls back to generic "
+            "Triton tiles. Also confirm the AITER MXFP4 MoE path "
+            "(rocm_aiter_fused_experts / MoeFlatmm) is actually selected at the "
+            "run's decode M (concurrency=1 → M=1)."
+        ),
+        consequence=(
+            "A missing tuned tile config for the (E, N, gfx950, fp4) combination "
+            "makes the fused-MoE grouped GEMM run generic Triton tiles that are "
+            "weight-bandwidth/occupancy bound at decode M=1, which is the "
+            "dominant weighted op for this workload — leaving decode throughput "
+            "and TPOT on the table."
+        ),
+        bridge=(
+            "Generate + commit the tuned tile config via "
+            "`benchmarks/kernels/benchmark_moe.py --num-experts <E> "
+            "--intermediate-size <N> --dtype fp4 --device <gfx950>` so the MoE "
+            "path selects the tuned config instead of the generic Triton "
+            "fallback. Confirm the AITER master switch is on (see "
+            "rocm.fp4.aiter_master_switch_gap) so the AITER MXFP4 MoE kernel is "
+            "eligible. A/B gate on validated throughput; require accuracy gate."
+        ),
+        domain_hint="kernel_switch_specialist",
+        source_dirs=(
+            "vllm/model_executor/layers/fused_moe/configs/",
+            "vllm/model_executor/layers/fused_moe/",
+        ),
+        evidence=(
+            "cph-perf-tuning:KNOWLEDGE.md#step2.2-missing-tuned-moe-configs",
+            "session:gpt-oss-120b/20260729T193315Z",
+        ),
+    ),
+    ChecklistEntry(
+        id="rocm.fp4.aiter_master_switch_gap",
+        applies_when={"gpu": "rocm", "precision": "fp4"},
+        detect=(
+            "Confirm the AITER master switch `VLLM_ROCM_USE_AITER=1` is set for "
+            "the run. It is OFF by default and gates ALL AITER GEMM / RMSNorm / "
+            "MoE kernels — and is required even when `--attention-backend` is set "
+            "explicitly (that flag only changes the attention kernel, not the "
+            "GEMM/MoE path). Grep `_aiter_ops.py` / the AITER enable gates and "
+            "confirm the fp4 MoE + dense-GEMM paths are not silently on the "
+            "non-AITER fallback. Known gpt-oss caveat: `ROCM_AITER_FA` is "
+            "incompatible with attention-sink models, so do NOT use it to enable "
+            "AITER — use the master switch + a compatible attention backend."
+        ),
+        consequence=(
+            "With the AITER master switch off, MXFP4 MoE and dense GEMMs run the "
+            "slower Triton / rocm_unquantized fallback even though tuned AITER "
+            "kernels exist for gfx950, capping throughput regardless of other "
+            "tuning."
+        ),
+        bridge=(
+            "Set `VLLM_ROCM_USE_AITER=1` (plus `VLLM_ROCM_USE_AITER_MOE=1` where "
+            "applicable) and confirm the AITER MXFP4 MoE / GEMM kernels are "
+            "selected. Pair with a compatible attention backend (NOT "
+            "ROCM_AITER_FA for gpt-oss). A/B gate on validated throughput."
+        ),
+        domain_hint="kernel_switch_specialist",
+        source_dirs=(
+            "vllm/model_executor/layers/quantization/",
+            "vllm/model_executor/layers/fused_moe/",
+        ),
+        evidence=(
+            "cph-perf-tuning:KNOWLEDGE.md#step0.2.1-aiter-master-switch",
+            "session:gpt-oss-120b/20260729T193315Z",
+        ),
+    ),
 )
 
 

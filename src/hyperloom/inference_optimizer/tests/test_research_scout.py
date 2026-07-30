@@ -31,7 +31,11 @@ def test_research_scout_has_focus_template():
 def test_skeleton_always_present(tmp_path: Path):
     research_hints.write_hints_skeleton(tmp_path)
     assert session_paths.research_hints_md(tmp_path).exists()
-    assert research_hints.load_hints(tmp_path) == []
+    # The skeleton seeds the committed built-in advisory priors (source-backed);
+    # every seeded hint must carry a source so it survives coercion.
+    hints = research_hints.load_hints(tmp_path)
+    assert hints == research_hints.builtin_hints()
+    assert all(h.get("source") for h in hints)
 
 
 def test_append_drops_sourceless_and_dedups(tmp_path: Path):
@@ -69,7 +73,11 @@ def test_append_is_additive_across_runs(tmp_path: Path):
 def test_skeleton_does_not_clobber_existing(tmp_path: Path):
     research_hints.append_hints(tmp_path, [{"what": "a", "source": "s1"}])
     research_hints.write_hints_skeleton(tmp_path)
-    assert len(research_hints.load_hints(tmp_path)) == 1
+    # The pre-existing scout hint must survive; the skeleton adds the committed
+    # built-in seed alongside it (never dropping prior hints).
+    whats = {h["what"] for h in research_hints.load_hints(tmp_path)}
+    assert "a" in whats
+    assert len(whats) == 1 + len(research_hints.builtin_hints())
 
 
 def test_competitor_target_requires_per_conc_source(tmp_path: Path):
