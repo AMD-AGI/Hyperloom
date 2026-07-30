@@ -346,6 +346,7 @@ def _finalize(
     emit_launches: bool = False,
     graph_launch_corrs: frozenset[int] | None = None,
     graph_launch_count: int = 0,
+    corr_to_launch_geom: dict[Any, tuple[Any, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events.
 
@@ -426,6 +427,14 @@ def _finalize(
     graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
+    geom = corr_to_launch_geom or {}
+    # Name-keyed shape backfill: a kernel replayed inside a CUDA graph loses its
+    # correlation->cpu_op link, but the SAME kernel resolved a shape on an
+    # eager/capture-time launch. Record the first shape-carrying meta per kernel
+    # name so a later shapeless launch can inherit it (provenance downgrades).
+    kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
+    # Name-keyed launch geometry (grid/block), first-seen per kernel name.
+    kern_name_launch_geom: dict[str, tuple[Any, Any]] = {}
     for name, dur, corr, _ts, _end in k_events:
         extid = corr_to_extid.get(corr) if corr is not None else None
         op_name = extid_to_opname.get(extid) if extid is not None else None
@@ -452,6 +461,13 @@ def _finalize(
             meta = extid_to_opmeta.get(extid)
             if meta:
                 kern_op_meta.setdefault(name, {}).setdefault(op_name, meta)
+                # Seed the name-keyed backfill from any shape-carrying meta.
+                if meta.get("shapes") and name not in kern_name_backfill_meta:
+                    kern_name_backfill_meta[name] = meta
+        if name not in kern_name_launch_geom:
+            g = geom.get(corr)
+            if g is not None and (g[0] is not None or g[1] is not None):
+                kern_name_launch_geom[name] = g
 
     def _majority_op(kernel_name: str) -> str:
         """Return the highest-GPU-time real launching op for a kernel name.
@@ -512,6 +528,14 @@ def _finalize(
                 row["op_dtypes"] = meta.get("dtypes") or []
                 row["op_kernel_file"] = meta.get("kernel_file") or ""
                 row["op_kernel_backend"] = meta.get("kernel_backend") or ""
+                # Shape fallbacks for a kernel whose own launch had no cpu_op
+                # shape: (a) same-name capture-time shape, (b) launch geometry.
+                bf = kern_name_backfill_meta.get(nm) or {}
+                row["backfill_shapes"] = bf.get("shapes") or []
+                row["backfill_dtypes"] = bf.get("dtypes") or []
+                lg = kern_name_launch_geom.get(nm)
+                row["launch_grid"] = list(lg[0]) if lg and lg[0] is not None else []
+                row["launch_block"] = list(lg[1]) if lg and lg[1] is not None else []
             rows.append(row)
         rows.sort(key=lambda r: r["gpu_time_ms"], reverse=True)
         return rows if top_k is None or top_k <= 0 else rows[:top_k]
@@ -633,6 +657,10 @@ def analyze_trace(
     extid_to_opname: dict[int, str] = {}
     # Compact per-op meta (first-seen) for shape + Triton-source enrichment.
     extid_to_opmeta: dict[int, dict[str, Any]] = {}
+    # Launch geometry (grid/block) per correlation, kept so a kernel whose
+    # correlation->cpu_op shape chain is broken (Triton direct-launch,
+    # graph replay) can still surface a launch-grid shape fallback.
+    corr_to_launch_geom: dict[Any, tuple[Any, Any]] = {}
     # Buffered device events so one pass serves both full-trace and steady-window
     # aggregation without re-reading the trace.
     k_events: list[tuple[str, float, Any, float, float]] = []
@@ -688,7 +716,15 @@ def analyze_trace(
                 end = ts + dur
                 name = ev.get("name", "") or ""
                 if cat == _GPU_KERNEL_CAT:
-                    corr = (ev.get("args") or {}).get("correlation")
+                    kargs = ev.get("args") or {}
+                    corr = kargs.get("correlation")
+                    # Retain launch grid/block: for Triton (hipModuleLaunchKernel)
+                    # and graph-replay kernels the correlation->cpu_op shape chain
+                    # is broken, but the launch geometry is a shape fallback.
+                    grid = kargs.get("grid")
+                    block = kargs.get("block")
+                    if grid is not None or block is not None:
+                        corr_to_launch_geom[corr] = (grid, block)
                     k_events.append((name, dur, corr, ts, end))
                 else:
                     m_events.append((dur, ts, end))
@@ -715,6 +751,7 @@ def analyze_trace(
         emit_launches=emit_launches,
         graph_launch_corrs=frozenset(graph_launch_corrs),
         graph_launch_count=len(graph_launch_corrs),
+        corr_to_launch_geom=corr_to_launch_geom,
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 
