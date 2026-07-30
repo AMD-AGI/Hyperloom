@@ -2692,7 +2692,11 @@ class IntegratePatchExecutor:
                 specialist_task_id,
             )
         gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
-        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), acc_baseline)
+        _ss_kb = extra.get("shared_state") or extra.get("state")
+        acc_delta_pct = _accuracy_delta_pct(
+            gate_evidence.get("accuracy"),
+            acc_baseline or getattr(_ss_kb, "baseline_accuracy", None),
+        )
         cfg_fingerprint = canonical_fingerprint(
             params.get("extra_server_args"),
             params.get("extra_envs"),
@@ -3289,6 +3293,19 @@ class IntegratePatchExecutor:
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
 
+        # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
+        measured_accuracy: float | None = None
+        if bench.get("status") == "succeeded":
+            try:
+                measured = parse_eval_results(
+                    eval_search_root,
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                ).get("accuracy")
+                if isinstance(measured, (int, float)):
+                    measured_accuracy = float(measured)
+            except Exception:  # noqa: BLE001 — advisory value only
+                log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
+
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
         enablement_accuracy_task = ""
@@ -3309,6 +3326,7 @@ class IntegratePatchExecutor:
 
         return bench, {
             "accuracy_pass": accuracy_pass,
+            "accuracy": measured_accuracy,
             "enablement_accuracy": enablement_accuracy,
             "enablement_accuracy_task": enablement_accuracy_task,
             "enablement_accuracy_metric": enablement_accuracy_metric,
