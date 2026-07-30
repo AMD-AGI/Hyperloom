@@ -3029,7 +3029,7 @@ class FrameworkPhase(PhaseHandler):
         kept: bool,
     ) -> None:
         """Write framework KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):

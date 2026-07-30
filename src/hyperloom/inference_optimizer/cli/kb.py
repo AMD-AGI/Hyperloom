@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import append_jsonl
-from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 from ..session.paths import workspace_root as _workspace_root_resolve
 
@@ -140,7 +140,7 @@ def _build_recipe_kb_dispatcher(
     return kb  # external (default): no in-process mirror
 
 
-def _bootstrap_cortex_kb(
+def _bootstrap_recipe_kb(
     args: argparse.Namespace,
     *,
     session_dir: Path,
@@ -226,16 +226,16 @@ def _bootstrap_cortex_kb(
 def _bootstrap_knowledge_plane(
     args: argparse.Namespace,
     *,
-    cortex_client: Any = None,
+    recipe_kb_client: Any = None,
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
     """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
-    Monitor REST client (KB reads go through RecipeKB, no Cortex KB client).
+    Monitor REST client (KB reads go through RecipeKB, no Recipe KB client).
     Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
 
     Args:
         args: Parsed CLI arguments (PR Monitor enablement, URLs, window).
-        cortex_client: Optional cortex client; unused (KB reads go via RecipeKB).
+        recipe_kb_client: Optional recipe KB client; unused (KB reads go via RecipeKB).
         session_dir: Optional session directory; when set a status marker is
             written for breakdown warnings.
 

@@ -56,7 +56,7 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda s: s == "sweep", "sweep"),
     # merged explore family subsuming the legacy backends + params buckets.
     (lambda s: s == "explore", "explore"),
-    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
+    # REPLAY_WARM_RECIPE: warm-recipe / recipe KB best_config replay (a prep action).
     # Its own headline row so its gain reconciles against validated_total_pct
     # instead of vanishing into the non-emitted ``other`` family. The label may
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.

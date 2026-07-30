@@ -74,8 +74,8 @@ Recommended locations:
 
 ## Remote recipe KB reads (gbrain)
 
-The read side of the recipe KB is the gbrain page store, not Cortex. It is
-enabled only when gbrain is configured; writes always stay local.
+The read side of the recipe KB is the gbrain page store. It is enabled only
+when gbrain is configured; writes always stay local.
 
 ```bash
 export GBRAIN_BASE_URL=https://your-gbrain

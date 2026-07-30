@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for KG-enhanced warm-start context in cortex_t0."""
+"""Tests for KG-enhanced warm-start context in recipe_kb_t0."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.knowledge.cortex_t0 import _build_warm_start_context
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import _build_warm_start_context
 from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import KGClient
 
 _FACTS_PAGE = """# KG

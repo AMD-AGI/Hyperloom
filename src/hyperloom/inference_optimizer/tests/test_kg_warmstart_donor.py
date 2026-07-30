@@ -4,7 +4,7 @@
 """KG-native cross-model warm-start donor synthesis (single_top).
 
 Covers ``generate_warmstart_donor_graph_guided`` (kg_client) and the
-``_kg_native_config_donor`` cortex_t0 wiring: the strongest positive-gain,
+``_kg_native_config_donor`` recipe_kb_t0 wiring: the strongest positive-gain,
 non-reverted ``KNOB_IMPROVES`` edge for the target arch+precision is adopted as
 a recipe-shaped donor; reverted / zero-gain / config-less / empty cases yield
 ``None`` so warm-start falls back to the recipe-KB sibling search.
@@ -114,9 +114,9 @@ def test_no_architectures_yields_none() -> None:
     assert out is None
 
 
-def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
+def test_recipe_kb_helper_requires_native_kg(monkeypatch) -> None:
     # _kg_native_config_donor must not borrow from a non-native (sim) client.
-    from hyperloom.orchestrator.knowledge import cortex_t0
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
 
     class _SimKG:
         _native = False
@@ -128,14 +128,14 @@ def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
             return [_knob_fact(fp="x", gain="+20%")]
 
     monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _SimKG())
-    out = cortex_t0._kg_native_config_donor(
+    out = recipe_kb_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
     )
     assert out is None
 
 
-def test_cortex_helper_returns_native_donor(monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import cortex_t0
+def test_recipe_kb_helper_returns_native_donor(monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
 
     class _NativeKG:
         _native = True
@@ -150,7 +150,7 @@ def test_cortex_helper_returns_native_donor(monkeypatch) -> None:
             return []
 
     monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG())
-    out = cortex_t0._kg_native_config_donor(
+    out = recipe_kb_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
     )
     assert out is not None

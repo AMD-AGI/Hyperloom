@@ -101,7 +101,7 @@ class _Spec:
             "updated_at": "2026-06-03T14:00:00Z",
         }
 
-    def cortex_v2_row(self) -> dict[str, Any]:
+    def recipe_kb_v2_row(self) -> dict[str, Any]:
         """Render as a central kb-service v2-nested recipe row."""
         model_s, hw_s, fw_s, mt_s, arch_s, fwv_s, prec_s = cid_to_path_components(self.cid)
         return {

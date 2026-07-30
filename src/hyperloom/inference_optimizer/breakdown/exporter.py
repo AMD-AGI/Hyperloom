@@ -552,7 +552,7 @@ def build(
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         "attribution": attribution,
-        # Cortex KB integration audit.
+        # Recipe KB integration audit.
         "kb_provenance": kb_provenance,
         "specialist_runs": specialist_runs,
         # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.

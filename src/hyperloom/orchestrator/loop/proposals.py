@@ -44,7 +44,7 @@ class ProposalsCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _workload_canonical_id(self) -> str:
-        """Canonical 5-tuple recipe id for the current workload. Must match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
+        """Canonical 5-tuple recipe id for the current workload. Must match recipe_kb_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
 
         Returns:
             The canonical recipe id derived from model, hardware, framework,
@@ -75,7 +75,7 @@ class ProposalsCollaborator:
 
         Cached per tick to avoid repeated I/O during multi-variant KEEP batches.
         """
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return {}
         tick = int(getattr(self.shared_state, "tick", 0) or 0)
         cache = getattr(self, "_local_recipe_cache", None)
@@ -83,7 +83,7 @@ class ProposalsCollaborator:
             return cache[1]
         try:
             row = (
-                self.cortex_kb.local.get_recipe(
+                self.recipe_kb.local.get_recipe(
                     canonical_id=self._workload_canonical_id(),
                 )
                 or {}
@@ -177,7 +177,7 @@ class ProposalsCollaborator:
             provenance_details: Optional provenance metadata recorded with the
                 amendment.
         """
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         try:
             cid = self._workload_canonical_id()
@@ -194,7 +194,7 @@ class ProposalsCollaborator:
 
         # Read the LOCAL authoritative row (bypass remote-first read; else a central row clobbers this session's lessons/pitfalls).
         try:
-            live = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
+            live = self.recipe_kb.local.get_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001
             log.info(
                 "_kb_amend_recipe: local get_recipe failed (%s); proceeding with empty live",
@@ -304,7 +304,7 @@ class ProposalsCollaborator:
             },
         }
         try:
-            self.cortex_kb.put_recipe(**put_kwargs)
+            self.recipe_kb.put_recipe(**put_kwargs)
             self._coord._local_recipe_cache = None
         except Exception:  # noqa: BLE001
             log.exception(

@@ -45,10 +45,10 @@ Every per-tick prompt now carries:
   a safety net, not a strategy gate — do not kill the run on it alone.
 
 NDJSON pending escalation: when the
-Cortex KB pending queue (`runtime/cortex/.kb_pending.ndjson`) grows
-past `cortex_pending_alert_threshold` lines and stays above for >
-`cortex_pending_alert_window_sec`, emit
-`alert{severity='high', summary='cortex_pending_backlog', detail={'lines': N}}`.
+Recipe KB pending queue (`runtime/recipe_kb/.kb_pending.ndjson`) grows
+past `recipe_kb_pending_alert_threshold` lines and stays above for >
+`recipe_kb_pending_alert_window_sec`, emit
+`alert{severity='high', summary='recipe_kb_pending_backlog', detail={'lines': N}}`.
 The flusher daemon should be drainsing it; sustained backlog means
 either the flusher is dead or the KB service is unreachable.
 

@@ -2842,7 +2842,7 @@ class IntegratePatchExecutor:
         session_id = ""
         shared_state = extra.get("shared_state") or extra.get("state")
         if shared_state is not None:
-            session_id = str(getattr(shared_state, "cortex_session_id", "") or "")
+            session_id = str(getattr(shared_state, "recipe_kb_session_id", "") or "")
         try:
             from ...knowledge.kb_writeback import write_framework_record
 

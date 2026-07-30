@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.cli.model_gate import _load_model_config_tags
-from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     RecipeKB,
@@ -100,7 +100,7 @@ def test_load_config_tags_drops_blank_entries(tmp_path: Path) -> None:
 # 2. T0 anchor stamps the tags into the recipe extras
 @dataclass
 class _FakeSharedState:
-    cortex_session_id: str = ""
+    recipe_kb_session_id: str = ""
     warm_start_ts: str = ""
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)
