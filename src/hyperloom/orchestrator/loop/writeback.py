@@ -3031,7 +3031,6 @@ class WritebackCollaborator:
             "correctness_verified": result.get("correctness_verified"),
             "enablement_eval_failure_kind": result.get("enablement_eval_failure_kind"),
             "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
-            "enablement_eval_contract_drift": result.get("enablement_eval_contract_drift"),
             "provisional": result.get("provisional"),
         }
         outcome.changed = changed

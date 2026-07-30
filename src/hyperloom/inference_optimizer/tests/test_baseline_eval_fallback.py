@@ -737,6 +737,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
 # --- eval-origin enablement routing (flag on) ------------------------------
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (  # noqa: E402
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
@@ -785,7 +786,7 @@ def test_eval_enablement_missing_accuracy_routes_not_stop(monkeypatch, tmp_path)
     assert result[BASELINE_EVAL_FAILED_KEY] is True
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
-    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == 0.0
+    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == DEFAULT_ENABLEMENT_ACCURACY_FLOOR
     assert result[BASELINE_EVAL_EVIDENCE_KEY]
     assert result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY]
     assert result["eval_origin"] == "eval"

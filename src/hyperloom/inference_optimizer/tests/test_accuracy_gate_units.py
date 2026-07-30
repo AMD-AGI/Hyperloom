@@ -125,7 +125,16 @@ class TestEnablementReaders:
 
     def test_floor_default(self, monkeypatch):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", raising=False)
-        assert ag.enablement_accuracy_floor() == 0.0
+        assert ag.enablement_accuracy_floor() == ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+
+    def test_floor_default_rejects_a_collapsed_model(self):
+        """The default must be strong enough to be the only correctness authority.
+
+        A run once KEPT a candidate scoring gsm8k=0.00076 because the floor was
+        0.0 and the gate degenerated to ``accuracy > 0``.
+        """
+        assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
+        assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
     def test_floor_valid(self, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", "0.7")
@@ -134,7 +143,7 @@ class TestEnablementReaders:
     @pytest.mark.parametrize("bad", ["1.5", "-0.1", "nonsense", "nan", "inf"])
     def test_floor_invalid_or_out_of_range_falls_back(self, monkeypatch, bad):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", bad)
-        assert ag.enablement_accuracy_floor() == 0.0
+        assert ag.enablement_accuracy_floor() == ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
 
 class TestAccuracyValidator:
