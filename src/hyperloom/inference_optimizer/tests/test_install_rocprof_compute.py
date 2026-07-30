@@ -404,17 +404,43 @@ def test_static_gated_on_checkout_not_backend() -> None:
 
 
 def test_static_call_ordered_after_all_pip_steps() -> None:
+    # The bare top-level call must run after EVERY pip-installing step, so no later
+    # step can re-pull pandas>=3 and the pin's re-check is the truthful final
+    # state. Derive the pip-installing steps instead of hardcoding them, so a
+    # future refactor that adds a pip step or moves the call is caught.
     text = IO_INSTALL.read_text(encoding="utf-8")
-    # The bare top-level call must run after EVERY pip-installing step (incl.
-    # chain_kernel_agent), so no later step can re-pull pandas>=3 and the pin's
-    # re-check is the truthful final state.
     call = text.rindex("\nensure_rocprof_compute\n")
-    for earlier in (
-        "\nensure_bench_serving_deps\n",
-        "\nensure_xdit_quality_deps\n",
-        "\nchain_kernel_agent\n",
-    ):
-        assert call > text.rindex(earlier), f"ensure_rocprof_compute must run after {earlier.strip()}"
+
+    # Top-level invocations: a line that is exactly a function name (col 0), i.e.
+    # ensure_*/chain_* CALLS (definitions are `name() {`, which this won't match).
+    invocations = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"^(ensure_[a-z_]+|chain_[a-z_]+)$", text, re.M)
+    ]
+    pip_steps_before = []
+    for pos, name in invocations:
+        if name == "ensure_rocprof_compute":
+            continue
+        # Only consider names that are DEFINED in this file, and whose body runs
+        # a pip install.
+        if not re.search(rf"^{name}\(\) \{{", text, re.M):
+            continue
+        body = _extract_fn(name)
+        if "pip install" in body:
+            pip_steps_before.append((pos, name))
+
+    # chain_kernel_agent installs INDIRECTLY (it shells out to another
+    # install.sh), so it has no literal "pip install" in its body — include it
+    # explicitly as a pip step that must precede the pin.
+    chain = text.rindex("\nchain_kernel_agent\n") + 1
+    pip_steps_before.append((chain, "chain_kernel_agent"))
+
+    assert pip_steps_before, "expected to find pip-installing steps to order against"
+    latest_pos, latest_name = max(pip_steps_before)
+    assert call > latest_pos, (
+        f"ensure_rocprof_compute (pos {call}) must be called AFTER every "
+        f"pip-installing step; last one is {latest_name} (pos {latest_pos})"
+    )
 
 
 def test_static_effective_python_probe_mirrors_resolve_rocpc() -> None:

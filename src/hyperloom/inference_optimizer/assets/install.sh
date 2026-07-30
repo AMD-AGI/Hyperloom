@@ -808,11 +808,23 @@ ensure_kernel_agents() {
 # pin pandas in exactly THAT interpreter (not blindly $PYTHON), so the pin cannot
 # be a silent no-op and the log names the env that will actually run the tool.
 #
+# Two known, accepted deltas vs. resolve_rocpc() (neither is a correctness bug —
+# both fall back safely and only affect which interpreter gets pinned):
+#   * First candidate: we probe $PYTHON where resolve_rocpc probes the RUNTIME
+#     sys.executable. $PYTHON is install-time sys.executable and, in the shared
+#     -venv carrier flow, is the SAME interpreter forge runs under, so they agree.
+#     If a deployment splits install-time and runtime Python, the pin may land on
+#     a non-preferred interpreter — the fallback + warn below make that visible.
+#   * `--help` passing proves rocprof-compute's deps import, NOT that its CSV
+#     conversion works on this pandas; the pandas<3 pin (below) is what closes
+#     that gap. A deeper check (pandas major inside the probe) would belong in
+#     KernelForge's resolve_rocpc(), not here.
+#
 # Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
 
 # Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
-# of $PYTHON, /usr/bin/python3, PATH python3 that can run `<libexec>/rocprof-
-# compute --help`. Returns non-zero with no output when none qualifies.
+# of $PYTHON (install-time sys.executable), /usr/bin/python3, PATH python3 that
+# can run `<libexec>/rocprof-compute --help`. Non-zero + no output if none do.
 _rocpc_effective_python() {
   local libexec="$1" py seen=" "
   for py in "$PYTHON" /usr/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
