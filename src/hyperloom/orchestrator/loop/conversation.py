@@ -461,6 +461,16 @@ class ConversationCollaborator:
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
+            # Capacities a needs_gpu dispatch is admitted against; session-locked,
+            # so a SEED-turn push is enough.
+            try:
+                pools_block = self.shared_state.to_resource_pools_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: resource pools summary failed")
+                pools_block = ""
+            if pools_block:
+                sections.append("=== Resource pools ===")
+                sections.append(pools_block)
         if agent_name == "orchestration":
             # target_gap_pct is the gain still needed for --target-gain.
             obj = getattr(self, "_current_objective", None)

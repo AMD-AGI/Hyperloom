@@ -332,6 +332,13 @@ defaults the rest; omitting a dial is safe):
   Both `bench` and `needs_gpu` acquire `gpu_research_lane` (see Phase awareness
   — GPU specialists serialize against serving).
 
+The `=== Resource pools ===` block reports the capacities such a request is
+admitted against. A `bench` / framework-authoring specialist admits against
+`whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
+`serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
+whenever serving owns every card — in that case dispatch CPU specialists, or
+use `bench` when the work genuinely needs to measure.
+
 **Domain-anchored example:**
 ```
 emit_intent({

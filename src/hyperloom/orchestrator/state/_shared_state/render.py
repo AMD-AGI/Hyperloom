@@ -313,6 +313,42 @@ class _RenderMixin:
             lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
         return "\n".join(lines) or "(no phase history yet)"
 
+    def to_resource_pools_summary(self) -> str:
+        """Render the GPU pool / lane capacity block.
+
+        These are the same numbers PolicyGate admits a ``needs_gpu`` dispatch
+        against, so a request can be judged schedulable before it is emitted.
+
+        Returns:
+            str: One line per pool / lane dimension.
+        """
+        from ...policy.gate import (
+            _effective_gpu_specialist_pool_size,
+            _whole_machine_pool_size,
+            gpu_specialist_ceiling,
+        )
+
+        try:
+            serving_tp = max(0, int(self.tp or 0))
+        except (TypeError, ValueError):
+            serving_tp = 0
+        ceiling = gpu_specialist_ceiling(self)
+        disjoint = _effective_gpu_specialist_pool_size(self)
+        whole_machine = _whole_machine_pool_size()
+        try:
+            research_capacity = max(0, int(self.research_lane_capacity or 0))
+        except (TypeError, ValueError):
+            research_capacity = 0
+        lines = [
+            f"serving_tp={serving_tp}",
+            f"gpu_specialist_capacity={ceiling}",
+            f"serving_disjoint_gpu_pool={disjoint}  (non-bench needs_gpu specialists admit against this)",
+            f"whole_machine_gpu_pool={whole_machine}  (bench / framework-authoring specialists admit against this)",
+            f"research_lane_capacity={research_capacity}  (concurrent specialists)",
+            "gpu_research_lane_capacity=1  (mutually exclusive with serving / benchmark / profile)",
+        ]
+        return "\n".join(lines)
+
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
         """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls.
 
