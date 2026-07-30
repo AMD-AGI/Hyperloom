@@ -521,6 +521,34 @@ def _git_apply(
     )
 
 
+def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
+    """True when ``patch_path`` is already fully applied in ``framework_root``.
+
+    The git-channel twin of
+    :func:`._nogit_patch._reverse_applies_cleanly`. ``git apply -R --check``
+    succeeds only when every hunk's *post*-state is already present, i.e. the
+    tree already equals what a forward apply would produce. Read-only:
+    ``--check`` never mutates the tree.
+
+    Args:
+        framework_root: The git checkout the patch targets.
+        patch_path: The patch file to probe.
+
+    Returns:
+        ``True`` when some strip level reverse-checks cleanly.
+    """
+    from ._nogit_patch import _P_LEVELS
+
+    for lvl in _P_LEVELS:
+        cp = _run_git_cp(
+            ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
+            timeout=120.0,
+        )
+        if cp is not None and cp.returncode == 0:
+            return True
+    return False
+
+
 def _git_apply_collect_feedback(
     framework_root: Path,
     patch_path: Path,
@@ -574,6 +602,20 @@ def _git_apply_collect_feedback(
     if not three_way:
         ok3, err3, fb3 = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
         if ok3:
+            return True, "", None
+        # Still nothing. Distinguish "does not apply" from "already applied":
+        # a specialist often writes both a superset patch and the subset it
+        # contains, so applying one leaves the other a satisfied no-op that
+        # ``git apply --check`` nonetheless rejects. A clean *reverse* check
+        # succeeds only when every hunk's post-state is already in the tree,
+        # which is exactly what a forward apply would have produced -- so treat
+        # it as success rather than failing the whole combo. Partial overlap
+        # fails the reverse check and stays a real failure.
+        if _git_reverse_applies_cleanly(framework_root, patch_path):
+            log.info(
+                "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
+                patch_path.name,
+            )
             return True, "", None
         # Merge both sets of stderrs.
         all_stderrs = "\n".join(level_stderrs)
