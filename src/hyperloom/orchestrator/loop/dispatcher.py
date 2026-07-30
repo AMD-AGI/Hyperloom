@@ -397,6 +397,7 @@ class DispatcherCollaborator:
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
                     needs_gpu=needs_gpu,
                 )
+                extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
                 if needs_gpu:
                     # §3.4: probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
@@ -628,6 +629,55 @@ class DispatcherCollaborator:
                         "dispatcher: finally GpuSpecialistLease close failed for task=%s",
                         task.task_id,
                     )
+
+    def _specialist_progress_publisher(self, task: Task) -> Any:
+        """Build the callback that turns partial checkpoints into observations.
+
+        A dispatched specialist is otherwise silent until it terminates; this
+        republishes each checkpoint it writes so the planner sees direction
+        before the budget is spent.
+
+        Args:
+            task: The specialist task the callback reports for.
+
+        Returns:
+            An async callable taking ``(payload, elapsed_sec)``.
+        """
+
+        async def _publish(payload: dict[str, Any], elapsed: float) -> None:
+            """Append one specialist_progress observation.
+
+            Args:
+                payload: The checkpoint payload the specialist wrote.
+                elapsed: Seconds since the subprocess was spawned.
+            """
+            proposals = payload.get("proposal_set")
+            findings = payload.get("new_findings")
+            questions = payload.get("residual_questions")
+            await self.bus.append_and_seq(
+                Message.new(
+                    "coordinator",
+                    "*",
+                    "observation",
+                    {
+                        "kind": "specialist_progress",
+                        "task_id": task.task_id,
+                        "domain": str((task.params or {}).get("domain") or ""),
+                        "gap_canonical_id": str((task.params or {}).get("gap_canonical_id") or ""),
+                        "elapsed_sec": int(elapsed),
+                        "summary": str(payload.get("summary") or "")[:400],
+                        "proposals_so_far": len(proposals) if isinstance(proposals, list) else 0,
+                        "new_findings": [str(f)[:200] for f in (findings or [])[:3]]
+                        if isinstance(findings, list)
+                        else [],
+                        "residual_questions": [str(q)[:200] for q in (questions or [])[:3]]
+                        if isinstance(questions, list)
+                        else [],
+                    },
+                )
+            )
+
+        return _publish
 
     def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
         """Compute the explicit wall-clock budget for a specialist task.

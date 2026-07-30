@@ -24,9 +24,11 @@ from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
 from ..bus.resource_lock import Lease
-from ..policy.gate import PolicyDenied
+from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
 from ..kernel.request_handlers import get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
@@ -1011,6 +1013,44 @@ class IntentRouter:
                 {k: v for k, v in intent.payload.items() if k != "to"},
             )
         )
+        if str(to_agent).startswith(SPECIALIST_FROM_AGENT_PREFIX):
+            self._deliver_specialist_inbox(source, str(to_agent), intent.payload)
+
+    def _deliver_specialist_inbox(self, source: str, to_agent: str, payload: dict[str, Any]) -> None:
+        """Append a message to a running specialist's workspace inbox.
+
+        A specialist reads ``inbox.json`` between turns; the reaper ignores the
+        file, so this steers a live run without ending it.
+
+        Args:
+            source (str): The sending agent.
+            to_agent (str): Recipient of the form ``specialist:<task_id>``.
+            payload (dict[str, Any]): The send_message payload.
+        """
+        task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
+        if not task_id or self.session_dir is None:
+            return
+        try:
+            workspace = runs_dir(self.session_dir, "specialist", task_id)
+            workspace.mkdir(parents=True, exist_ok=True)
+            inbox = workspace / "inbox.json"
+            existing: list[Any] = []
+            if inbox.exists():
+                loaded = json.loads(inbox.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    existing = loaded
+            existing.append(
+                {
+                    "from": source,
+                    "ts": now_iso(),
+                    "body": {k: v for k, v in payload.items() if k not in ("to", "topic")},
+                }
+            )
+            tmp = inbox.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
+            tmp.replace(inbox)
+        except Exception:  # noqa: BLE001 — steering is best-effort
+            log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
         """Broadcast an alert message, prioritized by severity.

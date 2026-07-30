@@ -379,6 +379,7 @@ class SpecialistSubprocessDispatcher:
         gpu_ids: tuple[int, ...] = (),
         wall_budget_sec: float | None = None,
         gpu_lease: Any = None,
+        progress_cb: Any = None,
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
@@ -413,6 +414,9 @@ class SpecialistSubprocessDispatcher:
                 devices, so any GPU command the specialist issues stays within
                 its lease). ``None`` keeps the local ``Popen`` path, with
                 ``gpu_ids`` pinned into ``*_VISIBLE_DEVICES`` as before.
+            progress_cb (Any): Optional async callback invoked with each new
+                partial checkpoint the specialist writes while it is still
+                alive. Exceptions from it never affect the run.
 
         Returns:
             SpecialistSubprocessResult: Parsed outcome — done payload (if
@@ -573,9 +577,11 @@ class SpecialistSubprocessDispatcher:
                 proc=proc,
                 workspace=workspace,
                 done_files=tuple(done_candidates),
+                partial_files=tuple(partial_candidates),
                 heartbeat_file=heartbeat_file,
                 max_seconds=max_seconds,
                 started=proc_started,
+                progress_cb=progress_cb,
             )
         finally:
             if log_fh is not None:
@@ -698,6 +704,47 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(list(cfg.extra_claude_args))
         return cmd
 
+    async def _publish_partial_progress(
+        self,
+        *,
+        partial_files: tuple[Path, ...],
+        since_mtime: float,
+        elapsed: float,
+        progress_cb: Any,
+    ) -> float:
+        """Forward a freshly-rewritten partial checkpoint to ``progress_cb``.
+
+        The specialist rewrites its best-so-far payload throughout the run; this
+        turns that file into a live uplink instead of a post-mortem fallback.
+
+        Args:
+            partial_files: Candidate checkpoint paths, worktree first.
+            since_mtime: Newest mtime already published.
+            elapsed: Seconds since spawn, passed to the callback.
+            progress_cb: Async callback receiving ``(payload, elapsed)``.
+
+        Returns:
+            The newest mtime seen, so the caller can skip unchanged files.
+        """
+        newest = since_mtime
+        for cand in partial_files:
+            try:
+                mtime = cand.stat().st_mtime
+            except OSError:
+                continue
+            if mtime <= since_mtime:
+                continue
+            payload = self._read_done(cand)
+            if payload is None:
+                continue
+            newest = max(newest, mtime)
+            try:
+                await progress_cb(payload, elapsed)
+            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+                log.exception("specialist progress callback raised")
+            break
+        return newest
+
     async def _reap_loop(
         self,
         *,
@@ -707,13 +754,16 @@ class SpecialistSubprocessDispatcher:
         heartbeat_file: Path,
         max_seconds: float,
         started: float,
+        partial_files: tuple[Path, ...] = (),
+        progress_cb: Any = None,
     ) -> dict[str, Any]:
         """Poll the subprocess until it finishes, stalls, or times out.
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
         heartbeat staleness, and the hard wall-clock cap. Stale / timed-out
-        runs are killed via :meth:`_kill`.
+        runs are killed via :meth:`_kill`. Partial checkpoints written along
+        the way are forwarded to ``progress_cb`` as they change.
 
         Args:
             proc (Any): The running claude subprocess — a ``subprocess.Popen``
@@ -724,6 +774,9 @@ class SpecialistSubprocessDispatcher:
             heartbeat_file (Path): Heartbeat file whose mtime gauges liveness.
             max_seconds (float): Hard wall-clock ceiling for the run.
             started (float): ``time.monotonic()`` value at spawn time.
+            partial_files (tuple[Path, ...]): Candidate partial-checkpoint
+                paths polled for live progress; never an exit signal.
+            progress_cb (Any): Optional async callback for each new checkpoint.
 
         Returns:
             dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
@@ -741,12 +794,21 @@ class SpecialistSubprocessDispatcher:
         # process.log mtime is a reliable "still working" signal even when the
         # agent never self-writes heartbeat.json.
         process_log = workspace / "process.log"
+        last_partial_mtime: float = 0.0
 
         while True:
             await asyncio.sleep(cfg.poll_interval_seconds)
             now = time.monotonic()
             elapsed = now - started
             outcome["elapsed"] = elapsed
+
+            if progress_cb is not None:
+                last_partial_mtime = await self._publish_partial_progress(
+                    partial_files=partial_files,
+                    since_mtime=last_partial_mtime,
+                    elapsed=elapsed,
+                    progress_cb=progress_cb,
+                )
 
             # done.json appeared — graceful exit with up to 30s grace.
             if any(p.exists() for p in done_files):

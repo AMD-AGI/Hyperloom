@@ -36,6 +36,15 @@ the work already done. Prefer it over waiting out a specialist that is
 clearly chasing a dead end; a GPU specialist can hold the machine for
 hours.
 
+A running specialist also reports in: each checkpoint it writes arrives as a
+`specialist_progress` observation carrying its summary so far, proposal
+count, new findings and any `residual_questions`. You can answer or redirect
+it mid-run with
+`send_message{to='specialist:<task_id>', body_md=…}` — the message lands in
+the specialist's inbox and it acts on it without restarting. Use this when a
+checkpoint shows the mandate was wrong; the alternative is letting it burn
+its whole budget on the wrong question.
+
 The opposite move is `extend_lease{task_id=<id>, extra_sec=<n>, reason=…}`,
 which grows a running task's lease TTL and every lane row it holds. Use it
 when `get_running_tasks` shows a task making progress (recent

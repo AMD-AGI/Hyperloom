@@ -1066,6 +1066,7 @@ class SpecialistRunner:
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             wall_budget_sec=wall_budget_sec,
             gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
+            progress_cb=(ctx.extra or {}).get("specialist_progress_cb"),
         )
         self._append_transcript(
             workspace,

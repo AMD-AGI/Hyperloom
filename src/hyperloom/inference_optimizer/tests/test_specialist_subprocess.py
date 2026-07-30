@@ -210,6 +210,18 @@ cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
 EOF
 exit 3
 """
+    elif behavior == "partial_then_done":
+        # Checkpoint first, wait for the reaper to see it, then exit normally.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+sleep 1
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
     elif behavior == "hang":
         # Sleep past any wall budget without writing done.json.
         body += "sleep 600\n"
@@ -852,3 +864,42 @@ def test_kill_on_ray_lease_process_delegates_to_actor():
     assert lease.stopped is True
     # After reap the actor reports not-alive; poll latches the exit code.
     assert handle.poll() == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_checkpoint_published_while_alive(
+    tmp_path: Path,
+    fake_framework_repo: Path,
+):
+    """A checkpoint written mid-run reaches the progress callback before exit."""
+    bin_dir = tmp_path / "bin"
+    fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_done")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    config = SpecialistSubprocessConfig(
+        claude_executable=str(fake_claude),
+        model="",
+        framework_source_roots=(str(fake_framework_repo),),
+        per_turn_max_seconds=15.0,
+        poll_interval_seconds=0.2,
+    )
+    runner = SpecialistRunner(
+        subprocess_config=config,
+        session_dir=session_dir,
+        default_max_turns=2,
+    )
+    seen: list[tuple[dict, float]] = []
+
+    async def _progress(payload, elapsed):
+        seen.append((payload, elapsed))
+
+    ctx = _make_runner_ctx("t-spec-progress")
+    ctx.extra["specialist_progress_cb"] = _progress
+
+    result = await runner.run(ctx)
+    assert result.status == "succeeded"
+    assert seen, "no progress checkpoint was published while the run was alive"
+    payload, elapsed = seen[0]
+    assert payload["summary"] == "fake claude subprocess output"
+    assert elapsed >= 0.0

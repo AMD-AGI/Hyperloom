@@ -465,3 +465,34 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
         assert updated.lease_ttl_sec == 1800
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
+    """A message addressed to a running specialist lands in its workspace inbox."""
+    import json as _json
+
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    try:
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={
+                    "to": "specialist:task-steer",
+                    "topic": "observation",
+                    "body_md": "the mandate changed; measure prefill instead",
+                },
+            ),
+        )
+        inbox = runs_dir(c.session_dir, "specialist", "task-steer") / "inbox.json"
+        assert inbox.exists()
+        entries = _json.loads(inbox.read_text(encoding="utf-8"))
+        assert len(entries) == 1
+        assert entries[0]["from"] == "orchestration"
+        assert "prefill" in entries[0]["body"]["body_md"]
+    finally:
+        await c.stop()
