@@ -374,7 +374,9 @@ def test_forward_enablement_carriers_eval_origin():
     assert dst["enablement_origin"] == "eval"
     assert dst["enablement_accuracy_floor"] == 0.4
     assert dst["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    assert dst["enablement_eval_contract_fingerprint"] == "fp1"
+    # The eval-contract fingerprint is no longer forwarded: nothing downstream
+    # reads it. Correctness is judged from the candidate's own measurement.
+    assert "enablement_eval_contract_fingerprint" not in dst
     # Benches against the original workload config, not the shipped default.
     assert dst["config_path"] == "/runs/baseline/materialized.yaml"
 

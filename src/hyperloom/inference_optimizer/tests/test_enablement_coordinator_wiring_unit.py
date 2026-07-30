@@ -111,7 +111,9 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch):
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
     assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    assert params["enablement_eval_contract_fingerprint"] == "abc123"
+    # The eval-contract fingerprint is no longer carried: nothing downstream
+    # reads it. Correctness is judged from the candidate's own measurement.
+    assert "enablement_eval_contract_fingerprint" not in params
 
 
 _TRANSFORMERS_UNRECOGNIZED_LOG = (
