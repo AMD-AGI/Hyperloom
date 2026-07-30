@@ -871,6 +871,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_request": "router",
         "_handle_response": "router",
         "_handle_kill_task": "router",
+        "_handle_extend_lease": "router",
+        "_extend_task_lane_leases": "router",
         "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router",
         "_handle_send_message": "router",

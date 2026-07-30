@@ -400,6 +400,10 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
+# Ceiling on a single extend_lease step; repeated extensions stay possible but
+# each one has to be re-justified against the live task view.
+EXTEND_LEASE_MAX_SEC: int = 3600
+
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.PRUNE_BRANCH,
@@ -697,6 +701,8 @@ class PolicyGate:
             self._validate_review_verdict(role, payload)
         elif intent.type == IntentType.KILL_TASK:
             self._validate_kill_task(role, payload)
+        elif intent.type == IntentType.EXTEND_LEASE:
+            self._validate_extend_lease(payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
             self._validate_robustness_only(role, intent.type, payload)
         # ALERT carries no extra checks beyond the role gate.
@@ -1926,13 +1932,44 @@ class PolicyGate:
                 rule="specialist_freeform_description_too_long",
             )
 
+    def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
+        """Validate an ``EXTEND_LEASE`` intent.
+
+        Args:
+            payload (dict[str, Any]): the payload carrying ``task_id``,
+                ``extra_sec`` and an optional ``reason``.
+
+        Raises:
+            PolicyDenied: when ``task_id`` is missing or ``extra_sec`` is not a
+                positive integer within :data:`EXTEND_LEASE_MAX_SEC`.
+        """
+        task_id = str(payload.get("task_id", "")).strip()
+        if not task_id:
+            raise PolicyDenied("extend_lease missing task_id", rule="payload")
+        try:
+            extra_sec = int(payload.get("extra_sec") or 0)
+        except (TypeError, ValueError) as exc:
+            raise PolicyDenied(
+                f"extend_lease extra_sec must be an integer, got {payload.get('extra_sec')!r}",
+                rule="payload",
+            ) from exc
+        if extra_sec <= 0 or extra_sec > EXTEND_LEASE_MAX_SEC:
+            raise PolicyDenied(
+                f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
+                rule="extend_lease_bounds",
+                hint=(
+                    "Extend in bounded steps and re-check get_running_tasks; "
+                    "a lease must not outlive the session budget."
+                ),
+            )
+
     def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``KILL_TASK`` intent (robustness-only).
+        """Validate a ``KILL_TASK`` intent.
 
         Requires the source role to be on
         :data:`KILL_TASK_SOURCE_ALLOWLIST`, a non-empty ``task_id`` and
         ``reason``, and a ``scope`` within :data:`KILL_TASK_ALLOWED_SCOPES`
-        (``task`` only — server/process kills stay out per IR-5).
+        (``task`` only — server/process kills stay out).
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.

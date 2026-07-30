@@ -335,6 +335,37 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
         return [Task.from_row(r) for r in rows]
 
+    async def extend_lease(self, task_id: str, extra_sec: int) -> int:
+        """Grow a running task's ``lease_ttl_sec`` and restamp ``updated_at``.
+
+        The TTL watchdog measures age from ``updated_at``, so both are moved
+        together to buy the task a further ``extra_sec``.
+
+        Args:
+            task_id: The running task to extend.
+            extra_sec: Seconds to add; non-positive values are a no-op.
+
+        Returns:
+            The task's new ``lease_ttl_sec``.
+
+        Raises:
+            TaskNotFound: If no row matches ``task_id``.
+            IllegalTransition: If the task is not ``running``.
+        """
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT state, lease_ttl_sec FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise TaskNotFound(task_id)
+            if row["state"] != "running":
+                raise IllegalTransition(f"cannot extend lease of {task_id!r} in state {row['state']!r}")
+            new_ttl = int(row["lease_ttl_sec"] or 0) + max(0, int(extra_sec))
+            cur.execute(
+                "UPDATE tasks SET lease_ttl_sec=?, updated_at=? WHERE task_id=?",
+                (new_ttl, _now_iso(), task_id),
+            )
+        return new_ttl
+
     async def by_state(self, state: str) -> list[Task]:
         """Return all tasks in the given state.
 

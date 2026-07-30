@@ -36,6 +36,13 @@ the work already done. Prefer it over waiting out a specialist that is
 clearly chasing a dead end; a GPU specialist can hold the machine for
 hours.
 
+The opposite move is `extend_lease{task_id=<id>, extra_sec=<n>, reason=…}`,
+which grows a running task's lease TTL and every lane row it holds. Use it
+when `get_running_tasks` shows a task making progress (recent
+`heartbeat_age_sec`) but close to `lease_expires_in_sec` — without it the
+TTL watchdog fails the row out from under live work. Extend in bounded
+steps and re-check rather than asking for one huge window.
+
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:
 `get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,

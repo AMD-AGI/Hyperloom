@@ -72,6 +72,7 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.UPDATE_STATE,
         IntentType.REQUEST,
         IntentType.KILL_TASK,
+        IntentType.EXTEND_LEASE,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }
@@ -101,6 +102,7 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.UPDATE_STATE,  # crash_count / current_action only
         IntentType.DELEGATE,  # only handle actions: accuracy_gate / recover / server_lifecycle
         IntentType.KILL_TASK,
+        IntentType.EXTEND_LEASE,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }

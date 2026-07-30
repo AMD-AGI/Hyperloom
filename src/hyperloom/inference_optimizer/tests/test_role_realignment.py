@@ -399,3 +399,69 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
         assert "running_sec=" in out
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
+    """extend_lease pushes out both the task TTL and every lane row it holds."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-1",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        lease = await c.locks.acquire_many(
+            ["research_lane"],
+            holder_id=f"h-{task.task_id}",
+            task_id=task.task_id,
+            action="specialist",
+            ttl_sec=1800,
+        )
+        assert lease is not None
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600, "reason": "close to done"},
+            ),
+        )
+
+        updated = await c.tasks.get(task.task_id)
+        assert updated.lease_ttl_sec == 2400
+        rows = await c.db.fetchall("SELECT lane FROM leases WHERE task_id=?", (task.task_id,))
+        assert [r["lane"] for r in rows] == ["research_lane"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
+    """A queued task cannot be extended; the rejection is recorded, not raised."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-2",
+            lease_ttl_sec=1800,
+        )
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+        updated = await c.tasks.get(task.task_id)
+        assert updated.lease_ttl_sec == 1800
+    finally:
+        await c.stop()

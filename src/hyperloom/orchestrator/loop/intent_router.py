@@ -25,6 +25,7 @@ from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
 from ..bus.message_bus import Message
+from ..bus.resource_lock import Lease
 from ..policy.gate import PolicyDenied
 from ..kernel.request_handlers import get_handler
 
@@ -45,6 +46,7 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.REQUEST: "_handle_request",
     IntentType.RESPONSE: "_handle_response",
     IntentType.KILL_TASK: "_handle_kill_task",
+    IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
     IntentType.SEND_MESSAGE: "_handle_send_message",
@@ -795,6 +797,86 @@ class IntentRouter:
                 {"task_id": task_id, "reason": intent.payload.get("reason")},
             )
         )
+
+    async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
+        """Grant a running task more lease time.
+
+        Refreshes both the task's own ``lease_ttl_sec`` (what the TTL watchdog
+        measures) and every lane row the task holds, so the two cannot drift.
+
+        Args:
+            source (str): The agent requesting the extension.
+            intent (Intent): The EXTEND_LEASE intent; ``payload`` carries
+                ``task_id``, ``extra_sec`` and an optional ``reason``.
+        """
+        task_id = str(intent.payload.get("task_id") or "").strip()
+        extra_sec = int(intent.payload.get("extra_sec") or 0)
+        try:
+            new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
+        except Exception as exc:  # noqa: BLE001 — unknown/terminal task
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "extend_lease_rejected",
+                    "task_id": task_id,
+                    "source": source,
+                    "error": repr(exc)[:200],
+                },
+            )
+            return
+        lanes = await self._extend_task_lane_leases(task_id, new_ttl)
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "extend_lease",
+                "task_id": task_id,
+                "source": source,
+                "extra_sec": extra_sec,
+                "lease_ttl_sec": new_ttl,
+                "lanes": lanes,
+                "reason": str(intent.payload.get("reason") or "")[:200],
+            },
+        )
+
+    async def _extend_task_lane_leases(self, task_id: str, ttl_sec: int) -> list[str]:
+        """Push every lane row this task holds out to ``ttl_sec`` from now.
+
+        Args:
+            task_id: The task whose lane rows should be refreshed.
+            ttl_sec: New lifetime in seconds from now.
+
+        Returns:
+            The lanes that were refreshed; empty when the task holds none.
+        """
+        try:
+            rows = await self.db.fetchall(
+                "SELECT lane, holder_id FROM leases WHERE task_id=?",
+                (task_id,),
+            )
+        except Exception:  # noqa: BLE001 — lane refresh is best-effort
+            log.exception("extend_lease: lease lookup failed for task=%s", task_id)
+            return []
+        by_holder: dict[str, list[str]] = {}
+        for r in rows or []:
+            by_holder.setdefault(str(r["holder_id"]), []).append(str(r["lane"]))
+        refreshed: list[str] = []
+        for holder_id, lanes in by_holder.items():
+            lease = Lease(
+                holder_id=holder_id,
+                task_id=task_id,
+                action="",
+                lanes=tuple(lanes),
+                acquired_at="",
+                expires_at="",
+            )
+            try:
+                await self.locks.heartbeat(lease, ttl_sec=ttl_sec)
+                refreshed.extend(lanes)
+            except Exception:  # noqa: BLE001 — a lost lease is not fatal here
+                log.warning("extend_lease: heartbeat failed for task=%s lanes=%s", task_id, lanes)
+        return sorted(refreshed)
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.

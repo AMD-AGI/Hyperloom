@@ -33,7 +33,8 @@ class IntentType(str, Enum):
     REQUEST = "request"
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"  # Critic-only
-    KILL_TASK = "kill_task"  # Robustness-only; payload.scope must be "task"
+    KILL_TASK = "kill_task"  # payload.scope must be "task"
+    EXTEND_LEASE = "extend_lease"  # refresh a live task's lease TTL
     # Robustness-only scheduling police.
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
