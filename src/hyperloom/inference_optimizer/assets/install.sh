@@ -775,6 +775,159 @@ ensure_kernel_agents() {
     || die "kernel_agents import failed after install from ${root}"
 }
 
+# --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
+# forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
+# and only falls back to the thin rocprofv3 "PMC" path when the tool is absent.
+# KernelForge's resolve_rocpc() looks for the tool at
+# `<ROCM_PATH>/libexec/rocprofiler-compute/rocprof_compute_base.py`; the stock
+# vllm/sglang ROCm serving images ship rocprofv3 but NOT rocprofiler-compute, so
+# every forge run silently degrades to PMC (no roofline -> optimization-potential
+# is always estimable=NO). The Python deps rocprof-compute needs are already
+# pulled in by the KernelForge root install (its base deps cover dash/kaleido/
+# matplotlib/plotille/tqdm); the only missing piece is the system tool itself,
+# which pip cannot provide — it comes from the ROCm apt package.
+#
+# This step is FAIL-SOFT by design: forge still works on the PMC path, so a
+# missing/failed rocprof-compute must NOT abort the install. Every branch logs
+# (with the concrete "profiling will degrade to PMC" consequence) so the
+# post-mortem observability question — "why did this run profile on PMC?" — is
+# answerable from the install log alone.
+_forge_backend_selected() {
+  # True when the kernel-rewrite ladder includes the forge backend. Substring
+  # match (case-insensitive) tolerates "forge", "geak,forge", "geak forge", etc.
+  case "$(printf '%s' "${KERNEL_OPT_BACKEND_ORDER:-}" | tr '[:upper:]' '[:lower:]')" in
+    *forge*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# rocprof-compute's CSV converter (utils/utils.py, v3->v2) assumes pandas'
+# legacy 'object' string dtype. pandas>=3.0 defaults future.infer_string=True,
+# so the rocprofv3 counter CSV's Agent_Id ("Agent 9") is read as the new
+# StringDtype; the converter's `dtype == "object"` guard then skips its int
+# coercion and the subsequent Agent_Id<->Node_Id merge dies ("merge on str and
+# int64"). Every counter file is dropped -> rocprof-compute reports "No
+# profiling data found" -> forge silently degrades to the PMC path (no roofline;
+# optimization-potential estimable=NO). rocprof-compute runs under the forge
+# interpreter (its sys.executable == $PYTHON here), so pinning pandas<3 in THIS
+# interpreter is exactly what the tool imports. Nothing else in the stack needs
+# pandas>=3 (verified: no installed dist requires it), so <3 is conflict-free.
+# Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
+_ensure_pandas_lt3_for_rocpc() {
+  local ver rc
+  # Decide in Python (robust vs. bash numeric parsing under set -euo pipefail).
+  # exit 0 => pandas <3 (ok); exit 1 => pandas >=3 (incompatible); 3 => absent.
+  if ver="$("$PYTHON" - <<'PY'
+import sys
+try:
+    import pandas
+except Exception:
+    sys.exit(3)
+print(pandas.__version__)
+sys.exit(1 if int(pandas.__version__.split(".")[0]) >= 3 else 0)
+PY
+)"; then rc=0; else rc=$?; fi
+
+  if [ "$rc" -eq 3 ]; then
+    log "rocprof-compute: pandas not importable under ${PYTHON}; skipping pandas-compat pin"
+    return 0
+  fi
+  if [ "$rc" -eq 0 ]; then
+    log "rocprof-compute: pandas ${ver} is <3 (compatible with rocprof-compute's CSV converter); no pin needed"
+    return 0
+  fi
+
+  # rc == 1: pandas >=3 -> breaks rocprof-compute's v3->v2 CSV conversion.
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute: pandas ${ver} (>=3) breaks rocprof-compute's CSV converter (Agent_Id StringDtype); check-only — would pin 'pandas>=2.2.3,<3'. Until fixed, forge profiling degrades to the PMC path."
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install 'pandas>=2.2.3,<3'  (rocprof-compute pandas>=3 incompatibility)"
+    return 0
+  fi
+
+  log "rocprof-compute: pandas ${ver} (>=3) incompatible with rocprof-compute's CSV converter; pinning to 'pandas>=2.2.3,<3'"
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" 'pandas>=2.2.3,<3' \
+    || warn "rocprof-compute: 'pip install pandas<3' failed; forge profiling will stay on the PMC path. Check pip/network."
+
+  # Re-check under the SAME interpreter so the logged outcome reflects reality.
+  if ver="$("$PYTHON" - <<'PY'
+import sys
+try:
+    import pandas
+except Exception:
+    sys.exit(3)
+print(pandas.__version__)
+sys.exit(1 if int(pandas.__version__.split(".")[0]) >= 3 else 0)
+PY
+)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -eq 0 ]; then
+    log "rocprof-compute: pandas pinned OK to ${ver}; forge profiling can use rocprof-compute (roofline)"
+  else
+    warn "rocprof-compute: pandas still incompatible after pin (version='${ver}', rc=${rc}); forge profiling will degrade to the PMC path. A later install step may be re-pulling pandas>=3 — pin it after that step or via a constraints file."
+  fi
+  return 0
+}
+
+ensure_rocprof_compute() {
+  # Gate exactly as requested: only when the forge backend is selected AND a
+  # FORGE_PATH was supplied. rocprof-compute is useless outside forge profiling,
+  # so unlike ensure_kernel_agents (which gates on checkout only) we skip the
+  # ~11 MB apt install entirely for geak-only runs.
+  if ! _forge_backend_selected; then
+    log "rocprof-compute: forge backend not selected (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}'); skipping"
+    return 0
+  fi
+  if [ -z "${FORGE_PATH:-}" ]; then
+    log "rocprof-compute: forge selected but FORGE_PATH unset; skipping (forge profiling will use the PMC fallback)"
+    return 0
+  fi
+
+  local rocm_root base
+  rocm_root="${ROCM_PATH:-/opt/rocm}"
+  base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+
+  # --- Step 1: ensure the rocprof-compute tool exists ---
+  # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
+  # install when the file KernelForge's resolve_rocpc() checks is already present.
+  if [ -f "$base" ]; then
+    log "rocprof-compute already present at ${base}"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute not found at ${base} (check-only; would apt-get install rocprofiler-compute). Forge profiling would degrade to the PMC path."
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+  elif ! command -v apt-get >/dev/null 2>&1; then
+    # No apt (RHEL/Alpine/etc.): cannot install the system package here.
+    warn "rocprof-compute: apt-get unavailable; cannot install rocprofiler-compute. Forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Bake rocprofiler-compute into the image to enable roofline profiling."
+  else
+    log "installing rocprofiler-compute (forge profiling backend) via apt into ${rocm_root}"
+    # Fail-soft throughout: never let apt failures (locked dpkg, offline mirror,
+    # missing package) abort the install. Try a plain install first; if the
+    # package index is stale, refresh once and retry.
+    export DEBIAN_FRONTEND=noninteractive
+    if ! apt-get install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1; then
+      apt-get update -qq >/dev/null 2>&1 || true
+      apt-get install -y --no-install-recommends rocprofiler-compute >/dev/null 2>&1 || true
+    fi
+    # Verify against the SAME path KernelForge's resolve_rocpc() checks.
+    if [ -f "$base" ]; then
+      log "rocprof-compute installed OK: ${base} present"
+    else
+      warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Check apt access to the ROCm repo and the rocprofiler-compute package for this ROCm version."
+    fi
+  fi
+
+  # --- Step 2: make pandas compatible with rocprof-compute's CSV converter ---
+  # Only meaningful once the tool is present (otherwise forge is on PMC anyway,
+  # and pandas>=3 is fine for everything else). In check/dry-run we still surface
+  # the pandas dependency so the plan is visible even before the tool is there.
+  if [ -f "$base" ] || [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    _ensure_pandas_lt3_for_rocpc
+  fi
+  return 0
+}
+
 # --- 2. Magpie ---
 # The install state is the pip-installed package specified by
 # $MAGPIE_PACKAGE_SPEC. $MAGPIE_PATH remains exported for runtime code that
@@ -1186,6 +1339,7 @@ chain_kernel_agent() {
 ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_kernel_agents
+ensure_rocprof_compute
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
