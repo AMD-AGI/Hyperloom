@@ -630,13 +630,13 @@ class WritebackCollaborator:
     def _source_session_id(self) -> str:
         """Return the hyperloom-local session id used as source_session_id on KB fact writes.
 
-        NOT a KB-side session id; prefers cortex_session_id, falls back to session_dir.name.
+        NOT a KB-side session id; prefers recipe_kb_session_id, falls back to session_dir.name.
 
         Returns:
-            The hyperloom-local session id (cortex_session_id when set, else
+            The hyperloom-local session id (recipe_kb_session_id when set, else
             ``session_dir.name``).
         """
-        return str(getattr(self.shared_state, "cortex_session_id", "") or "") or self.session_dir.name
+        return str(getattr(self.shared_state, "recipe_kb_session_id", "") or "") or self.session_dir.name
 
     async def _fact_write_hook(
         self,
@@ -700,7 +700,7 @@ class WritebackCollaborator:
             ss = self.shared_state
             self._coord._journal = Journal.load_or_create(
                 self.session_dir,
-                session_id=str(getattr(ss, "cortex_session_id", "") or "")
+                session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
                 or str(getattr(ss, "session_id", "") or "")
                 or self.session_dir.name,
                 model=str(getattr(ss, "model_name", "") or ""),
@@ -771,7 +771,7 @@ class WritebackCollaborator:
 
         Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
         (on REVERT/failure) to the recipe row, then returns.  Call only after
-        the journal entry has been appended and ``cortex_kb`` is confirmed
+        the journal entry has been appended and ``recipe_kb`` is confirmed
         non-None by the caller.
 
         Args:
@@ -912,7 +912,7 @@ class WritebackCollaborator:
             )
         )
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
 
         self._record_fact_impl(
@@ -1078,7 +1078,7 @@ class WritebackCollaborator:
             )
         )
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
 
         self._record_fact_impl(
@@ -1403,7 +1403,7 @@ class WritebackCollaborator:
             "workload": workload_tags,
             "sessions": [
                 {
-                    "session_id": str(getattr(ss, "cortex_session_id", "") or self.session_dir.name),
+                    "session_id": str(getattr(ss, "recipe_kb_session_id", "") or self.session_dir.name),
                     "gain_pct": cumulative_validated or cumulative_total,
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
@@ -1425,8 +1425,8 @@ class WritebackCollaborator:
             ],
         }
 
-    def cortex_finalize_recipe_and_journal(self) -> None:
-        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _cortex_t4_hook safety net)."""
+    def finalize_recipe_and_journal(self) -> None:
+        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _recipe_kb_t4_hook safety net)."""
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -1442,14 +1442,14 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
         gpu_type = getattr(ss, "gpu_type", "") or ""
         if not model_name or not gpu_type:
             log.info(
-                "cortex finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
+                "recipe KB finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
                 model_name,
                 gpu_type,
             )
@@ -1465,11 +1465,11 @@ class WritebackCollaborator:
             # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
-            if self.cortex_kb is not None:
+            if self.recipe_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
                     # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
-                    existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
+                    existing_row = self.recipe_kb.local.get_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in existing_row.get("sessions") or []:
                         if not isinstance(row, dict):
@@ -1537,7 +1537,7 @@ class WritebackCollaborator:
                 provenance_details={
                     "phase": "close_finalize",
                     "evidence": [
-                        f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
+                        f"log:session-{getattr(ss, 'recipe_kb_session_id', '') or self.session_dir.name}",
                     ],
                 },
             )

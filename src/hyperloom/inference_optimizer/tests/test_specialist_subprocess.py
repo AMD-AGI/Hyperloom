@@ -269,10 +269,16 @@ def test_default_tools_include_write_capabilities():
 
 
 def test_kb_write_tools_not_in_default_specialist_tools():
-    """KB lifecycle stays Coordinator-owned; specialist cortex_kb MCP was removed."""
-    for kb_tool in ("mcp__cortex_kb__propose_point", "mcp__cortex_kb__lookup"):
-        assert kb_tool not in DEFAULT_SPECIALIST_TOOLS
-        assert kb_tool not in SPECIALIST_TOOL_DENYLIST
+    """KB lifecycle stays Coordinator-owned; the specialist KB MCP was removed.
+
+    Asserted by shape rather than by a fixed tool name, so re-introducing a KB
+    MCP server under any name is caught (the old ``mcp__cortex_kb__*`` names no
+    longer exist to assert against).
+    """
+    kb_mcp_tools = [t for t in DEFAULT_SPECIALIST_TOOLS if t.startswith("mcp__") and "kb" in t.lower()]
+    assert kb_mcp_tools == [], f"specialist toolset exposes KB MCP tools: {kb_mcp_tools}"
+    denylisted_kb_mcp = [t for t in SPECIALIST_TOOL_DENYLIST if t.startswith("mcp__") and "kb" in t.lower()]
+    assert denylisted_kb_mcp == [], f"stale KB MCP entries in the denylist: {denylisted_kb_mcp}"
 
 
 def test_task_allowed_tools_override_default_patch_tools():

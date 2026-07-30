@@ -793,7 +793,7 @@ def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
                 {
                     "ts": "2026-06-09T15:14:55Z",
                     "method": "search",
-                    "remote": "cortex",
+                    "remote": "recipe_kb",
                     "resolution": "local",
                     "hit": False,
                 },
@@ -864,7 +864,7 @@ def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
                 },
                 {
                     "ts": "2026-06-09T15:14:55Z",
-                    "tool": "mcp__cortex_kb__lookup",
+                    "tool": "mcp__recipe_kb__lookup",
                     "task_id": "t1",
                     "turn": 1,
                     "query": "x",
@@ -877,7 +877,7 @@ def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
     assert client.span_named("intel:WebSearch") is not None
-    assert client.span_named("intel:mcp__cortex_kb__lookup") is not None
+    assert client.span_named("intel:mcp__recipe_kb__lookup") is not None
     assert client.span_named("agent:specialist") is not None
     persisted = lfe.read_receipt(sd)
     assert persisted["counts"]["specialist_intel_read"] == 2

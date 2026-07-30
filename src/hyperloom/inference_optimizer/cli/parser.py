@@ -829,8 +829,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "explicitly.",
     )
     opt.add_argument(
-        "--cortex-strict-fingerprint",
-        dest="cortex_strict_fingerprint",
+        "--recipe-kb-strict-fingerprint",
+        dest="recipe_kb_strict_fingerprint",
         action="store_true",
         default=False,
         help="When set, T0 refuses warm_start_recipe rows whose "
@@ -1200,7 +1200,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
-        "from a blank SharedState. Cortex KB is NOT touched.",
+        "from a blank SharedState. Recipe KB is NOT touched.",
     )
     # observability
     opt.add_argument(

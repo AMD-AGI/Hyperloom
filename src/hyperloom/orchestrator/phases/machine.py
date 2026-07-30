@@ -53,13 +53,13 @@ class MachinePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: save after phase init failed")
 
-    def _ensure_cortex_t0_anchored(self) -> None:
-        """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when cortex_kb is None or cortex_session_id set."""
-        client = self.cortex_kb
+    def _ensure_recipe_kb_t0_anchored(self) -> None:
+        """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
+        client = self.recipe_kb
         if client is None or not getattr(client, "enabled", True):
             return
         state = self.shared_state
-        if (state.cortex_session_id or "").strip():
+        if (state.recipe_kb_session_id or "").strip():
             # cli already T0'd or resume picked up the sid.
             return
         # Derive workload / hw from SharedState.
@@ -75,7 +75,7 @@ class MachinePhase(PhaseHandler):
             "boot_origin": "coordinator_fallback",
         }
         try:
-            from ..knowledge.cortex_t0 import run_t0_anchor
+            from ..knowledge.recipe_kb_t0 import run_t0_anchor
 
             run_t0_anchor(
                 client,

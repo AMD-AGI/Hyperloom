@@ -436,23 +436,23 @@ async def test_warm_specialist_params_noop_when_gap_unknown(coord):
     assert params["gap_symptom"] == "preset"
 
 
-# 7. Cortex traverse fallback (defensive)
+# 7. Recipe KB traverse fallback (defensive)
 class _StubKnowledgePlane:
-    """Minimal KnowledgePlane double returning one issue_node row from ``cortex_traverse_issues``."""
+    """Minimal KnowledgePlane double returning one issue_node row from ``recipe_kb_traverse_issues``."""
 
     def __init__(self, rows: list[dict[str, Any]] | None = None, raises: Exception | None = None):
         self._rows = rows or []
         self._raises = raises
         self.pr_monitor_enabled = False
 
-    def cortex_traverse_issues(self, *, model_class: str, gpu_type: str):
+    def recipe_kb_traverse_issues(self, *, model_class: str, gpu_type: str):
         if self._raises is not None:
             raise self._raises
         return list(self._rows)
 
 
 @pytest.mark.asyncio
-async def test_refresh_gaps_merges_cortex_traverse_rows(coord):
+async def test_refresh_gaps_merges_recipe_kb_traverse_rows(coord):
     coord.knowledge_plane = _StubKnowledgePlane(
         rows=[
             {
@@ -465,18 +465,18 @@ async def test_refresh_gaps_merges_cortex_traverse_rows(coord):
         ]
     )
     coord.shared_state.baseline_tput = 900.0
-    await coord._refresh_gaps(reason="cortex_refresh")
+    await coord._refresh_gaps(reason="recipe_kb_refresh")
     found = coord.shared_state.find_gap("issue.kb.fp8_kv_prior")
     assert found is not None
-    assert found["source"] == "cortex"
+    assert found["source"] == "recipe_kb"
 
 
 @pytest.mark.asyncio
-async def test_refresh_gaps_absorbs_cortex_traverse_exception(coord):
-    """Cortex outages must NOT crash the refresh (best-effort facets can't block the calling path)."""
+async def test_refresh_gaps_absorbs_recipe_kb_traverse_exception(coord):
+    """Recipe KB outages must NOT crash the refresh (best-effort facets can't block the calling path)."""
     coord.knowledge_plane = _StubKnowledgePlane(
         raises=RuntimeError("traverse down"),
     )
     coord.shared_state.baseline_tput = 900.0
     # Must not raise.
-    await coord._refresh_gaps(reason="cortex_refresh")
+    await coord._refresh_gaps(reason="recipe_kb_refresh")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hyperloom.orchestrator.knowledge.cortex_t0 import (
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _build_warm_start_context,
     _extract_patches_from_prs_tested,
 )

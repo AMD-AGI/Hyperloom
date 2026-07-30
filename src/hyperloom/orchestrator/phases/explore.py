@@ -1030,9 +1030,9 @@ class ExplorePhase(PhaseHandler):
             log.exception("gaps refresh: attempts extraction failed")
 
         plane = getattr(self, "knowledge_plane", None)
-        if plane is not None and hasattr(plane, "cortex_traverse_issues"):
+        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
-                traverse = getattr(plane, "cortex_traverse_issues")
+                traverse = getattr(plane, "recipe_kb_traverse_issues")
                 rows = traverse(
                     model_class=getattr(state, "model_class", "") or "",
                     gpu_type=getattr(state, "gpu_type", "") or "",
@@ -1041,11 +1041,11 @@ class ExplorePhase(PhaseHandler):
                     for entry in rows:
                         if isinstance(entry, dict):
                             entry = dict(entry)
-                            entry.setdefault("source", "cortex")
+                            entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
             except Exception:  # noqa: BLE001 — defensive
                 log.warning(
-                    "gaps refresh: cortex_traverse_issues failed (reason=%s)",
+                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
                     exc_info=True,
                 )

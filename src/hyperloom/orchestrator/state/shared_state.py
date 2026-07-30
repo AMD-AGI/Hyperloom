@@ -790,11 +790,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Per-cycle advisory focus log; persisted so cycle strategy survives resume.
     cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
-    # Cortex KB integration fields — Coordinator-only writers.
-    # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
-    cortex_session_id: str = ""
+    # Recipe KB integration fields — Coordinator-only writers.
+    # ``recipe_kb_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
+    recipe_kb_session_id: str = ""
     # Kept (always ``{}``) for resume back-compat.
-    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
@@ -803,7 +803,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``cortex_t0`` from the KB recipe
+    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
     # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
     # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
     # the experiential lists. Empty dict when T0 was bypassed or failed.

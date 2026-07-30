@@ -212,10 +212,10 @@ def test_journal_entry_phase(coord: Coordinator) -> None:
     assert coord._journal_entry_phase() == "EXPLORE"
 
 
-def test_source_session_id_prefers_cortex(coord: Coordinator) -> None:
-    coord.shared_state.cortex_session_id = "cortex-99"
-    assert coord._source_session_id() == "cortex-99"
-    coord.shared_state.cortex_session_id = ""
+def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
+    coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
+    assert coord._source_session_id() == "recipe-kb-99"
+    coord.shared_state.recipe_kb_session_id = ""
     assert coord._source_session_id() == coord.session_dir.name
 
 

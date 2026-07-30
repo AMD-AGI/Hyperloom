@@ -12,7 +12,7 @@
 # Recipe KB (local + gbrain) has no remote reachability probe; the cli
 # records recipe-KB enablement from --degraded-kb directly.
 #
-# Writes a marker JSON to $USER_DATA_PATH/runtime/cortex/.kb_preflight.json
+# Writes a marker JSON to $USER_DATA_PATH/runtime/recipe_kb/.kb_preflight.json
 # capturing reachability + skip + failure_reason per branch.
 
 set -u
@@ -30,7 +30,7 @@ if [ -z "${_user_data_was_set}" ]; then
 fi
 : "${SKIP_PR_PROBE:=}"
 
-marker_dir="${USER_DATA_PATH}/runtime/cortex"
+marker_dir="${USER_DATA_PATH}/runtime/recipe_kb"
 mkdir -p "${marker_dir}"
 marker="${marker_dir}/.kb_preflight.json"
 

@@ -370,10 +370,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
     "time_exhausted_during_prelude": "The wall-clock budget was exhausted while still in PRELUDE, before optimization began.",
-    # Cortex knowledge-plane bootstrap failures.
-    "cortex_t0_failed": "Cortex knowledge-plane bootstrap (t0) failed; the run stopped early.",
-    "cortex_drain_failed": "Cortex knowledge-plane drain failed; the run stopped early.",
-    "cortex_commit_failed": "Cortex knowledge-plane commit failed; the run stopped early.",
+    # Recipe KB knowledge-plane bootstrap failures.
+    "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
+    "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",
+    "recipe_kb_commit_failed": "Recipe KB knowledge-plane commit failed; the run stopped early.",
     # Search / phase plateaus and completions.
     "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
