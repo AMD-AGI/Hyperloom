@@ -245,6 +245,59 @@ _XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# HY-WorldPlay (video, AR rollout) do-not-set blacklist. Two categories: knobs
+# that crash on ROCm, and knobs that make the model compute something different
+# — a variant that drops denoise steps or quantizes the weights is not a faster
+# WorldPlay, it is a different one, and its speedup is not attributable.
+_WORLDPLAY_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
+    "WP_USE_SAGEATTN": (frozenset({"*"}), "SageAttention is CUDA-only and crashes on ROCm"),
+    "WP_USE_FP8_GEMM": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
+    "WP_NUM_STEPS": (
+        frozenset({"1", "2", "3"}),
+        "the distilled AR model's 4-step schedule is pinned (fewer steps = a different model)",
+    ),
+    "WP_SR": (frozenset({"*"}), "super-resolution changes the output resolution, so the quality gate cannot compare"),
+    "WP_REWRITE": (frozenset({"*"}), "prompt rewriting makes the run non-deterministic and uncomparable"),
+    "TRITON_HIP_USE_ASYNC_COPY": (frozenset({"*"}), "crashes on MI355X (gfx950)"),
+    "PYTORCH_TUNABLEOP_TUNING": (frozenset({"*"}), "GPU memory fault when combined with torch.compile"),
+}
+
+# Known crash combinations (all keys present + truthy -> drop).
+_WORLDPLAY_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("AMD_DIRECT_DISPATCH", "AMDGCN_USE_BUFFER_OPS"),
+        "AMD_DIRECT_DISPATCH=1 + AMDGCN_USE_BUFFER_OPS=1 is a known crash on gfx950",
+    ),
+)
+
+
+def worldplay_blacklist_reason(
+    extra_envs: dict[str, str] | None,
+) -> str | None:
+    """Return a drop reason if a variant trips the HY-WorldPlay blacklist.
+
+    Args:
+        extra_envs (dict[str, str] | None): The variant's env overrides.
+
+    Returns:
+        str | None: A human-readable reason when blacklisted, else ``None``.
+    """
+    envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
+    for key, (bad_values, reason) in _WORLDPLAY_ENV_BLACKLIST.items():
+        if key not in envs:
+            continue
+        val = envs[key]
+        if "*" in bad_values:
+            if is_truthy(val, default=True):
+                return f"{key}={val}: {reason}"
+        elif val.strip().lower() in {b.lower() for b in bad_values}:
+            return f"{key}={val}: {reason}"
+    for keys, reason in _WORLDPLAY_ENV_COMBO_BLACKLIST:
+        if all(k in envs and is_truthy(envs[k], default=True) for k in keys):
+            return reason
+    return None
+
+
 def xdit_blacklist_reason(
     extra_envs: dict[str, str] | None,
 ) -> str | None:
@@ -399,20 +452,26 @@ def apply_compatibility_filter(
     help_available = bool(help_text)
 
     is_xdit = fw == "xdit"
+    is_worldplay = fw == "worldplay"
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
         args = v.extra_server_args or ""
         skip_reason: str | None = None
-        # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
+        blacklist_source = "xdit_blacklist"
+        # Per-framework do-not-set blacklists (env-keyed; precision/schedule
+        # locks + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
+        elif is_worldplay:
+            skip_reason = worldplay_blacklist_reason(getattr(v, "extra_envs", None))
+            blacklist_source = "worldplay_blacklist"
         if skip_reason:
             dropped.append(
                 {
                     "name": v.name,
-                    "source": "xdit_blacklist",
+                    "source": blacklist_source,
                     "reason": skip_reason,
                 }
             )

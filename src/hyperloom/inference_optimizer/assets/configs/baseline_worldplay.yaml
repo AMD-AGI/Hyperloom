@@ -1,0 +1,109 @@
+# Magpie baseline benchmark config for HY-WorldPlay (image-to-video, AR).
+# Resolved by default_baseline_config() when $FRAMEWORK=worldplay.
+#
+# HY-WorldPlay is a SCRIPTABLE (server-less) framework like xDiT: no OpenAI
+# server, no benchmark_serving.py client, no server_lifecycle reuse. Unlike
+# xDiT it is not an xfuser pipeline -- it is an 8B HunyuanVideo-1.5 world model
+# driven by its own torchrun bench script (bench_worldplay.py), and the unit of
+# work is a whole video produced by an autoregressive rollout over latent
+# chunks. Throughput is video/s.
+#
+# The wrapper worldplay_{runner_type}.sh loads the pipeline once, discards
+# WP_WARMUP full-length generations, times WP_ITERATIONS of them, scores every
+# output frame against a BF16 reference, and writes the flat
+# inferencex_result.json that the bypass backend normalizes.
+#
+# DUAL GATE -- a variant is only selectable when BOTH hold:
+#   * it is faster            (output_throughput / mean_e2el_ms), and
+#   * it did not degrade      (quality_gate.passed).
+# is_valid_measurement() in benchmark_result.py drops any scriptable variant
+# whose quality gate failed, regardless of how fast it was, and the wrapper
+# additionally exits non-zero on a failed gate.
+#
+# Two fields are FALLBACK ONLY and overridden at run time by the executor:
+#   - `benchmark.model`       <- --model / $MODEL_PATH
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+#
+# The quality-gate env (XDIT_QUALITY_REF / _WRITE / thresholds) is injected by
+# the shared scriptable choke point in _workload_envs (keyed on is_scriptable),
+# so the XDIT_ prefix is reused here for the gate to match what Hyperloom
+# injects. The wrapper swaps the .png reference path it is handed for a .npz
+# frame stack -- comparing decoded mp4 frames would fold codec noise into the
+# gate. Generation knobs use the WP_ prefix.
+
+benchmark:
+  framework: worldplay
+  workload_kind: scriptable        # drives server-less branching in the loop
+  model: /primus/xiaofei/HY-WorldPlay/models/HunyuanVideo-1.5   # OVERRIDDEN at runtime
+  precision: bf16                  # LOCKED for a worldplay session
+  run_mode: local
+
+  envs:
+    # Single-GPU validated path on 1x MI355X (~44GB peak of 288GB). Multi-GPU
+    # sequence parallel is not validated on ROCm.
+    TP: 1
+
+    # ── Workload shape ────────────────────────────────────────────────
+    # The AR model requires [(WP_NUM_FRAMES-1)//4+1] % 4 == 0 and the pose must
+    # supply exactly that many latents: 61 pairs with w-15, 125 with w-31. The
+    # wrapper preflights both and fails fast rather than 50s into a model load.
+    WP_NUM_FRAMES: 61
+    WP_POSE: "w-15"
+    WP_WIDTH: 832
+    WP_HEIGHT: 480
+    WP_SEED: 1
+
+    # ── Measurement ───────────────────────────────────────────────────
+    # Median of the timed runs is the headline. 5 timed runs, because 2 left a
+    # ~13% spread between iterations -- not enough to separate a real winner
+    # from allocator noise. Per-chunk latency is recorded for diagnosis but
+    # never averaged into the metric: it falls monotonically across the rollout
+    # as the KV cache grows, so there is no steady-state window inside one run.
+    WP_ITERATIONS: 5
+    WP_WARMUP: 1
+    WP_STAGE_TIMING: "true"
+
+    # ── Tunable knobs (BF16-safe; the explore grid A/Bs these) ────────
+    WP_OFFLOADING: "true"
+    WP_RESIDENT_AR_ROLLOUT: "true"
+    WP_TORCH_COMPILE: "false"
+    WP_VAE_PARALLEL: "false"
+
+    # ── Quality gate ──────────────────────────────────────────────────
+    # Injected at runtime by the scriptable choke point; the values here are
+    # the thresholds only. Gate keys on BOTH mean and worst frame: AR drift
+    # accumulates towards the end of the rollout, so a mean-only gate would let
+    # a variant that wrecks the last chunk through.
+    XDIT_QUALITY_REF: ""           # reference path; injected at runtime
+    XDIT_QUALITY_SSIM_MIN: 0.95
+    XDIT_QUALITY_LPIPS_MAX: 0.05
+    XDIT_QUALITY_MSE_MAX: 0.002
+    WP_QUALITY_SSIM_MIN_WORST: 0.90
+    WP_QUALITY_LPIPS_MAX_WORST: 0.10
+    WP_QUALITY_LPIPS_SAMPLES: 8
+
+    # ── Environment ───────────────────────────────────────────────────
+    WP_REPO: /primus/xiaofei/HY-WorldPlay
+    PYTORCH_ALLOC_CONF: "expandable_segments:True"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TOKENIZERS_PARALLELISM: "false"
+    # ROCR_VISIBLE_DEVICES is injected at runtime by the executor as 0..TP-1.
+
+  gpu_selection:
+    auto: false                    # executor pins via ROCR_VISIBLE_DEVICES
+
+  server_lifecycle:
+    enabled: false                 # server-less: no reuse
+
+  # 51s pipeline load + (1 warmup + 5 timed) x ~30s + per-frame scoring, with
+  # headroom for a 125-frame run and a cold MIOpen cache.
+  timeout_seconds: 3600
+
+  profiler:
+    torch_profiler:
+      enabled: false               # baseline needs throughput + quality only
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

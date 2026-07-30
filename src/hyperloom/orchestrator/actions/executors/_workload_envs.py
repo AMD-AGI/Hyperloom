@@ -231,6 +231,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
+    "worldplay": Path("assets/configs/baseline_worldplay.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 

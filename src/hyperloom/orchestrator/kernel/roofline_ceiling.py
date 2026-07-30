@@ -1099,7 +1099,12 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def _read_diffusion_num_steps(state: Any) -> int:
-    """Read the denoising step count (``XDIT_NUM_STEPS``) from the baseline yaml.
+    """Read the denoising step count from the baseline yaml.
+
+    xDiT exposes it as ``XDIT_NUM_STEPS``. HY-WorldPlay runs the distilled
+    4-step schedule once per AR chunk, so the comparable per-video step count is
+    ``steps x chunks``; the chunk count follows from the frame count
+    (``latents = (frames-1)//4+1``, four latents per chunk).
 
     Args:
         state: Shared run state carrying the materialized baseline yaml.
@@ -1108,7 +1113,15 @@ def _read_diffusion_num_steps(state: Any) -> int:
         The positive step count, or ``0`` when unavailable.
     """
     envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-    return _env_int(envs, "XDIT_NUM_STEPS")
+    steps = _env_int(envs, "XDIT_NUM_STEPS")
+    if steps:
+        return steps
+    wp_steps = _env_int(envs, "WP_NUM_STEPS") or 4
+    frames = _env_int(envs, "WP_NUM_FRAMES")
+    if not frames:
+        return 0
+    chunks = max(1, ((frames - 1) // 4 + 1) // 4)
+    return wp_steps * chunks
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
@@ -1125,7 +1138,9 @@ def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """
     try:
         envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-        return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
+        height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "WP_HEIGHT")
+        width = _env_int(envs, "XDIT_WIDTH") or _env_int(envs, "WP_WIDTH")
+        return height, width
     except (AttributeError, TypeError, ValueError):
         return 0, 0
 
@@ -1425,8 +1440,13 @@ def compute_roofline_breakdown_from_state(
         fields).
     """
     runtime = resolve_runtime_workload(state, arm=arm)
-    # Diffusion (xDiT) uses a distinct images/sec ceiling.
-    if (runtime.framework or "").strip().lower() == "xdit":
+    # Scriptable media workloads (xDiT diffusion, HY-WorldPlay video) are sized
+    # per generated sample, not per token, so they take the denoise-step
+    # ceiling. Routing them through the text-gen path below would size a
+    # KV-cache/decode model that does not describe the workload at all.
+    from hyperloom.inference_optimizer import framework_registry
+
+    if framework_registry.is_supported(runtime.framework) and framework_registry.is_scriptable(runtime.framework):
         return _compute_diffusion_breakdown_from_state(state, runtime)
     meta = load_model_meta(
         runtime.model_path,

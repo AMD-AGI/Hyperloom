@@ -92,6 +92,19 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
+    # HY-WorldPlay: an 8B HunyuanVideo-1.5 interactive world model driven by its
+    # own torchrun bench script. SCRIPTABLE like xDiT, but the unit of work is a
+    # whole video (an autoregressive rollout over latent chunks), not an image,
+    # and the correctness signal is a per-frame video-quality gate.
+    "worldplay": FrameworkSpec(
+        name="worldplay",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_WORLDPLAY_ARGS",
+        # Benchmarked from a local checkout; no framework-agent source repo.
+        repo_url=None,
+        supports_server_reuse=False,
+        throughput_unit="video/s",
+    ),
     # HunyuanImage-3.0: an 80B multimodal MoE text-to-image model run as a
     # transformers AutoModelForCausalLM. Treated as a SCRIPTABLE image workload.
     "hunyuan_image3": FrameworkSpec(

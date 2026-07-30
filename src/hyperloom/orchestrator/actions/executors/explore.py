@@ -375,6 +375,78 @@ def _xdit_default_grid(
     return variants
 
 
+def _worldplay_default_grid(
+    *,
+    model_class: str,
+    conc: int = 0,
+    isl: int = 0,
+    osl: int = 0,
+) -> list[GridVariant]:
+    """HY-WorldPlay (video, AR rollout) EXPLORE default grid.
+
+    Only BF16-safe knobs that keep the distilled 4-step schedule intact are
+    emitted; anything that changes what the model computes (SageAttention, FP8
+    GEMMs, a shorter step schedule) is a different model rather than a speedup
+    and is rejected by ``worldplay_blacklist_reason`` in ``_grid_variant_filter``
+    as well as hard-locked in the bench wrapper.
+
+    The memory knobs lead deliberately: the validated baseline peaks at ~44GB of
+    288GB, so the offloading the pipeline defaults to is paying transfer cost
+    for headroom that is not needed on a single MI355X.
+
+    Args:
+        model_class: Model-class label (unused; kept for dispatch parity).
+        conc: Live concurrency (unused for video; signature parity).
+        isl: Input sequence length (unused; signature parity).
+        osl: Output sequence length (unused; signature parity).
+
+    Returns:
+        The curated list of worldplay ``GridVariant`` seeds.
+    """
+    variants: list[GridVariant] = []
+
+    def _add(name: str, *, envs: dict[str, str]) -> None:
+        """Append a ``default_grid``-provenance env-only variant.
+
+        Args:
+            name (str): Unique variant name (``worldplay_`` prefixed).
+            envs (dict[str, str]): The per-variant env overrides.
+
+        Returns:
+            None: Appends to the enclosing ``variants`` list.
+        """
+        gv = GridVariant(
+            name=name,
+            extra_server_args="",
+            extra_envs=dict(envs),
+            note="default_grid",
+        )
+        gv.provenance = "default_grid"  # type: ignore[attr-defined]
+        variants.append(gv)
+
+    # Offloading off: 44GB peak on a 288GB card means the CPU<->GPU transfers
+    # buy nothing. Expected to be the largest single win.
+    _add("worldplay_no_offload", envs={"WP_OFFLOADING": "false"})
+    # Keep the transformer resident for the whole rollout vs per-chunk moves.
+    _add("worldplay_resident_ar", envs={"WP_RESIDENT_AR_ROLLOUT": "true"})
+    _add(
+        "worldplay_no_offload_resident",
+        envs={"WP_OFFLOADING": "false", "WP_RESIDENT_AR_ROLLOUT": "true"},
+    )
+    # torch.compile on the transformer: explicit on/off contrast.
+    _add("worldplay_torch_compile", envs={"WP_TORCH_COMPILE": "true"})
+    _add("worldplay_no_compile", envs={"WP_TORCH_COMPILE": "false"})
+    # AMD buffer load/store instructions — directionally correct, BF16-safe.
+    _add("worldplay_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
+    # Allocator: the AR rollout grows its KV cache every chunk, so segment
+    # expansion rather than re-fragmentation is the relevant contrast.
+    _add(
+        "worldplay_alloc_expandable",
+        envs={"PYTORCH_ALLOC_CONF": "expandable_segments:True"},
+    )
+    return variants
+
+
 def _default_grid_for_framework(
     framework: str,
     *,
@@ -409,6 +481,13 @@ def _default_grid_for_framework(
         )
     if fw == "xdit":
         return _xdit_default_grid(
+            model_class=model_class,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        )
+    if fw == "worldplay":
+        return _worldplay_default_grid(
             model_class=model_class,
             conc=conc,
             isl=isl,

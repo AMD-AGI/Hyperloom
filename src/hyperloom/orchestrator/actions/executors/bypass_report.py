@@ -148,7 +148,23 @@ def build_report(
         }
         # Scriptable extras are carried verbatim so downstream gates can branch;
         # only emitted when present to keep the serving schema unchanged.
-        for key in ("workload_kind", "throughput_unit", "quality_gate", "latency_s"):
+        # The trailing diagnostic keys (stage/chunk breakdowns, VRAM, the
+        # resolved workload shape) are what make one scriptable variant
+        # comparable to another -- without them a report says a variant got
+        # faster but not which stage moved.
+        for key in (
+            "workload_kind",
+            "throughput_unit",
+            "quality_gate",
+            "latency_s",
+            "e2el_stat",
+            "stage_breakdown_ms",
+            "chunk_latencies_ms",
+            "chunk_gap_ms",
+            "peak_vram_gb",
+            "spread_pct",
+            "config",
+        ):
             if raw.get(key) is not None:
                 report[key] = raw[key]
     if analysis:

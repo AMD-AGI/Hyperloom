@@ -1,0 +1,73 @@
+# Magpie profile benchmark config for HY-WorldPlay (image-to-video, AR).
+# Same contract as baseline_worldplay.yaml but with torch_profiler enabled so
+# the loop can attribute time across the stages the bench script separates:
+# text encode (Qwen2.5-VL-7B), vision encode (FLUX Redux), the per-chunk
+# KV-cache update, the AR denoise steps, and the 3D VAE decode. Resolved by
+# _default_profile_config() when $FRAMEWORK=worldplay.
+#
+# Worth profiling early: on the 61-frame baseline the tqdm-visible denoise loop
+# accounted for only ~8.3s of a ~28s generation, so most of the wall clock is
+# outside the DiT steps. The stage breakdown the wrapper emits
+# (stage_breakdown_ms) is what tells the kernel agent where to aim.
+#
+# No correctness gate during profiling: REF/REF_WRITE are forced empty by the
+# scriptable choke point in _workload_envs when is_profile, and the wrapper
+# reports the gate as skipped-pass in that mode.
+
+benchmark:
+  framework: worldplay
+  workload_kind: scriptable
+  model: /primus/xiaofei/HY-WorldPlay/models/HunyuanVideo-1.5   # OVERRIDDEN at runtime
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+
+    WP_NUM_FRAMES: 61
+    WP_POSE: "w-15"
+    WP_WIDTH: 832
+    WP_HEIGHT: 480
+    WP_SEED: 1
+
+    # Profiling measures shape, not steady state: a short sample keeps the
+    # trace small. The wrapper shrinks these further when PROFILE=1.
+    WP_ITERATIONS: 2
+    WP_WARMUP: 1
+    WP_STAGE_TIMING: "true"
+    WP_PROFILE_ITERATIONS: 2
+    WP_PROFILE_WARMUP: 1
+
+    WP_OFFLOADING: "true"
+    WP_RESIDENT_AR_ROLLOUT: "true"
+    WP_TORCH_COMPILE: "false"
+    WP_VAE_PARALLEL: "false"
+
+    XDIT_QUALITY_REF: ""
+    XDIT_QUALITY_SSIM_MIN: 0.95
+    XDIT_QUALITY_LPIPS_MAX: 0.05
+    XDIT_QUALITY_MSE_MAX: 0.002
+    WP_QUALITY_SSIM_MIN_WORST: 0.90
+    WP_QUALITY_LPIPS_MAX_WORST: 0.10
+
+    WP_REPO: /primus/xiaofei/HY-WorldPlay
+    PYTORCH_ALLOC_CONF: "expandable_segments:True"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    TOKENIZERS_PARALLELISM: "false"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 3600
+
+  profiler:
+    torch_profiler:
+      enabled: true                # profile run: capture the timed region trace
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

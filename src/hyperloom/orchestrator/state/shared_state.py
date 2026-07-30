@@ -2315,12 +2315,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload.
 
-        Diffusion (xDiT) ceilings are images/sec; text-gen is tokens/sec. The
-        numeric ``*_tok_per_sec`` fields keep their names for wire stability;
-        this unit tells consumers how to render them.
+        Scriptable media workloads carry their own unit — images/sec for
+        diffusion (xDiT, hunyuan_image3), videos/sec for HY-WorldPlay — while
+        text-gen is tokens/sec. Read it from the registry rather than matching
+        a literal framework name, so registering a framework is still a
+        single-table edit. The numeric ``*_tok_per_sec`` fields keep their names
+        for wire stability; this unit tells consumers how to render them.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         framework = str(getattr(self, "framework", "") or "").strip().lower()
-        return "img/s" if framework == "xdit" else "tok/s"
+        if not framework_registry.is_supported(framework):
+            return "tok/s"
+        return framework_registry.throughput_unit(framework)
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.
