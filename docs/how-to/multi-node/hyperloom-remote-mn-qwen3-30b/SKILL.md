@@ -11,8 +11,9 @@ description: |
 Pinned workload for a remote multi-node `optimize` run. Pick **one** backend
 below and pass its `FLAGS` + `Environment` block to `inference_optimizer
 optimize`; the agent launches it in the background and monitors `state.json`
-until a terminal `stop_reason` (`target_reached`, `global_converged`,
-`time_exhausted`, `max_ticks`). Concept and variable reference:
+until a terminal `stop_reason` — success (`target_reached`, `global_converged`,
+`time_exhausted`, `max_ticks`) or early failure (`baseline_failed`,
+`baseline_accuracy_failed`) that ends the run before optimizing. Concept and variable reference:
 `@../hyperloom-remote-demo.md`. Optimizer skill: `@${HYPERLOOM_SKILL_PATH}`
 (fallback `@../../../../src/hyperloom/inference_optimizer/SKILL.md`).
 
@@ -68,6 +69,7 @@ path.
 ### FLAGS
 
 ```text
+--gpu-type mi325x \
 --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
 --target-gain 30 \
 --max-hours 4 \
@@ -75,6 +77,8 @@ path.
 --framework=sglang \
 --nodes 2 \
 --gpus-per-node 8 \
+--cpus-per-node 90 \
+--mem-per-node 1024 \
 --tp 8 --ep 8 \
 --isl 1024 --osl 1024 --conc 128 \
 --gpu-type mi325x \
@@ -84,11 +88,9 @@ path.
 --pd-prefill-tp 8 --pd-decode-tp 8 \
 --pd-prefill-ep 8 --pd-decode-ep 8 \
 --pd-transfer-backend mooncake \
---pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --deepep-mode normal --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --trust-remote-code" \
---pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code" \
+--pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --deepep-mode normal --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --trust-remote-code --disaggregation-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7" \
+--pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code --disaggregation-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7" \
 --mn-image <INFERA_SSHD_IMAGE> \
---cpus-per-node 90 \
---mem-per-node 1024 \
 --extra-env MC_GID_INDEX=3 \
 --extra-env NCCL_IB_GID_INDEX=3 \
 --extra-env SGLANG_USE_AITER_AR=0

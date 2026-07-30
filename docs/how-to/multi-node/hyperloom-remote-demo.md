@@ -31,7 +31,7 @@ Without a hand-off, a `--nodes >= 2` run exits 2.
 
 | Variable | Backend | Required | Meaning |
 |----------|---------|----------|---------|
-| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`) |
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`); use the port in this URL — the platform assigns it (not a fixed `:8000`) |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated, in rank order) |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated, leader first) |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Path to a private key authorized on the pods |
