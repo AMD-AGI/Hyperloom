@@ -44,6 +44,54 @@ Without a hand-off, a `--nodes >= 2` run exits 2.
   fast (`sys.exit(2)`).
 - **rayjob** uses `HEAD_IP` for restarts (not SSH); without it, benchmark-only.
 
+## Pod image requirements
+
+Neither backend runs the inference engine at pod start: the pods come up idle and
+Hyperloom launches and relaunches the server on them each round. That is what the
+image has to support, and it differs per backend.
+
+**infera** — a standard sglang (or vLLM) image plus an SSH control plane, because
+Hyperloom reaches these pods over SSH:
+
+- `openssh-server` installed, with `/run/sshd` present and host keys generated at
+  build time (`ssh-keygen -A`) so sshd can start without write access at runtime.
+- An entryPoint that makes the pod SSH-reachable and then blocks, so it stays
+  alive as an allocated but idle node while `restart-server` SSHes in to launch
+  sglang with each round's flags. The platform injects the authorized public key
+  as `MN_SSH_AUTHORIZED_KEY` and the port as `MN_SSH_PORT`.
+- Nothing else: `ENTRYPOINT` / `CMD` are irrelevant, since the platform sets the
+  container command explicitly.
+
+The core of that entryPoint:
+
+```bash
+mkdir -p /root/.ssh /run/sshd && chmod 700 /root/.ssh
+printf '%s\n' "$MN_SSH_AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+ssh-keygen -A                              # no-op when host keys are baked in
+printf 'Port %s\nPermitRootLogin prohibit-password\nPasswordAuthentication no\n' \
+  "${MN_SSH_PORT:-2233}" > /etc/ssh/sshd_config.d/mn.conf
+/usr/sbin/sshd -e                          # detaches, so pid 1 must block below
+exec tail -f /dev/null
+```
+
+A dedicated port rather than `:22` is deliberate: these pods run with hostNetwork
+for RDMA, where `:22` collides with the node's own sshd.
+
+**rayjob** — a standard sglang (or vLLM) image plus Ray, because these pods are a
+KubeRay cluster and Hyperloom drives them through the Ray Dashboard:
+
+- `ray` importable and on `PATH`, at the version the cluster expects; KubeRay runs
+  `ray start` in the head and worker containers. Pin Ray's CLI dependency along
+  with it, e.g. `python -m pip install "ray[default]==2.44.1" "click==8.1.8"`.
+- No sshd and no SSH control plane — the Ray Dashboard REST API replaces it.
+- The cluster idles the same way, through the RayJob submitter: the platform sets
+  its entrypoint to `tail -f /dev/null` so the cluster stays up instead of
+  finishing a job and tearing itself down.
+
+Example: `harbor…/custom/primussafe/sglang:v0.5.11-rocm722-mi30x-ray2.44.1-lmeval2`
+carries `ray 2.44.1` and `click 8.1.8` on top of the sglang base.
+
 ## Shared filesystem (mandatory)
 
 Multi-node *can't run* without a cluster-wide shared mount (`NFS_SHARED_ROOT`,
