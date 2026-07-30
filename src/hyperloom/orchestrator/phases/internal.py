@@ -129,7 +129,10 @@ class InternalTasksPhase(PhaseHandler):
         try:
             from ..knowledge import research_hints as _research_hints
 
-            _research_hints.write_hints_skeleton(self.session_dir)
+            _research_hints.write_hints_skeleton(
+                self.session_dir,
+                framework=str(getattr(self.shared_state, "framework", "") or ""),
+            )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: hints skeleton write failed")
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
@@ -210,6 +213,7 @@ class InternalTasksPhase(PhaseHandler):
                 model_class=str(getattr(state, "model_class", "") or ""),
                 gpu_type=str(getattr(state, "gpu_type", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
+                framework=str(getattr(state, "framework", "") or ""),
             )
             _entries = _src_recon.filter_entries_for_model(_entries, dict(getattr(state, "model_info", None) or {}))
             _rendered = _src_recon.render_checklist_for_prompt(_entries)
