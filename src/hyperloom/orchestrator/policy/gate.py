@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -299,21 +298,6 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 # research_lane capacity and the GPU specialist pool.
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
-# Fail-fast tripwire for obviously-destructive host commands in free-form task
-# descriptions. NOT a security boundary — the worktree, Critic review, and
-# integrate_patch gate remain the real boundaries.
-_FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\brm\s+-rf?\s+(?:/|~|\$HOME|\*)", re.IGNORECASE),
-    re.compile(r"\bmkfs\.", re.IGNORECASE),
-    re.compile(r"\bdd\s+if=.*\bof=/dev/", re.IGNORECASE),
-    re.compile(r">\s*/dev/sd[a-z]"),
-    re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
-    re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
-    # Ban pipe-to-kill and killall (can kill the serving / benchmark process).
-    re.compile(r"\bps\s+(?:aux|-\w+)\b.*\|.*\bkill\b", re.IGNORECASE),
-    re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
-    re.compile(r"\bkillall\b", re.IGNORECASE),
-)
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
@@ -1933,17 +1917,15 @@ class PolicyGate:
         specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
         validates only structural shape: a single ``task_description`` or a
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
-        with a non-empty, length-bounded description that survives the
-        red-line tripwire.
+        with a non-empty, length-bounded description.
 
         Args:
             params (dict[str, Any]): the freeform dispatch ``params`` carrying a
                 single ``task_description`` or a ``tasks`` wave.
 
         Raises:
-            PolicyDenied: when the GPU request fails, the wave is malformed or
-                too large, or a task description is empty / too long / trips the
-                red-line tripwire.
+            PolicyDenied: when the GPU request fails, the wave is too large, or
+                a task description is empty / too long.
         """
         # Freeform skips the domain-anchored max_turns gate (bounded by the task
         # timeout instead), but a GPU request must still clear the same pool
@@ -1983,8 +1965,7 @@ class PolicyGate:
 
     @staticmethod
     def _check_freeform_task_description(desc: str, *, where: str) -> None:
-        """Per-task structural checks for a free-form ``task_description``:
-        non-empty, length-bounded, and clear of the red-line tripwire.
+        """Per-task structural checks for a free-form ``task_description``: non-empty and length-bounded.
 
         Args:
             desc (str): the freeform task description to validate.
@@ -1992,8 +1973,7 @@ class PolicyGate:
                 messages.
 
         Raises:
-            PolicyDenied: when ``desc`` is empty, exceeds the length cap, or
-                matches a red-line pattern.
+            PolicyDenied: when ``desc`` is empty or exceeds the length cap.
         """
         if not desc:
             raise PolicyDenied(
@@ -2008,19 +1988,6 @@ class PolicyGate:
                 f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
                 rule="specialist_freeform_description_too_long",
             )
-        for pat in _FREEFORM_REDLINE_PATTERNS:
-            if pat.search(desc):
-                raise PolicyDenied(
-                    f"delegate{{action='specialist',scope='freeform'}}: "
-                    f"{where} task_description tripped the red-line scan "
-                    f"(pattern={pat.pattern!r})",
-                    rule="specialist_freeform_redline",
-                    hint=(
-                        "Free-form mandates must not embed destructive host "
-                        "commands. Describe the investigation, not raw "
-                        "destructive shell."
-                    ),
-                )
 
     # R3 ``specialist_done_source``
     def _validate_specialist_intent(

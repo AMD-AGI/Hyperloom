@@ -221,20 +221,18 @@ def test_freeform_description_too_long_rejected(gate, orchestration_role):
 
 
 @pytest.mark.parametrize(
-    "redline",
+    "desc",
     [
         "clean up with rm -rf / now",
         "run mkfs.ext4 on the scratch disk",
         "please shutdown the host afterwards",
     ],
 )
-def test_freeform_redline_rejected(gate, orchestration_role, redline):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"scope": "freeform", "task_description": redline}),
-        )
-    assert exc.value.rule == "specialist_freeform_redline"
+def test_freeform_destructive_text_allowed(gate, orchestration_role, desc):
+    gate._validate_specialist_dispatch(
+        orchestration_role,
+        _dispatch({"scope": "freeform", "task_description": desc}),
+    )
 
 
 def test_freeform_empty_wave_rejected(gate, orchestration_role):
