@@ -82,7 +82,6 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
     assert executed["ran"] is False
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
-    assert updated.attempts == 0
 
 
 @pytest.mark.asyncio
@@ -319,7 +318,6 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     assert executed["ran"] is True
     updated = await tasks2.get(task_id)
     assert updated.state == "succeeded"
-    assert updated.attempts == 1
 
 
 class _ReconcileCoordStub:

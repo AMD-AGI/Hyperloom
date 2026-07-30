@@ -6,9 +6,11 @@
 Allowed transitions::
 
     queued       -> running, cancelled
-    running      -> succeeded, failed, cancelled, needs_manual_review
-    failed       -> running                    (retry)
-    succeeded / cancelled / needs_manual_review -> (terminal)
+    running      -> succeeded, failed, cancelled
+    succeeded / failed / cancelled -> (terminal)
+
+A retry creates a new row under a fresh ``idempotency_key`` rather than
+re-entering ``running``.
 
 ``idempotency_key`` is UNIQUE so re-creating a logical task returns the existing row.
 """
@@ -31,19 +33,17 @@ TASK_STATES = (
     "succeeded",
     "failed",
     "cancelled",
-    "needs_manual_review",
 )
 
 _TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"succeeded", "failed", "cancelled", "needs_manual_review"}),
-    "failed": frozenset({"running"}),
+    "running": frozenset({"succeeded", "failed", "cancelled"}),
+    "failed": frozenset(),
     "succeeded": frozenset(),
     "cancelled": frozenset(),
-    "needs_manual_review": frozenset(),
 }
 
-TERMINAL_STATES = frozenset({"succeeded", "cancelled", "needs_manual_review"})
+TERMINAL_STATES = frozenset({"succeeded", "cancelled"})
 
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
@@ -64,7 +64,6 @@ class Task:
         allowed_tools (list[str]): Tool whitelist for the task.
         side_effects (list[str]): Declared side effects.
         lease_ttl_sec (int): Lease TTL in seconds.
-        attempts (int): Number of run attempts so far.
         history (list[dict]): Recorded state-transition history.
         created_at (str): ISO creation timestamp.
         updated_at (str): ISO last-update timestamp.
@@ -79,7 +78,6 @@ class Task:
     allowed_tools: list[str] = field(default_factory=list)
     side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
-    attempts: int = 0
     history: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
@@ -105,7 +103,6 @@ class Task:
             allowed_tools=json.loads(row["allowed_tools"]),
             side_effects=json.loads(row["side_effects"]),
             lease_ttl_sec=row["lease_ttl_sec"],
-            attempts=row["attempts"],
             history=json.loads(row["history"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -180,8 +177,8 @@ class TaskRegistry:
             cur.execute(
                 "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, "
                 "requires_lanes, allowed_tools, side_effects, lease_ttl_sec, "
-                "attempts, history, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "history, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     kind,
@@ -192,7 +189,6 @@ class TaskRegistry:
                     json.dumps(allowed_tools or []),
                     json.dumps(side_effects or []),
                     lease_ttl_sec,
-                    0,
                     "[]",
                     now,
                     now,
@@ -209,7 +205,6 @@ class TaskRegistry:
                 allowed_tools=allowed_tools or [],
                 side_effects=side_effects or [],
                 lease_ttl_sec=lease_ttl_sec,
-                attempts=0,
                 history=[],
                 created_at=now,
                 updated_at=now,
@@ -281,9 +276,6 @@ class TaskRegistry:
     ) -> Task:
         """Transition a task to a new state, recording history.
 
-        Increments ``attempts`` when entering ``running`` from ``queued`` or
-        ``failed``.
-
         Args:
             task_id (str): The task identifier.
             new_state (str): The target state (must be in :data:`TASK_STATES`).
@@ -319,12 +311,9 @@ class TaskRegistry:
                     "evidence": evidence or {},
                 }
             )
-            attempts = row["attempts"]
-            if new_state == "running" and current_state in ("queued", "failed"):
-                attempts += 1
             cur.execute(
-                "UPDATE tasks SET state=?, history=?, attempts=?, updated_at=? WHERE task_id=?",
-                (new_state, json.dumps(history), attempts, now, task_id),
+                "UPDATE tasks SET state=?, history=?, updated_at=? WHERE task_id=?",
+                (new_state, json.dumps(history), now, task_id),
             )
         return await self.get(task_id)
 

@@ -423,7 +423,6 @@ class IntentRouter:
             "succeeded",
             "failed",
             "cancelled",
-            "needs_manual_review",
         }
         task = None
         was_existing = False

@@ -1260,7 +1260,6 @@ class DispatcherCollaborator:
             "succeeded",
             "failed",
             "cancelled",
-            "needs_manual_review",
         ):
             return (
                 f"(run_action_now: an identical {action_name!r} task is "

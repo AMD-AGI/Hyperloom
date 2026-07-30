@@ -56,14 +56,13 @@ class SubAgentResult:
 
     Attributes:
         task_id (str): Id of the task that ran.
-        state (str): Terminal state — ``"succeeded"`` / ``"failed"`` /
-            ``"needs_manual_review"``.
+        state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
     """
 
     task_id: str
-    state: str  # "succeeded" / "failed" / "needs_manual_review"
+    state: str  # "succeeded" / "failed"
     result: dict
     error: str | None = None
 
