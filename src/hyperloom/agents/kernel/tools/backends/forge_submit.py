@@ -168,6 +168,39 @@ def _resolve_gpu_target(candidate: dict) -> str:
     )
 
 
+_KNOWN_FRAMEWORKS = ("vllm", "sglang", "aiter")
+
+
+def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
+    """Best-effort framework identity for the KB slug. Empty == let forge-loop infer.
+
+    framework is a SOFT slug component, so this never raises and never guesses a
+    wrong value: it returns a framework only when confident, else "" so the
+    caller omits ``--framework`` and forge-loop falls back to its own path scan
+    (then ``unknown``). Passing it explicitly matters because a producer (arena)
+    and consumer (hyperloom) can have different workspace layouts — pinning the
+    framework keeps both on the SAME kernel page. Resolution order:
+
+      1. an explicit, RECOGNIZED framework on the candidate
+         (``framework``/``backend`` — a language like ``triton`` is ignored, it
+         is not a framework);
+      2. a known framework directory in the kernel path;
+      3. "" (defer to forge-loop).
+    """
+    raw = str(
+        (candidate or {}).get("framework")
+        or (candidate or {}).get("backend")
+        or ""
+    ).strip().lower()
+    if raw in _KNOWN_FRAMEWORKS:
+        return raw
+    parts = {p.lower() for p in Path(kernel_path).parts} if kernel_path else set()
+    for framework in _KNOWN_FRAMEWORKS:
+        if framework in parts:
+            return framework
+    return ""
+
+
 def _fellow_for_source_type(source_type: str) -> str | None:
     """Map source_type to a Forge fellow. None if unsupported.
 
@@ -359,7 +392,21 @@ def _prepare_worktree_nogit(
     try:
         rel = src_abs.relative_to(layout_root)
     except ValueError:
-        # source_file not inside layout_root — use its parent dir instead.
+        # source_file not inside layout_root — fall back to a flat copy of just
+        # its parent dir. This DROPS the framework directory structure from the
+        # kernel path, which impairs cross-repo KB reuse: the slug's framework
+        # component now relies entirely on the explicit --framework we forward
+        # (see _resolve_framework), and a KB diff produced with the full repo
+        # path applies here only via forge-loop's strip-depth normalization.
+        # Surface it rather than degrade silently.
+        log.warning(
+            "forge: kernel %s is outside its package root %s; using a FLAT "
+            "scratch layout. KB framework detection falls back to the explicit "
+            "--framework, and cross-workspace diff apply relies on strip-depth "
+            "normalization. Pass an explicit kernel_repo to preserve structure.",
+            src_abs,
+            layout_root,
+        )
         layout_root = src_abs.parent
         rel = Path(src_abs.name)
         copy_subtrees = None
@@ -2199,6 +2246,7 @@ def _run_loop_via_cli(
     e2e_pct: float | None = None,
     operator_name: str = "",
     experience_id: str = "",
+    framework: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2290,6 +2338,11 @@ def _run_loop_via_cli(
         cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
+    # Pin the KB framework identity so producer/consumer resolve the same kernel
+    # page across differing workspace layouts. Omitted when unknown, in which
+    # case forge-loop infers it from the kernel path (soft, never fatal).
+    if framework:
+        cmd += ["--framework", framework]
 
     loop_exc = None
     out = ""
@@ -2824,6 +2877,7 @@ def submit(
             e2e_pct=e2e_pct,
             operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
             experience_id=output_dir.name,
+            framework=_resolve_framework(candidate, worktree_kernel),
         )
         # keep/revert is decided from forge's own published best, in descending
         # order of trust:
