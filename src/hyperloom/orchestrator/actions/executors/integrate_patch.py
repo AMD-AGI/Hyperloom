@@ -372,6 +372,22 @@ def _derive_lane(params: dict[str, Any]) -> str:
     return "perf_explore"
 
 
+def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
+    """Percent accuracy change of ``measured`` against ``baseline``.
+
+    Returns ``None`` when either side is missing or the baseline is not
+    positive, so callers fall back to their existing value.
+    """
+    try:
+        m = float(measured)
+        b = float(baseline)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0.0:
+        return None
+    return (m - b) / b * 100.0
+
+
 def _preflight_missing_targets(
     framework_root: Path,
     patch_paths: list[Path],
@@ -2629,6 +2645,7 @@ class IntegratePatchExecutor:
                 specialist_task_id,
             )
         gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), acc_baseline)
 
         if not gate_pass:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2649,6 +2666,7 @@ class IntegratePatchExecutor:
                 outcome="reverted_smoke_fail",
                 tps_delta_pct=float(delta_pct or 0.0),
                 extra=extra,
+                accuracy_delta_pct=acc_delta_pct,
             )
             return _with_stash_restore(
                 framework_root,
@@ -2708,6 +2726,7 @@ class IntegratePatchExecutor:
                     outcome="reverted_smoke_fail",
                     tps_delta_pct=float(delta_pct or 0.0),
                     extra=extra,
+                    accuracy_delta_pct=acc_delta_pct,
                 )
                 return _with_stash_restore(
                     framework_root,
@@ -2742,6 +2761,7 @@ class IntegratePatchExecutor:
             outcome="integrated",
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
+            accuracy_delta_pct=acc_delta_pct,
         )
         # Commit the KEEP so a later REVERT checkout fallback can't wipe this
         # win (best-effort, non-fatal). Non-git roots (e.g. a pip-installed
@@ -2863,6 +2883,7 @@ class IntegratePatchExecutor:
         outcome: str,
         tps_delta_pct: float,
         extra: dict[str, Any],
+        accuracy_delta_pct: float | None = None,
     ) -> None:
         """Append a JSONL record to ``lessons.jsonl`` when the patch
         came from the FRAMEWORK_AGENT phase.
@@ -2877,6 +2898,8 @@ class IntegratePatchExecutor:
             tps_delta_pct: The measured throughput delta percentage.
             extra: The runner ``extra`` mapping (provides shared state /
                 session id).
+            accuracy_delta_pct: Measured accuracy delta; overrides the payload
+                value when supplied.
         """
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
@@ -2905,12 +2928,13 @@ class IntegratePatchExecutor:
             changed_files = proposal.get("changed_files") or (done_payload or {}).get("changed_files") or []
             if isinstance(changed_files, str):
                 changed_files = [changed_files]
-            try:
-                accuracy_delta_pct = float(
-                    proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
-                )
-            except (TypeError, ValueError):
-                accuracy_delta_pct = 0.0
+            if accuracy_delta_pct is None:
+                try:
+                    accuracy_delta_pct = float(
+                        proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    accuracy_delta_pct = 0.0
             written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
