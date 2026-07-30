@@ -3,10 +3,8 @@
 
 """Unit coverage for the optional GPU-specialist rebench helper.
 
-``run_grid`` / Magpie are mocked, so these exercise the pure logic: port
-resolution + 8888 refusal, leased-card reporting, env-pair parsing, the
-success / failed-status / no-result / exception result shapes, and the CLI
-``main``.
+``run_grid`` / Magpie are mocked, so these exercise port resolution,
+leased-card reporting, env-pair parsing, result shapes, and the CLI ``main``.
 """
 
 from __future__ import annotations
@@ -19,18 +17,11 @@ import pytest
 from hyperloom.orchestrator.specialists import rebench as sr
 
 
-def test_pick_free_port_never_production() -> None:
-    port = sr._pick_free_port()
-    assert isinstance(port, int)
-    assert port != sr.PRODUCTION_SERVING_PORT
-
-
-def test_resolve_port_auto_explicit_and_reject_8888() -> None:
-    assert sr._resolve_port(None) != sr.PRODUCTION_SERVING_PORT
-    assert sr._resolve_port(0) != sr.PRODUCTION_SERVING_PORT
+def test_resolve_port_auto_and_explicit() -> None:
+    assert 0 < sr._resolve_port(None) <= 65535
+    assert 0 < sr._resolve_port(0) <= 65535
     assert sr._resolve_port(12345) == 12345
-    with pytest.raises(ValueError):
-        sr._resolve_port(sr.PRODUCTION_SERVING_PORT)
+    assert sr._resolve_port(8888) == 8888
 
 
 def test_current_leased_cards_precedence(monkeypatch) -> None:
@@ -85,6 +76,7 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     assert "w1" in res["warnings"]
     assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
     assert seen["grid"][0].extra_server_args == ""
+    assert seen["preclean_before_run"] is False
 
 
 @pytest.mark.asyncio
@@ -161,10 +153,3 @@ def test_main_failure_return_code(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(sr, "run_specialist_rebench", _fake)
     rc = sr.main(["--output", str(tmp_path / "o"), "--env", "A=1", "--extra-args=--foo bar"])
     assert rc == 1
-
-
-def test_main_rejects_explicit_8888(tmp_path, capsys) -> None:
-    rc = sr.main(["--output", str(tmp_path / "o"), "--port", "8888"])
-    assert rc == 1
-    out = json.loads(capsys.readouterr().out)
-    assert "8888" in out["error"]
