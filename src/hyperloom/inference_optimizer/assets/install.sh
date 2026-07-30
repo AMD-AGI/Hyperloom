@@ -933,7 +933,14 @@ ensure_rocprof_compute() {
       log "rocprof-compute installed OK: ${base} present"
     else
       warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
-      tail -n 6 "$apt_log" 2>/dev/null | while IFS= read -r _ln; do warn "  apt| ${_ln}"; done
+      # Guard BOTH the missing-file case and pipefail: if the redirect above never
+      # created $apt_log (e.g. an unwritable TMPDIR), a bare `tail | while` exits
+      # non-zero and set -euo pipefail would abort install.sh — the very
+      # fail-soft invariant this diagnostic exists to serve. Only tail when the
+      # file exists, and swallow any residual pipe failure.
+      if [ -f "$apt_log" ]; then
+        tail -n 6 "$apt_log" 2>/dev/null | while IFS= read -r _ln; do warn "  apt| ${_ln}"; done || true
+      fi
     fi
     rm -f "$apt_log" 2>/dev/null || true
   fi
