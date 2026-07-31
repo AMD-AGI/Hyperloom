@@ -130,8 +130,9 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     (``restart-server``, SSH fan-out, GPU sampling, Magpie client mode) reads one
     stable source, and points benchmarks at the cluster's frontend.
 
-    Nothing here creates or releases a cluster; that is the platform's job.
-    No-op when ``--nodes < 2``.
+    Nothing here creates or releases a cluster; that is the platform's job. The
+    session-side setup the adopted cluster still needs runs in
+    :func:`_prepare_adopted_cluster`. No-op when ``--nodes < 2``.
 
     Args:
         args: Parsed CLI namespace (reads ``nodes`` and ``mn_backend``).
@@ -139,7 +140,8 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     Raises:
         SystemExit: With code 2 when ``--nodes >= 2`` but no cluster was handed
             over, when an infera cluster arrives without SSH control, or when the
-            synthesized state cannot be written.
+            synthesized state cannot be written; with the bootstrap return code
+            when that fails.
     """
     nodes = max(1, int(args.nodes))
     if nodes < 2:
@@ -188,6 +190,53 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
         f"ssh_control={'yes' if external_has_ssh_control() else 'no (benchmark-only)'}"
     )
+    _prepare_adopted_cluster(args, str(ext_state["backend"]))
+
+
+def _prepare_adopted_cluster(args: argparse.Namespace, backend: str) -> None:
+    """Make an adopted cluster usable by this session.
+
+    Adopting only records where the cluster is. These steps are what the run
+    still needs from it, and none of them provision anything -- they went on
+    working against a handed-over cluster once the create path was removed:
+
+    * rayjob: the BYOI bootstrap renders ``/etc/profile.d/hyperloom-env.sh`` in
+      the head pod, which every later Ray Dashboard REST job sources to find the
+      framework venv. It is submitted unconditionally rather than tracked in the
+      state file: the synthesized state carries no submission id, and
+      ``bootstrap.sh`` already self-skips on its pod-side marker.
+    * infera: GEAK is installed on the GPU pods over SSH so the kernel agent
+      finds it on PATH. Best-effort, and the helper no-ops for other backends.
+    * both: kernel patches applied earlier in this session are replayed, so a
+      cluster adopted mid-session does not serve from the pre-patch state.
+
+    Args:
+        args: Parsed CLI namespace (reads ``nodes`` and ``no_kernel``).
+        backend: The resolved multi-node backend.
+
+    Raises:
+        SystemExit: With the bootstrap return code when the head pod fails it.
+    """
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+
+    if backend == "rayjob":
+        ns_boot = argparse.Namespace(
+            script=None,
+            force=False,
+            print_logs=False,
+            poll_interval=6,
+            # Adoption runs in-process, so it is not bound by the foreground/MCP
+            # 120s ceiling; a slow head pod should not abort the run.
+            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+        )
+        rc_boot = cmd_bootstrap(ns_boot)
+        if rc_boot != 0:
+            sys.exit(rc_boot)
+
+    if not getattr(args, "no_kernel", False):
+        install_geak_on_pods_best_effort()
+
+    _replay_kernel_patches_for_multi_node(args)
 
 
 def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:

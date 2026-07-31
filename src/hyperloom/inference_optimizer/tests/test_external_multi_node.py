@@ -214,6 +214,97 @@ def test_provision_external_infera_requires_ssh(
     assert ei.value.code == 2
 
 
+def test_adopting_a_rayjob_bootstraps_and_replays_patches(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adoption still owes the cluster its session-side setup.
+
+    Regression guard. Removing the create path took the three steps that lived
+    inside it with it -- none of them provision anything, so a handed-over
+    RayJob silently came up without the BYOI bootstrap (no framework venv on
+    PATH for later Ray Dashboard jobs) and without its applied patches.
+    """
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    calls: list[str] = []
+    monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+
+    args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
+    _prepare_multi_node_state(args)
+
+    assert calls == ["bootstrap", "geak", "replay"]
+
+
+def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bootstrap is a Ray Dashboard call, so it is rayjob-only; GEAK is the infera half."""
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    calls: list[str] = []
+    monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+
+    args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=False)
+    _prepare_multi_node_state(args)
+
+    assert calls == ["geak", "replay"]
+
+
+def test_adopting_with_no_kernel_skips_the_geak_install(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-kernel`` opts out of the kernel phase, so the pods need no GEAK."""
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    calls: list[str] = []
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+
+    args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=True)
+    _prepare_multi_node_state(args)
+
+    assert calls == ["replay"]
+
+
+def test_missing_handoff_exits_config_error_not_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unset hand-off is not something a retry can fix.
+
+    The guard used to raise a bare RuntimeError, and ``main`` classifies those by
+    message substring; this one matched nothing and fell through to
+    EXIT_TRANSIENT, so the caller retried a permanently misconfigured run. The
+    message is asserted too: the later ``missing required keys`` failure also
+    maps to EXIT_CONFIG_ERROR, so the code alone does not prove the guard fired.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+    with pytest.raises(mncli.ConfigurationError, match="HYPERLOOM_MN_EXT_SERVICE_URL is unset"):
+        mncli._load_state()
+    assert mncli.main(["verify"]) == mncli.EXIT_CONFIG_ERROR
+    assert "HYPERLOOM_MN_EXT_SERVICE_URL is unset" in capsys.readouterr().err
+
+
 def test_bootstrap_accepts_handed_over_rayjob_without_rayjob_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

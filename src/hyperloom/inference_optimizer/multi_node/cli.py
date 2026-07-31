@@ -135,6 +135,15 @@ class TransientFailure(RuntimeError):
     """Raised on poll timeout or repeated fetch failure. Exit code -> 1; caller may retry."""
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when the environment is wrong in a way retrying cannot fix. Exit code -> EXIT_CONFIG_ERROR.
+
+    Subclasses ``RuntimeError`` so existing handlers keep catching it; ``main``
+    matches on the type rather than on the message, which the substring list
+    below cannot do reliably for new errors.
+    """
+
+
 # State file
 def _state_file() -> Path:
     """Return the active multi-node state file path.
@@ -168,8 +177,9 @@ def _load_state() -> dict[str, Any]:
         missing, unreadable, or fails the ownership/permission check.
 
     Raises:
-        RuntimeError: When the run is multi-node, or the state file describes a
-            handed-over cluster, but no hand-off is present in the environment.
+        ConfigurationError: When the run is multi-node, or the state file
+            describes a handed-over cluster, but no hand-off is present in the
+            environment.
     """
     state = load_multi_node_state()
     if not external_service_url():
@@ -178,7 +188,7 @@ def _load_state() -> dict[str, Any]:
         except ValueError:
             nodes = 1
         if nodes >= 2 or state.get("external"):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "multi-node state requested without a cluster hand-off: "
                 "HYPERLOOM_MN_EXT_SERVICE_URL is unset"
                 + (" while the state file describes a handed-over cluster" if state.get("external") else "")
@@ -1471,7 +1481,9 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
-        err("apply-tracelens-patch requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
+        err(
+            "apply-tracelens-patch requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP"
+        )
         return EXIT_CONFIG_ERROR
 
     tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
@@ -2271,6 +2283,10 @@ def main(argv: list[str] | None = None) -> int:
     except TransientFailure as tf:
         err(str(tf))
         return EXIT_TRANSIENT
+    except ConfigurationError as cfg:
+        # Retrying cannot fix the environment, so never report it as transient.
+        err(f"{type(cfg).__name__}: {cfg}")
+        return EXIT_CONFIG_ERROR
     except (RuntimeError, ValueError) as exc:
         # Caller-fixable input/state errors -> config error; else transient.
         msg = str(exc)
