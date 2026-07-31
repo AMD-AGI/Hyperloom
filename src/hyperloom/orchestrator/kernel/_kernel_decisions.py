@@ -1494,6 +1494,12 @@ def untried_hot_reusable_kernels(
             continue
         if k.get("reusable_native_kernel") is not True:
             continue
+        # Bypass path tags a kernel non-dispatchable when its shape is
+        # geometry-only (launch_grid/tile_name) and would fail the kernel-opt
+        # gate. Skip those so they never re-enter the untried queue. Absent field
+        # (TraceLens path) is treated as dispatchable to avoid regressing it.
+        if k.get("shape_dispatchable") is False:
+            continue
         try:
             gpu_pct = float(k.get("gpu_pct") or 0.0)
         except (TypeError, ValueError):
