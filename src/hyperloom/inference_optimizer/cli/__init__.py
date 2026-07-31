@@ -1227,6 +1227,29 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+# Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
+# Anything else (baseline / preflight failures, crashes, enablement stalls) exits
+# non-zero so CI surfaces genuine problems.
+_SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
+    {
+        "target_reached",
+        "global_converged",
+        "time_exhausted",
+        "max_ticks",
+        # SWEEP finished cleanly. exit_normal_sweep returns sweep_done (shape grid)
+        # or conc_sweep_done (concurrency ladder); both mean the run optimized and
+        # closed normally (e.g. the no-kernel path), so neither is a CI failure.
+        "sweep_done",
+        "conc_sweep_done",
+    }
+)
+
+
+def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure)."""
+    return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end.
 
@@ -2231,17 +2254,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return (
-        0
-        if stop_reason
-        in (
-            "target_reached",
-            "global_converged",
-            "time_exhausted",
-            "max_ticks",
-        )
-        else 1
-    )
+    return _exit_code_for_stop_reason(stop_reason)
 
 
 def main(argv: list[str] | None = None) -> int:
