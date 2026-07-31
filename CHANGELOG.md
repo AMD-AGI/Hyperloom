@@ -5,6 +5,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Recipe-KB writes in the Langfuse trace**: every write to the cross-session
+  recipe KB (`recipe.json`) is now mirrored as a `kb:recipe_write:<generator>`
+  span under the `recipe_kb` agent, alongside the existing
+  `kb:recipe_snapshot:<method>` read spans. Both write sites are covered — the
+  session-opening T0 identity anchor (`generator=t0_anchor`) and the
+  Coordinator's KEEP/REVERT/framework-PR/CLOSE amends
+  (`generator=coordinator`), the latter carrying the session's lessons,
+  pitfalls, `best_config`, `prs_tested`, `what_worked`/`what_failed` and
+  `sessions` entries. Previously only reads were visible, so what a session
+  sank into the KB could only be recovered by diffing `history/v*.json`.
+
+  `RecipeKB.put_recipe` emits the audit event (reusing the existing
+  `audit_hook` → `runtime/recipe_snapshot/.audit.jsonl` channel), so the
+  offline `backfill_langfuse` CLI replays write spans too. Each event reports a
+  per-field `delta` against the pre-write row — `put_recipe` rewrites the whole
+  row, so absolute counts alone cannot distinguish an amend that appended a
+  lesson from the T0 anchor, which round-trips the existing lists untouched.
+  Read spans are unchanged, and audit rows predating this change (no `op`
+  field) still replay as reads. On-disk recipe rows are untouched: this is a
+  trace mirror, so warm-start reads the same data as before.
+
+  `LocalRecipeStore.put_recipe` now additionally returns `prior_counts` and
+  `counts` (per-field sizes before/after the write) to support the delta.
+
 ### Removed
 
 - **Remote Cortex KB, end to end**: every path that could reach a remote Cortex

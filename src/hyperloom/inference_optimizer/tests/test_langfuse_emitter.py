@@ -812,6 +812,140 @@ def test_flush_backfills_recipe_snapshot_audit(tmp_path, monkeypatch):
     assert persisted["counts"]["kb_spans_sent"] == 2
 
 
+def _write_recipe_audit(sd, rows):
+    """Write ``rows`` to the session's recipe-KB audit log."""
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+
+    audit = recipe_snapshot_audit_jsonl(sd)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_flush_backfills_recipe_kb_writes(tmp_path, monkeypatch):
+    """Write rows become ``kb:recipe_write:<generator>`` spans carrying deltas."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    _write_recipe_audit(
+        sd,
+        [
+            {
+                "ts": "2026-06-09T15:14:54Z",
+                "op": "write",
+                "method": "put_recipe",
+                "generator": "t0_anchor",
+                "result": {"canonical_id": "cid-x", "version": 1, "created": True},
+                "counts": {"lessons": 0, "pitfalls": 0},
+                "delta": {"lessons": 0, "pitfalls": 0},
+            },
+            {
+                "ts": "2026-06-09T15:20:00Z",
+                "op": "write",
+                "method": "put_recipe",
+                "generator": "coordinator",
+                "phase": "close_finalize",
+                "result": {
+                    "canonical_id": "cid-x",
+                    "version": 2,
+                    "created": False,
+                    "best_throughput": 1234.5,
+                    "best_config_nonempty": True,
+                },
+                "counts": {"lessons": 1, "pitfalls": 0},
+                "delta": {"lessons": 1, "pitfalls": 0},
+            },
+        ],
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+
+    anchor = client.span_named("kb:recipe_write:t0_anchor")
+    amend = client.span_named("kb:recipe_write:coordinator")
+    assert anchor is not None and amend is not None
+    # Both nest under the same agent span as the read spans.
+    assert client.span_named("agent:recipe_kb") is not None
+
+    assert amend.kwargs["metadata"]["kind"] == "recipe_write"
+    assert amend.kwargs["metadata"]["canonical_id"] == "cid-x"
+    assert amend.kwargs["metadata"]["version"] == 2
+    assert amend.kwargs["metadata"]["created"] is False
+    # Only non-zero deltas are flattened, so the amend advertises its lesson...
+    assert amend.kwargs["metadata"]["lessons_delta"] == 1
+    assert "pitfalls_delta" not in amend.kwargs["metadata"]
+    # ...and the anchor, which only restamped identity, advertises none.
+    assert not any(k.endswith("_delta") for k in anchor.kwargs["metadata"])
+    # The full audit row stays available as span output.
+    assert amend.kwargs["output"]["result"]["best_throughput"] == 1234.5
+
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["recipe_audit_read"] == 2
+    assert persisted["counts"]["recipe_write_audit_read"] == 2
+
+
+def test_flush_recipe_audit_splits_reads_from_writes(tmp_path, monkeypatch):
+    """One audit log holds both kinds; each maps to its own span namespace."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    _write_recipe_audit(
+        sd,
+        [
+            {
+                "ts": "2026-06-09T15:14:54Z",
+                "op": "read",
+                "method": "get_recipe",
+                "remote": "gbrain",
+                "resolution": "remote",
+                "hit": True,
+            },
+            {
+                "ts": "2026-06-09T15:20:00Z",
+                "op": "write",
+                "method": "put_recipe",
+                "generator": "coordinator",
+                "result": {"canonical_id": "cid-x", "version": 2, "created": False},
+                "counts": {"lessons": 1},
+                "delta": {"lessons": 1},
+            },
+        ],
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("kb:recipe_snapshot:get_recipe") is not None
+    assert client.span_named("kb:recipe_write:coordinator") is not None
+    persisted = lfe.read_receipt(sd)
+    assert persisted["counts"]["recipe_audit_read"] == 2
+    # Only the write half counts toward the write tally.
+    assert persisted["counts"]["recipe_write_audit_read"] == 1
+
+
+def test_flush_recipe_audit_row_without_op_is_a_read(tmp_path, monkeypatch):
+    """Rows predating the write audit carry no ``op`` and must replay as reads."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    sd = _seed_trace_dir(tmp_path)
+    _write_recipe_audit(
+        sd,
+        [
+            {
+                "ts": "2026-06-09T15:14:54Z",
+                "method": "get_recipe",
+                "remote": "gbrain",
+                "resolution": "remote",
+                "hit": True,
+            }
+        ],
+    )
+    em = lfe.LangfuseEmitter(sd)
+    em.flush_session()
+    assert client.span_named("kb:recipe_snapshot:get_recipe") is not None
+    assert not [s for s in client.spans if s.kwargs.get("name", "").startswith("kb:recipe_write")]
+    assert lfe.read_receipt(sd)["counts"]["recipe_write_audit_read"] == 0
+
+
 def test_flush_recipe_audit_idempotent(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

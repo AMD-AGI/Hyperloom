@@ -349,7 +349,8 @@ class LangfuseEmitter:
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
             "kb_spans_sent": 0,  # KB trace spans (assess/priors/recipe)
-            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
+            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
+            "recipe_write_audit_read": 0,  # of which were recipe-KB writes
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
             "forge_steps_read": 0,  # forge_steps.jsonl rows swept
             "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
@@ -914,28 +915,32 @@ class LangfuseEmitter:
                 self._emit_generation(token_row=row, conv_row=None)
 
     def _flush_recipe_kb_audit(self) -> None:
-        """Backfill recipe-snapshot / gbrain remote reads from the audit log.
+        """Backfill recipe-KB reads and writes from the audit log.
 
-        The recipe KB dispatcher appends one row per remote read to
-        ``runtime/recipe_snapshot/.audit.jsonl``. Each row becomes a
-        ``kb:recipe_snapshot:<method>`` span under the ``recipe_kb`` agent. Read
-        out-of-band at session end; idempotent via the ``flush_session`` guard.
+        The recipe KB dispatcher appends one row per read and per write to
+        ``runtime/recipe_snapshot/.audit.jsonl``. Reads become
+        ``kb:recipe_snapshot:<method>`` spans; writes become
+        ``kb:recipe_write:<generator>`` spans carrying what this session sank
+        into the KB (which fields grew, by how much, and at which version).
+        Both nest under the ``recipe_kb`` agent. Read out-of-band at session
+        end; idempotent via the ``flush_session`` guard.
+
+        Rows predating the write-audit event carry no ``op`` and are treated as
+        reads, so historical sessions replay exactly as before.
         """
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
             self._counts["recipe_audit_read"] += 1
-            method = str(row.get("method") or "read")
+            if lfmap.recipe_audit_is_write(row):
+                self._counts["recipe_write_audit_read"] += 1
+                name, metadata = lfmap.recipe_write_span(row)
+            else:
+                name, metadata = lfmap.recipe_read_span(row)
             self.record_kb_span(
-                name=f"kb:recipe_snapshot:{method}",
+                name=name,
                 agent="recipe_kb",
                 output=row,
-                metadata={
-                    "kind": "recipe_snapshot",
-                    "method": method,
-                    "remote": row.get("remote"),
-                    "resolution": row.get("resolution"),
-                    "hit": bool(row.get("hit")),
-                },
+                metadata=metadata,
                 ts=row.get("ts"),
             )
 

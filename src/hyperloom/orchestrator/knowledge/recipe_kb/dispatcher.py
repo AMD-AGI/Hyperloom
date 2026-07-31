@@ -351,6 +351,7 @@ class RecipeKB:
                 "best_config_nonempty": bool(row.get("best_config")),
             }
         return {
+            "op": "read",
             "method": method,
             "remote": self._remote_label(),
             "resolution": resolution,
@@ -362,6 +363,75 @@ class RecipeKB:
                 "label_match": label_match or None,
             },
             "result": result,
+        }
+
+    def _write_audit_event(
+        self,
+        *,
+        canonical_id: str,
+        result: dict[str, Any] | None,
+        provenance: dict[str, Any] | None,
+        identity: dict[str, str],
+        best_config: dict[str, str] | None,
+        best_throughput: float,
+    ) -> dict[str, Any]:
+        """Build a structured audit record for one recipe-snapshot write.
+
+        The read counterpart (:meth:`_read_audit_event`) answers "was the
+        snapshot consulted and what came back"; this answers the write-side
+        question "what did this session sink into the KB". Both land in the
+        same audit log and are told apart by ``op``.
+
+        ``delta`` is the per-field size change against the pre-write row.
+        ``put_recipe`` rewrites the whole row, so absolute counts alone cannot
+        distinguish an amend that appended a lesson from the T0 anchor, which
+        round-trips the existing lists untouched; the delta can.
+
+        Args:
+            canonical_id (str): Canonical identity written.
+            result (dict[str, Any] | None): The store's return value
+                (``version`` / ``created`` / ``prior_counts`` / ``counts``).
+            provenance (dict[str, Any] | None): The write's provenance; supplies
+                ``generator`` and the ``details.phase`` breadcrumb.
+            identity (dict[str, str]): The 5-tuple identity slots stamped.
+            best_config (dict[str, str] | None): Best config written.
+            best_throughput (float): Best throughput written.
+
+        Returns:
+            dict[str, Any]: The audit event (no timestamp; the hook stamps it).
+        """
+        result = result if isinstance(result, dict) else {}
+        counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        prior_counts = result.get("prior_counts") if isinstance(result.get("prior_counts"), dict) else {}
+        delta = {key: int(value) - int(prior_counts.get(key, 0) or 0) for key, value in counts.items()}
+
+        provenance = provenance if isinstance(provenance, dict) else {}
+        details = provenance.get("details") if isinstance(provenance.get("details"), dict) else {}
+        try:
+            throughput = float(best_throughput or 0.0)
+        except (TypeError, ValueError):
+            throughput = 0.0
+
+        return {
+            "op": "write",
+            "method": "put_recipe",
+            "remote": self._remote_label(),
+            # Writes are local-authoritative; the remote is read-side only.
+            "resolution": "local_write",
+            "hit": True,
+            "generator": str(provenance.get("generator") or ""),
+            "phase": str(details.get("phase") or ""),
+            "request": {"canonical_id": canonical_id or None},
+            "identity": dict(identity),
+            "result": {
+                "canonical_id": str(result.get("canonical_id") or canonical_id or ""),
+                "version": int(result.get("version") or 0),
+                "created": bool(result.get("created")),
+                "best_throughput": throughput,
+                "best_config_nonempty": bool(best_config),
+            },
+            "counts": {key: int(value) for key, value in counts.items()},
+            "delta": delta,
         }
 
     def _note_failure(self, method: str, exc: Exception) -> None:
@@ -451,9 +521,10 @@ class RecipeKB:
             extras (dict[str, Any] | None): Free-form arbor keys.
 
         Returns:
-            dict[str, Any]: ``{"canonical_id", "version", "created"}``.
+            dict[str, Any]: ``{"canonical_id", "version", "created",
+                "prior_counts", "counts"}``.
         """
-        return self.local.put_recipe(
+        result = self.local.put_recipe(
             canonical_id=canonical_id,
             model=model,
             hardware=hardware,
@@ -477,6 +548,25 @@ class RecipeKB:
             provenance=provenance,
             extras=extras,
         )
+        # Audit AFTER the write lands: the local store is authoritative, so a
+        # recorded event always describes a durable row.
+        self._emit_audit(
+            self._write_audit_event(
+                canonical_id=canonical_id,
+                result=result,
+                provenance=provenance,
+                identity={
+                    "model": model,
+                    "hardware": hardware,
+                    "framework_name": framework_name,
+                    "framework_version": framework_version,
+                    "precision": precision,
+                },
+                best_config=best_config,
+                best_throughput=best_throughput,
+            )
+        )
+        return result
 
     # Reads — remote-first, local fallback
     def get_recipe(
