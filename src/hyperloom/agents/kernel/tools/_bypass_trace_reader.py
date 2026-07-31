@@ -46,6 +46,44 @@ _DECODER = json.JSONDecoder()
 _RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 
 
+def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
+    """Hashable key for a cpu_op shape/dtype meta (for majority backfill)."""
+    shapes = meta.get("shapes") or []
+    dtypes = meta.get("dtypes") or []
+    norm_shapes: list[tuple[int, ...]] = []
+    for dims in shapes:
+        if not isinstance(dims, (list, tuple)):
+            continue
+        try:
+            norm_shapes.append(tuple(int(d) for d in dims))
+        except (TypeError, ValueError):
+            continue
+    norm_dtypes = tuple(str(d) for d in dtypes) if isinstance(dtypes, (list, tuple)) else ()
+    return (tuple(norm_shapes), norm_dtypes)
+
+
+def _graph_under_recorded(
+    *,
+    graph_mode: bool,
+    graph_launch_count: int,
+    graph_kernels: int,
+    busy_fraction: float,
+) -> bool:
+    """Return whether a graph-mode trace likely under-recorded replays."""
+    if not graph_mode or graph_launch_count < 2:
+        return False
+    if busy_fraction < 0.5:
+        return True
+    if graph_launch_count >= 4 and graph_kernels > 0 and busy_fraction < 0.9:
+        return True
+    # Few graph-kernel events per launch suggests only ~1 replay was captured.
+    if graph_kernels > 0:
+        events_per_launch = graph_kernels / graph_launch_count
+        if events_per_launch < 2.0 and busy_fraction < 0.9:
+            return True
+    return False
+
+
 def _file_size(fp: Path) -> int:
     """Return file size in bytes, or 0 on stat() failure."""
     try:
@@ -428,11 +466,9 @@ def _finalize(
     graph_kernels = 0
     graph_gpu_us = 0.0
     geom = corr_to_launch_geom or {}
-    # Name-keyed shape backfill: a kernel replayed inside a CUDA graph loses its
-    # correlation->cpu_op link, but the SAME kernel resolved a shape on an
-    # eager/capture-time launch. Record the first shape-carrying meta per kernel
-    # name so a later shapeless launch can inherit it (provenance downgrades).
-    kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
+    # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the
+    # majority capture-time shape wins; multiple distinct shapes mark ambiguous.
+    kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
     # Name-keyed launch geometry (grid/block): first launch that actually carries
     # geometry wins. Order-independent, so a shapeless graph-replay launch seen
     # first does not shadow a later eager launch that recorded grid/block.
@@ -463,9 +499,15 @@ def _finalize(
             meta = extid_to_opmeta.get(extid)
             if meta:
                 kern_op_meta.setdefault(name, {}).setdefault(op_name, meta)
-                # Seed the name-keyed backfill from any shape-carrying meta.
-                if meta.get("shapes") and name not in kern_name_backfill_meta:
-                    kern_name_backfill_meta[name] = meta
+                if meta.get("shapes"):
+                    sig = _backfill_shape_signature(meta)
+                    if sig[0]:
+                        by_sig = kern_name_backfill_by_sig.setdefault(name, {})
+                        entry = by_sig.get(sig)
+                        if entry is None:
+                            by_sig[sig] = {"meta": meta, "gpu_us": dur}
+                        else:
+                            entry["gpu_us"] += dur
         if name not in kern_name_launch_geom:
             g = geom.get(corr)
             if g is not None and (g[0] is not None or g[1] is not None):
@@ -507,9 +549,19 @@ def _finalize(
     # many launches map to a single recorded replay's worth of kernels.
     graph_mode = graph_launch_count > 0
     busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
-    graph_under_recorded = graph_mode and (
-        busy_fraction < 0.5 or (graph_launch_count >= 4 and graph_kernels > 0 and busy_fraction < 0.9)
+    graph_under_recorded = _graph_under_recorded(
+        graph_mode=graph_mode,
+        graph_launch_count=graph_launch_count,
+        graph_kernels=graph_kernels,
+        busy_fraction=busy_fraction,
     )
+    kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
+    kern_name_backfill_ambiguous: set[str] = set()
+    for kern_name, by_sig in kern_name_backfill_by_sig.items():
+        if len(by_sig) > 1:
+            kern_name_backfill_ambiguous.add(kern_name)
+        best_sig = max(by_sig, key=lambda sig: by_sig[sig]["gpu_us"])
+        kern_name_backfill_meta[kern_name] = by_sig[best_sig]["meta"]
 
     gpu_kernel_total_us = sum(a.dur_us for a in kern_agg.values())
 
@@ -535,6 +587,7 @@ def _finalize(
                 bf = kern_name_backfill_meta.get(nm) or {}
                 row["backfill_shapes"] = bf.get("shapes") or []
                 row["backfill_dtypes"] = bf.get("dtypes") or []
+                row["backfill_ambiguous"] = nm in kern_name_backfill_ambiguous
                 lg = kern_name_launch_geom.get(nm)
                 row["launch_grid"] = list(lg[0]) if lg and lg[0] is not None else []
                 row["launch_block"] = list(lg[1]) if lg and lg[1] is not None else []

@@ -200,6 +200,14 @@ def test_build_repo_kernel_index_scans_roots(monkeypatch, repo_dir):
     assert index["nat_k"] == str(repo_dir / "b.cu")
 
 
+def test_repo_scan_disabled_by_env(monkeypatch, repo_dir):
+    py = repo_dir / "fused.py"
+    py.write_text("@triton.jit\ndef foo(x):\n    return x\n", encoding="utf-8")
+    monkeypatch.setattr(resolver, "_build_repo_kernel_index", lambda: {"foo": str(py)})
+    monkeypatch.setenv("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN", "1")
+    assert resolver.resolve_by_kernel_name("foo") == ("", "unresolved")
+
+
 def test_repo_index_marks_duplicate_name_ambiguous(monkeypatch, repo_dir):
     # Same kernel name defined in two files: the index maps it to "" and
     # resolve_by_kernel_name refuses to guess (no arbitrary first-seen file).

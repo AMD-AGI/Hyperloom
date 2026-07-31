@@ -189,9 +189,8 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-# Shape sources trusted for kernel-opt dispatch.
-# capture_backfill: bypass graph-replay inherits capture-time operand shapes.
-_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv", "capture_backfill"})
+from hyperloom.common.env import is_truthy
+from hyperloom.common.kernel_shape_contract import ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
@@ -4105,12 +4104,14 @@ async def run_optimization_handler(
     candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
     if len(candidates) <= 1:
         single_payload = dict(payload)
+        kernel_id_pinned = False
         if candidates:
-            # Reconcile the (possibly hallucinated) LLM kernel_id against the real id.
-            single_payload["kernel_id"] = _reconcile_kernel_id_for_single_batch(
-                single_payload.get("kernel_id"),
+            requested_kernel_id = single_payload.get("kernel_id")
+            reconciled_id, kernel_id_pinned = _reconcile_kernel_id_for_single_batch(
+                requested_kernel_id,
                 candidates,
             )
+            single_payload["kernel_id"] = reconciled_id
             # Preserve the selected candidate itself: it may carry a task_group
             # that does not exist on the raw hot-kernel row reloaded by the
             # kernel_optimization subprocess.
@@ -4144,6 +4145,10 @@ async def run_optimization_handler(
             single_payload,
             session_dir=session_dir,
         )
+        if kernel_id_pinned and isinstance(result, dict):
+            result["kernel_id_pinned"] = True
+            if requested_kernel_id is not None:
+                result["requested_kernel_id"] = str(requested_kernel_id)
         return _stamp_task_group_result(
             result,
             candidates[0] if candidates else None,
@@ -4341,27 +4346,32 @@ def _reconcile_kernel_id(
 def _reconcile_kernel_id_for_single_batch(
     requested: Any,
     candidates: list[dict[str, Any]],
-) -> str:
+) -> tuple[str, bool]:
     """Reconcile ``requested`` and pin to the sole batch row when ids diverge.
 
     When the batch filter leaves exactly one candidate, the LLM may still
     request a different ``kernel_id``; keep candidate metadata and
     ``kernel_id`` aligned so predispatch validation uses the same row.
+
+    Returns:
+        ``(kernel_id, kernel_id_pinned)`` where ``kernel_id_pinned`` is True
+        when the requested id was overridden to match the sole batch row.
     """
     if not candidates:
-        return str(requested or "")
+        return str(requested or ""), False
     reconciled = _reconcile_kernel_id(requested, candidates)
     valid = {str(c.get("kernel_id") or "") for c in candidates if c.get("kernel_id")}
     if reconciled in valid:
-        return reconciled
+        return reconciled, False
     pinned = str(candidates[0].get("kernel_id") or "")
     if pinned and reconciled != pinned:
-        log.info(
+        log.warning(
             "kernel_id %r pinned to sole batch candidate %r",
             reconciled,
             pinned,
         )
-    return pinned or reconciled
+        return pinned, True
+    return pinned or reconciled, False
 
 
 def _resolve_candidate_id(
