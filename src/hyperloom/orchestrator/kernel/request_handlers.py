@@ -1086,10 +1086,15 @@ def materialize_unified_patch_snapshot(
 
     # Paths the patch CREATES (``--- /dev/null``): these must be produced by
     # ``git apply``, never pre-seeded with a base, or apply fails "already
-    # exists". Everything else is a modify whose base we must supply.
+    # exists". Everything else is a modify whose base we must supply. Normalize
+    # each ``+++`` path exactly as ``parse_patch_manifest`` does (strip a
+    # tab-suffixed timestamp, unquote C-quoting, drop the ``a/``/``b/`` prefix)
+    # so these match the descriptor ``path`` values below.
     _new_file_paths = {
-        m.group(1).strip()
-        for m in re.finditer(r"(?m)^--- /dev/null\n\+\+\+ b/(.+)$", patch_text)
+        tool._strip_ab_prefix(
+            tool._unquote_git_path(m.group(1).split("\t", 1)[0].strip())
+        )
+        for m in re.finditer(r"(?m)^--- /dev/null\n\+\+\+ (.+)$", patch_text)
     }
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"

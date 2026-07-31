@@ -530,6 +530,48 @@ class TestForgeGemmHelperCoverage:
             snapshot / "vllm" / "model_executor" / "models" / "qwen3.py"
         ).read_text(encoding="utf-8") == "new = 2\n"
 
+    def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
+        """A created file whose ``+++`` line carries a tab-suffixed timestamp
+        must still be recognized as a create on a NON-git root.
+
+        The new-file path is normalized exactly like ``parse_patch_manifest``
+        (strip the ``\\t<timestamp>`` suffix and the ``b/`` prefix); otherwise it
+        is misclassified as a modify, pre-seeded from disk, and ``git apply``
+        fails "already exists". Pairs a modify (base from disk) with a create in
+        the same patch.
+        """
+        repo = tmp_path / "site-packages"
+        (repo / "vllm").mkdir(parents=True)
+        (repo / "vllm" / "existing.py").write_text("old = 1\n", encoding="utf-8")
+        # NOTE: deliberately NOT a git repo -- mirrors dist-packages.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/vllm/existing.py b/vllm/existing.py\n"
+            "--- a/vllm/existing.py\n"
+            "+++ b/vllm/existing.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n"
+            "diff --git a/vllm/fused_new.py b/vllm/fused_new.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/vllm/fused_new.py\t2026-07-31 17:00:00.000000000 +0800\n"
+            "@@ -0,0 +1 @@\n"
+            "+created = 3\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "vllm" / "existing.py").read_text(encoding="utf-8") == "new = 2\n"
+        assert (snapshot / "vllm" / "fused_new.py").read_text(encoding="utf-8") == "created = 3\n"
+
     def test_materialize_unified_patch_snapshot_rejects_bad_inputs(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
