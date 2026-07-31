@@ -41,6 +41,20 @@ def test_resolve_framework_aiter_meta_maps_to_aiter():
         {}, "/ws/worktree/aiter_meta/csrc/gemm.cu") == "aiter"
 
 
+def test_op_name_for_target_functions_strips_backend_prefix():
+    # The specific operation identity (fed as --target-functions) becomes the KB
+    # slug op when the anchor is a wrapper; strip the ``backend::`` prefix.
+    assert forge_submit._op_name_for_target_functions(
+        {"name": "vllm::unified_attention_with_output"}) == "unified_attention_with_output"
+    assert forge_submit._op_name_for_target_functions(
+        {"operation": "fused_moe"}) == "fused_moe"
+    # operation preferred over name
+    assert forge_submit._op_name_for_target_functions(
+        {"operation": "gemm_a8w8", "name": "vllm::rocm_unquantized_gemm"}) == "gemm_a8w8"
+    assert forge_submit._op_name_for_target_functions({}) == ""
+    assert forge_submit._op_name_for_target_functions(None) == ""
+
+
 def test_resolve_framework_follows_kernel_sources_across_packages():
     # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but
     # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'

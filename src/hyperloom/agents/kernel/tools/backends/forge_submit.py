@@ -227,6 +227,23 @@ def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
     return _framework_from_path(kernel_path)
 
 
+def _op_name_for_target_functions(candidate: dict) -> str:
+    """The specific operation name to feed forge-loop as ``--target-functions``.
+
+    This becomes the KB slug's ``op`` component when the ``--kernel`` anchor is a
+    python/dispatch wrapper with no in-file kernel definition (e.g.
+    ``attention.py``), where op would otherwise collapse to the file stem
+    (``attention``) — too generic, colliding distinct operators. Uses the traced
+    operation identity (``operation``/``name``, the same value as the invocation
+    spec's ``kernel.name``), stripped of any ``backend::`` namespace prefix.
+    Returns "" when unavailable (forge-loop then derives from source / stem).
+    """
+    raw = str((candidate or {}).get("operation") or (candidate or {}).get("name") or "").strip()
+    if "::" in raw:
+        raw = raw.rsplit("::", 1)[-1].strip()
+    return raw
+
+
 def _fellow_for_source_type(source_type: str) -> str | None:
     """Map source_type to a Forge fellow. None if unsupported.
 
@@ -2273,6 +2290,7 @@ def _run_loop_via_cli(
     operator_name: str = "",
     experience_id: str = "",
     framework: str = "",
+    target_functions: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2364,6 +2382,14 @@ def _run_loop_via_cli(
         cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
+    # Feed the operator identity as a target function so the KB slug's ``op``
+    # component is the specific operation (e.g. ``unified_attention_with_output``)
+    # rather than the anchor file's stem (e.g. ``attention``) when the anchor is a
+    # python/dispatch wrapper with no in-file kernel definition. forge-loop uses
+    # target-functions only as the op fallback (source-derived names still win),
+    # so this is safe for self-contained kernels too.
+    if target_functions:
+        cmd += ["--target-functions", target_functions]
     # Pin the KB framework identity so producer/consumer resolve the same kernel
     # page across differing workspace layouts. Omitted when unknown, in which
     # case forge-loop infers it from the kernel path (soft, never fatal).
@@ -2904,6 +2930,7 @@ def submit(
             operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
             experience_id=output_dir.name,
             framework=_resolve_framework(candidate, worktree_kernel),
+            target_functions=_op_name_for_target_functions(candidate),
         )
         # keep/revert is decided from forge's own published best, in descending
         # order of trust:
