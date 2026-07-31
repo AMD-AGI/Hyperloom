@@ -931,6 +931,15 @@ def apply_runtime_benchmark_overrides(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
 
+    # AgentX switch on the shared rebuild path: without this, the gpu_type block
+    # above re-pins the synthetic {framework}_{gpu_type}.sh and silently reverts
+    # a materialize-time AgentX swap (grid/baseline/profile executors rebuild via
+    # this function). No-op when HYPERLOOM_AGENTX is off. Lazy import avoids a
+    # module-load cycle with _workload_envs.
+    from ._workload_envs import apply_agentx_switch
+
+    apply_agentx_switch(bench, model_path)
+
     envs = bench.setdefault("envs", {})
     for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
         val = os.environ.get(env_key, "").strip()
