@@ -198,3 +198,19 @@ def test_build_repo_kernel_index_scans_roots(monkeypatch, repo_dir):
     resolver._build_repo_kernel_index.cache_clear()
     assert index["tri_k"] == str(repo_dir / "a.py")
     assert index["nat_k"] == str(repo_dir / "b.cu")
+
+
+def test_repo_index_marks_duplicate_name_ambiguous(monkeypatch, repo_dir):
+    # Same kernel name defined in two files: the index maps it to "" and
+    # resolve_by_kernel_name refuses to guess (no arbitrary first-seen file).
+    (repo_dir / "a.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
+    (repo_dir / "b.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(resolver, "_repo_scan_roots", lambda: (str(repo_dir),))
+    resolver._build_repo_kernel_index.cache_clear()
+    try:
+        index = resolver._build_repo_kernel_index()
+        assert index["dup_k"] == ""
+        # resolve_by_kernel_name reads the same cached index and refuses to guess.
+        assert resolver.resolve_by_kernel_name("dup_k") == ("", "unresolved")
+    finally:
+        resolver._build_repo_kernel_index.cache_clear()

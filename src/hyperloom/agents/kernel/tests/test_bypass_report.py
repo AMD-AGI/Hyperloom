@@ -147,6 +147,74 @@ def test_shape_provenance_unresolved_when_no_signal():
     assert c["shapes"] == []
 
 
+def test_shape_dispatchable_flag_by_provenance():
+    # torch_trace / capture_backfill are dispatch-grade; launch_grid / tile_name
+    # are geometry-only and must be flagged not dispatchable.
+    torch = _one(
+        {
+            "name": "k",
+            "op_name": "aten::x",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[8, 8]],
+            "op_dtypes": ["c10::BFloat16"],
+        }
+    )
+    assert torch["shape_dispatchable"] is True
+    grid = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert grid["shape_provenance"] == "launch_grid"
+    assert grid["shape_dispatchable"] is False
+
+
+def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
+    # A reusable kernel with a resolved source but only launch-grid geometry is
+    # visible but not auto-dispatchable: skip_reason must say so.
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/k.cu", "op_to_source"))
+    c = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "aiter::combine",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert c["reusable_native_kernel"] is True
+    assert c["source_file"] == "/opt/aiter/csrc/k.cu"
+    assert c["shape_dispatchable"] is False
+    assert "not dispatchable" in c["skip_reason"]
+
+
+def test_workload_roofline_uses_capture_backfill_shape():
+    # A graph-replay kernel with no own cpu_op dims but a same-name capture-time
+    # backfill shape must still contribute an analytical roofline to the totals.
+    kernels = [
+        {
+            "name": "add_rmsnorm_kernel",
+            "op_name": "",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[17, 7168]],
+            "backfill_dtypes": ["c10::BFloat16"],
+        }
+    ]
+    totals = report.build_workload_roofline_totals(_analyze(kernels), target_platform="MI300X")
+    assert totals["sigma_actual_kernel_us"] == 500.0
+    # backfill shape feeds the roofline: some bound bucket is non-zero.
+    assert (totals["compute_bound_us"] + totals["memory_bound_us"]) > 0.0
+
+
 def test_build_workload_roofline_totals_covers_all_kernels():
     # 20 kernels > any top-k cap: the workload totals must sum every device
     # kernel, not just the top-k candidate list.
@@ -766,7 +834,7 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
     md = report.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
     # dispatchable split line present
-    assert "rewritable candidate(s) have a resolved editable source" in md
+    assert "rewritable candidate(s) are auto-dispatchable" in md
     # resolved source surfaced with method
     assert "/opt/aiter/csrc/act.cu" in md and "via op_to_source" in md
     # unresolved reusable candidate flagged as not auto-dispatchable
