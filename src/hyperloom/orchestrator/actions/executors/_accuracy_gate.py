@@ -336,6 +336,14 @@ def accuracy_keep_block(
 # Flags indicating accuracy risk; matching variants must pass the gate.
 _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
     "--kv-cache-dtype",
+    # Re-quantising the weights or changing the compute dtype alters numerics at
+    # least as much as the KV cache dtype above, and by more than any other flag
+    # here, so both have to be gated. ``--quantization fp8`` is also the largest
+    # measured throughput win on an unquantised checkpoint (Qwen3-32B +34.8%,
+    # Granite-3.1-8B +9.5% on mi325X), which is exactly why it must not reach a
+    # KEEP without an accuracy verdict.
+    "--quantization",
+    "--dtype",
     "--enforce-eager",
     "--compilation-config",
     "--attention-backend",

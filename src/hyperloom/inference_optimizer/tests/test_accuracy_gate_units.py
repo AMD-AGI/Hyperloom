@@ -31,6 +31,28 @@ class TestIsHighAccuracyRisk:
     def test_high_risk_cli_flags(self, args):
         assert ag.is_high_accuracy_risk(args, None) is True
 
+    @pytest.mark.parametrize(
+        "args",
+        ["--quantization fp8", "--quantization w8a8_fp8", "--dtype float16"],
+    )
+    def test_weight_and_compute_precision_are_high_risk(self, args):
+        """These change numerics by more than the KV cache dtype already gated.
+
+        ``--quantization fp8`` is also the largest measured throughput win on an
+        unquantised checkpoint, so an ungated version of it would let the biggest
+        accuracy risk in the search space reach a KEEP unexamined.
+        """
+        assert ag.is_high_accuracy_risk(args, None) is True
+
+    @pytest.mark.parametrize(
+        "args",
+        ["--enable-torch-compile", "--torch-compile-max-bs 64", "--stream-interval 16",
+         "--chunked-prefill-size 4096"],
+    )
+    def test_throughput_only_flags_stay_low_risk(self, args):
+        """Gating these would make every seeded variant demand an eval it does not need."""
+        assert ag.is_high_accuracy_risk(args, None) is False
+
     def test_high_risk_env_keys(self):
         assert ag.is_high_accuracy_risk("", {"VLLM_ROCM_USE_AITER": "1"}) is True
         assert ag.is_high_accuracy_risk("", {"SGLANG_USE_AITER": "1"}) is True
