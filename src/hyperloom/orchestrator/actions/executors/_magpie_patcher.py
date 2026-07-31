@@ -1189,6 +1189,61 @@ def _apply_sglang_client_trust_patch_atomic(src: Path) -> bool:
     return True
 
 
+def ensure_client_trust_compat(magpie_dir: Path | str | None = None) -> bool:
+    """Public, run-time-safe entry point for the SGLang client trust patches.
+
+    ``install.sh`` is the only caller that applies the custom-tokenizer trust
+    patches, but it is not the only way Magpie lands on a box:
+    :mod:`hyperloom.inference_optimizer.cli.preflight` pip-installs Magpie on
+    its own. An unpatched tree ignores ``MAGPIE_TRUST_REMOTE_CODE`` entirely —
+    upstream's client call sites never pass the ``trust`` argument — so
+    ``benchmark_serving.py`` keeps its ``--trust-remote-code`` default of False
+    and loads the tokenizer with ``trust_remote_code=False``. A model shipping
+    custom tokenizer code then raises before a single request is issued.
+    transformers offers no environment-variable fallback for this, so the CLI
+    flag is the only opt-in.
+
+    Only :func:`_apply_sglang_client_trust_patch_atomic` is used here. It
+    covers the remote-direct and local client paths of both SGLang scripts and,
+    unlike the legacy MI300X patcher, does not require the still-flagged
+    ``run_eval`` block — so it remains applicable on a tree whose
+    eval-concurrency strip has already run.
+
+    Cheap and idempotent: an already-patched script is skipped without a write.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
+            falsy.
+
+    Returns:
+        ``True`` when every resolved SGLang script carries the trust gating, or
+        when no SGLang script exists (not applicable). ``False`` when a script
+        drifted from the expected shape and could not be patched.
+    """
+    scripts = [
+        s
+        for s in (
+            _resolve_sglang_mi300x_script_path(magpie_dir),
+            _resolve_sglang_mi355x_script_path(magpie_dir),
+        )
+        if s is not None
+    ]
+    if not scripts:
+        log.info(
+            "_magpie_patcher: no SGLang MI300X/MI355X script resolved — "
+            "skipping client trust patches (not applicable)",
+        )
+        return True
+    with _file_lock(_LOCK_PATH):
+        # Materialized, not short-circuited: every script must be attempted so
+        # one drifted file cannot leave a healthy sibling unpatched.
+        results = [
+            _is_sglang_client_trust_patched(s) or _apply_sglang_client_trust_patch_atomic(s)
+            for s in scripts
+        ]
+    return all(results)
+
+
 @dataclass(frozen=True)
 class MagpiePatchStatus:
     atomic_ok: bool

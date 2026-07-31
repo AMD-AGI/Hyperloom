@@ -1061,6 +1061,61 @@ def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> b
     return ok
 
 
+def _ensure_client_trust_compat(magpie_path: str) -> bool:
+    """Assert the custom-tokenizer trust patch on the resolved Magpie tree.
+
+    ``MAGPIE_TRUST_REMOTE_CODE=1`` is set by default for every run, but it is
+    inert on an unpatched Magpie: upstream's SGLang client call sites never
+    pass the ``trust`` argument, so ``benchmark_serving.py`` falls back to its
+    ``--trust-remote-code`` default of False and builds the tokenizer with
+    ``trust_remote_code=False``. For a model shipping custom tokenizer code
+    (Kimi, some Qwen / DeepSeek / ChatGLM) transformers then refuses to execute
+    it and the benchmark client dies while synthesizing prompts — before any
+    request reaches the server. transformers has no environment-variable
+    escape hatch, so the CLI flag is the only opt-in.
+
+    ``install.sh`` applies the patch, but preflight pip-installs Magpie on its
+    own, so a preflight-only box never gets it. Re-assert it here.
+
+    Multi-node only, keeping the blast radius off the single-node path: the
+    remote-direct client this unblocks is the multi-node one. Single-node keeps
+    whatever ``install.sh`` did (or did not) leave behind.
+
+    Warn-only: a drifted script leaves the run usable for every model that does
+    not need remote code, which is the common case.
+
+    Args:
+        magpie_path: Resolved Magpie root (``$MAGPIE_PATH``); may be empty.
+
+    Returns:
+        ``True`` when every resolved SGLang script carries the trust gating,
+        none was applicable, or the run is single-node.
+    """
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return True
+    try:
+        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+            ensure_client_trust_compat,
+        )
+
+        ok = ensure_client_trust_compat(magpie_path or None)
+    except Exception as exc:  # noqa: BLE001 — preflight must not die here
+        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
+        return False
+    if not ok:
+        print(
+            "Preflight: WARNING — could not apply the custom-tokenizer trust "
+            "patch to a Magpie SGLang script "
+            f"(MAGPIE_PATH={magpie_path or '<unset>'}). MAGPIE_TRUST_REMOTE_CODE=1 "
+            "will not reach benchmark_serving.py, so a model shipping custom "
+            "tokenizer code will fail to load its tokenizer before issuing any "
+            "request. Models without remote code are unaffected."
+        )
+    return ok
+
+
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
 
@@ -1395,6 +1450,11 @@ def _preflight(
     # RUN_EVAL=true baseline before any results*.json exists. Patch the trees we
     # just materialized, now that both paths are known.
     if _magpie_backend_active:
+        # Trust patch first, mirroring install.sh: the eval-concurrency strip
+        # removes the very `run_eval ... --concurrent-requests` line the legacy
+        # MI300X trust patcher matches on, so the reverse order would leave a
+        # tree permanently unpatchable by that path.
+        _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
         _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
 
     # --- node / claude / codex CLI presence (WARN-only) ---
