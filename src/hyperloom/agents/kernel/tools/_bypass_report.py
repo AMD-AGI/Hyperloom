@@ -569,9 +569,16 @@ def build_candidates(
     ):
         c["priority_rank"] = rank
 
-    # ``routable_kernels`` = reusable-with-resolved-source subset dispatchable to
-    # kernel-opt; ``hot_kernels`` stays the FULL ranked hotspot set.
-    routable_kernels = [c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")]
+    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt:
+    # reusable + resolved source + a dispatch-grade operand shape. A geometry-only
+    # (launch_grid/tile_name) shape is rejected by the kernel-opt gate, so those
+    # kernels stay in ``skipped_kernels`` and never re-enter the untried queue.
+    # ``hot_kernels`` stays the FULL ranked hotspot set.
+    routable_kernels = [
+        c
+        for c in hot_kernels
+        if c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")
+    ]
     # Complement within ``hot_kernels`` so the contract
     # ``hot_kernels == routable_kernels + skipped_kernels`` holds.
     routable_ids = {c["kernel_id"] for c in routable_kernels}
@@ -633,6 +640,14 @@ def build_summary(
         row = _audit_row(c)
         row["skip_reason"] = c["skip_reason"]
         skipped.append(row)
+    # Reusable kernels that resolved a source but were held out of ``tasks``
+    # because their shape is geometry-only (launch_grid/tile_name). Surfaced for
+    # audit so the count reconciles with the "auto-dispatchable" report wording.
+    geometry_only_skipped_count = sum(
+        1
+        for c in candidates.get("skipped_kernels") or []
+        if c.get("reusable_native_kernel") and c.get("source_file") and not c.get("shape_dispatchable")
+    )
     # Compact task-group projection for the audit view.
     group_entries = [
         {
@@ -657,6 +672,10 @@ def build_summary(
         "skipped": skipped,
         "task_groups": group_entries,
         "task_count": len(tasks),
+        # ``tasks`` already excludes geometry-only kernels, so dispatchable_count
+        # == task_count; kept explicit so the audit view states dispatchability.
+        "dispatchable_count": len(tasks),
+        "geometry_only_skipped_count": geometry_only_skipped_count,
         "skipped_count": len(skipped),
         "task_group_count": len(group_entries),
         "trace_health_warnings": list(trace_health_warnings or []),
