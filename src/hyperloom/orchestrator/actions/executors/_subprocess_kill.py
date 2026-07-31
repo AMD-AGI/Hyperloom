@@ -234,6 +234,12 @@ _SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
 # ``error_class="detokenizer_stall"``.
 DETOKENIZER_STALL_RETURNCODE: int = -911
 
+# Sentinel ``returncode`` returned by the _run_magpie AgentX hook when the
+# execution-boundary preflight fails (aiperf missing or not weka-trace capable)
+# before any benchmark launches. Distinct so callers label it
+# ``error_class="agentx_preflight"`` and surface the guidance instead of crashing.
+AGENTX_PREFLIGHT_RETURNCODE: int = -912
+
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
 # detokenizer-stall clock start. Covers the uvicorn frontend (vLLM + sglang) and
