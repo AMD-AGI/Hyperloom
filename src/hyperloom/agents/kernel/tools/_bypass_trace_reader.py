@@ -433,7 +433,9 @@ def _finalize(
     # eager/capture-time launch. Record the first shape-carrying meta per kernel
     # name so a later shapeless launch can inherit it (provenance downgrades).
     kern_name_backfill_meta: dict[str, dict[str, Any]] = {}
-    # Name-keyed launch geometry (grid/block), first-seen per kernel name.
+    # Name-keyed launch geometry (grid/block): first launch that actually carries
+    # geometry wins. Order-independent, so a shapeless graph-replay launch seen
+    # first does not shadow a later eager launch that recorded grid/block.
     kern_name_launch_geom: dict[str, tuple[Any, Any]] = {}
     for name, dur, corr, _ts, _end in k_events:
         extid = corr_to_extid.get(corr) if corr is not None else None

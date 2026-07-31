@@ -30,10 +30,13 @@ from __future__ import annotations
 import functools
 import importlib.util
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
 
@@ -237,8 +240,6 @@ def resolve_source(
     return sources[0], "op_to_source"
 
 
-# Length-prefixed token of an Itanium name (e.g. "5aiter" -> "aiter").
-_ITANIUM_TOKEN_RE = re.compile(r"(\d+)")
 # Triton kernel definition: @triton.jit then optional decorators then def NAME.
 _TRITON_DEF_RE = re.compile(r"@triton\.jit[^\n]*\n(?:\s*@[^\n]*\n)*\s*def\s+(\w+)")
 # Native kernel definition: __global__ with optional qualifiers then NAME.
@@ -311,7 +312,12 @@ def _repo_scan_roots() -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=1)
 def _build_repo_kernel_index() -> dict[str, str]:
-    """Map kernel function name -> source path by scanning repo roots once."""
+    """Map kernel function name -> source path by scanning repo roots once.
+
+    A name that resolves to more than one distinct source path is ambiguous and
+    mapped to ``""`` so :func:`resolve_by_kernel_name` refuses it rather than
+    routing a rewrite at an arbitrary first-seen file.
+    """
     index: dict[str, str] = {}
     for root in _repo_scan_roots():
         for dirpath, _dirs, files in os.walk(root):
@@ -336,7 +342,14 @@ def _build_repo_kernel_index() -> dict[str, str]:
                 if marker not in text:
                     continue
                 for match in pattern.finditer(text):
-                    index.setdefault(match.group(1), path)
+                    name = match.group(1)
+                    prev = index.get(name)
+                    if prev is None:
+                        index[name] = path
+                    elif prev and prev != path:
+                        # Same kernel name in two files: ambiguous, do not guess.
+                        log.info("repo scan: kernel name %r is ambiguous (%s vs %s)", name, prev, path)
+                        index[name] = ""
     return index
 
 
@@ -344,7 +357,8 @@ def resolve_by_kernel_name(device_kernel_name: str) -> tuple[str, str]:
     """Resolve a device kernel name to an editable source via repo scan.
 
     Demangles the kernel name and looks it up in the repo kernel index, returning
-    ``(path, "repo_scan")`` on an editable on-disk hit, else ``("", "unresolved")``.
+    ``(path, "repo_scan")`` on an unambiguous editable on-disk hit, else
+    ``("", "unresolved")`` (an empty index entry marks an ambiguous name).
     """
     bare = _demangle_kernel_name(device_kernel_name)
     if not bare:

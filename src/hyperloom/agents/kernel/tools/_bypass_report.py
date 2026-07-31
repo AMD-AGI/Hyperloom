@@ -59,6 +59,12 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak"]
 
+# Shape provenances that carry real operand dims and satisfy the kernel-opt
+# dispatch gate. launch_grid / tile_name are coarse geometry (not operand dims),
+# so a kernel with only those is visible but NOT auto-dispatchable. Keep this in
+# sync with request_handlers._ALLOWED_SHAPE_PROVENANCE.
+_DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill", "tuning_csv"})
+
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
 _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}
 
@@ -504,6 +510,10 @@ def build_candidates(
             "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,
             "shape_provenance": shape_provenance,
+            # launch_grid / tile_name shapes are geometry, so the kernel-opt gate
+            # rejects them. Mark whether the shape actually satisfies dispatch so
+            # the report and routing do not claim a geometry-only kernel is ready.
+            "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
         }
         # Analytical roofline: derive bound_type / AI / efficiency from captured
         # shapes + measured time for EVERY estimable kernel (rocprof enrichment
@@ -513,7 +523,7 @@ def build_candidates(
         # poison the roofline -- skip analytical estimation for them.
         _roofline_shape = (
             shape_entries[0]["shape"]
-            if shape_entries and shape_provenance in ("torch_trace", "capture_backfill")
+            if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE
             else ""
         )
         rl = compute_roofline(
@@ -525,6 +535,12 @@ def build_candidates(
         )
         if rl:
             cand.update(rl)
+        # A reusable kernel with a resolved source but only a geometry shape
+        # (launch_grid / tile_name) is visible but not auto-dispatchable: the
+        # kernel-opt gate requires operand dims. Surface that in skip_reason so
+        # it is not silently presented as ready to optimize.
+        if kc.reusable and source_file and not cand["shape_dispatchable"]:
+            cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
         # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no
         # analytical efficiency, headroom=1 so it degrades to gpu_pct.
         eff = cand.get("efficiency_percent")
@@ -921,7 +937,9 @@ def render_analysis_md(
     # One P-item per routable candidate (ranked by optimization ROI). %E2E and
     # launcher Kernel Path are not modelled by bypass.
     routable = [c for c in hot if c.get("reusable_native_kernel")]
-    dispatchable = [c for c in routable if c.get("source_file")]
+    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape;
+    # a geometry-only (launch_grid/tile_name) shape does not satisfy the gate.
+    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
     p_items = []
     for i, c in enumerate(routable, start=1):
         shapes = c.get("input_shapes") or c.get("shapes") or []
@@ -1061,9 +1079,12 @@ def _render_bypass_extra_sections(
         L.append("_No rewritable compute-kernel candidates identified._")
         L.append("")
     else:
+        with_source = [c for c in routable if c.get("source_file")]
         L.append(
-            f"_{len(dispatchable)} of {len(routable)} rewritable candidate(s) have a resolved "
-            f"editable source (auto-dispatchable to kernel-opt); the rest need a source first._"
+            f"_{len(dispatchable)} of {len(routable)} rewritable candidate(s) are auto-dispatchable "
+            f"(resolved editable source AND a dispatch-grade operand shape); "
+            f"{len(with_source) - len(dispatchable)} have a source but only a geometry shape, "
+            f"and the rest need a source first._"
         )
         L.append("")
         for i, c in enumerate(routable, start=1):
@@ -1080,9 +1101,15 @@ def _render_bypass_extra_sections(
             src = c.get("source_file") or ""
             if src:
                 tg = (c.get("task_group") or {}).get("task_group_id") or ""
+                _prov = c.get("shape_provenance") or "unresolved"
+                _dispatch_note = (
+                    "dispatch-grade shape"
+                    if c.get("shape_dispatchable")
+                    else f"geometry-only shape ({_prov}) — NOT auto-dispatchable, needs operand dims"
+                )
                 L.append(
                     f"**Source**: `{src}` (via {c.get('source_resolution_method') or 'unknown'}); "
-                    f"shapes captured: {'yes' if c.get('input_shapes') else 'no'}"
+                    f"{_dispatch_note}"
                     + (f"; task group `{tg}`" if tg else "")
                     + "."
                 )
@@ -1227,7 +1254,14 @@ def build_workload_roofline_totals(
             continue
         sigma_actual += dur
         kc = classify_kernel(k.get("name", "") or "", op_name=k.get("op_name", "") or "")
-        shape_entries = _trace_shape_entries(k.get("op_shapes") or [], k.get("op_dtypes") or [], k.get("count") or 0)
+        _count = k.get("count") or 0
+        # Match the candidate-side waterfall for dispatch-grade shapes: own
+        # cpu_op dims, then the same-name capture-time backfill. Geometry
+        # fallbacks (launch_grid/tile_name) are intentionally excluded so they
+        # do not poison the analytical roofline.
+        shape_entries = _trace_shape_entries(k.get("op_shapes") or [], k.get("op_dtypes") or [], _count)
+        if not shape_entries:
+            shape_entries = _trace_shape_entries(k.get("backfill_shapes") or [], k.get("backfill_dtypes") or [], _count)
         rl = (
             compute_roofline(
                 category=kc.category,
