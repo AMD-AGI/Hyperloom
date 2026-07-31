@@ -132,6 +132,34 @@ def _coerce_args_str(value: Any) -> str:
     return str(value)
 
 
+# Audit/provenance metadata stashed on a GridVariant that must survive being
+# rebuilt into a derived variant.
+_CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
+    "provenance",
+    "scope",
+    "overlay_pythonpath",
+    "kb_evidence",
+    "pr_evidence",
+    "source_evidence",
+)
+
+
+def _carry_variant_metadata(src: Any, dst: Any) -> Any:
+    """Copy the carried audit metadata from ``src`` onto ``dst``.
+
+    Args:
+        src: The variant to read metadata from.
+        dst: The derived variant to stamp.
+
+    Returns:
+        ``dst``, for chaining.
+    """
+    for attr in _CARRIED_VARIANT_ATTRS:
+        if hasattr(src, attr):
+            setattr(dst, attr, getattr(src, attr))
+    return dst
+
+
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
     """Return non-default remove/unset/replace controls for ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
@@ -1005,16 +1033,7 @@ class ExploreExecutor:
                     unset_envs=run_unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
-                for attr in (
-                    "provenance",
-                    "scope",
-                    "overlay_pythonpath",
-                    "kb_evidence",
-                    "pr_evidence",
-                    "source_evidence",
-                ):
-                    if hasattr(gv, attr):
-                        setattr(run_gv, attr, getattr(gv, attr))
+                _carry_variant_metadata(gv, run_gv)
                 # The decision round is timed against a throughput-only anchor, so
                 # it measures throughput only: the warmup round already evaluated
                 # accuracy and ``parse_eval_results`` falls back to that score.
@@ -1024,25 +1043,18 @@ class ExploreExecutor:
                 if use_warm_decision:
                     decision_envs = dict(run_extra_envs)
                     decision_envs["RUN_EVAL"] = "false"
-                    decision_gv = GridVariant(
-                        name=gv.name,
-                        extra_server_args=gv.extra_server_args,
-                        extra_envs=decision_envs,
-                        note=gv.note,
-                        remove_args=run_remove_args,
-                        unset_envs=run_unset_envs,
-                        args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                    decision_gv = _carry_variant_metadata(
+                        run_gv,
+                        GridVariant(
+                            name=gv.name,
+                            extra_server_args=gv.extra_server_args,
+                            extra_envs=decision_envs,
+                            note=gv.note,
+                            remove_args=run_remove_args,
+                            unset_envs=run_unset_envs,
+                            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                        ),
                     )
-                    for attr in (
-                        "provenance",
-                        "scope",
-                        "overlay_pythonpath",
-                        "kb_evidence",
-                        "pr_evidence",
-                        "source_evidence",
-                    ):
-                        if hasattr(run_gv, attr):
-                            setattr(decision_gv, attr, getattr(run_gv, attr))
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
