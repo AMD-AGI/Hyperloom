@@ -89,8 +89,11 @@ KubeRay cluster and Hyperloom drives them through the Ray Dashboard:
   its entrypoint to `tail -f /dev/null` so the cluster stays up instead of
   finishing a job and tearing itself down.
 
-Example: `harbor…/custom/primussafe/sglang:v0.5.11-rocm722-mi30x-ray2.44.1-lmeval2`
-carries `ray 2.44.1` and `click 8.1.8` on top of the sglang base.
+Example: `…/custom/primussafe/sglang:v0.5.15-rocm720-mi30x-ray2.44.1` adds
+`ray 2.44.1` and `click 8.1.8` to the `lmsysorg/sglang-rocm:v0.5.15-rocm720-mi30x`
+base, which ships neither. Keep click below 8.2 whatever the Ray version claims:
+ray 2.44.1 declares only `click>=7.0`, but click 8.2 changed `Sentinel` and ray's
+CLI then dies on import, so KubeRay's `ray start` never runs.
 
 ## Shared filesystem (mandatory)
 

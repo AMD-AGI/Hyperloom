@@ -429,3 +429,38 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
 )
 def test_remove_moe_runner_backend_arg(args, expected):
     assert _remove_moe_runner_backend_arg(args) == expected
+
+
+# aiter CK fused-MoE shape support (gates the forge fmoe_ck tuner)
+
+
+@pytest.mark.parametrize(
+    "tp,supported",
+    [(1, True), (2, True), (4, False), (8, False), (16, False)],
+)
+def test_aiter_ck_fused_moe_needs_128_aligned_partition(tmp_path, tp, supported) -> None:
+    """Qwen3-30B-A3B's 768 shards below the CK kernel's 128 alignment past TP 2."""
+    model = _write_model_config(
+        tmp_path / "Qwen-Qwen3-30B-A3B",
+        {
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+            "num_experts": 128,
+            "moe_intermediate_size": 768,
+        },
+    )
+    assert cli_model_gate.model_supports_aiter_ck_fused_moe(model, tp) is supported
+
+
+def test_aiter_ck_fused_moe_support_defaults_open(tmp_path, dense_model) -> None:
+    """Dense models and unreadable configs leave the choice to sglang."""
+    # Never reaches the MoE kernel, so nothing to gate.
+    assert cli_model_gate.model_supports_aiter_ck_fused_moe(dense_model, 8) is True
+    # No config to judge by: do not skip work on a guess.
+    assert cli_model_gate.model_supports_aiter_ck_fused_moe(str(tmp_path / "absent"), 8) is True
+    # MoE without a declared intermediate size is equally undecidable.
+    moe_no_size = _write_model_config(
+        tmp_path / "moe-no-size",
+        {"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe", "num_experts": 128},
+    )
+    assert cli_model_gate.model_supports_aiter_ck_fused_moe(moe_no_size, 8) is True

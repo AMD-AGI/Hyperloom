@@ -713,6 +713,45 @@ def _is_quark_mx_fp4_entry(entry: Any) -> bool:
     return weight.get("is_dynamic") is not True and inputs.get("is_dynamic") is not False
 
 
+def model_supports_aiter_ck_fused_moe(model_path: str, tp: int) -> bool:
+    """Whether aiter's CK fused-MoE can serve this checkpoint at this TP.
+
+    The CK kernel only accepts a 128-aligned ``intermediate_size_per_partition``
+    (``moe_intermediate_size // tp``); anything else makes CK reject the GEMM
+    problem, so sglang either dies or silently serves corrupted output depending
+    on the build. Qwen3-30B-A3B is the common case: 768 shards to 96 at TP 8.
+
+    Non-MoE checkpoints answer ``True`` — they never reach this kernel, so there
+    is nothing to gate. Soft-degrades to ``True`` when the config is missing or
+    unreadable, leaving the decision to sglang rather than skipping work on a
+    guess.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+        tp (int): Tensor-parallel size the server runs with.
+
+    Returns:
+        bool: ``False`` only when a known MoE intermediate size shards to a
+        non-128-aligned partition.
+    """
+    if not _model_is_moe(model_path):
+        return True
+    data = _load_model_config_dict(model_path)
+    if data is None:
+        return True
+    candidates = [data]
+    nested = data.get("text_config")
+    if isinstance(nested, dict):
+        candidates.append(nested)
+    for cfg in candidates:
+        size = cfg.get("moe_intermediate_size")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            continue
+        shards = max(1, int(tp or 1))
+        return (size // shards) % 128 == 0
+    return True
+
+
 def _model_moe_runner_requires_aiter(model_path: str) -> bool:
     """Best-effort detect a MoE quant scheme that only the aiter runner serves.
 
