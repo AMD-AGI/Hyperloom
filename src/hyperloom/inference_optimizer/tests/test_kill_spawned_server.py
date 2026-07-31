@@ -22,6 +22,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
+    _scan_logs_increment,
     _scan_server_log_increment,
     _server_log_shows_death,
     kill_my_spawned_server,
@@ -516,6 +517,33 @@ def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
         f.write("HYPERLOOM_EVAL_START\n")
     off4, ready4, prog4, ev4 = _scan_server_log_increment(str(log_path), off3)
     assert ev4 is True and ready4 is False and prog4 is False and off4 == log_path.stat().st_size
+
+
+def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
+    """The real Magpie layout: the caller passes ``<output_dir>/server.log``,
+    which does not exist, while the engine log and the eval-start marker live in
+    a ``benchmark_*/`` subdir -- the marker only ever reaching stderr."""
+    output_dir = tmp_path / "measure_round"
+    bench = output_dir / "benchmark_atom_20260731_085850"
+    bench.mkdir(parents=True)
+    (bench / "server.log").write_text("Application startup complete\n")
+    (bench / "benchmark_stderr.log").write_text("running benchmark\n")
+    passed = str(output_dir / "server.log")
+    assert not Path(passed).exists()
+
+    offsets: dict[str, int] = {}
+    ready, _prog, eval_start, grew = _scan_logs_increment(passed, offsets)
+    assert ready is True and eval_start is False and grew is True
+
+    # The marker lands in stderr, never in server.log.
+    with (bench / "benchmark_stderr.log").open("a") as f:
+        f.write("HYPERLOOM_EVAL_START\n")
+    ready2, _prog2, eval_start2, grew2 = _scan_logs_increment(passed, offsets)
+    assert eval_start2 is True and ready2 is False and grew2 is True
+
+    # Nothing new appended: no re-trigger, offsets stay put.
+    _r3, _p3, eval_start3, grew3 = _scan_logs_increment(passed, offsets)
+    assert eval_start3 is False and grew3 is False
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
