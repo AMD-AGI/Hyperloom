@@ -34,6 +34,11 @@
 /*.yml                                                          @AMD-AGI/SaFE
 /*.toml                                                         @AMD-AGI/SaFE
 
+# Hyperloom Core
+/src/hyperloom/inference_optimizer/                             @AMD-AGI/SaFE
+/src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/                                   @AMD-AGI/SaFE
+
 # TraceLens Agent (agent-driven analysis route + agent-output sanitizer)
 /src/hyperloom/agents/kernel/tools/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
