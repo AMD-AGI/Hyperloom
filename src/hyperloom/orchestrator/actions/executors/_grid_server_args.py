@@ -157,7 +157,11 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    return " ".join(out)
+    # ``shlex.split`` above strips the inner double quotes of any JSON-valued
+    # flag (``--compilation-config {"cudagraph_mode":"FULL"}`` ->
+    # ``{cudagraph_mode:FULL}``); re-quote/compact the JSON blobs so removal
+    # never corrupts a sibling flag that vLLM parses with ``json.loads``.
+    return _reserialize_json_blobs(" ".join(out))
 
 
 def compose_server_args(
@@ -221,6 +225,40 @@ def split_config_changes(
     return server_args, coerce_extra_envs(env_items)
 
 
+# A JSON "bareword": an identifier-like token that appears where a double-quoted
+# JSON key or string value should be (letters/digits/underscore plus the ``.``,
+# ``/``, ``-`` common in model ids and paths). Numbers, ``true``/``false``/
+# ``null`` are handled separately so they stay unquoted.
+_JSON_BAREWORD = r"[A-Za-z_][A-Za-z0-9_./-]*"
+_UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
+_UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
+
+
+def _repair_unquoted_json(blob: str) -> str | None:
+    """Repair a JSON object/array whose double quotes were stripped.
+
+    A shlex round-trip (``shlex.split`` then space-join without re-quoting)
+    strips the inner double quotes of a JSON-valued server arg, turning a
+    stored-valid ``{"method":"ngram"}`` into ``{method:ngram}`` — which vLLM's
+    ``json.loads`` rejects at boot. Re-quote bare object keys and bare string
+    values, then VALIDATE by parsing: return the compact valid-JSON string, or
+    ``None`` when it still does not parse (caller keeps the blob verbatim).
+    """
+    def _quote_value(m: "re.Match[str]") -> str:
+        prefix, word = m.group(1), m.group(2)
+        if word in ("true", "false", "null"):
+            return m.group(0)  # JSON literals stay unquoted
+        return f'{prefix}"{word}"'
+
+    # Keys first (so a re-quoted key is not re-matched as a value), then values.
+    candidate = _UNQUOTED_KEY_RE.sub(r'\1"\2"\3', blob)
+    candidate = _UNQUOTED_VALUE_RE.sub(_quote_value, candidate)
+    try:
+        return json.dumps(json.loads(candidate), separators=(",", ":"))
+    except Exception:
+        return None
+
+
 def compact_json_server_args(
     server_args: str | None,
     framework: str | None,
@@ -244,6 +282,21 @@ def compact_json_server_args(
     if not args or ("{" not in args and "[" not in args):
         return args
     if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
+        return args
+    return _reserialize_json_blobs(args)
+
+
+def _reserialize_json_blobs(args: str) -> str:
+    """Compact (and, when needed, repair) every JSON object/array in ``args``.
+
+    Framework-agnostic core shared by :func:`compact_json_server_args` and
+    :func:`remove_server_args`. Each balanced ``{...}``/``[...]`` blob is
+    re-serialised with compact separators; a blob whose inner double quotes were
+    stripped by an earlier shlex round-trip is repaired via
+    :func:`_repair_unquoted_json`, and anything that still does not parse is left
+    verbatim (never worse than the input).
+    """
+    if "{" not in args and "[" not in args:
         return args
     out: list[str] = []
     i = 0
@@ -279,7 +332,13 @@ def compact_json_server_args(
             try:
                 out.append(json.dumps(json.loads(blob), separators=(",", ":")))
             except Exception:
-                out.append(blob)
+                # A prior shlex round-trip can strip the JSON double quotes,
+                # leaving an unquoted-bareword object (``{"m":"ngram"}`` ->
+                # ``{m:ngram}``) that vLLM's json.loads rejects at boot. Try to
+                # re-quote bare keys/values; fall back to verbatim if that still
+                # does not parse (never worse than before).
+                repaired = _repair_unquoted_json(blob)
+                out.append(repaired if repaired is not None else blob)
             i = j
         else:
             out.append(ch)

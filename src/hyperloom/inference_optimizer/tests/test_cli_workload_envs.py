@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -192,6 +194,38 @@ def test_operator_server_args_dedup_vllm_single_value_flags(tmp_path, monkeypatc
     assert args.count("--gpu-memory-utilization") == 1
     assert "--gpu-memory-utilization 0.85" in args
     assert "--trust-remote-code" in args
+
+
+def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
+    """JSON-valued flags appended via extra_server_args stay valid JSON.
+
+    The GEMM shape-capture path appends ``current_best.extra_server_args`` (which
+    can carry ``--compilation-config`` / ``--speculative-config`` JSON blobs) onto
+    the reused baseline config. A prior shlex round-trip in that merge stripped
+    the double quotes -> ``{cudagraph_mode:FULL}`` -> vLLM ``json.loads`` rejects
+    it at boot -> server never starts -> ``shape_capture_failed`` (no CSV). The
+    materialized config must therefore carry VALID JSON. Regression guard.
+    """
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(src, "vllm", {"EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"})
+    # The extra_server_args reaching shape-capture already had their JSON quotes
+    # stripped by an upstream shlex round-trip (observed in the session configs),
+    # so materialize receives the unquoted-bareword form. It must not pass this
+    # broken JSON through to the launch config; the repair restores valid JSON.
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args=(
+            "--compilation-config {cudagraph_mode:FULL} "
+            "--speculative-config {method:ngram,num_speculative_tokens:7}"
+        ),
+        args_mode="append",
+    )
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    blobs = re.findall(r"\{[^{}]*\}", args)
+    assert blobs, f"no JSON blob found in materialized args: {args!r}"
+    for blob in blobs:
+        json.loads(blob)  # must parse: broken JSON was repaired, not passed through
 
 
 def test_conc_env_ladder_materializes_as_single_baseline_conc(
