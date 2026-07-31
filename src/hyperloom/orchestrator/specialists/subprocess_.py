@@ -97,6 +97,57 @@ def _build_specialist_env() -> dict[str, str]:
     return env
 
 
+# Live wall-budget extensions granted by ``extend_lease`` while a specialist is
+# already spawned. The reap loop re-reads this every poll, so an extension moves
+# the hard kill deadline of a run that is in flight — without it, extend_lease
+# would push the task / lane / GPU leases out while the subprocess still died at
+# its original ``wall_budget_sec``. Keyed by task_id; the dispatcher clears the
+# entry when the run finishes.
+_WALL_BUDGET_EXTENSIONS: dict[str, float] = {}
+
+
+def grant_wall_budget_extension(task_id: str, extra_sec: float) -> float:
+    """Add ``extra_sec`` to a live specialist's hard wall-clock deadline.
+
+    Safe to call for a task that is not running a subprocess (the entry is
+    simply never read and is cleared on the next dispatch of that task_id).
+
+    Args:
+        task_id: The specialist task whose deadline should move.
+        extra_sec: Seconds to add; non-positive values are a no-op.
+
+    Returns:
+        The task's cumulative granted extension in seconds.
+    """
+    key = str(task_id or "").strip()
+    if not key or extra_sec <= 0:
+        return _WALL_BUDGET_EXTENSIONS.get(key, 0.0)
+    total = _WALL_BUDGET_EXTENSIONS.get(key, 0.0) + float(extra_sec)
+    _WALL_BUDGET_EXTENSIONS[key] = total
+    return total
+
+
+def wall_budget_extension(task_id: str) -> float:
+    """Return the cumulative live extension granted to ``task_id`` (0 if none).
+
+    Args:
+        task_id: The specialist task to look up.
+
+    Returns:
+        Seconds of extension granted so far.
+    """
+    return _WALL_BUDGET_EXTENSIONS.get(str(task_id or "").strip(), 0.0)
+
+
+def clear_wall_budget_extension(task_id: str) -> None:
+    """Drop any recorded extension for ``task_id``.
+
+    Args:
+        task_id: The specialist task whose entry should be removed.
+    """
+    _WALL_BUDGET_EXTENSIONS.pop(str(task_id or "").strip(), None)
+
+
 # Configuration
 @dataclass(frozen=True)
 class SpecialistSubprocessConfig:
@@ -423,6 +474,8 @@ class SpecialistSubprocessDispatcher:
                 any), exit code, timing, timeout / stale-heartbeat flags,
                 process log path, and discovered patches.
         """
+        # Drop any extension left over from a prior run of this task id.
+        clear_wall_budget_extension(task_id)
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
         process_log = workspace / "process.log"
@@ -582,10 +635,12 @@ class SpecialistSubprocessDispatcher:
                 max_seconds=max_seconds,
                 started=proc_started,
                 progress_cb=progress_cb,
+                task_id=task_id,
             )
         finally:
             if log_fh is not None:
                 log_fh.close()
+            clear_wall_budget_extension(task_id)
 
         # Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
@@ -755,6 +810,7 @@ class SpecialistSubprocessDispatcher:
         started: float,
         partial_files: tuple[Path, ...] = (),
         progress_cb: Any = None,
+        task_id: str = "",
     ) -> dict[str, Any]:
         """Poll the subprocess until it finishes, stalls, or times out.
 
@@ -776,6 +832,8 @@ class SpecialistSubprocessDispatcher:
             partial_files (tuple[Path, ...]): Candidate partial-checkpoint
                 paths polled for live progress; never an exit signal.
             progress_cb (Any): Optional async callback for each new checkpoint.
+            task_id (str): Task identifier used to pick up live
+                ``extend_lease`` wall-budget extensions each poll.
 
         Returns:
             dict[str, Any]: Outcome with ``exit_code``, ``elapsed``,
@@ -853,10 +911,12 @@ class SpecialistSubprocessDispatcher:
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
-            # Hard wall-clock cap.
-            if elapsed > max_seconds:
+            # Hard wall-clock cap — re-read each poll so an ``extend_lease``
+            # granted mid-run actually moves this deadline.
+            deadline = max_seconds + wall_budget_extension(task_id)
+            if elapsed > deadline:
                 outcome["timed_out"] = True
-                outcome["error"] = f"specialist subprocess exceeded {max_seconds:.0f}s wall-clock cap"
+                outcome["error"] = f"specialist subprocess exceeded {deadline:.0f}s wall-clock cap"
                 self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started

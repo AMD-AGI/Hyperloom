@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.actions.registry import ActionRegistry
+from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -565,6 +567,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
             ttl_sec=1800,
         )
         assert lease is not None
+        before = await c.tasks.get(task.task_id)
 
         await c._handle_intent(
             "orchestration",
@@ -577,11 +580,125 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
         # updated_at marks when the task started running; extending must not move it.
-        assert updated.updated_at == (await c.tasks.get(task.task_id)).updated_at
-        rows = await c.db.fetchall("SELECT lane FROM leases WHERE task_id=?", (task.task_id,))
+        assert updated.updated_at == before.updated_at
+        rows = await c.db.fetchall("SELECT lane, expires_at FROM leases WHERE task_id=?", (task.task_id,))
         assert [r["lane"] for r in rows] == ["research_lane"]
+        # The lane must expire at the REMAINING budget (cumulative TTL minus the
+        # elapsed run time), not at now + the full cumulative TTL.
+        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        assert expires_in <= 2400
+        started = _parse_iso_unix(updated.updated_at)
+        remaining_budget = 2400 - (time.time() - started)
+        assert abs(expires_in - remaining_budget) < 5
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks):
+    """A task that already burned most of its TTL only gets the remainder back."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-elapsed",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        await c.locks.acquire_many(
+            ["research_lane"],
+            holder_id=f"h-{task.task_id}",
+            task_id=task.task_id,
+            action="specialist",
+            ttl_sec=1800,
+        )
+        # Backdate the running mark so the task looks 1000s old.
+        started_iso = datetime.fromtimestamp(time.time() - 1000, tz=timezone.utc).isoformat()
+        await c.db.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (started_iso, task.task_id),
+        )
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+
+        rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
+        expires_in = _parse_iso_unix(str(rows[0]["expires_at"])) - time.time()
+        # 1800 + 600 cumulative, 1000 already spent -> ~1400s left, not 2400.
+        assert 1300 < expires_in < 1450
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_with_mocks):
+    """A swallowed GPU-refresh failure must not read as a clean extension."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={"needs_gpu": True},
+            idempotency_key="k-extend-gpu-fail",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+
+        async def _boom(*_a, **_kw):
+            raise RuntimeError("gpu pool down")
+
+        c.gpu_specialist_pool.extend = _boom  # type: ignore[method-assign]
+
+        recorded: list[dict] = []
+        original = c._record_observation
+
+        async def _capture(agent, topic, payload):
+            recorded.append(dict(payload))
+            return await original(agent, topic, payload)
+
+        c._record_observation = _capture  # type: ignore[method-assign]
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+
+        kinds = [r.get("kind") for r in recorded]
+        assert "extend_lease_degraded" in kinds
+        assert "extend_lease" not in kinds
+        degraded = next(r for r in recorded if r.get("kind") == "extend_lease_degraded")
+        assert "gpu pool down" in degraded["gpu_refresh_error"]
+    finally:
+        await c.stop()
+
+
+def test_extend_lease_moves_live_subprocess_deadline():
+    """extend_lease must also push out the specialist's hard wall-clock kill."""
+    from hyperloom.orchestrator.specialists import subprocess_ as _sub
+
+    _sub.clear_wall_budget_extension("task-live")
+    assert _sub.wall_budget_extension("task-live") == 0.0
+    _sub.grant_wall_budget_extension("task-live", 600)
+    assert _sub.wall_budget_extension("task-live") == 600.0
+    # Repeated extensions accumulate; a fresh dispatch clears the slate.
+    _sub.grant_wall_budget_extension("task-live", 300)
+    assert _sub.wall_budget_extension("task-live") == 900.0
+    _sub.clear_wall_budget_extension("task-live")
+    assert _sub.wall_budget_extension("task-live") == 0.0
 
 
 @pytest.mark.asyncio
@@ -637,6 +754,40 @@ async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
         assert len(entries) == 1
         assert entries[0]["from"] == "orchestration"
         assert "prefill" in entries[0]["body"]["body_md"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_specialist_prefers_worktree_inbox(coordinator_with_mocks):
+    """The production specialist has a worktree; the prompt advertises that path."""
+    import json as _json
+
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    try:
+        workspace = runs_dir(c.session_dir, "specialist", "task-wt")
+        (workspace / "worktree").mkdir(parents=True, exist_ok=True)
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.SEND_MESSAGE,
+                payload={
+                    "to": "specialist:task-wt",
+                    "topic": "observation",
+                    "body_md": "steer toward decode",
+                },
+            ),
+        )
+
+        worktree_inbox = workspace / "worktree" / "inbox.json"
+        assert worktree_inbox.exists()
+        assert not (workspace / "inbox.json").exists()
+        entries = _json.loads(worktree_inbox.read_text(encoding="utf-8"))
+        assert entries[0]["body"]["body_md"] == "steer toward decode"
     finally:
         await c.stop()
 

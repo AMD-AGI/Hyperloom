@@ -23,7 +23,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
+from .coordinator_helpers import (
+    _parse_iso_unix,
+    coerce_needs_gpu,
+    format_exc_brief,
+    serialize_verdict_advisory,
+)
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
@@ -803,8 +808,14 @@ class IntentRouter:
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time.
 
-        Refreshes the task's ``lease_ttl_sec``, its lane rows and its GPU rows
-        together, preserving ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
+        Refreshes the task's ``lease_ttl_sec``, its lane rows, its GPU rows and
+        the live subprocess wall-clock deadline together, preserving
+        ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
+
+        ``lease_ttl_sec`` is a *cumulative* budget measured from ``updated_at``
+        (when the task entered ``running``), but lane / GPU rows expire at
+        ``now + ttl``. Feeding the cumulative TTL straight into them would hand
+        back the already-elapsed time, so the refresh uses the remaining budget.
 
         Args:
             source (str): The agent requesting the extension.
@@ -827,23 +838,47 @@ class IntentRouter:
                 },
             )
             return
-        lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=new_ttl)
+        # Remaining budget = cumulative TTL minus the time already spent running.
+        running_sec = 0.0
         try:
-            gpus = await self.gpu_specialist_pool.extend(task_id, new_ttl)
-        except Exception:  # noqa: BLE001 — lane extension already landed
+            task = await self.tasks.get(task_id)
+            started = _parse_iso_unix(task.updated_at)
+            if started > 0:
+                running_sec = max(0.0, time.time() - started)
+        except Exception:  # noqa: BLE001 — fall back to the full TTL
+            log.exception("extend_lease: could not read running age for task=%s", task_id)
+        remaining_sec = max(1, int(new_ttl - running_sec))
+        lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
+        gpu_error = ""
+        try:
+            gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
+        except Exception as exc:  # noqa: BLE001 — lane extension already landed
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
+            gpu_error = repr(exc)[:200]
+        # Push the live subprocess's hard wall-clock kill deadline out too, so
+        # the extension actually buys the specialist more time to run.
+        try:
+            from ..specialists.subprocess_ import grant_wall_budget_extension
+
+            grant_wall_budget_extension(task_id, extra_sec)
+        except Exception:  # noqa: BLE001 — best-effort; lease rows already moved
+            log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
+        # A swallowed GPU failure would leave the lane extended while the GPU
+        # reaper can still reclaim the cards mid-run — report it as degraded.
         await self._record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease",
+                "kind": "extend_lease_degraded" if gpu_error else "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
                 "lease_ttl_sec": new_ttl,
+                "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
                 "gpu_rows": gpus,
+                **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )
