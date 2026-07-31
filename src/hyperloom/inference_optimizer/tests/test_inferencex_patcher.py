@@ -571,3 +571,85 @@ def test_baseline_after_materialize_applies_eval_dest_patch(tmp_path, monkeypatc
     text = lib.read_text(encoding="utf-8")
     assert 'mv -f "$jf" "${RESULT_DIR:-.}/"' in text
     assert 'mv -f "$jf" ./ ' not in text
+
+
+_EVAL_START_FIXTURE = """#!/usr/bin/env bash
+run_eval() {
+    local results_dir="$1"
+
+    # Export for append_lm_eval_summary to pick up
+    export EVAL_RESULT_DIR="$results_dir"
+    set -x
+    python3 -m lm_eval --model local-chat-completions --apply_chat_template \\
+      --tasks "${tasks_dir}"
+    local eval_exit=$?
+    set +x
+    return $eval_exit
+}
+"""
+
+
+def _write_eval_start_lib(root: Path) -> Path:
+    bench_dir = root / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_lib.sh"
+    lib.write_text(_EVAL_START_FIXTURE, encoding="utf-8")
+    return lib
+
+
+def test_eval_start_patch_emits_marker_before_lm_eval(tmp_path, monkeypatch):
+    """The marker must land after the EVAL_RESULT_DIR export and before lm_eval,
+    so the soft-deadline watcher sees it exactly when the eval begins."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_start_patched,
+    )
+
+    lib = _write_eval_start_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    rc = ensure_benchmark_lib_eval_start_patched(tmp_path)
+    assert rc is True
+    text = lib.read_text(encoding="utf-8")
+    assert 'echo "HYPERLOOM_EVAL_START" >&2' in text
+    marker_at = text.index("HYPERLOOM_EVAL_START")
+    assert text.index('export EVAL_RESULT_DIR="$results_dir"') < marker_at
+    assert marker_at < text.index("python3 -m lm_eval")
+
+
+def test_eval_start_patch_is_idempotent(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_start_patched,
+    )
+
+    lib = _write_eval_start_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    ensure_benchmark_lib_eval_start_patched(tmp_path)
+    after_first = lib.read_text(encoding="utf-8")
+    ensure_benchmark_lib_eval_start_patched(tmp_path)
+    assert lib.read_text(encoding="utf-8") == after_first
+    assert after_first.count("HYPERLOOM_EVAL_START") == 1
+
+
+def test_baseline_after_materialize_applies_eval_start_patch(tmp_path, monkeypatch):
+    """The eval-start marker is what keeps the explore overtime kill scoped to
+    the throughput phase, so the baseline hook must install it too."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_eval_start_lib(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
+
+    assert out is None
+    assert 'echo "HYPERLOOM_EVAL_START" >&2' in lib.read_text(encoding="utf-8")
