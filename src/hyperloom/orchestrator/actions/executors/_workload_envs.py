@@ -145,6 +145,34 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     return True
 
 
+def prepare_agentx_runtime(*, env, inferencex_path: str, config_path) -> "str | None":
+    """Deploy the AgentX client + capability-preflight aiperf for a run.
+
+    Shared by EVERY Magpie launch path (grid via _run_magpie AND the
+    baseline/profile shell-out) so a materialize-time swap to
+    aiperf_client.sh is always backed by a deployed script + a preflighted
+    aiperf -- otherwise the first Arbor step (baseline) points at a script
+    that was never copied into InferenceX benchmarks/.
+
+    No-op (returns None) under pytest, without an InferenceX path, or when
+    HYPERLOOM_AGENTX is off -- so the OFF path never imports the agentx
+    package (A2). Returns None on success/no-op, or an error string when
+    the aiperf preflight fails (the caller decides how to surface it).
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") or not inferencex_path:
+        return None
+    if not agentx_enabled(os.environ):
+        return None
+    from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
+    from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
+
+    try:
+        maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
+    except AgentXPreflightError as exc:
+        return f"AgentX preflight failed: {exc}"
+    return None
+
+
 # gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
 # gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
 _GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})

@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.inference_optimizer.agentx import runtime
 from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_agentx_runtime
 
 _DEPLOY = "hyperloom.inference_optimizer.agentx.deploy.deploy_agentx_assets"
 _RESOLVE = "hyperloom.inference_optimizer.agentx.preflight.resolve_aiperf_bin"
@@ -82,3 +83,54 @@ def test_incapable_bin_not_memoized(tmp_path, monkeypatch):
     with pytest.raises(AgentXPreflightError):
         runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
     assert n["p"] == 2  # a failed preflight is re-checked, not memoized
+
+
+# ── prepare_agentx_runtime: shared gate used by grid AND baseline/profile ─────
+def test_prepare_runtime_noop_under_pytest(tmp_path, monkeypatch):
+    """The pytest self-disable short-circuits even when AgentX is ON."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")  # PYTEST_CURRENT_TEST is set by pytest
+    calls = {"d": 0}
+    monkeypatch.setattr(_DEPLOY, lambda d: calls.__setitem__("d", calls["d"] + 1))
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    assert prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg) is None
+    assert calls["d"] == 0
+
+
+def test_prepare_runtime_off_noop(tmp_path, monkeypatch):
+    """OFF returns None and never deploys (A2: agentx package not imported)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    calls = {"d": 0}
+    monkeypatch.setattr(_DEPLOY, lambda d: calls.__setitem__("d", calls["d"] + 1))
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    assert prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg) is None
+    assert calls["d"] == 0
+
+
+def test_prepare_runtime_on_deploys_returns_none(tmp_path, monkeypatch):
+    """ON deploys the client + preflights, returning None on success."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    order = []
+    monkeypatch.setattr(_DEPLOY, lambda d: order.append("deploy"))
+    monkeypatch.setattr(_RESOLVE, lambda env: "/venv/bin/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: order.append("preflight"))
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    assert prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg) is None
+    assert order == ["deploy", "preflight"]
+
+
+def test_prepare_runtime_preflight_error_returns_string(tmp_path, monkeypatch):
+    """A failed preflight is returned as an error string (caller surfaces it)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+
+    def _raise(b, **k):
+        raise AgentXPreflightError("no weka-trace capability")
+
+    monkeypatch.setattr(_CHECK, _raise)
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    msg = prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg)
+    assert msg is not None and "AgentX preflight failed" in msg and "weka-trace" in msg
