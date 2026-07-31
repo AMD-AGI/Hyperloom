@@ -3357,9 +3357,12 @@ class FrameworkPhase(PhaseHandler):
         batch_id = ""
         any_call_ok = False
         last_exc: Exception | None = None
-        # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
-        per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
+        # ``timeout_sec`` bounds one repo, not the whole fan-out: each call is an
+        # independent primus_cortex round-trip, so dividing it starves every repo
+        # once the repo list grows (9 repos drove it to the 30s floor while a
+        # single discover needs ~20s plus PR-Monitor latency). The whole-phase
+        # bound is the caller's budget plus DISCOVER_FAILURE_RETRY_LIMIT.
+        per_repo_timeout = max(timeout_sec, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
         for repo_url in repo_urls:
             try:
                 repo_payload = await _fa_client.phase_discover(

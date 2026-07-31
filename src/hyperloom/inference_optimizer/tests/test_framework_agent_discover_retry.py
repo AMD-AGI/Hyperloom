@@ -192,6 +192,30 @@ def test_discover_timeout_default_used_when_override_zero(
     assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
 
 
+def test_discover_timeout_is_per_repo_not_divided(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Each repo gets the full timeout: dividing it starved every call once the
+    repo list grew (9 repos -> the 30s floor, below a real ~20s discover)."""
+    seen: list[float] = []
+
+    async def _spy(**kwargs: Any) -> dict[str, Any]:
+        seen.append(kwargs["timeout_sec"])
+        return {"batch_id": "b", "candidates": []}
+
+    repos = [f"https://github.com/o/r{i}.git" for i in range(9)]
+    monkeypatch.setattr(_fa_client, "phase_discover", _spy)
+    stub = _CoordinatorStub(tmp_path)
+    stub._framework_agent_discover_repo_urls = lambda _framework: repos  # type: ignore[method-assign]
+    stub.framework_agent_discover_timeout_sec = 180.0
+
+    asyncio.run(_call_discover(stub))
+
+    assert len(seen) == len(repos)
+    assert seen == [180.0] * len(repos)
+
+
 # Enqueue failure records progress row.
 class _TasksStub:
     """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""

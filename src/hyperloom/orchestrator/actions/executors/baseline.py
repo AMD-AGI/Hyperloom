@@ -59,7 +59,10 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
-from ._inferencex_patcher import ensure_benchmark_lib_eval_dest_patched
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_eval_dest_patched,
+    ensure_benchmark_lib_eval_start_patched,
+)
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -1140,6 +1143,14 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 — patch is best-effort
                 log.warning(
                     "baseline_executor: eval-dest patch skipped for %s: %s",
+                    ix_root,
+                    exc,
+                )
+            try:
+                ensure_benchmark_lib_eval_start_patched(Path(ix_root))
+            except Exception as exc:  # noqa: BLE001 — patch is best-effort
+                log.warning(
+                    "baseline_executor: eval-start patch skipped for %s: %s",
                     ix_root,
                     exc,
                 )
