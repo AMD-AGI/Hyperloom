@@ -930,9 +930,16 @@ def _run_magpie(
         from ._workload_envs import agentx_enabled
 
         if agentx_enabled(os.environ):
+            from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
             from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
 
-            maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
+            try:
+                maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
+            except AgentXPreflightError as exc:
+                # Fail loud but STRUCTURED: return a nonzero rc so the caller records
+                # a failed benchmark rather than crashing the whole grid.
+                log.error("AgentX preflight failed; failing this benchmark: %s", exc)
+                return (2, "", f"AgentX preflight failed: {exc}")
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
