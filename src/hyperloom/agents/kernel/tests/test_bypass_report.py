@@ -114,6 +114,23 @@ def test_shape_provenance_capture_backfill():
     assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
 
 
+def test_backfill_ambiguous_skips_capture_backfill():
+    c = _one(
+        {
+            "name": "dyn_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[64, 64]],
+            "backfill_dtypes": ["c10::BFloat16"],
+            "backfill_ambiguous": True,
+        }
+    )
+    assert c["shape_provenance"] != "capture_backfill"
+    assert c["shape_dispatchable"] is False
+
+
 def test_shape_provenance_launch_grid():
     # No cpu_op shape and no backfill: fall to launch grid/block geometry.
     c = _one(

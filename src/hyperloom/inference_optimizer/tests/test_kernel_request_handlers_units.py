@@ -3184,10 +3184,14 @@ class TestReconcileKernelIdForSingleBatch:
     ]
 
     def test_pins_mismatched_id_to_sole_candidate(self):
-        assert krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS) == "k002"
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS)
+        assert kid == "k002"
+        assert pinned is True
 
     def test_keeps_exact_match(self):
-        assert krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS) == "k002"
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS)
+        assert kid == "k002"
+        assert pinned is False
 
 
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id

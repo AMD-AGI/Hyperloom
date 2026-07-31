@@ -59,11 +59,7 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak"]
 
-# Shape provenances that carry real operand dims and satisfy the kernel-opt
-# dispatch gate. launch_grid / tile_name are coarse geometry (not operand dims),
-# so a kernel with only those is visible but NOT auto-dispatchable. Keep this in
-# sync with request_handlers._ALLOWED_SHAPE_PROVENANCE.
-_DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill", "tuning_csv"})
+from hyperloom.common.kernel_shape_contract import DISPATCHABLE_SHAPE_PROVENANCE as _DISPATCHABLE_SHAPE_PROVENANCE
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
 _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}
@@ -162,9 +158,8 @@ def _launch_grid_shape_entries(grid: Any, block: Any, call_count: int) -> list[d
     """Build a shape entry from a kernel's launch geometry (grid/block).
 
     Fallback for kernels whose correlation->cpu_op chain is broken (Triton
-    direct-launch, graph replay): the launch grid/block is not the operand
-    tensor shape but a coarse, dispatchable geometry. Returns ``[]`` when no
-    positive dimension is present.
+    direct-launch, graph replay): the launch grid/block is coarse geometry, not
+    dispatch-grade operand dims. Returns ``[]`` when no positive dimension is present.
     """
     def _dims(v: Any) -> list[int]:
         out: list[int] = []
@@ -439,7 +434,7 @@ def build_candidates(
         op_dtypes = k.get("op_dtypes") or []
         shape_entries = _trace_shape_entries(op_shapes, op_dtypes, _count)
         shape_provenance = "torch_trace" if shape_entries else ""
-        if not shape_entries:
+        if not shape_entries and not k.get("backfill_ambiguous"):
             bf_shapes = k.get("backfill_shapes") or []
             bf_dtypes = k.get("backfill_dtypes") or []
             shape_entries = _trace_shape_entries(bf_shapes, bf_dtypes, _count)

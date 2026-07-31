@@ -108,6 +108,26 @@ def test_launch_geom_and_backfill_threaded_to_rows(tmp_path):
     assert score["launch_block"] == [512, 1, 1]
 
 
+_MULTI_SHAPE_BACKFILL_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::small", "args": {"External id": 1, "Input Dims": [[8, 8]], "Input type": ["c10::BFloat16"]}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 1, "External id": 1}},
+    {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 1000, "dur": 10, "args": {"correlation": 1}},
+    {"cat": "cpu_op", "name": "aten::large", "args": {"External id": 2, "Input Dims": [[64, 64]], "Input type": ["c10::BFloat16"]}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 2, "External id": 2}},
+    {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 2000, "dur": 100, "args": {"correlation": 2}},
+]
+
+
+def test_backfill_majority_shape_and_ambiguous_flag(tmp_path):
+    payload = json.dumps({"traceEvents": _MULTI_SHAPE_BACKFILL_EVENTS}).encode("utf-8")
+    tf = tmp_path / "multi.trace.json"
+    tf.write_bytes(payload)
+    row = reader.analyze_trace(tf, top_k=0)["kernels"][0]
+    assert row["name"] == "dyn_kernel"
+    assert row["backfill_shapes"] == [[64, 64]]
+    assert row["backfill_ambiguous"] is True
+
+
 def test_timeline_union_math(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     tl = reader.analyze_trace(tf, top_k=0)["timeline"]

@@ -33,8 +33,11 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import is_truthy
 
 log = logging.getLogger(__name__)
 
@@ -319,7 +322,11 @@ def _build_repo_kernel_index() -> dict[str, str]:
     routing a rewrite at an arbitrary first-seen file.
     """
     index: dict[str, str] = {}
-    for root in _repo_scan_roots():
+    roots = _repo_scan_roots()
+    if not roots:
+        return index
+    t0 = time.monotonic()
+    for root in roots:
         for dirpath, _dirs, files in os.walk(root):
             if any(m in dirpath for m in _SCAN_SKIP_MARKERS):
                 continue
@@ -350,6 +357,13 @@ def _build_repo_kernel_index() -> dict[str, str]:
                         # Same kernel name in two files: ambiguous, do not guess.
                         log.info("repo scan: kernel name %r is ambiguous (%s vs %s)", name, prev, path)
                         index[name] = ""
+    elapsed = time.monotonic() - t0
+    log.info(
+        "repo scan: indexed %d kernel name(s) from %d root(s) in %.2fs",
+        len(index),
+        len(roots),
+        elapsed,
+    )
     return index
 
 
@@ -360,6 +374,8 @@ def resolve_by_kernel_name(device_kernel_name: str) -> tuple[str, str]:
     ``(path, "repo_scan")`` on an unambiguous editable on-disk hit, else
     ``("", "unresolved")`` (an empty index entry marks an ambiguous name).
     """
+    if is_truthy(os.environ.get("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN")):
+        return "", "unresolved"
     bare = _demangle_kernel_name(device_kernel_name)
     if not bare:
         return "", "unresolved"

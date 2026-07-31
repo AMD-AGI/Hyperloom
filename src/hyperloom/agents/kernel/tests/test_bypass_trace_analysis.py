@@ -858,3 +858,41 @@ def test_graph_under_recorded_skips_idle_gate_keeps_candidates(tmp_path, capsys,
     assert "high_gpu_idle_pct" not in codes
     # candidates are preserved (ranked by recorded-kernel GPU share)
     assert result["hot_kernels"], "candidates must survive the idle gate under graph under-recording"
+
+
+def _graph_partial_replay_events():
+    """Three graph launches but kernels from only one replay; busy_fraction ~0.78."""
+    events = []
+    for corr in (5, 6, 7):
+        events.append(
+            {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": corr, "External id": None}}
+        )
+    events += [
+        {"cat": "kernel", "ph": "X", "name": "graph_k0", "ts": 1000, "dur": 2000, "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "graph_k1", "ts": 3000, "dur": 2000, "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "busy_fill", "ts": 1000, "dur": 7000, "args": {"correlation": 99}},
+        {"cat": "kernel", "ph": "X", "name": "tail", "ts": 9000, "dur": 500, "args": {"correlation": 99}},
+    ]
+    return events
+
+
+def test_graph_under_recorded_partial_replay_moderate_busy(tmp_path):
+    trace = tmp_path / "partial.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": _graph_partial_replay_events()}).encode("utf-8"))
+    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    assert cov["graph_launch_count"] == 3
+    assert 0.5 < cov["busy_fraction"] < 0.9
+    assert cov["graph_under_recorded"] is True
+
+
+def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
+    events = [
+        {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "k", "ts": 1000, "dur": 50, "args": {"correlation": 5}},
+        {"cat": "kernel", "ph": "X", "name": "pad", "ts": 10_000, "dur": 50, "args": {"correlation": 99}},
+    ]
+    trace = tmp_path / "single.trace.json"
+    trace.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
+    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    assert cov["graph_launch_count"] == 1
+    assert cov["graph_under_recorded"] is False
