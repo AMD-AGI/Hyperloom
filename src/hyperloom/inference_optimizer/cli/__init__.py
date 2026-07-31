@@ -282,6 +282,27 @@ except (TypeError, ValueError):
     _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
 
 
+def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
+    """Return whether the GPU type should be probed on the remote cluster.
+
+    Multi-node runs the CLI on a GPU-less sandbox, so the real inference GPU
+    lives on the handed-over cluster and must be probed via the Ray head
+    (rayjob) or Infera SSH. Single-node runs keep the local probe.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes`` /
+            ``mn_backend``).
+
+    Returns:
+        bool: True when ``--nodes >= 2`` and the backend is rayjob/infera
+        (``--mn-backend`` unset defaults to rayjob).
+    """
+    if int(getattr(args, "nodes", 1) or 1) < 2:
+        return False
+    backend = (getattr(args, "mn_backend", None) or "rayjob").strip().lower()
+    return backend in ("rayjob", "infera")
+
+
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     """Validate atom-specific CLI knobs: sole job is the ``--nodes>=2`` fail-fast guard (IR-8).
 
@@ -1660,8 +1681,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
+        # Multi-node runs the CLI on a GPU-less sandbox, so the local probe sees
+        # nothing; probe the real inference GPU on the handed-over cluster (Ray
+        # head / Infera SSH) instead. Best-effort: on failure probed stays empty
+        # and the --gpu-type / $GPU_TYPE hint wins.
         user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-        probed = _autodetect_gpu_type() or ""
+        if _should_remote_probe_gpu(args):
+            from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
+
+            probed = remote_autodetect_gpu_type() or ""
+            if probed:
+                print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+        else:
+            probed = _autodetect_gpu_type() or ""
         gpu_type, gpu_warnings = _resolve_gpu_type(
             user_specified=user_specified,
             probed=probed,
