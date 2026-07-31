@@ -117,12 +117,18 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
 
     if _fw_reg.is_scriptable(bench.get("framework")):
         return False
+    _prev_script = bench.get("benchmark_script")
     bench["benchmark_script"] = "aiperf_client.sh"
     envs = bench.setdefault("envs", {})
     # Pass the resolved framework so aiperf_client.sh delegates to the correct
     # builtin ({framework}_{gpu}.sh); without it the wrapper cannot tell vllm
     # from sglang and would fall back to a default and boot the wrong server.
     envs.setdefault("FRAMEWORK", str(bench.get("framework") or ""))
+    # AgentX is a DISTINCT benchmark mode (agentic-trace replay), not the
+    # synthetic InferenceX workload: RUN_EVAL defaults off (the GSM8K accuracy
+    # gate does not apply to trace replay; set RUN_EVAL=1 to force it), so Arbor
+    # compares throughput under the agentic workload -- not apples-to-apples
+    # with a synthetic-workload baseline.
     envs.setdefault("RUN_EVAL", os.environ.get("RUN_EVAL", "false"))
     envs.setdefault("MODEL", str(model_path or bench.get("model") or ""))
     for _ax in _AGENTX_PASSTHROUGH_ENVS:
@@ -130,7 +136,10 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
         if _axv is not None:
             envs.setdefault(_ax, _axv)
     log.info(
-        "AgentX mode ON -> benchmark_script=aiperf_client.sh (dataset=%s)",
+        "AgentX mode ON (HYPERLOOM_AGENTX): authoritatively set benchmark_script"
+        " -> aiperf_client.sh%s (dataset=%s); overrides any framework/gpu default."
+        " Unset HYPERLOOM_AGENTX to restore the synthetic path.",
+        f" (was {_prev_script})" if _prev_script and _prev_script != "aiperf_client.sh" else "",
         envs.get("AGENTX_DATASET", "default-corpus"),
     )
     return True
