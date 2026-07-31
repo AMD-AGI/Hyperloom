@@ -95,6 +95,25 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert "RUNNABILITY" in params["notes"]
     assert "git apply --check" in params["notes"]
     assert "GLM-5" in params["notes"]
+    # Boot-origin: no eval carriers.
+    assert "enablement_origin" not in params
+
+
+def test_build_params_threads_eval_origin_carriers(monkeypatch):
+    _stub_enumerate(monkeypatch, [])
+    fake = _fake_self()
+    fake.shared_state.enablement_origin = "eval"
+    fake.shared_state.enablement_accuracy_floor = 0.3
+    fake.shared_state.enablement_probe_config_path = "/runs/baseline/materialized.yaml"
+    fake.shared_state.enablement_eval_contract_fingerprint = "abc123"
+    params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
+    assert params is not None
+    assert params["enablement_origin"] == "eval"
+    assert params["enablement_accuracy_floor"] == 0.3
+    assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
+    # The eval-contract fingerprint is no longer carried: nothing downstream
+    # reads it. Correctness is judged from the candidate's own measurement.
+    assert "enablement_eval_contract_fingerprint" not in params
 
 
 _TRANSFORMERS_UNRECOGNIZED_LOG = (
@@ -177,13 +196,21 @@ def test_build_params_none_for_blank_log():
 
 
 class _FakeTasks:
-    def __init__(self):
+    def __init__(self, queued=None, running=None):
         self.created = []
+        self._queued = list(queued or [])
+        self._running = list(running or [])
 
     async def create_or_return_existing(self, **kwargs):
         self.created.append(kwargs)
         task = types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued")
         return task, False
+
+    async def queued(self):
+        return list(self._queued)
+
+    async def running(self):
+        return list(self._running)
 
 
 def _enqueue_self(**state_kw):
@@ -202,6 +229,15 @@ def _enqueue_self(**state_kw):
         enablement_launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
         enablement_inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
         enablement_dispatch_tick=state_kw.get("enablement_dispatch_tick", -1),
+        enablement_origin=state_kw.get("enablement_origin", ""),
+        enablement_validation_pending=state_kw.get("enablement_validation_pending", False),
+        enablement_probe_config_path=state_kw.get("enablement_probe_config_path", ""),
+        enablement_accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
+        enablement_accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
+        enablement_eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
+        enablement_active_runtime=state_kw.get("enablement_active_runtime", {}),
+        enablement_revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
+        enablement_revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
         tick=state_kw.get("tick", 0),
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
@@ -241,6 +277,9 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_record_enablement_human_review, fake
     )
     fake._maybe_rearm_enablement = types.MethodType(Coordinator._maybe_rearm_enablement, fake)
+    fake._maybe_enqueue_enablement_baseline_revalidation = types.MethodType(
+        Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
+    )
     fake._enablement_round_silently_finished = types.MethodType(
         Coordinator._enablement_round_silently_finished, fake
     )
@@ -386,6 +425,112 @@ async def test_rearm_kept_is_terminal(monkeypatch):
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
+    fake = _enqueue_self(enablement_dispatched=True, enablement_origin="eval", enablement_revalidation_generation=1)
+    fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
+    # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
+    assert fake.shared_state.enablement_validation_pending is True
+    assert fake.shared_state.enablement_succeeded is False
+    assert fake.shared_state.enablement_dispatched is False
+    # Generation is incremented to get a fresh idempotency key.
+    assert fake.shared_state.enablement_revalidation_generation == 2
+    # Tracked task_id is cleared for the new window.
+    assert fake.shared_state.enablement_revalidation_task_id == ""
+    # The specialist pump is blocked while validation is pending.
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+
+
+@pytest.mark.asyncio
+async def test_revalidation_enqueues_genuine_baseline():
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_probe_config_path="/runs/baseline/materialized.yaml",
+        enablement_accuracy_floor=0.3,
+    )
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert tid
+    created = fake.tasks.created[-1]
+    assert created["kind"] == "baseline"
+    assert created["params"]["config_path"] == "/runs/baseline/materialized.yaml"
+    assert created["params"]["disable_run_eval"] is False
+    assert created["params"]["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_prefers_accepted_config_over_probe():
+    """accepted_config_path (from KEEP'd bench) takes precedence over probe config."""
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_probe_config_path="/runs/baseline/probe.yaml",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_accuracy_floor=0.3,
+    )
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert tid
+    created = fake.tasks.created[-1]
+    assert created["params"]["config_path"] == "/runs/specialist/accepted.yaml"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_carries_active_runtime():
+    """When an active runtime is recorded, its override is included in params."""
+    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+
+    rt = FrameworkRuntime(bin_path="/attempt/bin", python_path="/attempt/bin/python", venv_root="/attempt/venv")
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_probe_config_path="/runs/baseline/probe.yaml",
+        enablement_accepted_config_path="/runs/specialist/accepted.yaml",
+        enablement_active_runtime=rt.to_state(),
+    )
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert tid
+    created = fake.tasks.created[-1]
+    rt_override = created["params"].get("runtime_override")
+    assert isinstance(rt_override, dict) and rt_override
+    assert rt_override.get("framework_bin") == "/attempt/bin"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_skips_when_already_tracked():
+    """If a tracked revalidation task is already alive, no new task is created."""
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_revalidation_task_id="existing-spec-1",
+    )
+    # Put the tracked task in the running list so it appears alive.
+    import types as _types
+
+    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="existing-spec-1")])
+    result = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert result == "existing-spec-1"
+    assert fake.tasks.created == []
+
+
+@pytest.mark.asyncio
+async def test_revalidation_skips_when_tracked_task_in_flight():
+    """Skip enqueue when the tracked revalidation task is still running."""
+    import types as _types
+
+    fake = _enqueue_self(
+        enablement_validation_pending=True,
+        enablement_origin="eval",
+        enablement_revalidation_task_id="reval-in-flight",
+    )
+    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="reval-in-flight")])
+    result = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    assert result == "reval-in-flight"
+    assert fake.tasks.created == []
 
 
 @pytest.mark.asyncio
@@ -543,6 +688,21 @@ def test_enablement_close_guard_blocks_premature_skip_to_close():
     assert s.enablement_close_guard_active() is False
     s.baseline_tput = 0.0
     s.enablement_succeeded = True
+    assert s.enablement_close_guard_active() is False
+
+
+def test_enablement_close_guard_active_during_validation_pending():
+    """An eval-origin KEEP awaiting revalidation must keep the guard active even
+    if a stale positive tput is present."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    s = SharedState()
+    s.phase = "SWEEP"
+    s.baseline_tput = 100.0
+    s.enablement_succeeded = False
+    s.enablement_validation_pending = True
+    assert s.enablement_close_guard_active() is True
+    s.enablement_validation_pending = False
     assert s.enablement_close_guard_active() is False
 
 

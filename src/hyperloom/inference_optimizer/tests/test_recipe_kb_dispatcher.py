@@ -133,13 +133,6 @@ def test_put_recipe_never_touches_remote(local_store: LocalRecipeStore) -> None:
     assert local_store.get_recipe(canonical_id=cid) is not None
 
 
-def test_append_attempt_never_touches_remote(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    cid = _cid()
-    out = kb.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    assert out["id"] == 1
-
-
 def test_get_recipe_returns_remote_when_remote_hits(local_store: LocalRecipeStore) -> None:
     """A remote hit is returned, translated from the nested v2 envelope to arbor."""
     cid = _cid()
@@ -439,6 +432,102 @@ def test_audit_hook_never_raises_into_caller(local_store: LocalRecipeStore) -> N
     kb.audit_hook = _boom
     # Must not raise despite the failing hook.
     assert kb.get_recipe(canonical_id=cid) is None
+
+
+def test_read_audit_event_is_tagged_as_a_read(local_store: LocalRecipeStore) -> None:
+    """Reads carry ``op="read"`` so a consumer can tell them from writes."""
+    kb = RecipeKB(local=local_store, remote=None)
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = events.append
+    kb.get_recipe(canonical_id=_cid())
+    assert events[0]["op"] == "read"
+
+
+def test_put_recipe_emits_write_audit_event(local_store: LocalRecipeStore) -> None:
+    """A write is audited with its identity, resulting version, and deltas."""
+    cid = _cid()
+    kb = RecipeKB(local=local_store, remote=None)
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = events.append
+    kb.put_recipe(
+        canonical_id=cid,
+        model="m",
+        hardware="mi300x",
+        framework_name="sglang",
+        framework_version="0.4.5",
+        precision="fp8",
+        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
+        best_config={"extra_server_args": "--tp 8"},
+        best_throughput=1234.5,
+        provenance={"generator": "coordinator", "details": {"phase": "close_finalize"}},
+    )
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["op"] == "write"
+    assert ev["method"] == "put_recipe"
+    # The local store is authoritative for writes; the remote is read-side only.
+    assert ev["resolution"] == "local_write"
+    assert ev["generator"] == "coordinator"
+    assert ev["phase"] == "close_finalize"
+    assert ev["identity"]["framework_name"] == "sglang"
+    assert ev["result"]["version"] == 1
+    assert ev["result"]["created"] is True
+    assert ev["result"]["best_throughput"] == 1234.5
+    assert ev["result"]["best_config_nonempty"] is True
+    assert ev["counts"]["lessons"] == 1
+    assert ev["delta"]["lessons"] == 1
+
+
+def test_write_audit_delta_is_zero_for_a_round_trip(local_store: LocalRecipeStore) -> None:
+    """A read-modify-write that adds nothing reports a zero delta.
+
+    This is what the T0 anchor does every session: it restamps identity and
+    writes the existing lists straight back. Absolute counts would look
+    identical to a real amend; the delta is what tells them apart.
+    """
+    cid = _cid()
+    kb = RecipeKB(local=local_store, remote=None)
+    kb.put_recipe(
+        canonical_id=cid,
+        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
+    )
+    live = kb.local.get_recipe(canonical_id=cid) or {}
+
+    events: list[dict[str, Any]] = []
+    kb.audit_hook = events.append
+    kb.put_recipe(
+        canonical_id=cid,
+        lessons=list(live.get("lessons") or []),
+        provenance={"generator": "t0_anchor", "details": {"sid": "s1"}},
+    )
+    ev = events[0]
+    assert ev["generator"] == "t0_anchor"
+    assert ev["counts"]["lessons"] == 1
+    assert ev["delta"]["lessons"] == 0
+    assert not any(ev["delta"].values())
+
+
+def test_put_recipe_never_raises_into_caller_on_audit_failure(
+    local_store: LocalRecipeStore,
+) -> None:
+    """A failing audit sink must not break the write it is observing."""
+
+    def _boom(_e: dict[str, Any]) -> None:
+        raise RuntimeError("audit sink down")
+
+    cid = _cid()
+    kb = RecipeKB(local=local_store, remote=None)
+    kb.audit_hook = _boom
+    result = kb.put_recipe(canonical_id=cid, best_throughput=1000.0)
+    assert result["version"] == 1
+    # The row still landed on disk.
+    assert kb.local.get_recipe(canonical_id=cid) is not None
+
+
+def test_put_recipe_without_audit_hook_is_fine(local_store: LocalRecipeStore) -> None:
+    """No hook wired (the default) means no audit and no error."""
+    kb = RecipeKB(local=local_store, remote=None)
+    assert kb.put_recipe(canonical_id=_cid(), best_throughput=1.0)["created"] is True
 
 
 def test_close_releases_remote_transport(local_store: LocalRecipeStore) -> None:

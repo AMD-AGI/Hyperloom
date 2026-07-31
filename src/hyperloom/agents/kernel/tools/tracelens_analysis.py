@@ -657,26 +657,6 @@ class OpResolver:
         )
 
 
-def resolve_op_source(
-    op_name: str,
-    framework: str | None = None,
-    device_kernel_name: str | None = None,
-    *,
-    mapping: dict[str, Any] | None = None,
-) -> OpResolution | None:
-    """Resolve a CPU op to its editable ``.cu`` via the ground-truth dictionary.
-
-    Thin wrapper over :class:`OpResolver`; returns ``None`` on a dictionary miss
-    (the caller then falls back to trusting the TraceLens ``.py`` launcher).
-    """
-    table = mapping if mapping is not None else load_mapping()
-    return OpResolver(table).resolve_op_source(
-        op_name,
-        framework=framework,
-        device_kernel_name=device_kernel_name,
-    )
-
-
 # HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
 # (imported above) as the shared single source of truth across trace routes.
 
@@ -1724,21 +1704,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
-
-
-def is_reusable_native_kernel(candidate: dict[str, Any]) -> bool:
-    """Whether a candidate is safe to send to kernel optimization backends.
-
-    Thin wrapper over :func:`classify_patchability` kept for backward
-    compatibility with downstream consumers that only need the bool.
-
-    Args:
-        candidate (dict[str, Any]): A hot-kernel candidate row.
-
-    Returns:
-        bool: ``True`` when the candidate is routable to a kernel-opt backend.
-    """
-    return classify_patchability(candidate)[0]
 
 
 # Wrapper TUs that just dispatch to a precompiled .so/.co, detected by small
@@ -2895,7 +2860,7 @@ def _expand_op_fanout(
         # Prefer the candidate's own device symbol; else fall back to the
         # dominant-by-time device kernel so _composite pins the single hot source.
         dkn = str(item.get("device_kernel_name") or "").strip() or op_dominant_kernel.get(op_name) or None
-        res = resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
+        res = OpResolver(load_mapping()).resolve_op_source(op_name, framework=framework, device_kernel_name=dkn)
         if res is None:
             item["_op_resolution"] = None
             expanded.append(item)
@@ -3216,26 +3181,6 @@ def _is_fused_moe_candidate(item: dict[str, Any]) -> bool:
 
 _OTHER_BUCKET_MIN_GPU_PCT_ENV = "HYPERLOOM_OTHER_BUCKET_MIN_GPU_PCT"
 _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT = 10.0
-
-# Raw/normalized category labels that mean "TraceLens did not roofline this op"
-# (no P-item block). Compared case-insensitively against both the raw category
-# and normalize_upstream_category() output.
-_OTHER_LIKE_CATEGORIES = frozenset(
-    {
-        "",
-        "other",
-        "others",
-        "misc",
-        "miscellaneous",
-        "uncategorized",
-        "uncategorised",
-        "unknown",
-        "n/a",
-        "na",
-        "none",
-        "null",
-    }
-)
 
 # Per-op ranking sidecars in preference order, relative to the skill output dir.
 _OPS_RANKING_CSV_RELPATHS = (
@@ -3846,7 +3791,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     source_type = candidate.get("source_type")
     if not candidate.get("source_file"):
         return []
-    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+    if not candidate.get("reusable_native_kernel", classify_patchability(candidate)[0]):
         return []
     if source_type == "vendor_binary":
         return []
@@ -3872,7 +3817,7 @@ def build_notes(candidate: dict[str, Any]) -> str:
         is_runtime_generated_kernel(str(candidate.get("name") or ""), str(candidate.get("source_file") or "")),
     ):
         return "runtime-generated torch.compile/Inductor kernel; not reusable, kernel-opt disabled"
-    if not candidate.get("reusable_native_kernel", is_reusable_native_kernel(candidate)):
+    if not candidate.get("reusable_native_kernel", classify_patchability(candidate)[0]):
         return "not a reusable native source; kernel-opt disabled"
     return f"resolved source: {candidate['source_file']}"
 

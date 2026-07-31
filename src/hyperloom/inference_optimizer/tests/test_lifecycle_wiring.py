@@ -505,7 +505,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
             c.writeback,
-            "cortex_finalize_recipe_and_journal",
+            "finalize_recipe_and_journal",
             lambda: None,
         )
 
@@ -575,7 +575,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
             c.writeback,
-            "cortex_finalize_recipe_and_journal",
+            "finalize_recipe_and_journal",
             lambda: None,
         )
 
@@ -639,7 +639,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
         monkeypatch.setattr(c.sub, "run_task", fake_run_task)
         monkeypatch.setattr(
             c.writeback,
-            "cortex_finalize_recipe_and_journal",
+            "finalize_recipe_and_journal",
             lambda: None,
         )
 

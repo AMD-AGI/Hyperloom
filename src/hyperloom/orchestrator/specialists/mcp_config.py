@@ -4,15 +4,10 @@
 """Specialist subprocess MCP config generator.
 
 Generates the ``--mcp-config`` JSON the ``claude`` subprocess reads,
-registering up to two streamable-HTTP MCP servers:
+registering the streamable-HTTP PR Monitor MCP server:
 
 - ``pr_monitor`` (at :meth:`KnowledgePlane.specialist_mcp_url`) — the name MUST
   be ``pr_monitor`` so the ``mcp__pr_monitor__*`` whitelist names resolve.
-- ``cortex_kb`` (at :meth:`KnowledgePlane.cortex_specialist_mcp_url`) — the
-  read-only KB-graph (gbrain) server; the name MUST be ``cortex_kb`` so the
-  ``mcp__cortex_kb__*`` whitelist names resolve. Bearer auth headers are not
-  written to disk only when ``HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS`` is
-  unset/true; set it to ``0`` to disable bearer-auth MCP persistence.
 
 Schema follows :data:`claude_agent_sdk.types.McpHttpServerConfig`.
 """
@@ -21,11 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
-
-from hyperloom.common.env import is_truthy
 
 
 log = logging.getLogger(__name__)
@@ -34,17 +26,10 @@ log = logging.getLogger(__name__)
 SPECIALIST_MCP_CONFIG_FILENAME = "specialist_mcp.json"
 
 
-def _allow_persistent_mcp_auth_headers() -> bool:
-    setting = os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
-    return True if setting is None else is_truthy(setting)
-
-
 def write_specialist_mcp_config(
     *,
     session_dir: Path | str,
     pr_monitor_mcp_url: str,
-    cortex_kb_mcp_url: str = "",
-    cortex_kb_mcp_headers: dict[str, str] | None = None,
 ) -> Path | None:
     """Write the specialist subprocess MCP config and return its path.
 
@@ -56,10 +41,6 @@ def write_specialist_mcp_config(
             ``<session_dir>/runtime/<SPECIALIST_MCP_CONFIG_FILENAME>``.
         pr_monitor_mcp_url: ``KnowledgePlane.specialist_mcp_url()``; empty
             means disabled.
-        cortex_kb_mcp_url: ``KnowledgePlane.cortex_specialist_mcp_url()``;
-            empty means the read-only KB-graph server is disabled.
-        cortex_kb_mcp_headers: Optional auth headers for the ``cortex_kb``
-            server (e.g. ``{"Authorization": "Bearer …"}``).
 
     Returns:
         The written config file path, or ``None`` when no MCP server is
@@ -72,28 +53,6 @@ def write_specialist_mcp_config(
             "type": "http",
             "url": pr_url,
         }
-
-    kb_url = (cortex_kb_mcp_url or "").strip()
-    if kb_url:
-        kb_headers = {
-            str(k): str(v) for k, v in (cortex_kb_mcp_headers or {}).items() if str(k).strip() and str(v).strip()
-        }
-        has_auth = any(k.lower() == "authorization" for k in kb_headers)
-        if has_auth and not _allow_persistent_mcp_auth_headers():
-            log.warning(
-                "specialist_mcp_config: skipping cortex_kb MCP because auth headers would be written to disk; "
-                "unset HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS or set it to 1 to allow compatibility mode"
-            )
-        else:
-            if has_auth:
-                log.warning("specialist_mcp_config: writing cortex_kb auth headers by explicit operator opt-in")
-            kb_server: dict[str, Any] = {
-                "type": "http",
-                "url": kb_url,
-            }
-            if kb_headers:
-                kb_server["headers"] = kb_headers
-            servers["cortex_kb"] = kb_server
 
     if not servers:
         log.info(

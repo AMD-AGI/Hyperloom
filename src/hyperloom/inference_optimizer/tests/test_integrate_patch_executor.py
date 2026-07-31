@@ -697,6 +697,10 @@ async def _run_enablement_integrate(
     enablement_accuracy=None,
     bench_error: str = "",
     before_signature=None,
+    enablement_origin: str = "",
+    accuracy_floor=None,
+    accuracy_task: str = "gsm8k",
+    accuracy_metric: str = "exact_match",
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -714,6 +718,8 @@ async def _run_enablement_integrate(
         return bench_result, {
             "accuracy_pass": None,
             "enablement_accuracy": enablement_accuracy,
+            "enablement_accuracy_task": accuracy_task,
+            "enablement_accuracy_metric": accuracy_metric,
             "timed_out": False,
         }
 
@@ -731,6 +737,10 @@ async def _run_enablement_integrate(
     }
     if before_signature is not None:
         params["enablement_before_signature"] = before_signature
+    if enablement_origin:
+        params["enablement_origin"] = enablement_origin
+    if accuracy_floor is not None:
+        params["enablement_accuracy_floor"] = accuracy_floor
     ctx = _make_ctx("t-int-en", params)
     return await executor(ctx), repo
 
@@ -777,6 +787,82 @@ async def test_enablement_reverts_when_accuracy_zero(tmp_path: Path, monkeypatch
     assert result["correctness_verified"] is False
     assert result["patches_applied"] == []
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_when_accuracy_missing(tmp_path: Path, monkeypatch):
+    """eval-origin: booted but no accuracy -> fail closed (REVERT), not provisional KEEP."""
+    result, repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=None, enablement_origin="eval"
+    )
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["correctness_verified"] is False
+    assert result["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_below_configured_floor(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.2, enablement_origin="eval", accuracy_floor=0.5
+    )
+    assert result["status"] == "reverted"
+    assert result["enablement_eval_failure_kind"] == "accuracy_below_floor"
+    assert result["enablement_observed_accuracy"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_keeps_at_or_above_floor(tmp_path: Path, monkeypatch):
+    result, _ = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.5, enablement_origin="eval", accuracy_floor=0.5
+    )
+    assert result["status"] == "kept"
+    assert result["correctness_verified"] is True
+    assert result["provisional"] is False
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metric(
+    tmp_path: Path, monkeypatch
+):
+    """A score with no task/metric did not come from a real eval.
+
+    The candidate's own run is the only correctness authority; a bare number
+    with no provenance must not clear the gate.
+    """
+    result, _ = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.9,
+        enablement_origin="eval",
+        accuracy_task="",
+        accuracy_metric="",
+    )
+    assert result["status"] == "reverted"
+    assert result["correctness_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_enablement_eval_origin_keeps_a_measured_accuracy(tmp_path: Path, monkeypatch):
+    """A measured, above-floor accuracy is KEPT.
+
+    Regression for the burned Kimi-Linear run: an unrelated eval-less
+    re-baseline used to poison the stored eval-contract fingerprint, which
+    vetoed every later candidate without ever reading its accuracy. Nothing
+    outside this candidate's own run may decide its correctness.
+    """
+    result, _ = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.9,
+        enablement_origin="eval",
+        accuracy_task="gsm8k",
+        accuracy_metric="exact_match,strict-match",
+    )
+    assert result["status"] == "kept"
+    assert result["correctness_verified"] is True
 
 
 @pytest.mark.asyncio

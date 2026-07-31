@@ -11,7 +11,7 @@ fence line is a typed triple::
 
 This module turns that document substrate into a small graph query
 surface (``query_facts`` / ``graph_traverse`` / ``find_conflicts``) plus
-incremental writes (``emit_fact`` / ``retract_fact``).
+incremental writes (``emit_fact``).
 
 Two execution modes:
 
@@ -25,9 +25,7 @@ Two execution modes:
   context=json(properties))``; reads use ``get_links`` / ``get_backlinks`` /
   ``traverse_graph``. Fact properties are encoded in the edge ``context`` JSON.
   ``add_link`` requires both endpoints to exist, so writes materialize missing
-  nodes; ``remove_link`` is pair-coarse, so ``retract_fact`` does a
-  read-modify-write that preserves the other link types on the same pair.
-  gbrain reports some write failures as an in-band ``{"error": ...}`` payload,
+  nodes. gbrain reports some write failures as an in-band ``{"error": ...}`` payload,
   so the write paths inspect the decoded result via :func:`_rpc_failed`.
 
 Every read method has a ``*_safe`` companion that swallows transport failures
@@ -863,56 +861,6 @@ class KGClient:
         self._search_cache.clear()
         return True
 
-    def retract_fact(
-        self,
-        *,
-        page_slug: str,
-        subject: str,
-        predicate: str,
-        object: str,  # noqa: A002
-    ) -> bool:
-        """Remove a matching fact line from a page's ``## Facts`` fence.
-
-        Args:
-            page_slug: Target page slug.
-            subject: Subject entity.
-            predicate: Relation.
-            object: Object entity.
-
-        Returns:
-            ``True`` when a line was removed and the page rewritten.
-        """
-        if self._native:
-            return self._native_retract_fact(subject, predicate, object)
-        content = self._page_content_raw(page_slug)
-        if content is None or "## Facts" not in content:
-            return False
-        want = (_entity(subject), str(predicate).strip().upper(), _entity(object))
-        kept: list[str] = []
-        removed = False
-        for line in content.splitlines():
-            m = _FACT_LINE_RE.match(line.strip())
-            if (
-                m
-                and (
-                    _entity(m.group("subject")),
-                    m.group("predicate").strip().upper(),
-                    _entity(m.group("object")),
-                )
-                == want
-            ):
-                removed = True
-                continue
-            kept.append(line)
-        if not removed:
-            return False
-        new_content = "\n".join(kept)
-        if content.endswith("\n"):
-            new_content += "\n"
-        self._mcp.call("put_page", {"slug": page_slug, "content": new_content})
-        self._search_cache.clear()
-        return True
-
     def _native_emit_fact(
         self,
         subject: str,
@@ -955,47 +903,6 @@ class KGClient:
         if _rpc_failed(res):
             log.warning("kg add_link %s->%s error: %s", s, o, res.get("error"))
             return False
-        return True
-
-    def _native_retract_fact(self, subject: str, predicate: str, object: str) -> bool:  # noqa: A002
-        """Retract a single typed edge from the native link graph.
-
-        ``remove_link`` deletes *every* edge between the pair, so this reads
-        the outgoing edges, removes the pair, and re-adds the survivors that
-        had a different ``link_type`` — preserving the other relations on the
-        same node pair.
-
-        Args:
-            subject: Subject entity.
-            predicate: Relation to retract.
-            object: Object entity.
-
-        Returns:
-            ``True`` when a matching edge was removed, ``False`` otherwise.
-        """
-        s = _entity(subject)
-        o = _entity(object)
-        target = _link_type(predicate)
-        if not s or not o:
-            return False
-        pair_edges = [e for e in self._get_links(s) if _entity(e.get("to_slug")) == o]
-        if not any(_link_type(e.get("link_type")) == target for e in pair_edges):
-            return False
-        survivors = [e for e in pair_edges if _link_type(e.get("link_type")) != target]
-        res = self._mcp.call("remove_link", {"from": s, "to": o})
-        if _rpc_failed(res):
-            log.warning("kg remove_link %s->%s error: %s", s, o, res.get("error"))
-            return False
-        for edge in survivors:
-            self._mcp.call(
-                "add_link",
-                {
-                    "from": s,
-                    "to": o,
-                    "link_type": _link_type(edge.get("link_type")),
-                    "context": edge.get("context") or "{}",
-                },
-            )
         return True
 
     def _page_content_raw(self, slug: str) -> str | None:

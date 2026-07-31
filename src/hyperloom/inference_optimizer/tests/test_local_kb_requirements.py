@@ -30,7 +30,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
         "HYPERLOOM_LOCAL_KB_ROOT",
         "USER_DATA_PATH",
-        "CORTEX_KB_URL",
         "KB_SERVICE_TOKEN",
         "GBRAIN_BASE_URL",
         "GBRAIN_TOKEN",
@@ -43,7 +42,6 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     """Helper to build a CLI Namespace with the KB-related fields plus overrides."""
     fields: dict[str, Any] = {
         "local_kb_root": None,
-        "cortex_kb_url": None,
         "degraded_kb": False,
     }
     fields.update(overrides)

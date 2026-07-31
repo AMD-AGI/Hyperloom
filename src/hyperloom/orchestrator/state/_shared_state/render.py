@@ -360,7 +360,7 @@ class _RenderMixin:
                 out.append(f"  · {first_line[:240]}")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; see runtime/cortex/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:
@@ -532,8 +532,6 @@ class _RenderMixin:
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             f"discovered_flags={self._format_discovered_flags()}",
-            f"backend_winners_history={self._format_backend_winners_history()}",
-            f"synergy_attempted={len(self.synergy_attempted)} combos",
             f"last_kernel_opt={_kernel_request_handlers._format_last_kernel_opt(self)}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
@@ -712,39 +710,6 @@ class _RenderMixin:
             result = snap.get("result") if isinstance(snap.get("result"), dict) else {}
             out["tput"] = snap.get("tput") or (result or {}).get("output_throughput")
         return out
-
-    def _format_backend_winners_history(self) -> str:
-        """Multi-line render of the explore-round winners history (last 5 rounds); older rounds collapse to an elision line.
-
-        Returns:
-            str: The multi-line winners-history render, or
-                ``"(no explore rounds completed)"`` when empty.
-        """
-        if not self.backend_winners_history:
-            return "(no explore rounds completed)"
-        last = self.backend_winners_history[-5:]
-        out: list[str] = [""]
-        for r in last:
-            if not isinstance(r, dict):
-                continue
-            best = r.get("best") if isinstance(r.get("best"), dict) else None
-            best_gain = best.get("gain_pct") if best else None
-            gain_tag = f" {best_gain:+.2f}%" if isinstance(best_gain, (int, float)) else ""
-            base = float(r.get("base_tput", 0.0) or 0.0)
-            out.append(
-                f"    {r.get('round_id', '?')} ({r.get('action', '?')}): "
-                f"base_tput={base:.1f}  "
-                f"best={(best.get('name') if best else '(none)')}{gain_tag}"
-            )
-            winners = [w for w in (r.get("winners") or []) if isinstance(w, dict)]
-            if not winners:
-                out.append("      (no winners this round)")
-                continue
-            for w in winners:
-                out.append("      • " + _RenderMixin._format_variant_line(w))
-        if len(self.backend_winners_history) > 5:
-            out.append(f"    [+{len(self.backend_winners_history) - 5} earlier rounds elided]")
-        return "\n".join(out)
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:

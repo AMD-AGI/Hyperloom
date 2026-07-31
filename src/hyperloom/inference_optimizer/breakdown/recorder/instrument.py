@@ -953,8 +953,8 @@ def _snapshot_final(rec, st: Any) -> None:
 def _snapshot_explore_search(rec, st: Any) -> None:
     """Snapshot the ``explore_search`` singleton from ``st`` (no-op when empty).
 
-    Augments the base search dict with winner history, no-promote streak,
-    discovered flags, and synergy/backend-winner history pulled from ``st``.
+    Augments the base search dict with the no-promote streak, discovered
+    flags, and the ledger-owned synergy list.
 
     Args:
         rec: the recorder used to write the singleton.
@@ -963,11 +963,11 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = list(getattr(st, "params_winner_history", None) or [])
+    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
-    search["synergy_attempted"] = list(getattr(st, "synergy_attempted", None) or [])
-    search["backend_winners_history"] = list(getattr(st, "backend_winners_history", None) or [])
+    search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
+    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 
@@ -3234,7 +3234,6 @@ def record_critic_iteration(
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
-    kb_assess: dict[str, Any] | None = None,
     kb_priors: dict[str, Any] | None = None,
     producer: str = "critic",
 ) -> None:
@@ -3244,10 +3243,10 @@ def record_critic_iteration(
     workdir pruning never erases history; payload mirrors
     ``collectors.collect_critic_robustness``.
 
-    ``kb_assess`` / ``kb_priors`` (when provided) carry the per-iteration KB
-    integration trace: whether the substrate assess / historical priors were
-    used, the request, the response, and whether the final verdict referenced
-    them. Omitted from the payload when empty so historical items are unchanged.
+    ``kb_priors`` (when provided) carries the per-iteration KB integration
+    trace: whether the historical priors were used, the request, the response,
+    and whether the final verdict referenced them. Omitted from the payload
+    when empty so historical items are unchanged.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -3257,8 +3256,6 @@ def record_critic_iteration(
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
             per-iteration artifact files.
-        kb_assess (dict[str, Any] | None): the per-iteration substrate KB assess
-            trace; omitted when empty.
         kb_priors (dict[str, Any] | None): the per-iteration historical KB
             priors trace; omitted when empty.
         producer (str): the breakdown producer label (defaults to ``critic``).
@@ -3281,8 +3278,6 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
-        if isinstance(kb_assess, dict) and kb_assess:
-            payload["kb_assess"] = kb_assess
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
         _recorder(session_dir, producer).record_item(

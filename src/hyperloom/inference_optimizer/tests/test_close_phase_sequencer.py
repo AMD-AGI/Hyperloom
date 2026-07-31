@@ -26,8 +26,8 @@ class _BareState:
     """SharedState stand-in covering every attribute the CLOSE sequencer reads/writes."""
 
     closing_report_task_id: str = ""
-    cortex_session_id: str = ""
-    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    recipe_kb_session_id: str = ""
+    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     stop_reason: str = ""
     close_sequence_done: bool = False
     phase_history: list[dict[str, Any]] = field(default_factory=list)
@@ -96,8 +96,8 @@ class _StubTaskRegistry:
         return row
 
 
-class _StubCortex:
-    """Cortex KB double for the CLOSE NDJSON drain step."""
+class _StubRecipeKB:
+    """Recipe KB double for the CLOSE NDJSON drain step."""
 
     enabled: bool = True
 
@@ -150,7 +150,7 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.sub = _StubSubAgentRunner()
-    c.cortex_kb = None
+    c.recipe_kb = None
     c.knowledge_plane = None
     c.role_registry = {}
     return c
@@ -178,12 +178,12 @@ async def test_record_close_step_appends_to_evidence_close_steps(coord):
 async def test_record_close_step_optional_detail(coord):
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._record_close_step(
-        "cortex_commit",
+        "recipe_kb_commit",
         status="failed",
-        detail="cortex unreachable",
+        detail="recipe kb unreachable",
     )
     row = coord.shared_state.phase_history[-1]["evidence"]["close_steps"][0]
-    assert row["detail"] == "cortex unreachable"
+    assert row["detail"] == "recipe kb unreachable"
 
 
 @pytest.mark.asyncio
@@ -259,8 +259,8 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     coord,
 ):
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.cortex_kb = _StubCortex()
-    coord.shared_state.cortex_session_id = "sid-test"
+    coord.recipe_kb = _StubRecipeKB()
+    coord.shared_state.recipe_kb_session_id = "sid-test"
 
     await coord._on_enter_close(from_phase="SWEEP")
 
@@ -333,11 +333,11 @@ async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
 ):
     """An operator-set ``stop_reason`` must survive the final step's setter."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.shared_state.set_stop_reason("cortex_drain_failed")
+    coord.shared_state.set_stop_reason("recipe_kb_drain_failed")
 
     await coord._on_enter_close(from_phase="SWEEP")
 
-    assert coord.shared_state.stop_reason == "cortex_drain_failed"
+    assert coord.shared_state.stop_reason == "recipe_kb_drain_failed"
 
 
 @pytest.mark.asyncio
@@ -365,8 +365,8 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 
 
 @pytest.mark.asyncio
-async def test_close_sequencer_skips_cortex_steps_when_no_cortex(coord):
-    """``--degraded-kb`` runs (cortex_kb=None): NDJSON drain recorded 'skipped', not silent."""
+async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
+    """``--degraded-kb`` runs (recipe_kb=None): NDJSON drain recorded 'skipped', not silent."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
     await coord._on_enter_close(from_phase="SWEEP")
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
@@ -418,13 +418,9 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=None,
+        recipe_kb=None,
         knowledge_plane=None,
     )
-    # Shrink wait timeouts so the idle dispatcher doesn't hang on prod defaults.
-    coord.CLOSE_REPORT_TIMEOUT_SEC = 0.1
-    coord.CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC = 0.1
-
     # Seed state at SWEEP boundary.
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [
@@ -457,8 +453,8 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path):
-    """If the CLOSE sequencer already drained, ``_cortex_t4_hook`` must skip (no double drain)."""
+async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path):
+    """If the CLOSE sequencer already drained, ``_recipe_kb_t4_hook`` must skip (no double drain)."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -472,19 +468,19 @@ async def test_cortex_t4_hook_short_circuits_when_sequencer_done(tmp_path: Path)
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=_StubCortex(),
+        recipe_kb=_StubRecipeKB(),
         knowledge_plane=None,
     )
-    coord.shared_state.cortex_session_id = "sid-stop-skip"
+    coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
 
-    await coord._cortex_t4_hook()
-    assert coord.cortex_kb.drain_calls == 0
+    await coord._recipe_kb_t4_hook()
+    assert coord.recipe_kb.drain_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
-    """Crash / Ctrl-C path: sequencer didn't run, so ``_cortex_t4_hook`` MUST call recipe-finalize."""
+async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path):
+    """Crash / Ctrl-C path: sequencer didn't run, so ``_recipe_kb_t4_hook`` MUST call recipe-finalize."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -498,10 +494,10 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=_StubCortex(),
+        recipe_kb=_StubRecipeKB(),
         knowledge_plane=None,
     )
-    coord.shared_state.cortex_session_id = "sid-fallback"
+    coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
 
     finalize_calls: list[int] = []
@@ -509,6 +505,6 @@ async def test_cortex_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Path)
     def _spy() -> None:
         finalize_calls.append(1)
 
-    coord.cortex_finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
-    await coord._cortex_t4_hook()
+    coord.finalize_recipe_and_journal = _spy  # type: ignore[method-assign]
+    await coord._recipe_kb_t4_hook()
     assert finalize_calls == [1]

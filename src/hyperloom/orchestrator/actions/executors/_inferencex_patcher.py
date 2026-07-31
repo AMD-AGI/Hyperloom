@@ -67,6 +67,16 @@ _EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to m
 _EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'
 _EVAL_DEST_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_dest_patcher.lock")
 
+# The explore overtime kill bounds the throughput phase only, but benchmark and
+# eval share one Magpie subprocess, so Hyperloom cannot see the boundary. Emit a
+# sentinel on the last line before ``lm_eval`` starts; the soft-deadline watcher
+# retires the deadline when it appears. Anchored on the unique
+# ``EVAL_RESULT_DIR`` export — ``set -x`` occurs three times in the file.
+_EVAL_START_LEGACY = '    export EVAL_RESULT_DIR="$results_dir"'
+_EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPERLOOM_EVAL_START" >&2'
+_EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
+_EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
+
 
 def _discover_inferencex_roots(
     inferencex_path: Path | str | None,
@@ -472,8 +482,70 @@ def ensure_benchmark_lib_eval_dest_patched(
     )
 
 
+def _is_eval_start_patched(src: Path) -> bool:
+    """Return whether ``benchmark_lib.sh`` already emits the eval-start sentinel.
+
+    Args:
+        src (Path): The ``benchmark_lib.sh`` file to inspect.
+
+    Returns:
+        bool: ``True`` if the eval-start sentinel is present; ``False`` on a
+        miss or read error.
+    """
+    return file_contains_sentinel(src, _EVAL_START_SENTINEL, log, "_inferencex_patcher")
+
+
+def ensure_benchmark_lib_eval_start_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure ``run_eval`` announces the benchmark→eval boundary on stderr.
+
+    The explore overtime kill bounds the throughput phase only; without this
+    marker the eval's wall-clock is charged against a throughput-only anchor and
+    every gated variant is killed. Returns ``True`` when patched at exit,
+    ``False`` (non-fatal) when the file is missing or the anchor line is absent —
+    the deadline then behaves as before. Concurrency-safe; independent lock so it
+    does not serialize with the other patches on the same file.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        True when at least one discovered ``benchmark_lib.sh`` is patched (or
+        already patched), False when none could be patched.
+    """
+    return _ensure_patched(
+        _resolve_benchmark_lib_paths(inferencex_path),
+        _is_eval_start_patched,
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_EVAL_START_LEGACY,
+            patched_line=_EVAL_START_PATCHED,
+            tmp_prefix=".benchmark_lib.sh.eval_start_",
+            missing_msg=(
+                "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
+                "in %s; upstream layout may have changed. The overtime kill will "
+                "keep charging accuracy-eval time against the throughput anchor."
+            ),
+            success_msg=("_inferencex_patcher: added eval-start marker to %s"),
+        ),
+        _EVAL_START_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "benchmark_lib.sh missing — skipping eval-start patch (fine for "
+            "tests and dry-runs without a real InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to eval-start-patch %s; other discovered roots will still be attempted"
+        ),
+    )
+
+
 __all__ = [
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
+    "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
 ]

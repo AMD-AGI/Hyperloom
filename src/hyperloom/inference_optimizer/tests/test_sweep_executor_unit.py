@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.common.coerce import to_int
 from hyperloom.orchestrator.actions.executors import sweep as sw
+from hyperloom.orchestrator.actions.executors._grid_base import pareto_front
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
 )
@@ -128,24 +129,25 @@ def test_result_dict_surfaces_dims():
     assert d["conc"] == 16 and d["isl"] == 1024 and d["osl"] == 512
 
 
-# ---- _pareto_front ----
+# ---- pareto_front (shared by the native and GEAK sweeps) ----
 
 
-def test_pareto_front_dominance():
+@pytest.mark.parametrize("latency_key", ["e2el_mean_ms", "ttft_mean_ms"])
+def test_pareto_front_dominance(latency_key: str):
     entries = [
-        {"status": "succeeded", "output_throughput": 100, "e2el_mean_ms": 10},
-        {"status": "succeeded", "output_throughput": 90, "e2el_mean_ms": 20},  # dominated
-        {"status": "succeeded", "output_throughput": 80, "e2el_mean_ms": 5},  # not dominated
-        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded (failed)
+        {"status": "succeeded", "output_throughput": 100, latency_key: 10},
+        {"status": "succeeded", "output_throughput": 90, latency_key: 20},  # dominated
+        {"status": "succeeded", "output_throughput": 80, latency_key: 5},  # not dominated
+        {"status": "failed", "output_throughput": 999, latency_key: 1},  # excluded (failed)
     ]
-    front = sw._pareto_front(entries)
+    front = pareto_front(entries, latency_key=latency_key)
     tputs = sorted(e["output_throughput"] for e in front)
     assert tputs == [80, 100]
 
 
 def test_pareto_front_ignores_non_numeric():
     entries = [{"status": "succeeded", "output_throughput": None, "e2el_mean_ms": 10}]
-    assert sw._pareto_front(entries) == []
+    assert pareto_front(entries) == []
 
 
 # ---- SweepExecutor.__call__ ----

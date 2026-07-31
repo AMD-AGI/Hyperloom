@@ -12,16 +12,48 @@ kernel-agent.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import env_bool, env_float
 
 
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
+
+# Enablement-on-eval-fail switch and shared accuracy floor. The floor is used by
+# BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two
+# never diverge.
+#
+# The default is non-zero because the floor is the ONLY correctness authority on
+# the enablement KEEP path. At 0.0 the gate degenerates to ``accuracy > 0``, which
+# admits a model that is answering essentially nothing: a real run KEPT a
+# candidate scoring gsm8k=0.00076 (0.08% of a 0.906 baseline) as "correct".
+# 0.05 is a floor of last resort -- it rejects the collapsed-output regime
+# without judging genuine quality, which belongs to the operator override below.
+ENABLEMENT_ON_EVAL_FAIL_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL"
+ENABLEMENT_ACCURACY_FLOOR_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR"
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.05
+
+# Result-dict keys stamped by the baseline executor on an eval-rooted failure and
+# read by writeback promotion/persistence.
+BASELINE_EVAL_FAILED_KEY = "baseline_eval_failed"
+BASELINE_EVAL_FAILURE_KIND_KEY = "baseline_eval_failure_kind"
+BASELINE_EVAL_OBSERVED_ACCURACY_KEY = "baseline_eval_observed_accuracy"
+BASELINE_EVAL_ACCURACY_FLOOR_KEY = "baseline_eval_accuracy_floor"
+BASELINE_EVAL_EVIDENCE_KEY = "baseline_eval_evidence"
+BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
+
+# Distinct eval-failure kinds.
+EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
+EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
+EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 
 # stop_reason recorded when the baseline could not produce an accuracy result
 # even though the accuracy test was expected to run. A broken baseline accuracy
@@ -70,6 +102,151 @@ def require_framework_accuracy_default() -> bool:
     """
     v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def enablement_on_eval_fail_enabled() -> bool:
+    """Whether a baseline eval failure routes into enablement (default on)."""
+    return env_bool(ENABLEMENT_ON_EVAL_FAIL_ENV, True)
+
+
+def enablement_accuracy_floor() -> float:
+    """Shared accuracy floor for the eval trigger and the enablement KEEP gate.
+
+    Reads the env override, accepting only finite values in ``[0, 1]``; anything
+    else is logged and falls back to the default.
+    """
+    raw = os.environ.get(ENABLEMENT_ACCURACY_FLOOR_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    val = env_float(ENABLEMENT_ACCURACY_FLOOR_ENV, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
+    if not math.isfinite(val) or val < 0.0 or val > 1.0:
+        log.warning(
+            "%s=%r is not a finite value in [0,1]; using default %.3f",
+            ENABLEMENT_ACCURACY_FLOOR_ENV,
+            raw,
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+        )
+        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    return val
+
+
+def _finite_score(score: Any) -> float | None:
+    """Return ``score`` as a finite float, or ``None`` when unusable."""
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    val = float(score)
+    return val if math.isfinite(val) else None
+
+
+def accuracy_meets_floor(score: Any, floor: float) -> bool:
+    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
+    val = _finite_score(score)
+    if val is None or val <= 0.0:
+        return False
+    return val >= floor
+
+
+def classify_accuracy_failure(score: Any, floor: float) -> str | None:
+    """Classify an accuracy verdict; ``None`` means it passes the floor.
+
+    Missing / non-numeric / non-finite scores are ``accuracy_unavailable``;
+    finite scores that are non-positive or below the floor are
+    ``accuracy_below_floor``.
+    """
+    val = _finite_score(score)
+    if val is None:
+        return EVAL_KIND_ACCURACY_UNAVAILABLE
+    if val <= 0.0 or val < floor:
+        return EVAL_KIND_ACCURACY_BELOW_FLOOR
+    return None
+
+
+def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, str]:
+    """Extract stable eval-contract fields from a materialized Magpie YAML.
+
+    Reads the fields that define what workload is evaluated and how eval is
+    controlled.  Server args, runtime paths, lifecycle envs and any field
+    that a server-arg tuning candidate is allowed to change are excluded so
+    the fingerprint stays stable across valid enablement patches.
+
+    Returns an empty dict when the config is absent or unreadable.
+    """
+    if not config_path:
+        return {}
+    try:
+        import yaml as _yaml
+
+        p = Path(config_path)
+        if not p.is_file():
+            return {}
+        data = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — best-effort
+        return {}
+
+    bench = data.get("benchmark") or {}
+    envs: dict = bench.get("envs") or {}
+
+    # Eval-contract keys in benchmark.envs; all others are excluded.
+    _EVAL_CONTRACT_ENV_KEYS = (
+        "RUN_EVAL",
+        "MAGPIE_EVAL_TASKS",
+        "MAGPIE_EVAL_LIMIT",
+    )
+    # Workload-shape keys that define what is being measured.
+    _WORKLOAD_SHAPE_ENV_KEYS = (
+        "CONC",
+        "ISL",
+        "OSL",
+        "MAX_MODEL_LEN",
+        "TP",
+        "RANDOM_RANGE_RATIO",
+    )
+    contract: dict[str, str] = {
+        "framework": str(bench.get("framework") or ""),
+        "model": str(bench.get("model") or ""),
+        "benchmark_script": str(bench.get("benchmark_script") or ""),
+        "precision": str(bench.get("precision") or ""),
+    }
+    for k in _EVAL_CONTRACT_ENV_KEYS + _WORKLOAD_SHAPE_ENV_KEYS:
+        v = envs.get(k)
+        if v is not None:
+            contract[k] = str(v)
+    return contract
+
+
+def eval_contract_fingerprint(
+    *,
+    config_path: str | Path | None,
+    framework: str | None = None,
+    model: str | None = None,
+    task: str | None = None,
+    metric: str | None = None,
+) -> str:
+    """Short stable digest of the eval contract (workload + eval definition).
+
+    Derives the digest from stable eval-contract inputs extracted from the
+    materialized YAML (framework, model, script, precision, workload shape,
+    eval controls).  Result-level outputs such as task/metric names are NOT
+    included so an eval crash (where those are absent) produces the same
+    fingerprint as a successful eval on the identical contract.
+
+    ``task`` and ``metric`` parameters are accepted for call-site compatibility
+    but are not included in the hash.
+
+    Returns an empty string when the config cannot be read, signalling to
+    callers that the contract is invalid and drift checking should fail closed.
+    """
+    contract = _extract_eval_contract_fields(config_path)
+    if not contract:
+        # Unreadable or missing config — return invalid sentinel.
+        return ""
+    # Supplement with caller-supplied framework/model when the YAML lacks them.
+    if framework and not contract.get("framework"):
+        contract["framework"] = str(framework)
+    if model and not contract.get("model"):
+        contract["model"] = str(model)
+    payload = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def accuracy_keep_block(
@@ -391,8 +568,24 @@ def accuracy_passed(
 __all__ = [
     "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
+    "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
+    "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
+    "BASELINE_EVAL_EVIDENCE_KEY",
+    "BASELINE_EVAL_FAILED_KEY",
+    "BASELINE_EVAL_FAILURE_KIND_KEY",
+    "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
+    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "EVAL_KIND_ACCURACY_BELOW_FLOOR",
+    "EVAL_KIND_ACCURACY_UNAVAILABLE",
+    "EVAL_KIND_RUNTIME_FAILURE",
+    "_extract_eval_contract_fields",
     "accuracy_keep_block",
+    "accuracy_meets_floor",
     "accuracy_passed",
+    "classify_accuracy_failure",
+    "enablement_accuracy_floor",
+    "enablement_on_eval_fail_enabled",
+    "eval_contract_fingerprint",
     "is_high_accuracy_risk",
     "parse_eval_results",
     "request_baseline_accuracy_stop",

@@ -9,12 +9,10 @@ assignment. CPU/LLM steps stay on the local subprocess path.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -229,7 +227,6 @@ class RayExecutionBackend:
 
     def __init__(self) -> None:
         self._ensured = False
-        self._started = False
 
     def ensure(self, num_gpus: int | None = None, log_path: Path | None = None) -> None:
         """Ensure a Ray cluster is up and this process is connected.
@@ -253,133 +250,9 @@ class RayExecutionBackend:
         if resolved is None:
             env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
             resolved = int(env_n) if env_n.isdigit() else None
-        self._started = ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
+        ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
         quiet_ray_init(num_gpus=resolved, log_path=log_path)
         self._ensured = True
-
-    async def run_subprocess(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        num_gpus: float = 0,
-        resources: dict[str, float] | None = None,
-        timeout_s: int | float | None = None,
-        result_dir: str | None = None,  # noqa: ARG002 — reserved for artifact addressing (§4.6)
-        soft_deadline_sec: float | None = None,
-        server_log_path: str | None = None,
-        server_already_ready: bool = False,
-    ) -> SubprocessResult:
-        """Run ``cmd`` inside a Ray task holding ``num_gpus`` + ``resources``.
-
-        Ray queues the task until the requested GPUs / custom resources
-        (e.g. ``serving_slot``) are free, then runs the subprocess on a worker
-        with the corresponding devices made visible.
-
-        Args:
-            cmd: Command to execute.
-            env: Caller env (device vars are dropped; Ray owns them).
-            cwd: Working directory.
-            num_gpus: GPUs the task leases (Ray schedules on availability).
-            resources: Ray custom resources (e.g. ``{"serving_slot": 1}``).
-            timeout_s: Hard timeout.
-            result_dir: Reserved for §4.6 unified artifact addressing.
-            soft_deadline_sec: Overtime soft deadline.
-            server_log_path: Server log path for watchdog markers.
-            server_already_ready: Warm-reuse soft-clock semantics.
-
-        Returns:
-            The subprocess :class:`SubprocessResult`.
-        """
-        import ray
-
-        ref = self._submit(
-            cmd,
-            env=env,
-            cwd=cwd,
-            num_gpus=num_gpus,
-            resources=resources,
-            timeout_s=timeout_s,
-            soft_deadline_sec=soft_deadline_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-        )
-        rc, out, err = await asyncio.to_thread(ray.get, ref)
-        return SubprocessResult(returncode=rc, stdout=out, stderr=err)
-
-    def run_subprocess_sync(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-        num_gpus: float = 0,
-        resources: dict[str, float] | None = None,
-        timeout_s: int | float | None = None,
-        result_dir: str | None = None,  # noqa: ARG002 — reserved for §4.6
-        soft_deadline_sec: float | None = None,
-        server_log_path: str | None = None,
-        server_already_ready: bool = False,
-    ) -> SubprocessResult:
-        """Blocking variant of :meth:`run_subprocess` for sync call sites.
-
-        Used by ``_run_magpie`` (already invoked via ``asyncio.to_thread``), so a
-        blocking ``ray.get`` here does not stall the event loop.
-
-        Returns:
-            The subprocess :class:`SubprocessResult`.
-        """
-        import ray
-
-        ref = self._submit(
-            cmd,
-            env=env,
-            cwd=cwd,
-            num_gpus=num_gpus,
-            resources=resources,
-            timeout_s=timeout_s,
-            soft_deadline_sec=soft_deadline_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-        )
-        rc, out, err = ray.get(ref)
-        return SubprocessResult(returncode=rc, stdout=out, stderr=err)
-
-    def _submit(
-        self,
-        cmd: list[str],
-        *,
-        env: dict[str, str] | None,
-        cwd: str | None,
-        num_gpus: float,
-        resources: dict[str, float] | None,
-        timeout_s: int | float | None,
-        soft_deadline_sec: float | None,
-        server_log_path: str | None,
-        server_already_ready: bool,
-    ) -> Any:
-        """Ensure the cluster and submit the worker task; return its ObjectRef.
-
-        Returns:
-            The Ray ``ObjectRef`` for the submitted worker task.
-        """
-        self.ensure()
-        import ray
-
-        # Ray's decorated remote function is dynamically typed; treat as Any so
-        # mypy does not check the .remote(**kwargs) call shape.
-        decorator: Any = ray.remote(num_gpus=num_gpus, resources=resources or {})
-        worker: Any = decorator(_run_subprocess_worker)
-        return worker.remote(
-            cmd=cmd,
-            env=env,
-            cwd=cwd,
-            timeout_s=timeout_s,
-            soft_deadline_sec=soft_deadline_sec,
-            server_log_path=server_log_path,
-            server_already_ready=server_already_ready,
-        )
 
 
 def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
@@ -463,7 +336,6 @@ def mark_ray_backend_unhealthy() -> None:
         pass
     if _BACKEND is not None:
         _BACKEND._ensured = False
-        _BACKEND._started = False
 
 
 __all__ = [

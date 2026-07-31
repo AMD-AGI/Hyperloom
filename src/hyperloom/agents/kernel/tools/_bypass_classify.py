@@ -30,14 +30,38 @@ from typing import NamedTuple
 _RULES: list[tuple[re.Pattern, str, int]] = [
     # MemCpy (highest; also detected via Kineto cat).
     (re.compile(r"(?i)memcpy|memset"), "MemCpy", 30),
+    # Communication / collective (before generic GEMM/Elementwise/reduce). Match
+    # on the substring present inside mangled device names (e.g. aiter all-reduce).
+    (
+        re.compile(
+            r"(?i)cross_device_reduce|outplace_all_reduce|all_reduce|allreduce|"
+            r"allgather|all_gather|reg_all_gather|reduce_scatter|all_to_all|alltoall"
+        ),
+        "Communication",
+        28,
+    ),
     # MoE (specific, before generic GEMM/Elementwise).
     (re.compile(r"(?i)swiglu|fmoe|kernel_moe_gemm|MoeGemmBlockScale"), "MoE", 25),
-    (re.compile(r"(?i)moe_sorting|moe_align|topk_softmax|topkGatingSoftmax|routing"), "MoE", 22),
+    (
+        re.compile(
+            r"(?i)fused_moe|moe_gemm[12]|ck_moe|moe_sorting|moe_align|"
+            r"topk_softmax|topkGatingSoftmax|grouped_topk|biased_grouped_topk|routing"
+        ),
+        "MoE",
+        22,
+    ),
     # Attention / SDPA.
-    (re.compile(r"(?i)paged_attention|PagedAttention"), "SDPA", 20),
+    (re.compile(r"(?i)paged_attention|PagedAttention|mla_decode"), "SDPA", 20),
     (re.compile(r"(?i)attention_[23]d|unified_attention"), "SDPA", 20),
     (re.compile(r"(?i)flash_attn|flash_fwd|fmha"), "SDPA", 20),
-    (re.compile(r"(?i)_fwd_kernel|reduce_segments"), "SDPA", 18),
+    (
+        re.compile(
+            r"(?i)_fwd_kernel|_fwd_grouped_kernel|_decode_grouped_att|"
+            r"_score_kernel|_combine_kernel|kda_packed_decode|reduce_segments"
+        ),
+        "SDPA",
+        18,
+    ),
     # KV cache store.
     (re.compile(r"(?i)reshape_and_cache|concat_and_cache"), "KVCacheStore", 20),
     # Normalization.
@@ -56,14 +80,31 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
         "Quantization",
         18,
     ),
-    (re.compile(r"(?i)\bquant\b|quantize"), "Quantization", 6),
+    (
+        re.compile(r"(?i)dynamic_per_token|per_token.*quant|static_quant_fp8|\bquant\b|quantize"),
+        "Quantization",
+        6,
+    ),
     # Activation / elementwise.
-    (re.compile(r"(?i)silu|swish|\bgelu\b|act_and_mul"), "Elementwise", 15),
+    (re.compile(r"(?i)silu|swish|\bgelu\b|silu_and_mul|situ_and_mul|act_and_mul"), "Elementwise", 15),
     (re.compile(r"(?i)embedding|gather_kernel|vectorized_gather"), "Elementwise", 14),
-    (re.compile(r"(?i)elementwise|CatArrayBatchedCopy|direct_copy_kernel|_to_copy\b|FillFunctor"), "Elementwise", 10),
+    (
+        re.compile(
+            r"(?i)elementwise|index_elementwise|CatArrayBatchedCopy|direct_copy_kernel|"
+            r"copy_|_to_copy\b|FillFunctor"
+        ),
+        "Elementwise",
+        10,
+    ),
     # GEMM (vendor + generic).
     (re.compile(r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet"), "GEMM", 12),
-    (re.compile(r"(?i)kernel_gemm_xdl_cshuffle|_gemm_a\d+w\d+|_gemm_a16_w16"), "GEMM", 12),
+    (
+        re.compile(
+            r"(?i)kernel_gemm_xdl_cshuffle|_?gemm_a\d+w\d+|_gemm_a16_w16|hgemm_bf16|flatmm|opus_gemm"
+        ),
+        "GEMM",
+        12,
+    ),
     (re.compile(r"(?i)scaled_mm|\bgemm\b|matmul|\bbmm\b"), "GEMM", 8),
     # Triton / generic catch-alls (lowest).
     (re.compile(r"(?i)triton_poi_fused|triton_red_fused|triton_per_fused"), "Elementwise", 3),
@@ -75,8 +116,10 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
 _VENDOR_BINARY_RE = re.compile(r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet_tst|miopen|cudnn")
 # Native-source kernels that are rewritable (triton / aiter / CK / vLLM native).
 _REUSABLE_RE = re.compile(
-    r"(?i)triton_|^_fwd_kernel|aiter|ck_tile|paged_attention|reshape_and_cache|"
-    r"rmsnorm|rms_norm|add_rmsnorm|silu|per_tensor_quant|scaled_quant|data_to_scale|initializeScale|"
+    r"(?i)triton_|^_fwd_kernel|_fwd_grouped_kernel|_decode_grouped_att|_score_kernel|_combine_kernel|"
+    r"kda_packed_decode|aiter|ck_tile|paged_attention|mla_decode|reshape_and_cache|"
+    r"rmsnorm|rms_norm|add_rmsnorm|silu|situ_and_mul|act_and_mul|"
+    r"per_tensor_quant|dynamic_per_token|static_quant_fp8|scaled_quant|data_to_scale|initializeScale|"
     r"fusedlnmodulate|ada_?ln|modulate|scale_shift"
 )
 
@@ -86,6 +129,13 @@ _REUSABLE_RE = re.compile(
 # row, so rows MUST stay ordered most-specific-first. Norm keeps only explicit
 # ``*_norm`` names so a bare ``\bnorm\b`` does not mis-map ``aten::norm``.
 _OP_RULES: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(
+            r"(?i)cross_device_reduce|outplace_all_reduce|all_reduce|allreduce|"
+            r"allgather|all_gather|reg_all_gather|reduce_scatter|all_to_all|alltoall"
+        ),
+        "Communication",
+    ),
     (re.compile(r"(?i)convolution|conv[123]d|conv_transpose|_convolution"), "Convolution"),
     (
         re.compile(
@@ -178,6 +228,9 @@ def classify_kernel(name: str, *, gpu_cat: str = "", op_name: str = "") -> Kerne
 
     if category == "MemCpy":
         return KernelClass("MemCpy", False, "device memcpy/memset (not a rewritable kernel)")
+    # Collectives are runtime/library primitives, never a rewritable candidate.
+    if category == "Communication":
+        return KernelClass(category, False, "collective/communication primitive (not a rewritable kernel)")
     if _VENDOR_BINARY_RE.search(n):
         return KernelClass(category, False, "vendor backend library (precompiled binary, no rewritable source)")
     if _REUSABLE_RE.search(n):

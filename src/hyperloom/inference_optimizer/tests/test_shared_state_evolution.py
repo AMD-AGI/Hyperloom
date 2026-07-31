@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import logging
 
 import pytest
 
@@ -116,6 +115,28 @@ def test_fact_layer_md5_matches_post_save(tmp_path):
     assert md5_before == md5_after, "fact-layer md5 changed across migration + save round-trip"
 
 
+def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
+    """A v1-like dict with unknown scoreboard keys loads, drops the unknowns,
+    and is stamped to the latest schema version (no flags, no raise)."""
+    payload = {
+        "session_id": "legacy",
+        "baseline_tput": 100.0,
+        "action_scores": {"backends": {"base_score": 5.0}},
+        "cooldown_until_tick": {"backends": 12},
+        "score_violation": {"params": 3},
+        "not_a_real_field": 123,
+    }
+    loaded = SharedState.from_dict(payload)
+    assert loaded.session_id == "legacy"
+    assert loaded.baseline_tput == 100.0
+    for dropped in ("action_scores", "cooldown_until_tick", "score_violation", "not_a_real_field"):
+        assert not hasattr(loaded, dropped)
+    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+    assert isinstance(loaded.explore_search, dict)
+    for key in ("tested", "accepted", "rejected", "winners_history", "synergy_attempted"):
+        assert key in loaded.explore_search
+
+
 # 3. Inv-10.3 — migration idempotence
 def test_migration_is_idempotent(tmp_path):
     """Re-loading an already-migrated state.json produces the identical SharedState."""
@@ -132,36 +153,6 @@ def test_migration_is_idempotent(tmp_path):
     snap2 = {k: getattr(third, k) for k in _FACT_LAYER_PAYLOAD}
     assert snap1 == snap2
     assert second.schema_version == third.schema_version == LATEST_STATE_SCHEMA_VERSION
-
-
-def test_v08_payload_short_circuits_migration(caplog):
-    """A current-schema payload (schema_version == LATEST) skips the migration log line."""
-    payload = {
-        "schema_version": LATEST_STATE_SCHEMA_VERSION,
-        "session_id": "fresh-v08",
-        "baseline_tput": 100.0,
-    }
-    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.state.shared_state"):
-        SharedState.from_dict(payload)
-    migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
-    assert migrated == [], "fresh v0.8 payload should not log a migration line"
-
-
-# 4. Migration log content
-def test_v06_migration_log_lists_scoreboard_drop(monkeypatch, caplog):
-    """A legacy payload with action_scores logs the scoreboard drop + migrated schema_version."""
-    payload = {
-        "session_id": "legacy",
-        "baseline_tput": 100.0,
-        "action_scores": {"backends": {"base_score": 5.0}},
-    }
-    with caplog.at_level(logging.INFO, logger="hyperloom.orchestrator.state.shared_state"):
-        SharedState.from_dict(payload)
-    migrated = [r for r in caplog.records if "v0.8 §3.10: state.json migrated" in r.getMessage()]
-    assert migrated, "v0.6 payload should log a migration line"
-    msg = migrated[0].getMessage()
-    assert f"v1 → v{LATEST_STATE_SCHEMA_VERSION}" in msg
-    assert "§3.9 dropped scoreboard fields" in msg
 
 
 def test_v2_kernel_keep_migrates_to_stable_task_and_pending_patch():
@@ -218,37 +209,6 @@ def test_v2_ungrouped_kernel_uses_runtime_legacy_task_key():
     assert len(state.pending_kernel_integrations) == 1
 
 
-# 5. Strict / lenient migration mode
-def test_lenient_mode_allows_continue_on_fact_field_drop(monkeypatch, caplog):
-    """Lenient mode downgrades a fact-layer discrepancy to WARNING and continues."""
-    # Drop ``baseline_tput`` from the field set to force the fact-drop branch.
-    real_fields = SharedState.__dataclass_fields__
-    fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
-    monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)
-    payload = {
-        "session_id": "legacy",
-        "baseline_tput": 100.0,
-    }
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.state.shared_state"):
-        loaded = SharedState.from_dict(payload, migration_mode="lenient")
-    assert loaded.session_id == "legacy"
-    warned = [r for r in caplog.records if "Inv-10.1 violation" in r.getMessage()]
-    assert warned, "lenient mode should still log a WARNING about the drop"
-
-
-def test_strict_mode_raises_on_fact_field_drop(monkeypatch):
-    """Strict mode raises ValueError when a fact-layer field would be lost."""
-    real_fields = SharedState.__dataclass_fields__
-    fake_fields = {k: v for k, v in real_fields.items() if k != "baseline_tput"}
-    monkeypatch.setattr(SharedState, "__dataclass_fields__", fake_fields)
-    payload = {
-        "session_id": "legacy",
-        "baseline_tput": 100.0,
-    }
-    with pytest.raises(ValueError, match="strict migration failed"):
-        SharedState.from_dict(payload)
-
-
 # 6. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
     """``--reset-state`` renames state.json so the next load starts blank."""
@@ -278,46 +238,6 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
 
 
 # 7. CLI flag wiring
-def test_cli_exposes_migration_mode_flag():
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    args = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/dummy",
-            "--migration-mode",
-            "lenient",
-        ]
-    )
-    assert args.migration_mode == "lenient"
-    args2 = parser.parse_args(
-        [
-            "optimize",
-            "--model",
-            "/tmp/dummy",
-        ]
-    )
-    assert args2.migration_mode in ("strict", "lenient")
-
-
-def test_cli_rejects_unknown_migration_mode():
-    from hyperloom.inference_optimizer.cli.parser import _build_parser
-
-    parser = _build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "optimize",
-                "--model",
-                "/tmp/dummy",
-                "--migration-mode",
-                "ultra",
-            ]
-        )
-
-
 def test_cli_exposes_reset_state_flag():
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -351,8 +271,8 @@ def test_core_state_fields_contains_v08_new_additions():
         "phase_started_ts",
         "phase_history",
         "phase_budget_pct",
-        "cortex_session_id",
-        "cortex_session_summary",
+        "recipe_kb_session_id",
+        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",
@@ -443,6 +363,19 @@ def test_search_ledgers_in_core_state_fields():
     assert "explore_search" in CORE_STATE_FIELDS, (
         "'explore_search' must be in CORE_STATE_FIELDS so LLM update_state cannot rewrite the search ledger"
     )
+
+
+def test_enablement_accepted_config_path_roundtrips(tmp_path):
+    """enablement_accepted_config_path is persisted and reloaded correctly."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState()
+    s.enablement_accepted_config_path = "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    s.enablement_active_runtime = {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+    s.save(sd)
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.enablement_accepted_config_path == "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    assert loaded.enablement_active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
 
 
 @pytest.mark.parametrize("field_name", ["explore_search"])

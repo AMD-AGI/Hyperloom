@@ -309,8 +309,7 @@ def ensure_sglang_patched_for_ck_blockscale(
 
     Args:
         kernelforge_root: KernelForge checkout root; falls back to
-            ``$FORGE_PATH`` / ``$KERNEL_FORGE_ROOT`` / ``$KERNEL_FORGE_PATH``
-            (in that order) when ``None``.
+            ``$FORGE_PATH`` when ``None``.
 
     Returns:
         True if the SGLang install carries the CK-routing patch at exit, False
@@ -345,6 +344,10 @@ class _PatchPlan:
     # Per-plan ``-p<N>`` strip count: ``-p1`` for editable / vLLM, ``-p3`` for
     # wheel SGLang. Passed to both ``git apply`` and ``patch``.
     apply_strip: int = 1
+    # Patch names that may fail ``git apply --check`` and be skipped instead of
+    # rolling back the whole atomic set (e.g. eagle-draft patches whose context
+    # drifted across same-version different-commit sglang builds).
+    optional_patches: frozenset[str] = frozenset()
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
@@ -572,6 +575,14 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     )
 
 
+#: Basename substrings marking SGLang patches that are non-critical to kernel
+#: shape profiling. These patch eagle speculative-decoding cuda-graph runners,
+#: unrelated to the shape-profiler pipeline; when one fails ``git apply --check``
+#: against a point-release-shifted SGLang it is skipped instead of aborting the
+#: whole atomic set (which would also roll back the critical profiler patch).
+_SGLANG_OPTIONAL_PATCH_MARKERS = ("eagle",)
+
+
 def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     """Build the SGLang patch plan for the installed SGLang version.
 
@@ -677,6 +688,11 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
             ("shape_discovery", "roofline_annotations"),
         ),
     )
+    optional_patches = frozenset(
+        p.name
+        for p in filtered_patches
+        if any(m in p.name.lower() for m in _SGLANG_OPTIONAL_PATCH_MARKERS)
+    )
     return _PatchPlan(
         framework="sglang",
         version=version,
@@ -688,6 +704,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         sentinel_text=("kernel_shape_profiler",),
         extra_sentinels=extra_sentinels,
         apply_strip=apply_strip,
+        optional_patches=optional_patches,
     )
 
 
@@ -718,12 +735,8 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# KernelForge root env aliases, in install.sh's precedence order.
-_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = (
-    "FORGE_PATH",
-    "KERNEL_FORGE_ROOT",
-    "KERNEL_FORGE_PATH",
-)
+# KernelForge root env var (single canonical var; CI/local both export it).
+_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = ("FORGE_PATH",)
 
 # CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the
 # KernelForge-owned patch; all three must be present to count as patched.
@@ -737,9 +750,8 @@ _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
 def _resolve_kernelforge_root(arg: Path | str | None) -> Path | None:
     """Resolve the KernelForge root from arg → env aliases → None; fail-soft.
 
-    Mirrors the env precedence in ``install.sh``
-    (``FORGE_PATH`` > ``KERNEL_FORGE_ROOT`` > ``KERNEL_FORGE_PATH``); returns
-    the first candidate that exists on disk, else ``None``.
+    Reads ``FORGE_PATH`` (the single canonical KernelForge root var); returns
+    it when it exists on disk, else ``None``.
 
     Args:
         arg: Explicit KernelForge root override, or ``None`` to read the env
@@ -782,7 +794,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     if kernelforge_root is None:
         log.info(
             "_server_patcher: KernelForge root unset/missing "
-            "(FORGE_PATH/KERNEL_FORGE_ROOT/KERNEL_FORGE_PATH) — skip SGLang "
+            "(FORGE_PATH) — skip SGLang "
             "fp8 block-scale CK patch (SGLANG_FP8_BLOCKSCALE_CK_MAX_M will "
             "no-op on the unpatched tree)"
         )
@@ -995,6 +1007,19 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
                 "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
                 plan.framework,
                 p.name,
+            )
+            apply_modes[p] = "skip"
+            continue
+        if p.name in plan.optional_patches:
+            log.warning(
+                "_server_patcher: optional %s patch %s does not apply "
+                "(`git apply --check %s` + fuzzy both failed, not already "
+                "applied) — skipping it so the critical patches still apply "
+                "atomically (version %s; non-critical to kernel shape profiling)",
+                plan.framework,
+                p.name,
+                strip_arg,
+                plan.version,
             )
             apply_modes[p] = "skip"
             continue

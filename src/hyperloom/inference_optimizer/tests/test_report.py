@@ -33,32 +33,6 @@ def test_completeness_annotations_full():
     assert "k2" in body
 
 
-# ---- _format_steward_section ----
-def test_steward_section_empty():
-    assert rp._format_steward_section({}) == []
-
-
-def test_steward_section_with_assessment():
-    out = rp._format_steward_section(
-        {
-            "remaining_gaps_assessment": {
-                "recommendation": "stop",
-                "ts": "t0",
-                "remaining_potential_pct_estimate": 3.5,
-                "rationale": "diminishing\nreturns",
-                "next_gap_canonical_id": "gap.x",
-            },
-            "remaining_gaps_assessments_history": [1, 2, 3],
-        }
-    )
-    body = "\n".join(out)
-    assert "stop" in body
-    assert "3.50%" in body
-    assert "gap.x" in body
-    assert "prior assessments: 2" in body
-
-
-# ---- _format_degraded_mode_section ----
 def test_degraded_mode_section():
     out = rp._format_degraded_mode_section(
         {

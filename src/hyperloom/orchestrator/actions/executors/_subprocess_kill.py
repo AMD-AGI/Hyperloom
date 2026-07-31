@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -258,6 +259,20 @@ _SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
     "Avg generation throughput:",  # vLLM
 )
 
+# Accuracy-eval start markers: their appearance means the benchmark phase of the
+# run is over and the accuracy eval has begun. The soft deadline measures
+# throughput only, so it stops being enforced from this point on — eval duration
+# is not a throughput signal and the anchor it is compared against excludes it.
+# The hard timeout and the dead/stall watchdogs stay armed.
+_EVAL_START_MARKERS: tuple[str, ...] = (
+    "HYPERLOOM_EVAL_START",
+    "[magpie_bench_remote_compat] lm_eval cmd:",
+)
+
+# The patcher echoes the eval-start marker to stderr, which Magpie redirects
+# here rather than into ``server.log``; scanned alongside it.
+_EVAL_LOG_NAME: str = "benchmark_stderr.log"
+
 # Default grace: how long after the server reports ready it may emit no log
 # output before the watchdog declares a hang / detokenizer stall. Measured from
 # the ready marker so the cold start is never counted. ``<= 0`` disables the
@@ -492,9 +507,63 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     return None
 
 
-def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, bool]:
+def _resolve_scan_logs(server_log_path: str) -> list[str]:
+    """Return the log files to scan for markers, newest-nesting first.
+
+    The caller passes ``<output_dir>/server.log``, but the Magpie benchmark
+    scripts write their logs into a ``benchmark_<fw>_<ts>/`` subdir of
+    ``$RESULT_DIR``, so that exact path usually does not exist. Resolve the
+    nested location and pair each ``server.log`` with the sibling
+    ``benchmark_stderr.log`` that carries the eval-start marker (the patcher
+    echoes it to stderr, which never reaches ``server.log``).
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+
+    Returns:
+        Existing log paths to scan; empty when none are present yet.
+    """
+    primary = Path(server_log_path)
+    out: list[str] = []
+    candidates = [primary]
+    try:
+        candidates.extend(sorted(primary.parent.glob("benchmark_*/server.log")))
+    except OSError:
+        pass
+    for log in candidates:
+        for name in (log, log.with_name(_EVAL_LOG_NAME)):
+            text = str(name)
+            if text not in out and name.exists():
+                out.append(text)
+    return out
+
+
+def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> tuple[bool, bool, bool, bool]:
+    """Scan every resolved log for markers, advancing ``offsets`` in place.
+
+    Args:
+        server_log_path: The ``<output_dir>/server.log`` path from the caller.
+        offsets: Per-path byte offsets already consumed; mutated in place.
+
+    Returns:
+        ``(saw_ready, saw_progress, saw_eval_start, grew)`` — the markers seen
+        in the newly appended bytes, and whether any log grew (liveness).
+    """
+    saw_ready = saw_progress = saw_eval_start = grew = False
+    for path in _resolve_scan_logs(server_log_path):
+        prev = offsets.get(path, 0)
+        new_offset, ready, progress, eval_start = _scan_server_log_increment(path, prev)
+        offsets[path] = new_offset
+        saw_ready = saw_ready or ready
+        saw_progress = saw_progress or progress
+        saw_eval_start = saw_eval_start or eval_start
+        grew = grew or new_offset > prev
+    return saw_ready, saw_progress, saw_eval_start, grew
+
+
+def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, bool, bool]:
     """Incrementally scan the bytes appended to ``server.log`` since
-    ``from_offset`` for ready / generation-progress markers.
+    ``from_offset`` for ready / generation-progress / eval-start markers.
 
     Reading only the NEW tail (not the whole file) keeps the per-poll cost flat
     and — crucially — makes "progress" mean *fresh* progress: a throughput line
@@ -510,27 +579,29 @@ def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, 
         from_offset: Byte offset already consumed by a prior scan.
 
     Returns:
-        ``(new_offset, saw_ready, saw_progress)`` — the advanced offset plus
-        whether a ready / progress marker appeared in the newly read bytes.
+        ``(new_offset, saw_ready, saw_progress, saw_eval_start)`` — the advanced
+        offset plus whether a ready / progress / eval-start marker appeared in
+        the newly read bytes.
     """
     try:
         size = os.path.getsize(path)
     except OSError:
-        return from_offset, False, False
+        return from_offset, False, False, False
     start = from_offset
     if size < start:  # truncated / rotated — rescan from the top.
         start = 0
     if size <= start:  # nothing new appended
-        return start, False, False
+        return start, False, False, False
     try:
         with open(path, "rb") as fh:
             fh.seek(start)
             chunk = fh.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return from_offset, False, False
+        return from_offset, False, False, False
     saw_ready = any(marker in chunk for marker in _SERVER_READY_MARKERS)
     saw_progress = any(marker in chunk for marker in _SERVER_PROGRESS_MARKERS)
-    return size, saw_ready, saw_progress
+    saw_eval_start = any(marker in chunk for marker in _EVAL_START_MARKERS)
+    return size, saw_ready, saw_progress, saw_eval_start
 
 
 def run_with_session_kill(
@@ -780,41 +851,54 @@ def _communicate_with_soft_deadline(
         and os.environ.get("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1").strip().lower()
         not in {"0", "false", "no", "off"}
     )
-    # The server.log increment scan feeds both the stall watchdog and the
-    # from-ready soft-deadline anchor; run it once per slice when either needs it.
-    scan_active = stall_active or soft_from_ready
+    # The log increment scan feeds the stall watchdog, the from-ready
+    # soft-deadline anchor and the eval-start boundary; run it once per slice
+    # when any of them needs it. Broader than ``soft_from_ready``: a warm-reuse
+    # round (``server_already_ready``) still needs the eval-start boundary, so
+    # any soft deadline with a log present scans.
+    soft_watches_log = soft_active and bool(server_log_path)
+    scan_active = stall_active or soft_watches_log
     poll_interval = 0.5
     start = time.monotonic()
     dead_marker_since: float | None = None
-    # Detokenizer-stall watchdog state: byte offset consumed from server.log,
-    # whether a ready marker has been seen, and the last time the log showed any
+    # Detokenizer-stall watchdog state: per-log byte offsets consumed so far,
+    # whether a ready marker has been seen, and the last time a log showed any
     # new output (seeded to the ready time). The gate only arms once
     # ``server_ready_since`` is set.
-    stall_log_offset = 0
+    scan_offsets: dict[str, int] = {}
     server_ready_since: float | None = None
     last_activity_at: float | None = None
+    # Latched once the accuracy eval starts: the soft deadline bounds the
+    # throughput phase only, so it is retired for the rest of the process.
+    soft_deadline_suspended = False
     while True:
         now = time.monotonic()
         elapsed = now - start
-        # Advance the server.log scan, latching the server-ready and
-        # last-activity times.
+        # Advance the log scan, latching the server-ready, last-activity
+        # and eval-start signals.
         if scan_active:
-            prev_offset = stall_log_offset
-            stall_log_offset, saw_ready, _saw_progress = _scan_server_log_increment(
+            saw_ready, _saw_progress, saw_eval_start, grew = _scan_logs_increment(
                 server_log_path,  # type: ignore[arg-type]
-                stall_log_offset,
+                scan_offsets,
             )
             if saw_ready and server_ready_since is None:
                 server_ready_since = now
                 last_activity_at = now  # start the silence clock at ready
-            # Any new bytes in server.log count as liveness; only total silence
-            # trips the stall gate.
-            if stall_log_offset > prev_offset:
+            if saw_eval_start and not soft_deadline_suspended:
+                soft_deadline_suspended = True
+                log.info(
+                    "_subprocess_kill: accuracy eval started; soft_deadline_sec=%.1fs no longer enforced "
+                    "(it bounds the throughput phase only)",
+                    float(deadline_sec or 0.0),
+                )
+            # Any new bytes count as liveness; only total silence trips the
+            # stall gate.
+            if grew:
                 last_activity_at = now
         # Soft deadline. With ``soft_from_ready`` the overtime clock is measured
         # from the server-ready marker and stays dormant until ready; otherwise
         # it is the from-spawn elapsed.
-        if soft_active and deadline_sec is not None:
+        if soft_active and deadline_sec is not None and not soft_deadline_suspended:
             if soft_from_ready:
                 if server_ready_since is not None:
                     soft_elapsed = now - server_ready_since
@@ -852,7 +936,7 @@ def _communicate_with_soft_deadline(
         # Slice bounded by every active remaining window so the right gate
         # fires first; the child can still finish inside any slice.
         slice_sec = poll_interval
-        if soft_active and deadline_sec is not None:
+        if soft_active and deadline_sec is not None and not soft_deadline_suspended:
             if soft_from_ready:
                 if server_ready_since is not None:
                     slice_sec = min(slice_sec, deadline_sec - (now - server_ready_since))

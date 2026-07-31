@@ -53,13 +53,13 @@ class MachinePhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: save after phase init failed")
 
-    def _ensure_cortex_t0_anchored(self) -> None:
-        """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when cortex_kb is None or cortex_session_id set."""
-        client = self.cortex_kb
+    def _ensure_recipe_kb_t0_anchored(self) -> None:
+        """Defensive T0 anchor for SDK callers constructed without cli plumbing. Skips when recipe_kb is None or recipe_kb_session_id set."""
+        client = self.recipe_kb
         if client is None or not getattr(client, "enabled", True):
             return
         state = self.shared_state
-        if (state.cortex_session_id or "").strip():
+        if (state.recipe_kb_session_id or "").strip():
             # cli already T0'd or resume picked up the sid.
             return
         # Derive workload / hw from SharedState.
@@ -75,7 +75,7 @@ class MachinePhase(PhaseHandler):
             "boot_origin": "coordinator_fallback",
         }
         try:
-            from ..knowledge.cortex_t0 import run_t0_anchor
+            from ..knowledge.recipe_kb_t0 import run_t0_anchor
 
             run_t0_anchor(
                 client,
@@ -119,6 +119,21 @@ class MachinePhase(PhaseHandler):
         Priority order (Inv-8.2): abort > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
+        # KERNEL_AGENT idle-spin bookkeeping: count consecutive ticks with no
+        # actionable kernel work so exit_normal_kernel can wind down to SWEEP
+        # instead of spinning until the wall-clock cap (the escalate-hint handoff
+        # is unavailable — PolicyGate denies escalate_strategy_change for the
+        # kernel_agent role). Reset outside KERNEL or whenever work reappears.
+        try:
+            if str(getattr(state, "phase", "") or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
+                if _phase_state.kernel_work_pending(state):
+                    state.kernel_idle_ticks = 0
+                else:
+                    state.kernel_idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0) + 1
+            elif int(getattr(state, "kernel_idle_ticks", 0) or 0):
+                state.kernel_idle_ticks = 0
+        except Exception:  # noqa: BLE001 — advisory bookkeeping is best-effort
+            log.debug("kernel idle-tick bookkeeping failed", exc_info=True)
         max_hours_arg: float | None = None
         mm = float(getattr(state, "max_minutes", 0) or 0.0)
         if mm > 0:

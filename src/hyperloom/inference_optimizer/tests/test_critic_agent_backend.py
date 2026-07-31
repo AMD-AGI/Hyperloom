@@ -214,48 +214,6 @@ def _make_backend(
     return backend, fake_client
 
 
-def test_cortex_kb_url_propagated_to_runtime_env(fake_critic_root, fake_session_dir, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-        cortex_kb_url="http://kb.local/",
-    )
-    env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://kb.local/"
-
-
-def test_explicit_cortex_kb_url_flag_wins_over_inherited_env(fake_critic_root, fake_session_dir, monkeypatch):
-    # The --cortex-kb-url flag is authoritative: the endpoint is a CLI concern
-    # with no env fallback, so the flag value overrides any inherited
-    # CORTEX_KB_URL in the parent env when building the subprocess env.
-    # The --cortex-kb-url flag is authoritative and overrides inherited env.
-    monkeypatch.setenv("CORTEX_KB_URL", "http://from-env.local")
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-        cortex_kb_url="http://from-flag.local",
-    )
-    env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://from-flag.local"
-
-
-def test_no_cortex_kb_url_leaves_env_unset(fake_critic_root, fake_session_dir, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-    )
-    env = backend._build_runtime_env()
-    assert "CORTEX_KB_URL" not in env
-
-
 # _extract_review_json
 def test_extract_review_json_fenced():
     text = """Reasoning prose.
@@ -1152,7 +1110,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
@@ -1236,7 +1194,7 @@ class _DeterministicClient:
 @pytest.fixture
 def critic_agent_root() -> Path:
     """Locate the real critic-agent checkout. Skip gracefully if absent."""
-    root = _resolve_critic_agent_root()
+    root = _resolve_agent_root("critic")
     if root is None:
         pytest.skip(
             "critic-agent runtime not found — set CRITIC_AGENT_ROOT or place critic-agent/ next to src/hyperloom/inference_optimizer/"
@@ -1395,41 +1353,6 @@ def test_verdict_references_kb_helper():
     assert _verdict_references_kb({"review_verdicts": [{"verdict": "reject", "kb_evidence": ["kb_x"]}]}) is True
 
 
-def test_build_kb_assess_trace_dry_run_vs_injected():
-    judge_bundle = {
-        "kb_assess_trace": {
-            "configured": True,
-            "skipped_reason": None,
-            "focus": {"model": "m"},
-            "requests": [{"msg_id": "p1", "responded": True}],
-        },
-        "kb_assess_by_proposal": {"p1": {"reasonable": "supported"}},
-    }
-    review = {"review_verdicts": [{"verdict": "reject", "kb_evidence": ["k"]}]}
-    dry = CriticAgentBackend._build_kb_assess_trace(
-        judge_bundle,
-        review,
-        injected=False,
-    )
-    assert dry["mode"] == "dry_run"
-    assert dry["injected"] is False
-    assert dry["verdict_count"] == 1
-    # In dry-run the verdict can't have been steered by assess, so False.
-    assert dry["referenced_in_verdict"] is False
-
-    inj = CriticAgentBackend._build_kb_assess_trace(
-        judge_bundle,
-        review,
-        injected=True,
-    )
-    assert inj["mode"] == "injected"
-    assert inj["referenced_in_verdict"] is True
-
-
-def test_build_kb_assess_trace_empty_when_nothing_captured():
-    assert CriticAgentBackend._build_kb_assess_trace({}, {}, injected=False) == {}
-
-
 def test_build_kb_priors_trace_counts_and_reference():
     judge_bundle = {
         "kb_priors_trace": {
@@ -1464,28 +1387,7 @@ def test_build_kb_priors_trace_carries_skip_reason():
     assert trace["prior_count"] == 0
 
 
-def test_kb_assess_inject_enabled_resolution(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch,
-):
-    monkeypatch.delenv("CORTEX_KB_ASSESS_INJECT", raising=False)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: lambda call: None,
-    )
-    # Default: dry-run (off).
-    assert backend._kb_assess_inject_enabled() is False
-    monkeypatch.setenv("CORTEX_KB_ASSESS_INJECT", "true")
-    assert backend._kb_assess_inject_enabled() is True
-    # Explicit field overrides the env.
-    backend.kb_assess_inject = False
-    assert backend._kb_assess_inject_enabled() is False
-
-
-def _assess_judge_bundle() -> dict[str, Any]:
+def _kb_trace_judge_bundle() -> dict[str, Any]:
     return {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
@@ -1508,63 +1410,12 @@ def _assess_judge_bundle() -> dict[str, Any]:
             "limit": 5,
             "requests": [{"msg_id": "p1", "cache": "miss", "count": 0}],
         },
-        "kb_assess_by_proposal": {"p1": {"reasonable": "supported"}},
-        "kb_assess_trace": {
-            "configured": True,
-            "skipped_reason": None,
-            "focus": {"model": "m"},
-            "requests": [{"msg_id": "p1", "responded": True}],
-            "verdict_count": 1,
-        },
         "kb_read_skipped_reason": None,
         "review_constraints": {},
         "notes": [],
         "missing_context": [],
         "required_context": [],
     }
-
-
-@pytest.mark.asyncio
-async def test_run_dry_run_withholds_assess_from_prompt(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch,
-):
-    monkeypatch.delenv("CORTEX_KB_ASSESS_INJECT", raising=False)
-    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
-    backend, fake = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=_assess_judge_bundle(),
-    )
-    await backend.run("prompt")
-    prompt = fake.completions.calls[0]["messages"][-1]["content"]
-    assert "kb_assess_by_proposal" not in prompt
-    # priors are always present in the prompt.
-    assert "kb_priors_by_proposal" in prompt
-    assert backend.calls[0]["kb_assess_mode"] == "dry_run"
-    assert backend.calls[0]["kb_assess_verdicts"] == 1
-
-
-@pytest.mark.asyncio
-async def test_run_inject_enabled_feeds_assess_to_prompt(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-    monkeypatch,
-):
-    monkeypatch.setenv("CORTEX_KB_ASSESS_INJECT", "1")
-    reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
-    backend, fake = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[reply],
-        judge_bundle=_assess_judge_bundle(),
-    )
-    await backend.run("prompt")
-    prompt = fake.completions.calls[0]["messages"][-1]["content"]
-    assert "kb_assess_by_proposal" in prompt
-    assert backend.calls[0]["kb_assess_mode"] == "injected"
 
 
 class _FakeKbEmitter:
@@ -1591,11 +1442,11 @@ async def test_run_mirrors_kb_trace_to_langfuse(
         fake_critic_root,
         fake_session_dir,
         codex_replies=[reply],
-        judge_bundle=_assess_judge_bundle(),
+        judge_bundle=_kb_trace_judge_bundle(),
     )
     await backend.run("prompt")
     names = sorted(s["name"] for s in fake_em.spans)
-    assert names == ["kb_assess:iter_0", "kb_priors:iter_0"]
+    assert names == ["kb_priors:iter_0"]
     agents = {s["agent"] for s in fake_em.spans}
     assert agents == {"critic"}
 
@@ -1616,7 +1467,7 @@ async def test_run_skips_langfuse_mirror_when_disabled(
         fake_critic_root,
         fake_session_dir,
         codex_replies=[reply],
-        judge_bundle=_assess_judge_bundle(),
+        judge_bundle=_kb_trace_judge_bundle(),
     )
     await backend.run("prompt")
     assert fake_em.spans == []

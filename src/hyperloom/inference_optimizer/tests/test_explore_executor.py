@@ -27,6 +27,9 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
 )
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    _RUN_EVAL_FALSE_VALUES as _RUN_EVAL_FALSE,
+)
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
@@ -862,6 +865,129 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert sum("stack_rebench" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+
+
+def _run_eval_of(cmd: list[str]) -> str:
+    """Read RUN_EVAL out of the materialized YAML a Magpie call was handed."""
+    cfg_idx = cmd.index("--benchmark-config")
+    with Path(cmd[cfg_idx + 1]).open() as f:
+        cfg = yaml.safe_load(f)
+    return str(cfg["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower()
+
+
+@pytest.mark.asyncio
+async def test_explore_decision_round_skips_eval_warmup_keeps_it(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The overtime deadline is anchored on a throughput-only baseline, so the
+    rounds it gates must measure throughput only. The warmup round is ungated and
+    remains the accuracy source."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-noeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "noeval_keep",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-noeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    warmup = [ev for slot, ev in seen if "warmup_round" in slot]
+    rebench = [ev for slot, ev in seen if "stack_rebench" in slot]
+    decision = [ev for slot, ev in seen if "warmup_round" not in slot and "stack_rebench" not in slot]
+    assert warmup and warmup[0] not in _RUN_EVAL_FALSE
+    assert decision and all(ev in _RUN_EVAL_FALSE for ev in decision)
+    assert rebench and all(ev in _RUN_EVAL_FALSE for ev in rebench)
+
+
+@pytest.mark.asyncio
+async def test_explore_cold_decision_keeps_eval(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """With warm-decision disabled there is no warmup eval to fall back on, so
+    the decision round must still run its own accuracy gate."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-coldeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "cold_keep",
+                    "extra_args": "--cold-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-coldeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert not [slot for slot, _ in seen if "warmup_round" in slot]
+    decision = [ev for slot, ev in seen if "stack_rebench" not in slot]
+    assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
 
 
 @pytest.mark.asyncio

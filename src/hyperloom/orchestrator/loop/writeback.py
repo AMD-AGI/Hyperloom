@@ -42,11 +42,22 @@ from ..policy.gate import (
 )
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors._accuracy_gate import (
+    BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
+    BASELINE_EVAL_FAILED_KEY,
+    BASELINE_EVAL_FAILURE_KIND_KEY,
+    BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+    EVAL_KIND_ACCURACY_UNAVAILABLE,
+    accuracy_meets_floor,
+)
 
 from .coordinator import (
     _AUDIT_ACTIONS,
     _BASELINE_MAX_TOTAL_FAILURES,
     _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
+    _ENABLEMENT_MAX_STALL,
     _SEVERITY_CRASH,
     _SEVERITY_REGRESS,
     PendingProposal,
@@ -250,9 +261,6 @@ class WritebackCollaborator:
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
-        if not self.shared_state.optimization_stack:
-            self.shared_state.seed_stack_from_current_best()
-
         cb = self.shared_state.current_best or {}
         extra_args = (
             str(result.get("extra_server_args") or "")
@@ -354,7 +362,13 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return False
-        if task_kind in ("baseline", "profile"):
+        if task_kind == "baseline":
+            # A baseline whose accuracy eval failed measured throughput but must
+            # not anchor; route it to _handle_unpromotable_result for enablement.
+            if bool(result.get("baseline_eval_failed")):
+                return False
+            return is_valid_measurement(result)
+        if task_kind == "profile":
             return is_valid_measurement(result)
         if task_kind == "sweep":
             return result.get("status") == "succeeded"
@@ -418,6 +432,75 @@ class WritebackCollaborator:
                 task_id=task.task_id,
                 delta_pct=result.get("delta_pct"),
             )
+
+    def _persist_eval_failure(self, result_payload: dict[str, Any]) -> None:
+        """Persist an eval-rooted baseline failure so enablement can re-run it.
+
+        Records origin, floor, probe config, contract fingerprint, evidence,
+        kind and observed accuracy, and seeds ``enablement_launch_log`` so the
+        FRAMEWORK pump dispatches even when the failure carries no boot log.
+
+        A run that never executed the eval characterizes nothing: it reports
+        ``accuracy_unavailable`` with no task/metric/source. Such a run must
+        still register as a failed round (origin / pending / stall accounting
+        below), but it must NOT overwrite a stored trigger that actually
+        measured an accuracy -- otherwise an eval-less re-baseline downgrades
+        real ``accuracy_below_floor`` evidence to an empty
+        ``accuracy_unavailable`` and the next enablement attempt loses the
+        measurement it is supposed to reproduce. Contract fingerprints cannot
+        gate this: ``RUN_EVAL`` is itself a contract field, so the eval-less
+        run's fingerprint never matches the measured one.
+        """
+        state = self.shared_state
+        was_validation_pending = bool(getattr(state, "enablement_validation_pending", False))
+        incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
+        measured_incoming = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None
+        stored_kind = str(getattr(state, "enablement_baseline_eval_kind", "") or "")
+        preserve_measured_trigger = (
+            incoming_kind == EVAL_KIND_ACCURACY_UNAVAILABLE
+            and not measured_incoming
+            and bool(stored_kind)
+            and stored_kind != EVAL_KIND_ACCURACY_UNAVAILABLE
+        )
+        state.enablement_origin = "eval"
+        state.enablement_pending = True
+        # A failed revalidation reopens the authoring loop and counts as a
+        # no-progress round so the enablement_stalled cap can still terminate.
+        if was_validation_pending:
+            state.enablement_validation_pending = False
+            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+                state.set_stop_reason("enablement_stalled")
+        floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
+        if floor is not None:
+            state.enablement_accuracy_floor = float(floor)
+        if preserve_measured_trigger:
+            log.info(
+                "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
+                "an eval-less baseline reported accuracy_unavailable and must not "
+                "overwrite it",
+                stored_kind,
+                getattr(state, "enablement_observed_accuracy", None),
+                getattr(state, "enablement_observed_task", ""),
+            )
+            return
+        cfg = result_payload.get("materialized_config")
+        if isinstance(cfg, str) and cfg:
+            state.enablement_probe_config_path = cfg
+        fp = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
+        if isinstance(fp, str) and fp:
+            state.enablement_eval_contract_fingerprint = fp
+        if isinstance(incoming_kind, str) and incoming_kind:
+            state.enablement_baseline_eval_kind = incoming_kind
+        observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
+        if observed is not None:
+            state.enablement_observed_accuracy = float(observed)
+        state.enablement_observed_task = str(result_payload.get("accuracy_task") or "")
+        state.enablement_observed_metric = str(result_payload.get("accuracy_metric") or "")
+        evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
+        if evidence:
+            state.enablement_baseline_eval_evidence = evidence[:4000]
+            state.enablement_launch_log = evidence
 
     async def _handle_unpromotable_result(
         self,
@@ -559,6 +642,48 @@ class WritebackCollaborator:
                 or getattr(self.shared_state, "enablement_dispatched", False)
                 or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
             )
+            eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
+            # Revalidation task failed for any reason (boot/OOM/timeout/eval): clear
+            # pending state, preserve the frozen trigger identity, increment stall.
+            reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+            is_revalidation = bool(
+                (task.params or {}).get("reason") == "enablement_eval_revalidation"
+                or (reval_tid and reval_tid == str(task.task_id or ""))
+            )
+            if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
+                self.shared_state.enablement_validation_pending = False
+                self.shared_state.enablement_revalidation_task_id = ""
+                self.shared_state.enablement_stall_streak = (
+                    int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+                )
+                try:
+                    from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+                except ImportError:
+                    _max_stall = 5
+                if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                    self.shared_state.set_stop_reason("enablement_stalled")
+                else:
+                    self.shared_state.enablement_dispatched = False
+                launch_log = _extract_enablement_launch_log(result_payload)
+                if launch_log:
+                    self.shared_state.enablement_launch_log = launch_log
+                log.warning(
+                    "enablement revalidation task %s failed (error_class=%s); "
+                    "stall_streak=%d rearm=%s",
+                    task.task_id,
+                    err_class,
+                    self.shared_state.enablement_stall_streak,
+                    not bool(self.shared_state.stop_reason),
+                )
+                any_changed = True
+            from ..actions.executors._multi_node_env import is_multi_node  # noqa: PLC0415
+
+            # Single-node eval-pending failure: throughput measured fine and the
+            # eval is expected to re-run under enablement, so do not spend the
+            # baseline_failed budget yet. Multi-node keeps the strict backstop.
+            eval_pending_suppress = eval_failed and not is_multi_node()
+            if eval_failed:
+                self._persist_eval_failure(result_payload)
             if err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -566,7 +691,7 @@ class WritebackCollaborator:
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
-                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged:
+                if self.shared_state.baseline_failure_streak >= 3 and not enablement_engaged and not eval_pending_suppress:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -575,6 +700,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not enablement_engaged
+                and not eval_pending_suppress
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
@@ -599,6 +725,7 @@ class WritebackCollaborator:
                 "stop_reason": self.shared_state.stop_reason,
                 "result_status": result_payload.get("status"),
                 "error_class": err_class,
+                "baseline_eval_failed": eval_failed,
             }
             any_changed = True
         # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
@@ -633,13 +760,13 @@ class WritebackCollaborator:
     def _source_session_id(self) -> str:
         """Return the hyperloom-local session id used as source_session_id on KB fact writes.
 
-        NOT a KB-side session id; prefers cortex_session_id, falls back to session_dir.name.
+        NOT a KB-side session id; prefers recipe_kb_session_id, falls back to session_dir.name.
 
         Returns:
-            The hyperloom-local session id (cortex_session_id when set, else
+            The hyperloom-local session id (recipe_kb_session_id when set, else
             ``session_dir.name``).
         """
-        return str(getattr(self.shared_state, "cortex_session_id", "") or "") or self.session_dir.name
+        return str(getattr(self.shared_state, "recipe_kb_session_id", "") or "") or self.session_dir.name
 
     async def _fact_write_hook(
         self,
@@ -703,7 +830,7 @@ class WritebackCollaborator:
             ss = self.shared_state
             self._coord._journal = Journal.load_or_create(
                 self.session_dir,
-                session_id=str(getattr(ss, "cortex_session_id", "") or "")
+                session_id=str(getattr(ss, "recipe_kb_session_id", "") or "")
                 or str(getattr(ss, "session_id", "") or "")
                 or self.session_dir.name,
                 model=str(getattr(ss, "model_name", "") or ""),
@@ -774,7 +901,7 @@ class WritebackCollaborator:
 
         Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
         (on REVERT/failure) to the recipe row, then returns.  Call only after
-        the journal entry has been appended and ``cortex_kb`` is confirmed
+        the journal entry has been appended and ``recipe_kb`` is confirmed
         non-None by the caller.
 
         Args:
@@ -915,7 +1042,7 @@ class WritebackCollaborator:
             )
         )
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
 
         self._record_fact_impl(
@@ -1081,7 +1208,7 @@ class WritebackCollaborator:
             )
         )
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
 
         self._record_fact_impl(
@@ -1406,7 +1533,7 @@ class WritebackCollaborator:
             "workload": workload_tags,
             "sessions": [
                 {
-                    "session_id": str(getattr(ss, "cortex_session_id", "") or self.session_dir.name),
+                    "session_id": str(getattr(ss, "recipe_kb_session_id", "") or self.session_dir.name),
                     "gain_pct": cumulative_validated or cumulative_total,
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
@@ -1428,8 +1555,8 @@ class WritebackCollaborator:
             ],
         }
 
-    def cortex_finalize_recipe_and_journal(self) -> None:
-        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _cortex_t4_hook safety net)."""
+    def finalize_recipe_and_journal(self) -> None:
+        """CLOSE-time fact finalize: final update_recipe + journal finalize (total_gain_pct + final_throughput); idempotent (CLOSE sequencer + _recipe_kb_t4_hook safety net)."""
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -1445,14 +1572,14 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("optimization_journal.finalize failed")
 
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         ss = self.shared_state
         model_name = getattr(ss, "model_name", "") or ""
         gpu_type = getattr(ss, "gpu_type", "") or ""
         if not model_name or not gpu_type:
             log.info(
-                "cortex finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
+                "recipe KB finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
                 model_name,
                 gpu_type,
             )
@@ -1468,11 +1595,11 @@ class WritebackCollaborator:
             # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
-            if self.cortex_kb is not None:
+            if self.recipe_kb is not None:
                 try:
                     cid = self._workload_canonical_id()
                     # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
-                    existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
+                    existing_row = self.recipe_kb.local.get_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
                     for row in existing_row.get("sessions") or []:
                         if not isinstance(row, dict):
@@ -1540,7 +1667,7 @@ class WritebackCollaborator:
                 provenance_details={
                     "phase": "close_finalize",
                     "evidence": [
-                        f"log:session-{getattr(ss, 'cortex_session_id', '') or self.session_dir.name}",
+                        f"log:session-{getattr(ss, 'recipe_kb_session_id', '') or self.session_dir.name}",
                     ],
                 },
             )
@@ -1693,9 +1820,7 @@ class WritebackCollaborator:
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "steward routing failed for task=%s; assessment "
-                    "left in last_remaining_gaps_assessment but no "
-                    "phase-routing change applied",
+                    "steward routing failed for task=%s; no phase-routing change applied",
                     task.task_id,
                 )
 
@@ -1911,9 +2036,6 @@ class WritebackCollaborator:
                 provenance resolves by gap id rather than name.
         """
         previous = self.shared_state.current_best or {}
-        if not self.shared_state.optimization_stack:
-            self.shared_state.seed_stack_from_current_best()
-
         base_args = ""
         if isinstance(previous, dict):
             base_args = str(previous.get("extra_server_args") or "").strip()
@@ -2205,6 +2327,61 @@ class WritebackCollaborator:
                 self.shared_state.baseline_tput = float(tput)
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
+            # A genuine baseline may revalidate an eval-origin enablement.
+            if bool(getattr(self.shared_state, "enablement_validation_pending", False)):
+                tracked_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+                promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
+                task_params = getattr(task, "params", None) or {} if task is not None else {}
+                is_revalidation = (
+                    task_params.get("reason") == "enablement_eval_revalidation"
+                    or (tracked_tid and tracked_tid == promoting_tid)
+                )
+                if is_revalidation:
+                    acc = result.get("accuracy")
+                    floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
+                    if accuracy_meets_floor(acc, floor):
+                        self.shared_state.enablement_succeeded = True
+                        self.shared_state.enablement_validation_pending = False
+                        self.shared_state.enablement_revalidation_task_id = ""
+                        self.shared_state.enablement_origin = ""
+                        self.shared_state.enablement_pending = False
+                    else:
+                        # Sub-floor accuracy on the tracked revalidation: rearm the
+                        # specialist loop without clearing the frozen trigger identity.
+                        log.warning(
+                            "enablement revalidation: accuracy %.4f below floor %.4f; rearming",
+                            acc if isinstance(acc, (int, float)) else float("nan"),
+                            floor,
+                        )
+                        self.shared_state.enablement_validation_pending = False
+                        self.shared_state.enablement_revalidation_task_id = ""
+                        self.shared_state.enablement_stall_streak = (
+                            int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+                        )
+                        _max_stall = getattr(self, "_ENABLEMENT_MAX_STALL", None)
+                        if _max_stall is None:
+                            try:
+                                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
+                            except ImportError:
+                                _max_stall = 5
+                        if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                            self.shared_state.set_stop_reason("enablement_stalled")
+                        else:
+                            self.shared_state.enablement_dispatched = False
+                else:
+                    # An unrelated baseline promoted while revalidation is pending.
+                    # Only anchor tput; do not consume or clear the pending state.
+                    log.info(
+                        "enablement revalidation pending: unrelated baseline promoted "
+                        "(task=%s tracked=%s); not consuming pending state",
+                        promoting_tid,
+                        tracked_tid,
+                    )
+                    self.shared_state.enablement_origin = ""
+                    self.shared_state.enablement_pending = False
+            else:
+                self.shared_state.enablement_origin = ""
+                self.shared_state.enablement_pending = False
             changed = True
         acc = result.get("accuracy")
         if isinstance(acc, (int, float)):
@@ -2258,12 +2435,17 @@ class WritebackCollaborator:
         }
         changed = True
         audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
+        _task_params = task.params if task is not None else {}
         audit_extras = {
             "materialized_config": result.get("materialized_config"),
             "accuracy": result.get("accuracy"),
             "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
             # Stamp canonical params fingerprint for the self-loop denial helper.
-            "fingerprint": _baseline_params_fingerprint(task.params if task is not None else None),
+            "fingerprint": _baseline_params_fingerprint(_task_params),
+            # Record revalidation context for history.
+            "is_revalidation": bool(_task_params.get("reason") == "enablement_eval_revalidation"),
+            "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
+            "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
@@ -2845,6 +3027,11 @@ class WritebackCollaborator:
             "accuracy_pass": result.get("accuracy_pass"),
             "patches_applied": result.get("patches_applied") or [],
             "patches_reverted": result.get("patches_reverted") or [],
+            # Enablement eval-origin verdict fields for history.
+            "correctness_verified": result.get("correctness_verified"),
+            "enablement_eval_failure_kind": result.get("enablement_eval_failure_kind"),
+            "enablement_observed_accuracy": result.get("enablement_observed_accuracy"),
+            "provisional": result.get("provisional"),
         }
         outcome.changed = changed
         outcome.audit_decision = audit_decision
@@ -3250,6 +3437,10 @@ class WritebackCollaborator:
         # coordinator restart, so kill the orphan group, GC its attempt dir,
         # sweep its jit locks, fail the row, and clear the sentinel.
         await self._resume_recover_pending_targeted_build(report)
+        # (1c) Orphaned revalidation tasks: if enablement_validation_pending is set
+        # but the tracked revalidation task is already terminal, clear the pending
+        # flag and rearm the stall counter so a fresh revalidation can be enqueued.
+        await self._resume_recover_pending_revalidation(report)
         # (2) Orphaned KEEPs: replay integrate_patch KEEPs
         # that crashed before the append landed; surface ambiguous ones loudly.
         await self._resume_recover_orphaned_keeps(report)
@@ -3294,15 +3485,7 @@ class WritebackCollaborator:
                 state.current_best = new_cb
                 report["fixes"].append("rebuilt_current_best_config_from_stack")
         elif cb:
-            # Legacy sessions before the append-only stack existed are still
-            # recoverable; seed once instead of dropping a possibly valid best.
-            before = len(getattr(state, "optimization_stack", []) or [])
-            state.seed_stack_from_current_best()
-            after = len(getattr(state, "optimization_stack", []) or [])
-            if after > before:
-                report["fixes"].append("seeded_stack_from_legacy_current_best")
-            else:
-                report["warnings"].append({"kind": "current_best_without_stack"})
+            report["warnings"].append({"kind": "current_best_without_stack"})
 
         # (4) Validation-watermark compensation: unvalidated
         # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
@@ -3561,6 +3744,45 @@ class WritebackCollaborator:
 
         state.pending_targeted_build = {}
         report["fixes"].append(summary)
+
+    async def _resume_recover_pending_revalidation(self, report: dict[str, Any]) -> None:
+        """Clear stale enablement_validation_pending when the tracked revalidation task is terminal.
+
+        If the coordinator died while a revalidation baseline was running, the
+        task row may already be in a terminal state on resume.  Without this
+        recovery the pending flag stays set indefinitely and the next
+        revalidation cannot be enqueued (tracked_tid is still the old row).
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "enablement_validation_pending", False)):
+            return
+        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        if not tracked_tid:
+            return
+        try:
+            from ..state.task_registry import TERMINAL_STATES, TaskNotFound
+
+            try:
+                row = await self.tasks.get(tracked_tid)
+                is_terminal = row.state in TERMINAL_STATES
+            except TaskNotFound:
+                is_terminal = True
+            if is_terminal:
+                state.enablement_validation_pending = False
+                state.enablement_revalidation_task_id = ""
+                state.enablement_stall_streak = (
+                    int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+                )
+                state.enablement_dispatched = False
+                report["fixes"].append(
+                    {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
+                )
+                log.info(
+                    "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
+                    tracked_tid,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
         """Recover / surface KEEPs present in the event log but absent from the stack (Gap B).

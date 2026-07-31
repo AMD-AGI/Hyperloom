@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared T0 (PRELUDE) Cortex anchor — KB warm-start only."""
+"""Shared T0 (PRELUDE) Recipe KB anchor — KB warm-start only."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from typing import Any, Callable, Mapping
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
-    cortex_lessons_json,
-    cortex_pitfalls_json,
-    cortex_warm_json,
+    recipe_kb_lessons_json,
+    recipe_kb_pitfalls_json,
+    recipe_kb_warm_json,
 )
 
 
@@ -76,10 +76,6 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
     return prefer
 
 
-def _row_best_config_source(row: Mapping[str, Any] | None) -> str:
-    return ""
-
-
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
     """Resolve which KB path actually supplied the applied warm recipe.
 
@@ -88,17 +84,17 @@ def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
         kb (Any): The RecipeKB dispatcher (for the remote-type fallback).
 
     Returns:
-        str: A short source tag, e.g. ``gbrain`` / ``cortex-kb``.
+        str: A short source tag, e.g. ``gbrain`` / ``recipe-kb``.
     """
-    return "gbrain" if _remote_is_gbrain(kb) else "cortex-kb"
+    return "gbrain" if _remote_is_gbrain(kb) else "recipe-kb"
 
 
 def _remote_is_gbrain(kb: Any) -> bool:
     """Best-effort source tag for the WarmStartContext.
 
     Reports ``True`` when the dispatcher's active remote is the gbrain
-    adapter; otherwise the source is the cortex kb-service (or local-only
-    fallback, which we still label ``cortex-kb`` since that is the
+    adapter; otherwise the source is the recipe kb-service (or local-only
+    fallback, which we still label ``recipe-kb`` since that is the
     configured remote contract).
 
     Args:
@@ -953,7 +949,7 @@ def run_t0_anchor(
         raise ValueError("run_t0_anchor requires an explicit session_dir")
     sd = Path(session_dir)
 
-    sid = (getattr(shared_state, "cortex_session_id", "") or "").strip()
+    sid = (getattr(shared_state, "recipe_kb_session_id", "") or "").strip()
     if not sid and sd is not None:
         sid = Path(sd).name
 
@@ -971,14 +967,14 @@ def run_t0_anchor(
 
     # Short-circuit when already anchored; resume=True bypasses.
     if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
-        shared_state.cortex_session_id = sid
-        emit(f"Cortex KB        : already anchored session_id={sid}")
+        shared_state.recipe_kb_session_id = sid
+        emit(f"Recipe KB        : already anchored session_id={sid}")
         return
 
     if sid:
-        shared_state.cortex_session_id = sid
+        shared_state.recipe_kb_session_id = sid
         if resume:
-            emit(f"Cortex KB        : resumed session_id={sid}")
+            emit(f"Recipe KB        : resumed session_id={sid}")
     began_now = not getattr(shared_state, "warm_start_ts", "")
     if began_now:
         shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(
@@ -1220,7 +1216,7 @@ def run_t0_anchor(
         sort_keys=True,
     )
     try:
-        warm_path = cortex_warm_json(sd)
+        warm_path = recipe_kb_warm_json(sd)
         warm_path.parent.mkdir(parents=True, exist_ok=True)
         warm_path.write_text(
             json.dumps(
@@ -1280,7 +1276,7 @@ def run_t0_anchor(
     pitfalls_list: list[dict[str, Any]] = list(warm_point.get("pitfalls") or [])
     lessons_list: list[dict[str, Any]] = list(warm_point.get("lessons") or [])
     try:
-        pit_path = cortex_pitfalls_json(sd)
+        pit_path = recipe_kb_pitfalls_json(sd)
         pit_path.parent.mkdir(parents=True, exist_ok=True)
         pit_path.write_text(
             json.dumps(
@@ -1299,7 +1295,7 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
     try:
-        les_path = cortex_lessons_json(sd)
+        les_path = recipe_kb_lessons_json(sd)
         les_path.parent.mkdir(parents=True, exist_ok=True)
         les_path.write_text(
             json.dumps(
@@ -1323,7 +1319,7 @@ def run_t0_anchor(
             shared_state.save(sd)
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
-                "Cortex T0: SharedState.save failed (sid=%s, workload=%s)",
+                "Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)",
                 sid,
                 workload,
             )

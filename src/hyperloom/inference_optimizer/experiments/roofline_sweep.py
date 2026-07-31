@@ -320,49 +320,6 @@ def run_bench(
         return {}
 
 
-def compute_ceiling(
-    *,
-    model_meta: Any,
-    gpu_type: str,
-    num_gpus: int,
-    conc: int,
-    isl: int,
-    osl: int,
-) -> float:
-    """Compute the theoretical peak output throughput for one concurrency.
-
-    Thin wrapper over :func:`compute_theoretical_peak_output_tok_per_sec` that
-    unpacks the model metadata fields.
-
-    Args:
-        model_meta: Loaded model metadata (weights, layers, KV shape, ...).
-        gpu_type: GPU type key into the hardware specs.
-        num_gpus: Number of GPUs (tensor-parallel size).
-        conc: Concurrency level.
-        isl: Input sequence length.
-        osl: Output sequence length.
-
-    Returns:
-        The theoretical peak output tokens/second.
-    """
-    return compute_theoretical_peak_output_tok_per_sec(
-        gpu_type=gpu_type,
-        num_gpus=num_gpus,
-        weight_bytes=model_meta.weight_bytes,
-        active_weight_bytes=model_meta.active_weight_bytes,
-        num_experts=getattr(model_meta, "num_experts", 0),
-        experts_per_tok=getattr(model_meta, "experts_per_tok", 0),
-        expert_weight_bytes=getattr(model_meta, "expert_weight_bytes", 0),
-        num_layers=model_meta.num_layers,
-        num_kv_heads=model_meta.num_kv_heads,
-        head_dim=model_meta.head_dim,
-        kv_dtype_bytes=model_meta.weight_dtype_bytes,
-        isl=isl,
-        osl=osl,
-        concurrency=conc,
-    )
-
-
 def sweep_one_template(
     *,
     tmpl: LaunchTemplate,
@@ -425,13 +382,21 @@ def sweep_one_template(
                 output_dir=bench_out_dir,
                 port=port,
             )
-            ceiling = compute_ceiling(
-                model_meta=model_meta,
+            ceiling = compute_theoretical_peak_output_tok_per_sec(
                 gpu_type=gpu_type,
                 num_gpus=tp,
-                conc=conc,
+                weight_bytes=model_meta.weight_bytes,
+                active_weight_bytes=model_meta.active_weight_bytes,
+                num_experts=getattr(model_meta, "num_experts", 0),
+                experts_per_tok=getattr(model_meta, "experts_per_tok", 0),
+                expert_weight_bytes=getattr(model_meta, "expert_weight_bytes", 0),
+                num_layers=model_meta.num_layers,
+                num_kv_heads=model_meta.num_kv_heads,
+                head_dim=model_meta.head_dim,
+                kv_dtype_bytes=model_meta.weight_dtype_bytes,
                 isl=isl,
                 osl=osl,
+                concurrency=conc,
             )
             if not metrics:
                 rows.append(

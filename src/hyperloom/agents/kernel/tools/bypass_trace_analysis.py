@@ -50,6 +50,7 @@ try:
 except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
     _shared_build_provenance = None
 from _idle_gate import (  # noqa: E402
+    build_graph_under_recorded_warning,
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
@@ -654,7 +655,18 @@ def main(argv: list[str] | None = None) -> int:
     # surface a high_gpu_idle_pct warning for the Coordinator.
     idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
     idle_pct_threshold = resolve_idle_pct_threshold()
-    if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
+    # Graph under-recording makes idle% unreliable: skip the idle gate (keep
+    # candidates ranked by recorded-kernel GPU share) and surface a health warning.
+    graph_coverage = analyze.get("graph_coverage") or {}
+    graph_under_recorded = bool(graph_coverage.get("graph_under_recorded"))
+    if graph_under_recorded:
+        trace_health_warnings.append(
+            build_graph_under_recorded_warning(
+                graph_launch_count=int(graph_coverage.get("graph_launch_count", 0) or 0),
+                idle_pct=float(idle_pct_value) if isinstance(idle_pct_value, (int, float)) else None,
+            )
+        )
+    elif isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
         for _cand_key in ("hot_kernels", "routable_kernels", "skipped_kernels", "task_groups"):
             candidates[_cand_key] = []
         trace_health_warnings.append(
@@ -812,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
+        "graph_coverage": analyze.get("graph_coverage") or {},
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),

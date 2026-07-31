@@ -246,7 +246,7 @@ class SweepPhase(PhaseHandler):
                 a ``sweep_grid`` override.
 
         Returns:
-            A dict with ``source`` (``"cortex_recipe"`` or
+            A dict with ``source`` (``"recipe_kb"`` or
             ``"skill_md_default"``), ``conc_values``, ``isl_osl_configs`` and
             ``num_prompts_factor``.
         """
@@ -336,7 +336,7 @@ class SweepPhase(PhaseHandler):
                 )
 
         return {
-            "source": "cortex_recipe" if used_recipe else "skill_md_default",
+            "source": "recipe_kb" if used_recipe else "skill_md_default",
             "conc_values": conc_values,
             "isl_osl_configs": isl_osl_configs,
             "num_prompts_factor": num_prompts_factor,

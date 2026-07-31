@@ -248,12 +248,15 @@ def test_proposal_scoring_flag_parsing() -> None:
     assert disabled.proposal_scoring is False
 
 
-def test_retired_enable_proposal_scoring_flag_rejected() -> None:
+def test_retired_enable_proposal_scoring_flag_rejected(capsys) -> None:
+    # The deprecation window is over: the flag is now an ordinary unknown argument.
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["optimize", "--model", "x", "--enable-proposal-scoring"])
+    err = capsys.readouterr().err
+    assert "unrecognized arguments: --enable-proposal-scoring" in err
 
 
 def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:

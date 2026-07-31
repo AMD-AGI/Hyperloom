@@ -386,7 +386,7 @@ or real `torchrun --nproc=N`.
 The `forge` backend needs the private KernelForge (`kernel_agents`) package.
 The installer no longer clones it: provide it yourself before running forge,
 either by `pip install`-ing `kernel_agents`, or by setting `FORGE_PATH`
-(aliases `KERNEL_FORGE_ROOT` / `KERNEL_FORGE_PATH`) to a KernelForge checkout.
+to a KernelForge checkout.
 When neither is present, forge resolution is a silent no-op (fail-soft), so a
 run that explicitly selects forge will do nothing — verify the checkout/env is
 in place first.
@@ -521,7 +521,7 @@ falls back to `NEEDS_REVIEW` with the missing fields listed in `reasons`.
 ## Multi-node mode
 
 When the workload runs with `--nodes >= 2`
-(`/tmp/multi_node_state.json` has `nodes >= 2`), the sandbox is
+(`$INFERENCE_OPTIMIZER_NODES >= 2`), the sandbox is
 CPU-only and the inference server lives only on RayJob pods. The
 kernel-agent flow adapts transparently:
 

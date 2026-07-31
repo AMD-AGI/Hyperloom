@@ -1,6 +1,6 @@
 """Tests for the unified KB-interface convergence.
 
-Covers the cross-cutting behaviour that the cortex-KB and gbrain
+Covers the cross-cutting behaviour that the recipe-KB and gbrain
 adapters share:
 
 * the dispatcher runs a SINGLE ``_v2_to_arbor`` translation on any
@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.cortex_t0 import (
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _build_warm_prefer,
     _build_warm_start_context,
     _recipe_is_actionable,
@@ -43,7 +43,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import (
 class _NestedRemote:
     """A remote that returns the unified nested KB-interface envelope.
 
-    Stands in for both cortex and gbrain: the dispatcher runs the same
+    Stands in for both recipe KB and gbrain: the dispatcher runs the same
     ``_v2_to_arbor`` translation regardless of which served the row.
     ``search`` filters by ``label_match`` against ``labels``.
     """
@@ -259,7 +259,7 @@ def test_build_warm_start_context_non_hit_has_empty_replay(status: str) -> None:
         tier=status,
         confidence=0.0,
         canonical_id="inference:m:h:f:v:p",
-        source="cortex-kb",
+        source="recipe-kb",
         recipe=None,
     )
     assert ctx["status"] == status
@@ -271,7 +271,7 @@ def test_build_warm_start_context_non_hit_has_empty_replay(status: str) -> None:
 # T0 status matrix end-to-end (local-only dispatcher)
 @dataclass
 class _FakeState:
-    cortex_session_id: str = ""
+    recipe_kb_session_id: str = ""
     warm_start_ts: str = ""
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)

@@ -1312,6 +1312,54 @@ class TestCompactJsonServerArgs:
         # ['--speculative-config', '{"model":"draft', 'model', 'name"}'].
         assert len(out.split()) == 4
 
+    def test_quote_stripped_json_is_repaired(self):
+        # A prior shlex round-trip (e.g. in the GEMM shape-capture path) can strip
+        # the JSON double-quotes, turning a stored-valid ``{"method":"ngram",...}``
+        # into ``{method:ngram,...}`` which vLLM's ``json.loads`` rejects at boot
+        # (observed: shape_capture server never boots -> shape_capture_failed).
+        # compact must repair the barewords back to valid JSON.
+        out = _grid_runner.compact_json_server_args(
+            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}",
+            "vllm",
+        )
+        assert out == (
+            "--speculative-config "
+            '{"method":"ngram","num_speculative_tokens":7,"prompt_lookup_min":2,"prompt_lookup_max":8}'
+        )
+        blob = out.split(" ", 1)[1]
+        json.loads(blob)  # must be valid JSON now
+
+    def test_quote_stripped_json_with_path_value_repaired(self):
+        # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id)
+        # must also be re-quoted.
+        out = _grid_runner.compact_json_server_args(
+            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}",
+            "vllm",
+        )
+        blob = out.split(" ", 1)[1]
+        assert json.loads(blob) == {
+            "method": "eagle3",
+            "model": "RedHatAI/Llama-3.1-8B-Instruct-speculator",
+        }
+
+    def test_quote_stripped_nested_json_is_repaired(self):
+        out = _grid_runner.compact_json_server_args(
+            "--compilation-config {method:ngram,nested:{a:1}}",
+            "vllm",
+        )
+        blob = out.split(" ", 1)[1]
+        assert json.loads(blob) == {
+            "method": "ngram",
+            "nested": {"a": 1},
+        }
+
+    def test_unrepairable_json_left_verbatim(self):
+        # Genuinely broken blobs that cannot be repaired to valid JSON are left
+        # verbatim (no worse than before), never raising.
+        raw = "--compilation-config {this is : not ] json"
+        out = _grid_runner.compact_json_server_args(raw, "vllm")
+        assert "{this is" in out
+
     def test_other_flags_around_json_untouched(self):
         out = _grid_runner.compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
@@ -1331,3 +1379,35 @@ class TestCompactJsonServerArgs:
     def test_empty_is_noop(self):
         assert _grid_runner.compact_json_server_args("", "vllm") == ""
         assert _grid_runner.compact_json_server_args(None, "vllm") == ""
+
+
+class TestRemoveServerArgsPreservesJson:
+    """``remove_server_args`` tokenizes with ``shlex.split`` (which strips JSON
+    inner double quotes) and runs AFTER ``compact_json_server_args`` in
+    ``materialize_config_with_envs`` (GEMM shape-capture always passes
+    ``remove_args=['--port']``). It must therefore re-quote/compact the JSON
+    blobs itself, or a sibling ``--compilation-config`` / ``--speculative-config``
+    is silently corrupted to unquoted barewords that vLLM rejects at boot."""
+
+    def test_remove_port_keeps_sibling_json_valid(self):
+        raw = '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        assert "--port" not in out
+        blob = out.split("--compilation-config ", 1)[1].strip()
+        assert json.loads(blob) == {"cudagraph_mode": "FULL"}
+
+    def test_remove_keeps_multikey_speculative_config_valid(self):
+        raw = (
+            '--speculative-config {"method":"ngram","num_speculative_tokens":7} '
+            "--port 8888"
+        )
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        blob = out.split("--speculative-config ", 1)[1].strip()
+        assert json.loads(blob) == {"method": "ngram", "num_speculative_tokens": 7}
+
+    def test_remove_noop_when_nothing_matches_keeps_json(self):
+        raw = '--compilation-config {"cudagraph_mode":"FULL"}'
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {
+            "cudagraph_mode": "FULL"
+        }
