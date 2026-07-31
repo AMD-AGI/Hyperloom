@@ -557,6 +557,49 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
+# Probed one subprocess each: the base package and the [api] extra can arrive
+# from different places (image vs pip), and only the truly absent one is
+# installed. Order matters only for the log line.
+_LM_EVAL_DEPS = ("lm_eval", "tenacity")
+
+
+def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
+    """Report which accuracy-gate modules ``python_exe`` cannot import.
+
+    One subprocess per module, on purpose. Importing ``lm_eval`` pulls in torch,
+    which on a broken ROCm install can take the interpreter down with a signal
+    rather than an exception; a shared probe would lose the verdict for every
+    other module along with it. Separate probes also distinguish "no lm_eval at
+    all" from "the image ships lm_eval and only the extra is absent", which
+    decides whether the image's own build gets reinstalled over.
+
+    A real import rather than ``find_spec``, so a half-installed package that
+    fails at exec time counts as missing.
+
+    Args:
+        python_exe (str): The interpreter to probe.
+
+    Returns:
+        list[str] | None: The modules that failed to import, or ``None`` when
+            the interpreter could not run the probe at all, leaving absence
+            unproven.
+    """
+    try:
+        # A missing or non-executable interpreter raises instead of returning a
+        # code, and preflight must not die on it: absence stays unproven, which
+        # the caller reports without touching anything.
+        liveness = subprocess.run([python_exe, "-c", "pass"], capture_output=True)
+        if liveness.returncode != 0:
+            return None
+        missing: list[str] = []
+        for module in _LM_EVAL_DEPS:
+            probe = subprocess.run([python_exe, "-c", f"import {module}"], capture_output=True)
+            if probe.returncode != 0:
+                missing.append(module)
+    except OSError:
+        return None
+    return missing
+
 
 def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
@@ -569,25 +612,48 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     Ensure it here (preflight runs for all paths) with the benchmark interpreter.
     Skipped when RUN_EVAL is explicitly disabled (default is enabled).
 
+    Runs for single-node too, by design: preflight has no node count, and the
+    single-node path can reach the same direct ``python -m lm_eval`` call. It is
+    a no-op on any interpreter that can already import the modules, so an image
+    that ships ``lm_eval`` is left untouched rather than reinstalled over.
+
     Args:
         python_exe (str): The interpreter that will run ``python -m lm_eval``.
         pip_extra (list[str]): Extra ``pip install`` arguments.
+
+    Raises:
+        subprocess.CalledProcessError: If the install fails. Preflight aborts
+            rather than continuing, since letting a failed install through
+            reproduces the exact ``baseline_accuracy_failed`` this prevents,
+            only hours later and with the pip diagnostics long gone.
     """
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
         return  # accuracy gate disabled; lm_eval not required
-    # The multi-node client uses ``--model local-completions`` (an lm_eval API
-    # model), which needs the ``[api]`` extra (e.g. ``tenacity``) on top of the
-    # base package. Probe both so a base-only install still triggers the extra.
-    probe = subprocess.run([python_exe, "-c", "import lm_eval, tenacity"], capture_output=True)
-    if probe.returncode == 0:
+    missing = _probe_missing_lm_eval_deps(python_exe)
+    if missing is None:
+        # Absence is unproven, so installing would be a guess that could replace
+        # an lm_eval the image ships. An interpreter that cannot run ``python -c``
+        # already breaks the benchmark far more loudly than a missing accuracy
+        # gate would, so this warns and changes nothing.
+        print("Preflight: WARNING — cannot run the lm_eval probe; leaving the interpreter untouched")
+        return
+    if not missing:
         print("Preflight: lm_eval[api] OK")
         return
-    print("Preflight: installing lm_eval[api] (accuracy gate) ...")
+    if "lm_eval" in missing:
+        targets = ["lm_eval[api]"]
+    else:
+        # The image already ships lm_eval. Install only the absent extra so pip
+        # cannot resolve a different lm_eval build over the one baked in, which
+        # would silently swap out a version the image pinned on purpose.
+        targets = missing
+    print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
     subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, "lm_eval[api]"],
-        check=False,
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *targets],
+        check=True,
     )
+    print(f"Preflight: {' '.join(targets)} installed OK")
 
 
 def _unset_hip_visible_devices() -> None:
