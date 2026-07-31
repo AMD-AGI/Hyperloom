@@ -32,11 +32,16 @@ TOKENIZER_ERROR = "tokenizer_error"
 SERVE_FLAG = "serve_flag"
 # Resource constraints (OOM, TP/GPU count) are NOT code acquisition targets.
 RESOURCE_CONSTRAINT = "resource_constraint"
+# Accuracy-eval triggers (values match _accuracy_gate EVAL_KIND_*): a booting
+# baseline whose accuracy is below the floor, and a crashed eval run.
+ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
+EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
 
 # Ordered most-specific to least-specific.
 FAILURE_KINDS: tuple[str, ...] = (
     MISSING_MODEL_ARCH,
+    ACCURACY_BELOW_FLOOR,
     RESOURCE_CONSTRAINT,
     HIP_KERNEL_MISSING,
     UNSUPPORTED_DTYPE,
@@ -47,6 +52,7 @@ FAILURE_KINDS: tuple[str, ...] = (
     TOKENIZER_ERROR,
     SERVE_FLAG,
     IMPORT_ERROR,
+    EVAL_RUNTIME_FAILURE,
     UNKNOWN,
 )
 
@@ -187,6 +193,17 @@ _RULES: tuple[_Rule, ...] = (
         symbol_from=_grp,
     ),
     _Rule(
+        # A booting baseline whose accuracy is below the floor. Not a bridge-repo
+        # target — the fix is correctness of the model's real output.
+        kind=ACCURACY_BELOW_FLOOR,
+        bridge_layer="",
+        patterns=(
+            re.compile(r"accuracy\s+.*?(?:did not meet|below)\s+.*?floor"),
+            re.compile(r"baseline[_ ]accuracy[_ ]below[_ ]floor"),
+        ),
+        confidence=0.9,
+    ),
+    _Rule(
         kind=HIP_KERNEL_MISSING,
         bridge_layer="rocm_hip",
         patterns=(
@@ -315,6 +332,19 @@ _RULES: tuple[_Rule, ...] = (
         ),
         confidence=0.7,
         symbol_from=_grp,
+    ),
+    _Rule(
+        # LAST rule: a generic eval-run crash. Kept lowest-priority so a
+        # co-occurring import/serve-flag/tokenizer/HIP signature in the same log
+        # wins as the primary root cause and this only surfaces as secondary.
+        kind=EVAL_RUNTIME_FAILURE,
+        bridge_layer="",
+        patterns=(
+            re.compile(r"run_eval failed with exit code"),
+            re.compile(r"ERROR: run_eval failed"),
+            re.compile(r"accuracy eval (?:failed|crashed|did not run)"),
+        ),
+        confidence=0.6,
     ),
 )
 
@@ -682,7 +712,9 @@ def is_targeted_build_candidate(
 
 
 __all__ = [
+    "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
+    "EVAL_RUNTIME_FAILURE",
     "FAILURE_KINDS",
     "HIP_KERNEL_MISSING",
     "IMPORT_ERROR",

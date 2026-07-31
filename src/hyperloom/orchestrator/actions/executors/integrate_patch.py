@@ -24,7 +24,14 @@ from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
-from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
+from ._accuracy_gate import (
+    accuracy_keep_block,
+    accuracy_meets_floor,
+    accuracy_passed,
+    classify_accuracy_failure,
+    enablement_accuracy_floor,
+    parse_eval_results,
+)
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import (
@@ -36,6 +43,7 @@ from ._nogit_patch import (
     _revert_patches_no_git,
     _strip_path_prefix,
 )
+from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -59,9 +67,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800
-# Minimal-correctness floor for the enablement runnable gate: accuracy strictly
-# above this counts as "not garbage".
-ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
 
@@ -367,6 +372,22 @@ def _derive_lane(params: dict[str, Any]) -> str:
     return "perf_explore"
 
 
+def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
+    """Percent accuracy change of ``measured`` against ``baseline``.
+
+    Returns ``None`` when either side is missing or the baseline is not
+    positive, so callers fall back to their existing value.
+    """
+    try:
+        m = float(measured)
+        b = float(baseline)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0.0:
+        return None
+    return (m - b) / b * 100.0
+
+
 def _preflight_missing_targets(
     framework_root: Path,
     patch_paths: list[Path],
@@ -500,6 +521,34 @@ def _git_apply(
     )
 
 
+def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
+    """True when ``patch_path`` is already fully applied in ``framework_root``.
+
+    The git-channel twin of
+    :func:`._nogit_patch._reverse_applies_cleanly`. ``git apply -R --check``
+    succeeds only when every hunk's *post*-state is already present, i.e. the
+    tree already equals what a forward apply would produce. Read-only:
+    ``--check`` never mutates the tree.
+
+    Args:
+        framework_root: The git checkout the patch targets.
+        patch_path: The patch file to probe.
+
+    Returns:
+        ``True`` when some strip level reverse-checks cleanly.
+    """
+    from ._nogit_patch import _P_LEVELS
+
+    for lvl in _P_LEVELS:
+        cp = _run_git_cp(
+            ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
+            timeout=120.0,
+        )
+        if cp is not None and cp.returncode == 0:
+            return True
+    return False
+
+
 def _git_apply_collect_feedback(
     framework_root: Path,
     patch_path: Path,
@@ -553,6 +602,20 @@ def _git_apply_collect_feedback(
     if not three_way:
         ok3, err3, fb3 = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
         if ok3:
+            return True, "", None
+        # Still nothing. Distinguish "does not apply" from "already applied":
+        # a specialist often writes both a superset patch and the subset it
+        # contains, so applying one leaves the other a satisfied no-op that
+        # ``git apply --check`` nonetheless rejects. A clean *reverse* check
+        # succeeds only when every hunk's post-state is already in the tree,
+        # which is exactly what a forward apply would have produced -- so treat
+        # it as success rather than failing the whole combo. Partial overlap
+        # fails the reverse check and stays a real failure.
+        if _git_reverse_applies_cleanly(framework_root, patch_path):
+            log.info(
+                "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
+                patch_path.name,
+            )
             return True, "", None
         # Merge both sets of stderrs.
         all_stderrs = "\n".join(level_stderrs)
@@ -2291,17 +2354,24 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Enablement gate: runnability + minimal-correctness.
 
-        Three states:
-          accuracy > floor      -> correctness_ok=True  (KEEP, verified)
-          accuracy <= floor/NaN -> correctness_ok=False (REVERT, garbage)
-          accuracy is None      -> correctness_ok=None  (KEEP but provisional)
+        The verdict depends on the trigger origin, because the two origins have
+        different evidence available:
+
+        * ``accuracy >= floor`` -> ``correctness_ok=True`` (KEEP, verified).
+          eval-origin additionally requires the score to carry a task + metric;
+          without them it did not come from a real eval and fails closed.
+        * present but below floor / non-positive / non-finite ->
+          ``correctness_ok=False`` (REVERT, garbage output).
+        * ``accuracy is None`` -> eval-origin fails closed
+          (``correctness_ok=False``): the trigger *was* an accuracy failure, so a
+          candidate that produces no score has not shown it fixed anything.
+          boot-origin stays ``None`` (KEEP but provisional) — it only ever
+          claimed to make the model boot, and eval-less runs must not be blocked.
 
         On KEEP, when an attempt runtime was provisioned, the stack action is
         recorded in the result (``enablement_kept_stack_action``) so it survives
         rearm. On REVERT / non-KEEP, the attempt runtime dir is GC'd.
         """
-        import math as _math
-
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
 
@@ -2324,13 +2394,43 @@ class IntegratePatchExecutor:
         probe_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
+        _param_floor = params.get("enablement_accuracy_floor")
+        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else enablement_accuracy_floor()
+        eval_origin = str(params.get("enablement_origin") or "") == "eval"
+        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
         correctness_ok: bool | None
-        if isinstance(enablement_accuracy, (int, float)) and not _math.isnan(float(enablement_accuracy)):
-            correctness_ok = float(enablement_accuracy) > ENABLEMENT_ACCURACY_FLOOR
-        elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
-            correctness_ok = False
+        if enablement_accuracy is None:
+            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+            correctness_ok = False if eval_origin else None
+        elif accuracy_meets_floor(enablement_accuracy, floor):
+            correctness_ok = True
         else:
-            correctness_ok = None
+            # Present but below floor / non-positive / non-finite.
+            correctness_ok = False
+        # eval-origin only: a score with no task/metric did not come from a real
+        # eval, so it cannot clear the gate. This reads the candidate's OWN run
+        # (both keys are stamped beside the accuracy it is judging), unlike the
+        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
+        # field, so an eval-less re-baseline could poison the stored digest and
+        # veto every later candidate without ever consulting its accuracy.
+        if (
+            eval_origin
+            and correctness_ok
+            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+        ):
+            correctness_ok = False
+            log.warning(
+                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+                enablement_accuracy,
+            )
+        eval_provenance = {
+            "enablement_origin": str(params.get("enablement_origin") or ""),
+            "enablement_observed_accuracy": enablement_accuracy,
+            "enablement_accuracy_floor": floor,
+            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+            "enablement_eval_failure_kind": accuracy_kind or "",
+        }
 
         after_signature = classify_failure(str(bench_result.get("error") or ""))
         before_signature: FailureSignature | None = None
@@ -2387,6 +2487,7 @@ class IntegratePatchExecutor:
                         "setup_commands_applied": list(setup_result.get("applied") or []),
                         "bench_result": bench_result,
                         "workspace": str(output_root),
+                        **eval_provenance,
                     },
                 )
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2416,6 +2517,7 @@ class IntegratePatchExecutor:
                     "reason": f"enablement not runnable: {run_reason}",
                     "bench_result": bench_result,
                     "workspace": str(output_root),
+                    **eval_provenance,
                 },
             )
 
@@ -2447,6 +2549,10 @@ class IntegratePatchExecutor:
             "setup_commands_applied": list(setup_result.get("applied") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            # The actual materialized config from the KEEP'd bench, used for
+            # revalidation baseline so the same effective config is re-run.
+            "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
+            **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later
         # bench in this session re-activates it.
@@ -2586,6 +2692,15 @@ class IntegratePatchExecutor:
                 specialist_task_id,
             )
         gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        _ss_kb = extra.get("shared_state") or extra.get("state")
+        acc_delta_pct = _accuracy_delta_pct(
+            gate_evidence.get("accuracy"),
+            acc_baseline or getattr(_ss_kb, "baseline_accuracy", None),
+        )
+        cfg_fingerprint = canonical_fingerprint(
+            params.get("extra_server_args"),
+            params.get("extra_envs"),
+        )
 
         if not gate_pass:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -2606,6 +2721,8 @@ class IntegratePatchExecutor:
                 outcome="reverted_smoke_fail",
                 tps_delta_pct=float(delta_pct or 0.0),
                 extra=extra,
+                accuracy_delta_pct=acc_delta_pct,
+                config_fingerprint=cfg_fingerprint,
             )
             return _with_stash_restore(
                 framework_root,
@@ -2665,6 +2782,8 @@ class IntegratePatchExecutor:
                     outcome="reverted_smoke_fail",
                     tps_delta_pct=float(delta_pct or 0.0),
                     extra=extra,
+                    accuracy_delta_pct=acc_delta_pct,
+                config_fingerprint=cfg_fingerprint,
                 )
                 return _with_stash_restore(
                     framework_root,
@@ -2699,23 +2818,35 @@ class IntegratePatchExecutor:
             outcome="integrated",
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
+            accuracy_delta_pct=acc_delta_pct,
+            config_fingerprint=cfg_fingerprint,
         )
         # Commit the KEEP so a later REVERT checkout fallback can't wipe this
-        # win (best-effort, non-fatal).
-        try:
-            touched = _patch_touched_paths(framework_root, applied)
-            ok, note = _git_commit_kept(
-                framework_root,
-                f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                touched,
-            )
-            if not ok:
-                log.warning(
-                    "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
-                    note,
+        # win (best-effort, non-fatal). Non-git roots (e.g. a pip-installed
+        # framework in site-packages) have no checkout fallback to guard
+        # against and get their durability from snapshot_source_layer below,
+        # so skip the commit instead of failing it — matches framework_agent.
+        if framework_root is not None and _is_git_tree(framework_root):
+            try:
+                touched = _patch_touched_paths(framework_root, applied)
+                ok, note = _git_commit_kept(
+                    framework_root,
+                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                    touched,
                 )
-        except Exception:  # noqa: BLE001 — commit durability is best-effort
-            log.exception("integrate_patch: commit-on-KEEP raised")
+                if not ok:
+                    log.warning(
+                        "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
+                        note,
+                    )
+            except Exception:  # noqa: BLE001 — commit durability is best-effort
+                log.exception("integrate_patch: commit-on-KEEP raised")
+        else:
+            log.info(
+                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP "
+                "(backup-based revert + source snapshot provide durability)",
+                framework_root,
+            )
 
         source_snapshot_dir = ""
         source_base_sha = ""
@@ -2810,6 +2941,8 @@ class IntegratePatchExecutor:
         outcome: str,
         tps_delta_pct: float,
         extra: dict[str, Any],
+        accuracy_delta_pct: float | None = None,
+        config_fingerprint: str = "",
     ) -> None:
         """Append a JSONL record to ``lessons.jsonl`` when the patch
         came from the FRAMEWORK_AGENT phase.
@@ -2824,6 +2957,10 @@ class IntegratePatchExecutor:
             tps_delta_pct: The measured throughput delta percentage.
             extra: The runner ``extra`` mapping (provides shared state /
                 session id).
+            accuracy_delta_pct: Measured accuracy delta; overrides the payload
+                value when supplied.
+            config_fingerprint: Content fingerprint of the applied server
+                args / envs, recorded so a retried config can be recognised.
         """
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
@@ -2852,12 +2989,13 @@ class IntegratePatchExecutor:
             changed_files = proposal.get("changed_files") or (done_payload or {}).get("changed_files") or []
             if isinstance(changed_files, str):
                 changed_files = [changed_files]
-            try:
-                accuracy_delta_pct = float(
-                    proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
-                )
-            except (TypeError, ValueError):
-                accuracy_delta_pct = 0.0
+            if accuracy_delta_pct is None:
+                try:
+                    accuracy_delta_pct = float(
+                        proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    accuracy_delta_pct = 0.0
             written = await write_framework_record(
                 pr_url=pr_url,
                 pr_sha=pr_sha,
@@ -2873,9 +3011,10 @@ class IntegratePatchExecutor:
                 model_class=str(getattr(shared_state, "model_class", "") if shared_state is not None else "").strip(),
                 gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
                 precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
-                applicability=str(
-                    proposal.get("applicability") or (done_payload or {}).get("applicability") or ""
-                ).strip(),
+                applicability=(
+                    config_fingerprint
+                    or str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip()
+                ),
                 provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
                 accuracy_delta_pct=accuracy_delta_pct,
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
@@ -3073,6 +3212,9 @@ class IntegratePatchExecutor:
         _base_envs = dict(params.get("base_extra_envs") or {})
         _variant_envs = dict(_base_envs)
         _variant_envs.update(extra_envs_applied)
+        # For enablement runs, ensure RUN_EVAL=true survives any variant overlay.
+        if bool(params.get("enablement")):
+            _variant_envs["RUN_EVAL"] = "true"
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=extra_server_args_applied,
@@ -3084,7 +3226,8 @@ class IntegratePatchExecutor:
         )
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:
-            variant.runtime_override = {str(k): str(v) for k, v in _rt.items()}
+            # Preserve list/dict values; apply_runtime_override expects them.
+            variant.runtime_override = dict(_rt)
 
         # Ray-managed GPU execution: hold a serving lease
         # (num_gpus=TP + serving_slot) for the whole run_grid so
@@ -3131,6 +3274,8 @@ class IntegratePatchExecutor:
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
+                # Materialized config used for this bench; needed by revalidation.
+                "materialized_config": str(config_path),
             }
 
         accuracy_pass: bool | None = None
@@ -3148,8 +3293,23 @@ class IntegratePatchExecutor:
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
 
+        # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
+        measured_accuracy: float | None = None
+        if bench.get("status") == "succeeded":
+            try:
+                measured = parse_eval_results(
+                    eval_search_root,
+                    framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
+                ).get("accuracy")
+                if isinstance(measured, (int, float)):
+                    measured_accuracy = float(measured)
+            except Exception:  # noqa: BLE001 — advisory value only
+                log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
+
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
+        enablement_accuracy_task = ""
+        enablement_accuracy_metric = ""
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
             try:
                 eval_results = parse_eval_results(
@@ -3159,10 +3319,18 @@ class IntegratePatchExecutor:
                 acc = eval_results.get("accuracy")
                 if isinstance(acc, (int, float)):
                     enablement_accuracy = float(acc)
+                enablement_accuracy_task = str(eval_results.get("task") or "")
+                enablement_accuracy_metric = str(eval_results.get("metric") or "")
             except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
-        return bench, {"accuracy_pass": accuracy_pass, "enablement_accuracy": enablement_accuracy}
+        return bench, {
+            "accuracy_pass": accuracy_pass,
+            "accuracy": measured_accuracy,
+            "enablement_accuracy": enablement_accuracy,
+            "enablement_accuracy_task": enablement_accuracy_task,
+            "enablement_accuracy_metric": enablement_accuracy_metric,
+        }
 
     @staticmethod
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -3278,7 +3446,7 @@ class IntegratePatchExecutor:
         )
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
-            variant.runtime_override = {str(k): str(v) for k, v in _rt_rb.items()}
+            variant.runtime_override = dict(_rt_rb)
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,

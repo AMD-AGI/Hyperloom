@@ -67,6 +67,8 @@ _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "shape_mismatch": ("shape", "reshape", "layout"),
     "not_implemented": ("implement", "support", "rocm"),
     "capability_disabled": ("enable", "rocm", "supported"),
+    "accuracy_below_floor": (),
+    "eval_runtime_failure": ("eval", "accuracy", "harness"),
     "unknown": (),
 }
 
@@ -253,12 +255,14 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "Only *source edits* must stay under the allowed source roots listed below; "
     "touching any other path with a code patch is a hard reject. (Environment "
     "setup via ENVIRONMENT SETUP below is separate and allowed.)",
-    "Do NOT fabricate throughput/latency/accuracy numbers — the gate here is "
-    "RUNNABILITY (does the server boot + pass a minimal inference), not perf.",
-    "Prefer the smallest bridging change that makes the combo run — or, when full "
-    "runnability is out of reach this round, the smallest change that ADVANCES the "
-    "boot past the current failure (see PROGRESS DELIVERABLE below); do not "
-    "refactor unrelated code.",
+    "Do NOT fabricate throughput/latency/accuracy numbers, and do NOT alter the "
+    "eval dataset/task/metric/limit or the result parsing to inflate a score — the "
+    "gate here is RUNNABILITY (server boots + minimal inference) or, for an "
+    "eval-origin round, the real model output meeting the accuracy floor; not perf.",
+    "Prefer the smallest bridging change that makes the combo run correctly — or, "
+    "when that is out of reach this round, the smallest change that ADVANCES past "
+    "the current failure (a deeper boot gap, or a real accuracy gain toward the "
+    "floor) (see PROGRESS DELIVERABLE below); do not refactor unrelated code.",
     "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
@@ -385,6 +389,8 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "import_error / merged-PR closure -> Rung 4",
     "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
+    "accuracy_below_floor / eval_runtime_failure -> re-diagnose against the failing "
+    "eval contract (accuracy target), then enter at the rung the underlying gap implies",
 )
 
 
@@ -472,7 +478,8 @@ def _render_task_description(
     """
     lines: list[str] = []
     lines.append(
-        f"GOAL: make model `{req.model}` run under the `{req.framework}` backend. It currently fails to start."
+        f"GOAL: make model `{req.model}` run correctly under the `{req.framework}` backend. "
+        "It currently fails to start, or it starts but fails its accuracy eval."
     )
     lines.append("")
     lines.append(f"FAILURE CLASS: {sig.kind} (confidence {sig.confidence:.2f}).")

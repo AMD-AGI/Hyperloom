@@ -358,3 +358,36 @@ def test_pump_routes_ranked_local_explore_candidate(tmp_path: Path):
     assert audited["n"] == 0, "local-explore arm must not run the PR semantic audit"
     assert len(stub.tasks.created) == 1
     assert stub.tasks.created[0]["params"]["framework_local_explore"] is True
+
+
+def test_forward_enablement_carriers_eval_origin():
+    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+
+    src = {
+        "enablement_origin": "eval",
+        "enablement_accuracy_floor": 0.4,
+        "enablement_probe_config_path": "/runs/baseline/materialized.yaml",
+        "enablement_eval_contract_fingerprint": "fp1",
+    }
+    dst: dict[str, Any] = {}
+    _forward_enablement_carriers(src, dst)
+    assert dst["enablement_origin"] == "eval"
+    assert dst["enablement_accuracy_floor"] == 0.4
+    assert dst["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
+    # The eval-contract fingerprint is no longer forwarded: nothing downstream
+    # reads it. Correctness is judged from the candidate's own measurement.
+    assert "enablement_eval_contract_fingerprint" not in dst
+    # Benches against the original workload config, not the shipped default.
+    assert dst["config_path"] == "/runs/baseline/materialized.yaml"
+
+
+def test_forward_enablement_carriers_boot_origin_noop():
+    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+
+    dst: dict[str, Any] = {}
+    _forward_enablement_carriers({}, dst)
+    assert dst == {}
+    # An existing config_path is not overwritten for boot-origin.
+    dst2 = {"config_path": "/keep.yaml"}
+    _forward_enablement_carriers({"enablement_origin": ""}, dst2)
+    assert dst2 == {"config_path": "/keep.yaml"}

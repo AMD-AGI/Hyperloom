@@ -365,6 +365,19 @@ def test_search_ledgers_in_core_state_fields():
     )
 
 
+def test_enablement_accepted_config_path_roundtrips(tmp_path):
+    """enablement_accepted_config_path is persisted and reloaded correctly."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState()
+    s.enablement_accepted_config_path = "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    s.enablement_active_runtime = {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+    s.save(sd)
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.enablement_accepted_config_path == "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    assert loaded.enablement_active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+
+
 @pytest.mark.parametrize("field_name", ["explore_search"])
 def test_policy_blocks_llm_search_ledger_write(field_name):
     """LLM ``update_state`` of a search ledger surfaces a ``state_field`` denial."""

@@ -1039,6 +1039,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_reauthor_from_critic_feedback": "phase_framework",
         "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "phase_framework",
+        "_maybe_enqueue_enablement_baseline_revalidation": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
