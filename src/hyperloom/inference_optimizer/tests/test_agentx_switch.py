@@ -222,3 +222,17 @@ def test_agentx_package_importable_contrast():
     )
     assert r.returncode == 0, "stdout=%s\nstderr=%s" % (r.stdout, r.stderr)
     assert "CONTRAST_OK" in r.stdout
+
+
+# ── Finding 1: framework injected so the wrapper delegates to the right builtin ─
+def test_switch_on_injects_framework_for_delegation(tmp_path, monkeypatch):
+    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so
+    aiperf_client.sh delegates to ``{framework}_{gpu}.sh``. Without it an sglang
+    task falls back to the wrapper default and would boot vllm."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    for fw in ("sglang", "vllm"):
+        src = _write(tmp_path / f"{fw}.yaml", framework=fw)
+        bench = _materialize(src, tmp_path / f"out_{fw}", gpu_type="mi300x", model_path="/m")
+        assert bench["benchmark_script"] == "aiperf_client.sh"
+        assert bench["envs"]["FRAMEWORK"] == fw

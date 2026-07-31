@@ -119,6 +119,10 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
         return False
     bench["benchmark_script"] = "aiperf_client.sh"
     envs = bench.setdefault("envs", {})
+    # Pass the resolved framework so aiperf_client.sh delegates to the correct
+    # builtin ({framework}_{gpu}.sh); without it the wrapper cannot tell vllm
+    # from sglang and would fall back to a default and boot the wrong server.
+    envs.setdefault("FRAMEWORK", str(bench.get("framework") or ""))
     envs.setdefault("RUN_EVAL", os.environ.get("RUN_EVAL", "false"))
     envs.setdefault("MODEL", str(model_path or bench.get("model") or ""))
     for _ax in _AGENTX_PASSTHROUGH_ENVS:

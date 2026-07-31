@@ -39,9 +39,16 @@ rm -rf "$ART"
 mkdir -p "$RESULT_DIR" "$ART"
 
 # ── Resolve the per-framework builtin server script ──────────────────────────
-FRAMEWORK="${FRAMEWORK:-vllm}"
+FRAMEWORK="${FRAMEWORK:-}"
 GPU="$(printf '%s' "${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}" | tr '[:upper:]' '[:lower:]')"
 BUILTIN="${AGENTX_SERVER_SCRIPT:-${FRAMEWORK}_${GPU}.sh}"
+# The AgentX switch injects FRAMEWORK from benchmark.framework; a missing value
+# (and no explicit AGENTX_SERVER_SCRIPT) is misconfiguration -- fail loud rather
+# than silently defaulting to a framework and booting the wrong server.
+if [ -z "${AGENTX_SERVER_SCRIPT:-}" ] && [ -z "$FRAMEWORK" ]; then
+  log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
+  exit 2
+fi
 if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
   log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
   exit 2

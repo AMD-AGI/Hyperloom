@@ -168,3 +168,30 @@ def test_warmup_off_omits_flags(tmp_path):
     args = _aiperf_args(res)
     assert "--warmup-duration" not in args
     assert "--num-warmup-sessions" not in args
+
+
+def test_framework_sglang_delegates_to_sglang_builtin(tmp_path):
+    """FRAMEWORK=sglang must delegate to sglang_{gpu}.sh, not the vllm default."""
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK="sglang")
+    assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
+
+
+def test_missing_framework_fail_loud(tmp_path):
+    """FRAMEWORK unset must fail loud (exit 2), never silently boot the vllm
+    builtin — the switch always injects FRAMEWORK from benchmark.framework."""
+    bench, bind, res = _sandbox(tmp_path)  # vllm_mi300x.sh present
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK="")
+    assert r.returncode == 2
+    assert not (res / "inferencex_result.json").exists()
+
+
+def test_agentx_server_script_override_without_framework(tmp_path):
+    """An explicit AGENTX_SERVER_SCRIPT still resolves when FRAMEWORK is unset."""
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "custom_server.sh", _fake_builtin(True))
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK="", AGENTX_SERVER_SCRIPT="custom_server.sh")
+    assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
