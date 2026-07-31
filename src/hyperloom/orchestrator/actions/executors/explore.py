@@ -47,6 +47,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
+from ._delta_filter import filter_variants
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
@@ -851,6 +852,23 @@ class ExploreExecutor:
                 "workspace": output_root.as_posix(),
             }
         grid = _grid_variants_from_payload(grid_payload)
+        if grid:
+            # Opt-in, and a no-op unless HYPERLOOM_DELTA_FILTER_DIR points at a
+            # ranker trained for this framework version. Runs after the grid is
+            # assembled so it prunes LLM-proposed and seeded variants alike.
+            grid, _filter_info = filter_variants(
+                grid,
+                framework=framework,
+                framework_version=str(
+                    (_cfg.get("benchmark") or {}).get("framework_version")
+                    or os.environ.get("FRAMEWORK_VERSION", "")).strip(),
+                model_path=str((_cfg.get("benchmark") or {}).get("model")
+                               or os.environ.get("MODEL_PATH", "")).strip(),
+                precision=str((_cfg.get("benchmark") or {}).get("precision")
+                              or os.environ.get("PRECISION", "")).strip(),
+                hardware=str((_cfg.get("benchmark") or {}).get("runner_type")
+                             or os.environ.get("GPU_TYPE", "")).strip(),
+            )
         if not grid:
             return {
                 "status": "failed",
