@@ -228,6 +228,32 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
         json.loads(blob)  # must parse: broken JSON was repaired, not passed through
 
 
+def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
+    """The shape-capture materialization path must remove its inherited port
+    without corrupting a sibling JSON-valued server flag."""
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(
+        src,
+        "vllm",
+        {
+            "EXTRA_VLLM_ARGS": (
+                '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'
+            )
+        },
+    )
+
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        remove_args=["--port"],
+    )
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+    assert "--port" not in args
+    blob = args.split("--compilation-config ", 1)[1].strip()
+    assert json.loads(blob) == {"cudagraph_mode": "FULL"}
+
+
 def test_conc_env_ladder_materializes_as_single_baseline_conc(
     tmp_path,
     monkeypatch,
