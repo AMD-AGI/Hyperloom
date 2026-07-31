@@ -190,7 +190,8 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "inductor",
 )
 # Shape sources trusted for kernel-opt dispatch.
-_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv"})
+# capture_backfill: bypass graph-replay inherits capture-time operand shapes.
+_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv", "capture_backfill"})
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
@@ -4106,7 +4107,7 @@ async def run_optimization_handler(
         single_payload = dict(payload)
         if candidates:
             # Reconcile the (possibly hallucinated) LLM kernel_id against the real id.
-            single_payload["kernel_id"] = _reconcile_kernel_id(
+            single_payload["kernel_id"] = _reconcile_kernel_id_for_single_batch(
                 single_payload.get("kernel_id"),
                 candidates,
             )
@@ -4335,6 +4336,32 @@ def _reconcile_kernel_id(
         return req
     fallback = str(candidates[0].get("kernel_id") or "")
     return fallback
+
+
+def _reconcile_kernel_id_for_single_batch(
+    requested: Any,
+    candidates: list[dict[str, Any]],
+) -> str:
+    """Reconcile ``requested`` and pin to the sole batch row when ids diverge.
+
+    When the batch filter leaves exactly one candidate, the LLM may still
+    request a different ``kernel_id``; keep candidate metadata and
+    ``kernel_id`` aligned so predispatch validation uses the same row.
+    """
+    if not candidates:
+        return str(requested or "")
+    reconciled = _reconcile_kernel_id(requested, candidates)
+    valid = {str(c.get("kernel_id") or "") for c in candidates if c.get("kernel_id")}
+    if reconciled in valid:
+        return reconciled
+    pinned = str(candidates[0].get("kernel_id") or "")
+    if pinned and reconciled != pinned:
+        log.info(
+            "kernel_id %r pinned to sole batch candidate %r",
+            reconciled,
+            pinned,
+        )
+    return pinned or reconciled
 
 
 def _resolve_candidate_id(
