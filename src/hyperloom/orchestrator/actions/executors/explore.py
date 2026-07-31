@@ -1015,6 +1015,34 @@ class ExploreExecutor:
                 ):
                     if hasattr(gv, attr):
                         setattr(run_gv, attr, getattr(gv, attr))
+                # The decision round is timed against a throughput-only anchor, so
+                # it measures throughput only: the warmup round already evaluated
+                # accuracy and ``parse_eval_results`` falls back to that score.
+                # Without a warmup there is nothing to fall back to, so the
+                # decision round keeps its own eval.
+                decision_gv = run_gv
+                if use_warm_decision:
+                    decision_envs = dict(run_extra_envs)
+                    decision_envs["RUN_EVAL"] = "false"
+                    decision_gv = GridVariant(
+                        name=gv.name,
+                        extra_server_args=gv.extra_server_args,
+                        extra_envs=decision_envs,
+                        note=gv.note,
+                        remove_args=run_remove_args,
+                        unset_envs=run_unset_envs,
+                        args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                    )
+                    for attr in (
+                        "provenance",
+                        "scope",
+                        "overlay_pythonpath",
+                        "kb_evidence",
+                        "pr_evidence",
+                        "source_evidence",
+                    ):
+                        if hasattr(run_gv, attr):
+                            setattr(decision_gv, attr, getattr(run_gv, attr))
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
@@ -1122,7 +1150,7 @@ class ExploreExecutor:
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
-                        grid=[run_gv],
+                        grid=[decision_gv],
                         output_root=slot,
                         variant_timeout_sec=timeout_sec,
                         model_path=resolved_model,
@@ -1396,10 +1424,16 @@ class ExploreExecutor:
                             # comparable; otherwise a fresh cold boot. The
                             # overtime-kill deadline applies as in the decision
                             # round.
+                            rebench_envs = dict(gv.extra_envs)
+                            if use_warm_decision:
+                                # Throughput-stability check only; it shares the
+                                # decision round's throughput-only deadline and
+                                # never reads an accuracy score.
+                                rebench_envs["RUN_EVAL"] = "false"
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
-                                extra_envs=dict(gv.extra_envs),
+                                extra_envs=rebench_envs,
                                 note="stack_rebench",
                                 remove_args=list(run_remove_args),
                                 unset_envs=list(run_unset_envs),
