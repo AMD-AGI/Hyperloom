@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -352,6 +353,165 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
         assert "=== Phase budget telemetry ===" in prompt
         assert "PRELUDE: elapsed=" in prompt
         assert "EXPLORE: elapsed=" in prompt
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_reports_held_resources(coordinator_with_mocks):
+    """Lease expiry, lanes and GPU ids reach the planner.
+
+    These four fields are the whole point of the on-demand path: the prompt
+    tells the planner to weigh "what is queued behind the lane or GPUs it
+    holds" and to extend a lease that is near expiry, so each has to survive
+    the join from ``leases`` / ``gpu_leases`` into the rendered line.
+    """
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-resources",
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        # Two lanes, deliberately out of sorted order and with different
+        # expiries: the renderer must sort the lanes and report the SOONEST
+        # expiry, because that is when reclaim starts.
+        for lane, holder, expires in (
+            ("research_lane", "h-late", "2099-12-31T23:59:59+00:00"),
+            ("gpu_research_lane", "h-soon", "2099-01-01T00:00:00+00:00"),
+        ):
+            c.bus.db.raw.execute(
+                "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
+                "acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    lane,
+                    holder,
+                    task.task_id,
+                    "specialist",
+                    1,
+                    "2026-05-19T18:00:00+00:00",
+                    expires,
+                    "2026-05-19T18:00:00+00:00",
+                ),
+            )
+        for gpu_id in (3, 1):
+            c.bus.db.raw.execute(
+                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
+                "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
+                (
+                    gpu_id,
+                    f"h-gpu{gpu_id}",
+                    task.task_id,
+                    "2026-05-19T18:00:00+00:00",
+                    "2099-12-31T23:59:59+00:00",
+                    "2026-05-19T18:00:00+00:00",
+                ),
+            )
+        c.bus.db.raw.commit()
+
+        out = c._context_running_tasks_reader()
+        assert "lanes=['gpu_research_lane', 'research_lane']" in out
+        assert "gpu_ids=[1, 3]" in out
+        # Soonest expiry wins: reclaim starts at the FIRST lane to lapse, so
+        # reporting the latest would overstate the remaining window by a year.
+        reported = int(out.split("lease_expires_in_sec=")[1].split()[0])
+        now = datetime.now(timezone.utc)
+        soonest = int((datetime.fromisoformat("2099-01-01T00:00:00+00:00") - now).total_seconds())
+        latest = int((datetime.fromisoformat("2099-12-31T23:59:59+00:00") - now).total_seconds())
+        assert abs(reported - soonest) <= 5, f"expected soonest {soonest}, got {reported}"
+        assert abs(reported - latest) > 1000
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_reports_heartbeat_age(
+    coordinator_with_mocks,
+    session_dir,
+):
+    """Heartbeat age is read from the same files the reap loop polls.
+
+    ``process.log`` counts as proof of life alongside ``heartbeat.json`` — a
+    specialist mid-benchmark can go minutes without restamping the heartbeat
+    while its log grows, and treating that as silence would invite a spurious
+    kill.
+    """
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-heartbeat",
+        )
+        await c.tasks.transition(task.task_id, "running")
+        # No workspace yet: the field is omitted rather than reported as zero.
+        assert "heartbeat_age_sec=" not in c._context_running_tasks_reader()
+
+        ws = runs_dir(c.session_dir, "specialist", task.task_id)
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "process.log").write_text("benchmarking\n", encoding="utf-8")
+        out = c._context_running_tasks_reader()
+        assert "heartbeat_age_sec=" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
+    coordinator_with_mocks,
+    session_dir,
+):
+    """The kind guard holds even when a same-named workspace exists.
+
+    ``runs_dir`` is keyed on task_id, so a non-specialist whose id collides
+    with a specialist workspace would otherwise inherit a heartbeat that
+    describes someone else's process.
+    """
+    from hyperloom.inference_optimizer.session.session_paths import runs_dir
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="explore",
+            params={},
+            idempotency_key="k-explore-hb",
+        )
+        await c.tasks.transition(task.task_id, "running")
+        # Plant the liveness file the specialist path would have read.
+        ws = runs_dir(c.session_dir, "specialist", task.task_id)
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "heartbeat.json").write_text("{}", encoding="utf-8")
+
+        out = c._context_running_tasks_reader()
+        assert task.task_id in out
+        assert "kind='explore'" in out
+        assert "heartbeat_age_sec=" not in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_survives_db_failure(coordinator_with_mocks):
+    """A read failure degrades to a message, never an exception.
+
+    This reader backs a context tool the planner calls on its own turn; an
+    exception here would surface as an SDK stream failure and discard every
+    intent already collected in that turn.
+    """
+    c = coordinator_with_mocks
+    try:
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("db gone")
+
+        c.bus.db.fetchall_sync = _boom
+        out = c._context_running_tasks_reader()
+        assert "running tasks unavailable" in out
+        assert "db gone" in out
     finally:
         await c.stop()
 
