@@ -17,7 +17,6 @@ def _args(**over):
     base = dict(
         local_kb_root=None,
         degraded_kb=False,
-        cortex_kb_url=None,
         pr_monitor_enabled=True,
         pr_monitor_url=None,
         pr_monitor_mcp_url=None,
@@ -55,16 +54,6 @@ def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert kb.remote is None
-
-
-def test_dispatcher_cortex_url_is_not_a_recipe_remote(tmp_path, monkeypatch) -> None:
-    # CORTEX_KB_URL / --cortex-kb-url feed only the critic agent, not a recipe-KB remote.
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
-
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: None)
-    kb = cli_kb._build_recipe_kb_dispatcher(_args(cortex_kb_url="http://cortex"))
     assert kb.remote is None
 
 
@@ -150,6 +139,18 @@ def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
     assert kb.audit_hook is None
 
 
+def test_bootstrap_cortex_kb_degraded_returns_none(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
+    kb = cli_kb._bootstrap_cortex_kb(
+        _args(degraded_kb=True),
+        session_dir=tmp_path,
+        manifest={"model_name": "m"},
+        resume=False,
+    )
+    assert kb is None
+    assert "DISABLED (--degraded-kb)" in capsys.readouterr().out
+
+
 def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
@@ -197,14 +198,6 @@ def test_bootstrap_knowledge_plane_disabled(tmp_path) -> None:
         _args(pr_monitor_enabled=False, pr_degraded_reason="explicit_flag"),
         session_dir=tmp_path,
     )
-    assert plane is not None
-
-
-def test_bootstrap_knowledge_plane_with_kb_mcp(tmp_path, monkeypatch) -> None:
-    """When a specialist KB MCP url resolves, the enabled branch (L302-303) runs."""
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://kb.invalid/mcp")
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "tok")
-    plane = cli_kb._bootstrap_knowledge_plane(_args(), session_dir=tmp_path)
     assert plane is not None
 
 
@@ -262,41 +255,3 @@ def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch
     monkeypatch.setattr(sp, "recipe_snapshot_audit_jsonl", lambda _sd: bad)
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)
     kb.audit_hook({"method": "search"})
-
-
-def test_resolve_specialist_kb_mcp_override(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://x/mcp")
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "secret")
-    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
-    assert url == "http://x/mcp"
-    assert headers == {"Authorization": "Bearer secret"}
-
-
-def test_resolve_specialist_kb_mcp_override_without_token(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://x/mcp")
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", raising=False)
-    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
-    assert url == "http://x/mcp"
-    assert headers == {}
-
-
-def test_resolve_specialist_kb_mcp_gbrain(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", raising=False)
-    monkeypatch.setenv("GBRAIN_BASE_URL", "http://gbrain.invalid/")
-    monkeypatch.setenv("GBRAIN_TOKEN", "gtok")
-    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
-    assert url == "http://gbrain.invalid/mcp"
-    assert headers == {"Authorization": "Bearer gtok"}
-
-
-def test_resolve_specialist_kb_mcp_nothing_configured(monkeypatch) -> None:
-    for k in (
-        "HYPERLOOM_SPECIALIST_KB_MCP_URL",
-        "HYPERLOOM_SPECIALIST_KB_MCP_TOKEN",
-        "GBRAIN_BASE_URL",
-        "GBRAIN_TOKEN",
-    ):
-        monkeypatch.delenv(k, raising=False)
-    url, headers = cli_kb._resolve_specialist_kb_mcp(_args())
-    assert url == ""
-    assert headers == {}

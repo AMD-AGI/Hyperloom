@@ -43,7 +43,6 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     """Helper to build a CLI Namespace with the KB-related fields plus overrides."""
     fields: dict[str, Any] = {
         "local_kb_root": None,
-        "cortex_kb_url": None,
         "degraded_kb": False,
     }
     fields.update(overrides)

@@ -79,8 +79,6 @@ def _extra_focus_tags(
 
 # Re-export the external tool registries defined in :mod:`policy`.
 from ..policy.gate import (
-    CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
-    KB_WRITE_TOOL_NAMES as _KB_WRITE,
     PR_MONITOR_TOOL_NAMES as _PR_MONITOR,
     WEB_TOOL_NAMES as _WEB,
 )
@@ -88,13 +86,6 @@ from ..policy.gate import (
 #: Tuple alias for the PR Monitor MCP readonly tools.
 PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 
-#: Tuple alias for the Cortex KB readonly MCP tools.
-CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
-
-
-# Default tool whitelist for specialists. Write tools are worktree-scoped
-# via ``--add-dir <worktree>``; ``integrate_patch`` is the only path that
-# applies patches to the serving workspace.
 DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     (
         "emit_intent",
@@ -114,13 +105,11 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
     )
     + tuple(sorted(_WEB))
     + PR_MONITOR_MCP_TOOLS
-    # Read-only KB-graph query tools; stripped at resolve time when cortex_kb is not wired.
-    + CORTEX_KB_READONLY_MCP_TOOLS
 )
 
 
 # Tools explicitly denied even if the operator extends the whitelist.
-SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
+SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset()
 
 
 _now_iso = now_iso
@@ -426,9 +415,8 @@ class SpecialistRunner:
     ) -> tuple[str, ...]:
         """Return the per-task tool whitelist.
 
-        Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled (and
-        ``mcp__cortex_kb__*`` when Cortex disabled); honors a narrower
-        ``Task.allowed_tools``; enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
+        Strips ``mcp__pr_monitor__*`` when PR Monitor is disabled; honors a
+        narrower ``Task.allowed_tools``; enforces :data:`SPECIALIST_TOOL_DENYLIST` last.
 
         GPU specialists run their real serving / benchmark / autotune loops via
         the broad ``Bash``/``Write``/``Edit`` grant on their leased cards (the
@@ -446,13 +434,9 @@ class SpecialistRunner:
         if forced is not None:
             if "pr_monitor" not in forced:
                 tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-            if "cortex_kb" not in forced:
-                tools = [t for t in tools if not t.startswith("mcp__cortex_kb__")]
         elif plane is not None:
             if not bool(plane.pr_monitor_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-            if not bool(plane.cortex_enabled):
-                tools = [t for t in tools if not t.startswith("mcp__cortex_kb__")]
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)
 
@@ -1594,7 +1578,6 @@ class SpecialistRunner:
 
 
 __all__ = [
-    "CORTEX_KB_READONLY_MCP_TOOLS",
     "DEFAULT_SPECIALIST_TOOLS",
     "PR_MONITOR_MCP_TOOLS",
     "RETRYABLE_SPECIALIST_FAILURES",

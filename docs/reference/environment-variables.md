@@ -253,7 +253,6 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`1`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb` by default for production compatibility. The generated config is chmod `0600`. Set to `0` to skip bearer-auth Cortex KB MCP wiring when no auth header should be persisted. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -264,11 +263,10 @@ The following variables configure the Critic, Robustness, and knowledge base com
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md).             |
+| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe knowledge base in Hyperloom](integrate-kb.md).             |
 | `GBRAIN_BASE_URL`                     | Unset                  | Base URL of the remote recipe-snapshot page store — the **read** side of the recipe KB. When unset, recipe reads are local-only.       |
 | `GBRAIN_TOKEN`                        | Unset                  | Bearer token for `GBRAIN_BASE_URL`.                                                                                                   |
 | `RECIPE_KB_MIRROR_MODE`               | `external`             | `external` (default): a separate ingest process mirrors the local store into the remote recipe KB. `inline`: best-effort mirror each local write into the remote store in-process (local write stays authoritative). |
-| `CORTEX_KB_URL`                       | Unset                  | Optional Cortex KB URL used **only** by the Critic agent's per-proposal assess enrichment (`/v2/reasoning/assess`) — *not* the recipe KB. Also set by `--cortex-kb-url`. No Cortex call is made unless configured. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |

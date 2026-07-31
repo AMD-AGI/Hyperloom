@@ -1251,7 +1251,7 @@ def _preflight(
                 f"(skipped; --no-kernel + roofline disabled)"
             )
 
-    # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
+    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
     if args is not None:
         _run_ir3_preflight(args)
 
@@ -1266,7 +1266,10 @@ def _preflight(
 
 
 def _run_ir3_preflight(args: argparse.Namespace) -> None:
-    """IR-3 — Cortex KB + PR Monitor reachability probe (soft degrade); never raises/exits.
+    """IR-3 — PR Monitor reachability probe (soft degrade); never raises/exits.
+
+    Recipe KB enablement is controlled by ``--degraded-kb`` (``cortex_enabled``);
+    this probe only affects ``pr_monitor_enabled``.
 
     Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
     ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
@@ -1278,38 +1281,23 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
 
-    args.cortex_enabled = True
-    args.pr_monitor_enabled = True
-    args.kb_degraded_reason = None
-    args.pr_degraded_reason = None
+    args.cortex_enabled = not explicit_kb
+    args.kb_degraded_reason = "explicit_flag" if explicit_kb else None
+    args.pr_monitor_enabled = not explicit_pr
+    args.pr_degraded_reason = "explicit_flag" if explicit_pr else None
 
     if explicit_kb and explicit_pr:
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "explicit_flag"
-        args.pr_monitor_enabled = False
-        args.pr_degraded_reason = "explicit_flag"
         return
 
     user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    # The Cortex KB endpoint is a CLI-flag concern (no env fallback): drop any
-    # inherited CORTEX_KB_URL, then inject the flag when set.
-    env.pop("CORTEX_KB_URL", None)
-    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-    if cortex_url:
-        env["CORTEX_KB_URL"] = cortex_url
-    # PR Monitor endpoint is a CLI-flag concern: compute the probe's healthz base
-    # from the resolved flag. The REST base omits /v1 (the client appends it) but
-    # healthz lives under /v1, so normalise the probe base to end with /v1.
     env.pop("PR_MONITOR_URL", None)
     pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
     if pr_url:
         probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
         env["PR_MONITOR_URL"] = probe_base
-    if explicit_kb:
-        env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 
@@ -1321,12 +1309,11 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
             timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        # Script died — treat both branches as unreachable so soft-degrade kicks in.
         log.warning("IR-3 preflight script error: %s", exc)
         marker: dict[str, Any] = {
             "kb_reachable": False,
             "pr_reachable": False,
-            "kb_skipped": explicit_kb,
+            "kb_skipped": True,
             "pr_skipped": explicit_pr,
         }
     else:
@@ -1337,20 +1324,10 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
             marker = {
                 "kb_reachable": False,
                 "pr_reachable": False,
-                "kb_skipped": explicit_kb,
+                "kb_skipped": True,
                 "pr_skipped": explicit_pr,
             }
 
-    if explicit_kb:
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "explicit_flag"
-    elif not marker.get("kb_reachable", False) and not marker.get("kb_skipped", False):
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "ir3_auto"
-
-    if explicit_pr:
-        args.pr_monitor_enabled = False
-        args.pr_degraded_reason = "explicit_flag"
-    elif not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
+    if not explicit_pr and not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
         args.pr_monitor_enabled = False
         args.pr_degraded_reason = "ir3_auto"
