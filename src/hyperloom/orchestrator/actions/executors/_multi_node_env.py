@@ -297,14 +297,35 @@ def export_ray_address_to_os() -> None:
         os.environ["RAY_ADDRESS"] = addr
 
 
+def _remote_client_env(service_url: str) -> dict[str, str]:
+    """Build the multi-node Magpie client env for ``service_url``.
+
+    ``MAGPIE_EVAL_PYTHON`` pins the accuracy gate to the interpreter preflight
+    installed ``lm_eval`` into. Magpie's ``magpie_run_eval_remote_direct`` runs
+    ``${MAGPIE_EVAL_PYTHON:-python3}`` and, unlike the single-node path, has no
+    InferenceX shim to install the harness for itself, so leaving it on a PATH
+    ``python3`` that differs from the benchmark interpreter puts the import in a
+    different interpreter than the install and fails the gate on a box that
+    preflight just reported as ready.
+    """
+    from .benchmark_backend import resolve_benchmark_interpreter
+
+    return {
+        "MAGPIE_RUN_PHASE": "client",
+        "BENCHMARK_BASE_URL": service_url,
+        "MAGPIE_EVAL_PYTHON": resolve_benchmark_interpreter(),
+    }
+
+
 def magpie_remote_env() -> dict[str, str]:
     """Return env vars to inject into a Magpie ``benchmark`` subprocess.
 
     Single-node: ``{}`` (Magpie's ``--run-mode local`` untouched). Multi-node
-    with a ``service_url``: ``{"MAGPIE_RUN_PHASE": "client",
-    "BENCHMARK_BASE_URL": "<service_url>"}`` so Magpie skips its local server
-    launch and points ``benchmark_serving`` at the head pod. Multi-node without
-    a state file: ``{}`` + WARN (the local-launch failure surfaces clearly).
+    with a ``service_url``: ``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL``
+    so Magpie skips its local server launch and points ``benchmark_serving`` at
+    the head pod, plus ``MAGPIE_EVAL_PYTHON`` (see :func:`_remote_client_env`).
+    Multi-node without a state file: ``{}`` + WARN (the local-launch failure
+    surfaces clearly).
 
     Returns:
         Env vars to inject into the Magpie subprocess, or ``{}`` for the
@@ -313,7 +334,7 @@ def magpie_remote_env() -> dict[str, str]:
     # External mode: point benchmarks at the env-provided endpoint when multi-node.
     ext = external_service_url()
     if ext and is_multi_node():
-        return {"MAGPIE_RUN_PHASE": "client", "BENCHMARK_BASE_URL": ext}
+        return _remote_client_env(ext)
     if not is_multi_node():
         return {}
 
@@ -339,10 +360,7 @@ def magpie_remote_env() -> dict[str, str]:
         )
         return {}
 
-    return {
-        "MAGPIE_RUN_PHASE": "client",
-        "BENCHMARK_BASE_URL": service_url,
-    }
+    return _remote_client_env(service_url)
 
 
 def log_mn_banner(

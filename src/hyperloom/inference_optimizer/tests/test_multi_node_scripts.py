@@ -987,6 +987,55 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# magpie_remote_env accuracy-gate interpreter tests.
+
+
+def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
+    """The eval must run in the interpreter preflight installed lm_eval into.
+
+    Magpie's ``magpie_run_eval_remote_direct`` runs ``${MAGPIE_EVAL_PYTHON:-python3}``
+    and has no InferenceX shim to install the harness for itself, so a bare PATH
+    ``python3`` would look for lm_eval in a different interpreter than preflight
+    installed it into and fail the gate on a box preflight called ready.
+    """
+    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
+    monkeypatch.setattr(mne, "external_service_url", lambda: "")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
+        lambda: "/opt/venv/bin/python",
+    )
+
+    env = mne.magpie_remote_env()
+
+    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
+    assert env["BENCHMARK_BASE_URL"] == "http://h:8888"
+
+
+def test_magpie_remote_env_pins_eval_interpreter_external(tmp_path, monkeypatch):
+    """The platform hand-off path needs the same pin as the state-file path."""
+    _write_mn_state(tmp_path, monkeypatch, {"nodes": 2})
+    monkeypatch.setattr(mne, "external_service_url", lambda: "http://frontend:8000")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
+        lambda: "/opt/venv/bin/python",
+    )
+
+    env = mne.magpie_remote_env()
+
+    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
+    assert env["BENCHMARK_BASE_URL"] == "http://frontend:8000"
+
+
+def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):
+    """Single-node stays untouched: no client phase, no interpreter override."""
+    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 1})
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setattr(mne, "external_service_url", lambda: "")
+
+    assert mne.magpie_remote_env() == {}
+
+
+# ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 
 

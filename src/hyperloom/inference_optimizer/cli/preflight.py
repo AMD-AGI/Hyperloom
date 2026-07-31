@@ -601,6 +601,36 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
     return missing
 
 
+# The harness the single-node path ends up on: InferenceX's benchmark_lib.sh
+# force-reinstalls this commit over whatever pip resolved. Pinning the same one
+# keeps a multi-node accuracy number comparable with a single-node one instead
+# of silently measuring against whatever PyPI happens to serve that day.
+_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+_LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
+# git first, then the archive, because the sandbox may not ship a git binary.
+_LM_EVAL_PINNED_SPECS = (
+    ("git", f"lm_eval[api] @ git+https://{_LM_EVAL_REPO}.git@{_LM_EVAL_PINNED_REF}"),
+    ("archive", f"lm_eval[api] @ https://{_LM_EVAL_REPO}/archive/{_LM_EVAL_PINNED_REF}.tar.gz"),
+)
+
+
+def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
+    """Install the pinned ``lm_eval[api]``, falling back to the source archive.
+
+    Raises:
+        subprocess.CalledProcessError: If every spec fails; the last error wins.
+    """
+    for i, (source, spec) in enumerate(_LM_EVAL_PINNED_SPECS):
+        is_last = i == len(_LM_EVAL_PINNED_SPECS) - 1
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, spec],
+            check=is_last,
+        )
+        if proc.returncode == 0:
+            return
+        print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
+
+
 def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
 
@@ -612,10 +642,18 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     Ensure it here (preflight runs for all paths) with the benchmark interpreter.
     Skipped when RUN_EVAL is explicitly disabled (default is enabled).
 
-    Runs for single-node too, by design: preflight has no node count, and the
-    single-node path can reach the same direct ``python -m lm_eval`` call. It is
-    a no-op on any interpreter that can already import the modules, so an image
-    that ships ``lm_eval`` is left untouched rather than reinstalled over.
+    Multi-node only. Single-node reaches lm_eval through ``run_eval`` ->
+    InferenceX ``benchmark_lib.sh::run_lm_eval``, which installs the harness on
+    first use and then force-reinstalls its own pinned commit over whatever is
+    there. Installing ahead of it therefore cannot change a single-node outcome,
+    while ``check=True`` below would give a working run a new way to die, so
+    single-node is left exactly as it was before this ensure existed.
+
+    Even where it does run, it is a no-op on any interpreter that can already
+    import the modules, so an image that ships ``lm_eval`` is left untouched
+    rather than reinstalled over. When it does install, it pins
+    :data:`_LM_EVAL_PINNED_REF` -- the commit InferenceX force-reinstalls on the
+    single-node path -- so the two paths measure with the same harness.
 
     Args:
         python_exe (str): The interpreter that will run ``python -m lm_eval``.
@@ -627,6 +665,10 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
             reproduces the exact ``baseline_accuracy_failed`` this prevents,
             only hours later and with the pip diagnostics long gone.
     """
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return  # single-node: InferenceX installs lm_eval itself, see above
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
         return  # accuracy gate disabled; lm_eval not required
@@ -642,12 +684,15 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
         print("Preflight: lm_eval[api] OK")
         return
     if "lm_eval" in missing:
-        targets = ["lm_eval[api]"]
-    else:
-        # The image already ships lm_eval. Install only the absent extra so pip
-        # cannot resolve a different lm_eval build over the one baked in, which
-        # would silently swap out a version the image pinned on purpose.
-        targets = missing
+        print(f"Preflight: installing lm_eval[api]@{_LM_EVAL_PINNED_REF[:12]} (accuracy gate) ...")
+        _install_pinned_lm_eval(python_exe, pip_extra)
+        print("Preflight: lm_eval[api] installed OK")
+        return
+    # The image already ships lm_eval. Install only the absent extra so pip
+    # cannot resolve a different lm_eval build over the one baked in, which
+    # would silently swap out a version the image pinned on purpose -- the same
+    # reason the pinned spec above is not force-reinstalled here.
+    targets = missing
     print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
     subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *targets],
@@ -1231,10 +1276,11 @@ def _preflight(
     # sys.executable differs from /opt/venv can still import the client.
     _ensure_bench_serving_deps(benchmark_python, pip_extra)
 
-    # 1c. lm_eval — GSM8K accuracy gate. The multi-node magpie remote-compat
-    # client path runs ``python -m lm_eval`` directly (no InferenceX runtime
-    # shim), so ensure it in the same benchmark interpreter or every
-    # RUN_EVAL=true baseline aborts with baseline_accuracy_failed.
+    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates
+    # itself). The multi-node magpie remote-compat client path runs
+    # ``python -m lm_eval`` directly, with no InferenceX runtime shim to install
+    # the harness, so every RUN_EVAL=true baseline there would otherwise abort
+    # with baseline_accuracy_failed.
     _ensure_lm_eval_dep(benchmark_python, pip_extra)
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.

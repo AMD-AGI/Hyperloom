@@ -19,10 +19,11 @@ class _FakeRun:
     makes even the ``pass`` liveness probe fail.
     """
 
-    def __init__(self, missing, *, dead_interpreter: bool = False, install_rc: int = 0):
+    def __init__(self, missing, *, dead_interpreter: bool = False, install_rc: int = 0, failing_specs=()):
         self.missing = list(missing)
         self.dead_interpreter = dead_interpreter
         self.install_rc = install_rc
+        self.failing_specs = list(failing_specs)
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd, **kwargs):
@@ -41,6 +42,11 @@ class _FakeRun:
         if cmd[1:2] == ["-c"]:  # per-module import probe
             module = cmd[2].removeprefix("import ")
             r.returncode = 1 if module in self.missing else 0
+            return r
+        if any(spec in cmd for spec in self.failing_specs):
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(1, cmd)
+            r.returncode = 1
             return r
         r.returncode = self.install_rc
         if self.install_rc and kwargs.get("check"):
@@ -61,6 +67,12 @@ def _patch(monkeypatch, runner):
     return runner
 
 
+@pytest.fixture(autouse=True)
+def _multi_node(monkeypatch):
+    """The ensure is multi-node only; single-node coverage sets this explicitly."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+
 def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     monkeypatch.delenv("RUN_EVAL", raising=False)  # default => enabled
     runner = _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity"]))
@@ -68,7 +80,10 @@ def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     preflight._ensure_lm_eval_dep("py", ["--break-system-packages"])
 
     assert len(runner.installs) == 1
-    assert "lm_eval[api]" in runner.installs[0]
+    # Pinned to the commit InferenceX force-reinstalls on the single-node path,
+    # so both paths measure accuracy with the same harness.
+    assert preflight._LM_EVAL_PINNED_SPECS[0][1] in runner.installs[0]
+    assert preflight._LM_EVAL_PINNED_REF in runner.installs[0][-1]
 
 
 def test_lm_eval_skipped_when_present(monkeypatch):
@@ -97,6 +112,55 @@ def test_image_provided_lm_eval_is_never_reinstalled_for_a_missing_extra(monkeyp
     assert "tenacity" in install
     assert not any("lm_eval" in arg for arg in install)
     assert "installing tenacity" in capsys.readouterr().out
+
+
+def test_pinned_install_falls_back_to_archive_without_git(monkeypatch):
+    """No git binary must not fail the gate: the source archive is the fallback.
+
+    ``check=True`` on the git spec would turn a gitless sandbox into an aborted
+    preflight, so only the last spec may raise.
+    """
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    git_spec, archive_spec = (s for _, s in preflight._LM_EVAL_PINNED_SPECS)
+    runner = _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity"], failing_specs=[git_spec]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert [i[-1] for i in runner.installs] == [git_spec, archive_spec]
+
+
+def test_image_pinned_lm_eval_is_not_replaced(monkeypatch):
+    """Only the absent extra is installed when the image already ships lm_eval.
+
+    Force-reinstalling the pin here would swap out a version the image chose on
+    purpose, so the pinned spec must stay out of this install.
+    """
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun(["tenacity"]))  # lm_eval imports fine
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert len(runner.installs) == 1
+    assert runner.installs[0][-1] == "tenacity"
+    assert preflight._LM_EVAL_PINNED_REF not in " ".join(runner.installs[0])
+
+
+def test_single_node_is_left_to_inferencex(monkeypatch):
+    """Single-node must not even probe: preflight never touched lm_eval there.
+
+    ``run_eval`` -> InferenceX ``run_lm_eval`` installs the harness on first use
+    and force-reinstalls its own pinned commit over anything already present, so
+    installing ahead of it cannot change the outcome -- it can only add a way for
+    a previously working run to die on ``check=True``.
+    """
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("single-node must not probe or install lm_eval")
+
+    monkeypatch.setattr(preflight.subprocess, "run", _boom)
+    preflight._ensure_lm_eval_dep("py", [])
 
 
 def test_lm_eval_skipped_when_run_eval_disabled(monkeypatch):
@@ -162,7 +226,8 @@ def test_each_module_is_probed_in_its_own_subprocess(monkeypatch):
 
     assert runner.probed_modules == ["lm_eval", "tenacity"]
     assert len(runner.installs) == 1
-    assert "lm_eval[api]" in runner.installs[0]  # tenacity still judged present
+    # tenacity still judged present: only lm_eval is installed
+    assert preflight._LM_EVAL_PINNED_SPECS[0][1] in runner.installs[0]
 
 
 def test_lm_eval_install_failure_aborts_preflight(monkeypatch):
