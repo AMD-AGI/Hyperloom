@@ -28,6 +28,7 @@ from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
+from hyperloom.orchestrator.specialists import subprocess_
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
@@ -769,6 +770,145 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     assert killed["v"] is True
 
 
+# ── extend_lease moves the live wall-clock deadline ──────────────────────────
+@pytest.fixture
+def _live_reaper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A reaper whose only stop condition is the hard wall-clock cap.
+
+    Keeps process.log fresh so the staleness path never fires, and stubs
+    ``_kill`` so the timeout never signals a real process group (the fake
+    proc reuses this pytest process's pid).
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "process.log").write_text("alive\n", encoding="utf-8")
+
+    cfg = SpecialistSubprocessConfig(
+        # Far above the run so only the wall-clock cap can end the loop.
+        heartbeat_stale_seconds=3600.0,
+        poll_interval_seconds=0.05,
+    )
+    disp = SpecialistSubprocessDispatcher(config=cfg)
+    proc = _FakeProc()
+    monkeypatch.setattr(
+        SpecialistSubprocessDispatcher,
+        "_kill",
+        staticmethod(lambda p: setattr(p, "alive", False)),
+    )
+    return disp, proc, workspace
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper):
+    """Baseline: with no extension the run dies at its original cap."""
+    disp, proc, workspace = _live_reaper
+    subprocess_.clear_wall_budget_extension("task-base")
+
+    started = time.monotonic()
+    outcome = await disp._reap_loop(
+        proc=proc,
+        workspace=workspace,
+        done_files=(),
+        heartbeat_file=workspace / "heartbeat.json",
+        max_seconds=0.3,
+        started=time.monotonic(),
+        task_id="task-base",
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome["timed_out"] is True, outcome
+    # Killed at ~0.3s. The bound is loose because only the direction matters:
+    # a loaded CI box can stretch this, but it can never finish early.
+    assert elapsed < 5.0, elapsed
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_reaper):
+    """The regression this fix exists for.
+
+    ``extend_lease`` used to push the task / lane / GPU leases out while the
+    subprocess kept the ``max_seconds`` deadline computed once at spawn, so the
+    specialist still died on schedule. The reaper must re-read the extension
+    every poll.
+    """
+    disp, proc, workspace = _live_reaper
+    subprocess_.clear_wall_budget_extension("task-live")
+
+    started = time.monotonic()
+    loop = asyncio.create_task(
+        disp._reap_loop(
+            proc=proc,
+            workspace=workspace,
+            done_files=(),
+            heartbeat_file=workspace / "heartbeat.json",
+            max_seconds=0.3,
+            started=time.monotonic(),
+            task_id="task-live",
+        )
+    )
+    # Grant the extension while the run is still in flight, before the
+    # original 0.3s cap would have fired.
+    await asyncio.sleep(0.15)
+    subprocess_.grant_wall_budget_extension("task-live", 0.6)
+    # The reaper recomputes `max_seconds + wall_budget_extension(task_id)`
+    # every poll, so this is the deadline it now enforces.
+    assert subprocess_.wall_budget_extension("task-live") == 0.6
+    outcome = await loop
+    elapsed = time.monotonic() - started
+
+    assert outcome["timed_out"] is True, outcome
+    # Survived past the base cap — the load-independent half of the proof
+    # (a slow box only ever pushes this later, never earlier).
+    assert elapsed > 0.7, elapsed
+    subprocess_.clear_wall_budget_extension("task-live")
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
+    """Extensions are per-task; another task's grant must not leak across."""
+    disp, proc, workspace = _live_reaper
+    subprocess_.clear_wall_budget_extension("task-mine")
+    subprocess_.grant_wall_budget_extension("task-other", 600)
+
+    started = time.monotonic()
+    outcome = await disp._reap_loop(
+        proc=proc,
+        workspace=workspace,
+        done_files=(),
+        heartbeat_file=workspace / "heartbeat.json",
+        max_seconds=0.3,
+        started=time.monotonic(),
+        task_id="task-mine",
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome["timed_out"] is True, outcome
+    # The other task's 600s grant would have kept this alive far past any
+    # plausible scheduling delay, so a bound this loose still proves isolation.
+    assert elapsed < 30.0, elapsed
+    subprocess_.clear_wall_budget_extension("task-other")
+
+
+def test_wall_budget_extension_registry_guards():
+    """Blank ids and non-positive grants are no-ops, not stored entries."""
+    subprocess_.clear_wall_budget_extension("guard-task")
+    # Non-positive extra_sec must not create an entry.
+    assert subprocess_.grant_wall_budget_extension("guard-task", 0) == 0.0
+    assert subprocess_.grant_wall_budget_extension("guard-task", -30) == 0.0
+    assert subprocess_.wall_budget_extension("guard-task") == 0.0
+    # Blank / whitespace task ids are ignored rather than keyed on "".
+    assert subprocess_.grant_wall_budget_extension("", 600) == 0.0
+    assert subprocess_.grant_wall_budget_extension("   ", 600) == 0.0
+    assert subprocess_.wall_budget_extension("") == 0.0
+    # Lookups are whitespace-insensitive so a padded id still finds its grant.
+    subprocess_.grant_wall_budget_extension("  guard-task  ", 120)
+    assert subprocess_.wall_budget_extension("guard-task") == 120.0
+    # Clearing an unknown id is a no-op, not a KeyError.
+    subprocess_.clear_wall_budget_extension("never-seen")
+    subprocess_.clear_wall_budget_extension("guard-task")
+    assert subprocess_.wall_budget_extension("guard-task") == 0.0
+
+
 # ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
 class _FakeGpuSpecialistLease:
     """Fake GpuSpecialistLease: start_async() writes done.json + log, then 'exits'."""
@@ -857,6 +997,48 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
     assert result.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_clears_stale_wall_budget_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A reused task_id must not inherit a previous run's granted extension.
+
+    The registry is keyed by task_id and lives for the process, so a grant left
+    behind by an earlier dispatch would silently widen the next run's deadline.
+    """
+    workspace = tmp_path / "ws"
+    lease = _FakeGpuSpecialistLease(workspace)
+    monkeypatch.setattr(
+        subprocess_.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
+    )
+
+    # A grant left over from a prior dispatch of the same task id.
+    subprocess_.grant_wall_budget_extension("t-reused", 9999)
+    assert subprocess_.wall_budget_extension("t-reused") == 9999.0
+
+    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+    disp = SpecialistSubprocessDispatcher(config=cfg)
+    result = await disp.run(
+        task_id="t-reused",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=(),
+        max_turns=1,
+        wall_budget_sec=60.0,
+        gpu_lease=lease,
+    )
+
+    assert result.exit_code == 0
+    # Cleared on entry and again when the run finished.
+    assert subprocess_.wall_budget_extension("t-reused") == 0.0
 
 
 def test_kill_on_ray_lease_process_delegates_to_actor():

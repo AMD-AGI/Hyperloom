@@ -686,19 +686,141 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
         await c.stop()
 
 
-def test_extend_lease_moves_live_subprocess_deadline():
-    """extend_lease must also push out the specialist's hard wall-clock kill."""
+@pytest.mark.asyncio
+async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mocks):
+    """The handler must hand the grant to the reaper, not just move DB rows.
+
+    The reap-loop side of this (that the deadline actually moves) is covered in
+    test_specialist_subprocess.py; here we pin the wiring.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.specialists import subprocess_ as _sub
 
-    _sub.clear_wall_budget_extension("task-live")
-    assert _sub.wall_budget_extension("task-live") == 0.0
-    _sub.grant_wall_budget_extension("task-live", 600)
-    assert _sub.wall_budget_extension("task-live") == 600.0
-    # Repeated extensions accumulate; a fresh dispatch clears the slate.
-    _sub.grant_wall_budget_extension("task-live", 300)
-    assert _sub.wall_budget_extension("task-live") == 900.0
-    _sub.clear_wall_budget_extension("task-live")
-    assert _sub.wall_budget_extension("task-live") == 0.0
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-live",
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        _sub.clear_wall_budget_extension(task.task_id)
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+        assert _sub.wall_budget_extension(task.task_id) == 600.0
+
+        # Repeated extensions accumulate on the live deadline.
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 300},
+            ),
+        )
+        assert _sub.wall_budget_extension(task.task_id) == 900.0
+        _sub.clear_wall_budget_extension(task.task_id)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_mocks):
+    """The lease rows already moved; a grant failure must not raise past here."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.specialists import subprocess_ as _sub
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-grant-fail",
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("registry unavailable")
+
+        original = _sub.grant_wall_budget_extension
+        _sub.grant_wall_budget_extension = _boom  # type: ignore[assignment]
+        try:
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.EXTEND_LEASE,
+                    payload={"task_id": task.task_id, "extra_sec": 600},
+                ),
+            )
+        finally:
+            _sub.grant_wall_budget_extension = original  # type: ignore[assignment]
+
+        # The DB-side extension still stands.
+        updated = await c.tasks.get(task.task_id)
+        assert updated.lease_ttl_sec == 2400
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_survives_unreadable_running_age(coordinator_with_mocks):
+    """A failed age lookup must degrade to the full TTL, not abort the extension."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={},
+            idempotency_key="k-extend-age-fail",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        await c.locks.acquire_many(
+            ["research_lane"],
+            holder_id=f"h-{task.task_id}",
+            task_id=task.task_id,
+            action="specialist",
+            ttl_sec=1800,
+        )
+
+        # extend_lease() itself still works; only the follow-up age read fails.
+        real_get = c.tasks.get
+        calls = {"n": 0}
+
+        async def _get(task_id):
+            calls["n"] += 1
+            if calls["n"] > 0 and task_id == task.task_id:
+                raise RuntimeError("row vanished")
+            return await real_get(task_id)
+
+        c.tasks.get = _get  # type: ignore[method-assign]
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+
+        c.tasks.get = real_get  # type: ignore[method-assign]
+        # Lane still moved — falling back to the full TTL is the safe direction
+        # (a lease that outlives the task beats one reaped mid-run).
+        rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
+        assert _parse_iso_unix(str(rows[0]["expires_at"])) > time.time()
+        updated = await c.tasks.get(task.task_id)
+        assert updated.lease_ttl_sec == 2400
+    finally:
+        await c.stop()
 
 
 @pytest.mark.asyncio
