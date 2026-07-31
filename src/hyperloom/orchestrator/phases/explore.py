@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
-from ..loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
@@ -594,40 +593,6 @@ class ExplorePhase(PhaseHandler):
                     "research-scout: upsert_gap failed for %s",
                     cid,
                 )
-
-    async def _scan_stale_specialists(self) -> list[dict[str, Any]]:
-        """Return specialist task rows running longer than ``_specialist_stale_sec``; never raises, returns [] on failure.
-
-        Returns:
-            A list of stale specialist task row dicts; empty on failure or when
-            none are stale.
-        """
-        try:
-            running = await self.tasks.running()
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("Coordinator: tasks.running() failed during stale scan")
-            return []
-        if not running:
-            return []
-        stale: list[dict[str, Any]] = []
-        now_unix = time.time()
-        for t in running:
-            if (t.kind or "").strip() != "specialist":
-                continue
-            # updated_at on a running task = when the dispatcher promoted it.
-            started_unix = _parse_iso_unix(t.updated_at)
-            if started_unix <= 0:
-                continue
-            running_sec = max(0.0, now_unix - started_unix)
-            if running_sec >= self._specialist_stale_sec:
-                stale.append(
-                    {
-                        "task_id": t.task_id,
-                        "kind": t.kind,
-                        "running_seconds": running_sec,
-                    }
-                )
-        return stale
 
     async def _fan_out_specialist_wave(
         self,

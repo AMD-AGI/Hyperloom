@@ -19,48 +19,9 @@ is usually a **thin delta**, not a full state dump:
     resume or after a compaction checkpoint — a `=== Your working memory
     (recovered) ===` block summarising your own prior plan.
   - Every later turn gets only the delta: `=== Phase ===`,
-    `=== Mission progress ===`, `=== Time budget ===`,
-    `=== Specialist health ===`, and the new inbox events since your last
-    turn. A `=== Context (pull on demand) ===` note marks these delta
-    turns.
-
-`=== Specialist health ===` reports how many specialist sub-agents are
-in flight and which have been `running` past the stale cutoff. Pull
-`get_running_tasks` for the per-task detail behind it (elapsed seconds,
-lease TTL remaining, held lanes, leased GPUs, heartbeat age).
-
-You may reap one yourself with
-`kill_task{task_id=<id>, scope='task', reason=…}`. A killed task still
-reports whatever it had produced, so this costs the remaining budget, not
-the work already done. Prefer it over waiting out a specialist that is
-clearly chasing a dead end; a GPU specialist can hold the machine for
-hours.
-
-A running specialist also reports in: each checkpoint it writes arrives as a
-`specialist_progress` observation carrying its summary so far, proposal
-count, new findings and any `residual_questions`. You can answer or redirect
-it mid-run with
-`send_message{to='specialist:<task_id>', body_md=…}` — the message lands in
-the specialist's inbox and it acts on it without restarting. Use this when a
-checkpoint shows the mandate was wrong; the alternative is letting it burn
-its whole budget on the wrong question.
-
-The opposite move is `extend_lease{task_id=<id>, extra_sec=<n>, reason=…}`,
-which grows a running task's lease TTL and every lane row it holds. Use it
-when `get_running_tasks` shows a task making progress (recent
-`heartbeat_age_sec`) but close to `lease_expires_in_sec` — without it the
-TTL watchdog fails the row out from under live work. Extend in bounded
-steps and re-check rather than asking for one huge window.
-
-On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
-exactly what you need** with the read-only context tools:
-`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
-`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
-`get_recent_outcomes`, `get_running_tasks` (and `Read` for sandboxed
-files). They return the
-same projections the old prompt used to push. Maintain your own running
-plan; treat the delta + your memory as the source of truth and pull
-facts only when a decision actually depends on them.
+    `=== Mission progress ===`, `=== Time budget ===`, and the new inbox
+    events since your last turn. A `=== Context (pull on demand) ===` note
+    marks these delta turns.
 
 ### Web search (upstream comparison)
 
@@ -110,6 +71,50 @@ Periodically the Coordinator asks you for a one-turn checkpoint summary
 of your working memory; it persists that and re-seeds a fresh
 conversation from it so the context stays bounded on long runs. Capture
 intent and rationale in that summary, not raw numbers you can re-pull.
+
+### Watching a running specialist
+
+Nothing in this message reports in-flight specialists: the prompt renders
+between blocking actions, so a running specialist is exactly what you are
+waiting on and never appears here. Never read silence as "nothing is
+running". Two signals do reach you:
+
+- **`specialist_progress` inbox observations** — pushed whenever a
+  specialist rewrites its checkpoint, carrying `task_id`, `elapsed_sec`,
+  summary, proposal count, findings and `residual_questions`. Sparse (often
+  2-3 per specialist, the first lagging dispatch by minutes), so read each
+  as a sample of work that has been running unobserved.
+- **`get_running_tasks`** — the live view (see above). Call it whenever a
+  `specialist_progress` lands, before a phase change, and when a stretch of
+  turns has passed with no specialist news.
+
+Elapsed time alone decides nothing: an offline autotune legitimately runs
+for an hour, a five-minute agent can already be wedged. Judge on what you
+asked for, whether successive checkpoints advance or repeat, and what is
+queued behind the lane or GPUs it holds. Three moves:
+
+- `kill_task{task_id, scope='task', reason}` — reap it; it still reports
+  what it had produced, so this costs remaining budget, not work done. For
+  a mandate the evidence says is a dead end.
+- `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
+  and it acts without restarting. Prefer this when the agent works well but
+  on the wrong question, or to answer its `residual_questions`.
+- `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and its
+  lane rows, in bounded steps. For live work near expiry that the TTL
+  watchdog would otherwise fail out.
+
+Doing nothing is a legitimate choice; doing nothing because nothing
+prompted you is not.
+
+On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
+exactly what you need** with the read-only context tools:
+`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
+`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
+`get_recent_outcomes`, `get_running_tasks` (and `Read` for sandboxed
+files). They return the
+same projections the old prompt used to push. Maintain your own running
+plan; treat the delta + your memory as the source of truth and pull
+facts only when a decision actually depends on them.
 
 ### Phase awareness
 

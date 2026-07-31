@@ -567,19 +567,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._proposal_scorer: Any = proposal_scorer
         # Phase budget percentages, normalised once at construction.
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
-        # Specialist stale scan threshold (seconds).
-        try:
-            self._specialist_stale_sec: float = max(
-                0.0,
-                float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC",
-                        "600",
-                    )
-                ),
-            )
-        except ValueError:
-            self._specialist_stale_sec = 600.0
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -977,7 +964,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_on_enter_explore": "phase_explore",
         "_maybe_force_stalled_domain_specialist": "phase_explore",
         "_seed_gaps_from_research_hints": "phase_explore",
-        "_scan_stale_specialists": "phase_explore",
         "_fan_out_specialist_wave": "phase_explore",
         "_maybe_auto_retry_specialist": "phase_explore",
         "_record_specialist_retry_exhausted": "phase_explore",

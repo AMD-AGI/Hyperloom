@@ -445,12 +445,6 @@ async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinato
     assert coord.shared_state.pending_escalate_hint == "skip_to_close"
 
 
-# -- _scan_stale_specialists -----------------------------------------------
-@pytest.mark.asyncio
-async def test_scan_stale_specialists_empty(coord: Coordinator) -> None:
-    assert await coord._scan_stale_specialists() == []
-
-
 # -- _maybe_autosubmit_specialist_patches ----------------------------------
 @pytest.mark.asyncio
 async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:

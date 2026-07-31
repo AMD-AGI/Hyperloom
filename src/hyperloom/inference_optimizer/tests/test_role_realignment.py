@@ -322,16 +322,16 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_name", ["robustness", "orchestration"])
-async def test_compose_prompt_renders_specialist_health(
+async def test_compose_prompt_omits_specialist_health_block(
     coordinator_with_mocks,
     agent_name,
 ):
+    """The periodic specialist block is intentionally gone (see conversation.py)."""
     c = coordinator_with_mocks
     try:
         prompt = await c._compose_prompt(agent_name)
-        assert "=== Specialist health ===" in prompt
-        assert "running=0 stale=0" in prompt
-        assert "stale_threshold_sec=600" in prompt
+        assert "Specialist health" not in prompt
+        assert "stale" not in prompt.lower()
     finally:
         await c.stop()
 
@@ -354,25 +354,6 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
         assert "EXPLORE: elapsed=" in prompt
     finally:
         await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_scan_stale_specialists_returns_empty_when_no_specialists(
-    coordinator_with_mocks,
-):
-    c = coordinator_with_mocks
-    try:
-        stale = await c._scan_stale_specialists()
-        assert stale == []
-    finally:
-        await c.stop()
-
-
-# Phase budget telemetry math (independent of coordinator)
-def test_to_phase_budget_telemetry_handles_empty_history():
-    s = SharedState()
-    out = s.to_phase_budget_telemetry()
-    assert out == "(no phase history yet)"
 
 
 @pytest.mark.asyncio

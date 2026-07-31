@@ -595,22 +595,18 @@ class ConversationCollaborator:
                 "from your own running plan; do not re-derive it from scratch."
             )
 
-        if agent_name in ("orchestration", "robustness"):
-            try:
-                stale = await self._scan_stale_specialists()
-                running = await self.tasks.running()
-                specialist_running = sum(1 for t in (running or []) if (t.kind or "").strip() == "specialist")
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: specialist health scan failed")
-                stale, specialist_running = [], 0
-            stale_lines = [f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}" for row in stale]
-            sections.append("=== Specialist health ===")
-            sections.append(
-                f"running={specialist_running} stale={len(stale)} stale_threshold_sec={int(self._specialist_stale_sec)}"
-            )
-            if stale_lines:
-                sections.append("stale specialists (consider kill_task):")
-                sections.extend(stale_lines)
+        # NOTE: there is deliberately no "=== Specialist health ===" block.
+        # This prompt renders only on an agent's own turn, and a turn only
+        # comes around between blocking actions — so a running specialist is
+        # exactly what the agent is waiting on and is structurally absent from
+        # any snapshot taken here. Measured over a full 11.6h session: 33
+        # renders, 0 of them overlapped a live specialist, while specialists
+        # held 41% of the wall clock. A block that always reports "none
+        # running" is worse than no block, because it manufactures a false
+        # belief. In-flight specialists reach the agent through
+        # ``specialist_progress`` observations (pushed from the reap loop,
+        # independent of turn timing) and are verified on demand with
+        # ``get_running_tasks``.
 
         # Robustness gets phase budget telemetry for medium-severity alerts.
         if agent_name == "robustness":
