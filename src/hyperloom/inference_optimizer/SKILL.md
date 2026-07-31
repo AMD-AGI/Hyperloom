@@ -197,7 +197,7 @@ Exit codes (soft degrade — IR-3 never aborts launch):
 - `1` → PR Monitor unreachable. The cli auto-enables `--degraded-pr` and
   continues; `manifest.json` records `pr_degraded_reason=ir3_auto`.
 
-Recipe KB enablement is independent: `--degraded-kb` sets `cortex_enabled=False`
+Recipe KB enablement is independent: `--degraded-kb` sets `recipe_kb_enabled=False`
 (T0/T2/T3/T4 no-ops) without affecting PR Monitor.
 
 Operator opt-out: pass `--degraded-pr` to skip the PR Monitor probe (one

@@ -903,11 +903,11 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
     assert "kb_subgraph" in params
 
 
-# -- cortex_finalize_recipe_and_journal ------------------------------------
-def test_cortex_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
+# -- finalize_recipe_and_journal ------------------------------------
+def test_recipe_kb_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 950.0}
     coord.shared_state.cumulative_gain_validated = 12.5
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
 
 
 # -- _record_fact_per_variant ----------------------------------------------

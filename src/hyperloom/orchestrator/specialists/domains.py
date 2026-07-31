@@ -155,19 +155,22 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     ),
     SpecialistDomain(
         key="enablement_specialist",
-        layer="non-runnable (model, backend) enablement / framework + ROCm/HIP bridging",
+        layer="non-runnable or eval-failing (model, backend) enablement / framework + ROCm/HIP bridging",
         kb_anchor="framework",
         available_in="M6",
         description=(
             "Authoring specialist for the ENABLEMENT objective: makes a "
-            "currently non-runnable (model, backend) combo *run at all*. Given a "
+            "(model, backend) combo that is non-runnable, or that boots but fails "
+            "its accuracy eval, *run correctly*. Given a "
             "structured failure signature (missing model arch, unsupported "
             "dtype, missing HIP kernel, import/build error, shape mismatch, "
-            "not-implemented) and ranked bridging PRs, it authors a bridging "
+            "not-implemented, accuracy below floor, eval runtime failure) and "
+            "ranked bridging PRs, it authors a bridging "
             "patch into an isolated worktree — editing the framework source, "
             "and, when the framework layer cannot bridge it, /opt/rocm / HIP / "
             "aiter source. Gated on RUNNABILITY (server boots + minimal "
-            "correctness), NOT throughput. Distinct from static_recon "
+            "correctness) or, for eval-origin, meeting the accuracy floor; NOT "
+            "throughput. Distinct from static_recon "
             "(which only finds already-runnable-but-disabled fast paths)."
         ),
     ),

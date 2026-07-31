@@ -18,6 +18,31 @@ def test_collect_enablement_returns_empty_when_nothing():
     assert collect_enablement(Path("/tmp"), _state(), []) == {}
 
 
+def test_collect_enablement_eval_origin_surfaced():
+    out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            enablement_origin="eval",
+            enablement_baseline_eval_kind="accuracy_below_floor",
+            enablement_observed_accuracy=0.12,
+            enablement_accuracy_floor=0.3,
+            enablement_observed_task="gsm8k",
+            enablement_observed_metric="exact_match",
+            enablement_eval_contract_fingerprint="fp1",
+            enablement_validation_pending=True,
+            enablement_probe_config_path="/tmp/runs/materialized.yaml",
+        ),
+        [],
+    )
+    assert out["origin"] == "eval"
+    assert out["trigger_kind"] == "accuracy_below_floor"
+    assert out["observed_accuracy"] == 0.12
+    assert out["accuracy_floor"] == 0.3
+    assert out["eval_contract_fingerprint"] == "fp1"
+    assert out["validation_pending"] is True
+    assert out["probe_config_path"]
+
+
 def test_collect_enablement_build_manifest_surfaced():
     manifest = [
         {
@@ -118,3 +143,58 @@ def test_collect_enablement_combined_rung3_and_rung5():
     assert "build_attempts" in out
     assert "last_build_failure" in out
     assert out["last_build_failure"]["failure_class"] == "symbol_missing"
+
+
+def test_collect_enablement_history_preserved_after_success():
+    """After success, enablement_origin is cleared to '' but trigger history must still be surfaced."""
+    out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            # After success, origin is cleared but eval_kind is preserved.
+            enablement_origin="",
+            enablement_succeeded=True,
+            enablement_baseline_eval_kind="accuracy_below_floor",
+            enablement_observed_accuracy=0.12,
+            enablement_accuracy_floor=0.3,
+            enablement_eval_contract_fingerprint="fp-done",
+            enablement_validation_pending=False,
+            enablement_probe_config_path="/tmp/runs/probe.yaml",
+            enablement_accepted_config_path="/tmp/runs/accepted.yaml",
+        ),
+        [],
+    )
+    # The block should still be non-empty despite origin being cleared.
+    assert out
+    assert out.get("trigger_kind") == "accuracy_below_floor"
+    assert out.get("observed_accuracy") == 0.12
+    assert out.get("eval_contract_fingerprint") == "fp-done"
+    assert out.get("succeeded") is True
+    assert out.get("validation_pending") is False
+
+
+def test_collect_enablement_succeeded_flag():
+    """succeeded field is exposed correctly in the breakdown."""
+    pending_out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            enablement_origin="eval",
+            enablement_baseline_eval_kind="accuracy_unavailable",
+            enablement_succeeded=False,
+            enablement_validation_pending=True,
+        ),
+        [],
+    )
+    assert pending_out.get("succeeded") is False
+    assert pending_out.get("validation_pending") is True
+
+    done_out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            enablement_origin="",
+            enablement_baseline_eval_kind="accuracy_unavailable",
+            enablement_succeeded=True,
+            enablement_validation_pending=False,
+        ),
+        [],
+    )
+    assert done_out.get("succeeded") is True

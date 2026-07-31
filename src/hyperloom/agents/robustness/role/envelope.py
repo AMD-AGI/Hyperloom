@@ -115,9 +115,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "optimization_stack",
         "gain_per_stack_entry",
         "schema_version",
-        # Cortex KB integration.
-        "cortex_session_id",
-        "cortex_session_summary",
+        # Recipe KB integration.
+        "recipe_kb_session_id",
+        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",

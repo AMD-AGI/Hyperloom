@@ -301,10 +301,7 @@ SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
-# R4 / R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
-
-#: KB *write* surfaces. R4 ``kb_write_unauthorized`` denies any intent invoking one.
-KB_WRITE_TOOL_NAMES: frozenset[str] = frozenset()
+# R5 — external tool whitelist registry (single source of truth for PolicyGate + SpecialistRunner).
 
 #: PR Monitor *readonly* surfaces. R5 same role gating.
 PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
@@ -337,10 +334,8 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "robustness": frozenset(),
 }
 
-#: Convenience superset of every known external tool name (R4 collision check).
-ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = (
-    KB_WRITE_TOOL_NAMES | PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
-)
+#: Convenience superset of every known external tool name (R5 collision check).
+ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 
 
 # REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
@@ -491,9 +486,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "optimization_stack",
         "gain_per_stack_entry",
         "schema_version",
-        # Cortex KB integration fields (Coordinator-only writes).
-        "cortex_session_id",
-        "cortex_session_summary",
+        # Recipe KB integration fields (Coordinator-only writes).
+        "recipe_kb_session_id",
+        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",
@@ -789,7 +784,7 @@ class PolicyGate:
         the GEMM-tuning ownership, gain-driven and explore-minimum kernel_opt gates, the
         ActionRegistry unknown-action lookup, per-action source and
         required-payload guards, the phase-compatibility check, and the
-        external-tool collision guards (R4 / R5).
+        external-tool collision guard (R5).
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -892,11 +887,7 @@ class PolicyGate:
         # R1 phase_incompatible; after structural checks so cheaper denials win.
         if check_phase:
             self._validate_phase_action(role, action_name, intent_kind="delegate")
-        # R4 / R5 — block a delegate whose action_name invokes an external tool.
-        self._validate_no_kb_write_collision(
-            action_name,
-            intent_kind="delegate",
-        )
+        # R5 — block a delegate whose action_name invokes an external tool.
         self._validate_tool_whitelist_collision(
             role.name,
             action_name,
@@ -969,11 +960,7 @@ class PolicyGate:
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
-        # R4 / R5 — defense in depth on propose_action.
-        self._validate_no_kb_write_collision(
-            action_name,
-            intent_kind="propose_action",
-        )
+        # R5 — defense in depth on propose_action.
         self._validate_tool_whitelist_collision(
             role.name,
             action_name,
@@ -1084,8 +1071,7 @@ class PolicyGate:
         ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, gated_kind, intent_kind="request")
         self._validate_gemm_tuning_action(kind, intent_kind="request")
-        # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
-        self._validate_no_kb_write_collision(kind, intent_kind="request")
+        # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
             role.name,
             kind,
@@ -1308,40 +1294,6 @@ class PolicyGate:
         """
         return
 
-    # R4 — kb_write_unauthorized
-    def _validate_no_kb_write_collision(
-        self,
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject any intent whose ``action_name`` / ``request.kind`` equals a Cortex KB write tool name (defense in depth; Inv-11.3).
-
-        Args:
-            action_name (str): the action name (or REQUEST ``kind``) being
-                checked.
-            intent_kind (str): the channel the action arrived on, used in the
-                error message.
-
-        Raises:
-            PolicyDenied: when the name targets a KB write surface.
-        """
-        if not action_name:
-            return
-        if action_name not in KB_WRITE_TOOL_NAMES:
-            return
-        raise PolicyDenied(
-            f"intent={intent_kind!r} cannot invoke KB write surface {action_name!r}",
-            rule="kb_write_unauthorized",
-            hint=(
-                "Direct KB writes are not allowed. "
-                "The Coordinator owns all KB writes. Express your "
-                "intent via propose_action / delegate / "
-                "specialist_done.proposal_set / review_verdict / "
-                "kb_writes (critic-agent commit-review) instead."
-            ),
-        )
-
     # R5 — tool_whitelist_role
     def _validate_tool_whitelist_collision(
         self,
@@ -1364,9 +1316,6 @@ class PolicyGate:
                 for the role.
         """
         if not action_name:
-            return
-        # Skip KB write names (R4 owns them) so a write attempt yields ``kb_write_unauthorized``, not the less-specific R5 code.
-        if action_name in KB_WRITE_TOOL_NAMES:
             return
         if action_name not in ALL_KNOWN_EXTERNAL_TOOL_NAMES:
             return

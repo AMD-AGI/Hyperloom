@@ -137,6 +137,51 @@ def test_decision_to_scores_non_numeric_gain_and_predicted():
     assert [s["name"] for s in scores] == ["decision_outcome"]
 
 
+def test_recipe_audit_is_write_defaults_to_read():
+    """Absence of ``op`` (pre-write-audit rows) must not read as a write."""
+    assert lm.recipe_audit_is_write({"op": "write"}) is True
+    assert lm.recipe_audit_is_write({"op": "read"}) is False
+    assert lm.recipe_audit_is_write({"method": "get_recipe"}) is False
+    assert lm.recipe_audit_is_write({"op": ""}) is False
+
+
+def test_recipe_write_span_flattens_only_nonzero_deltas():
+    name, meta = lm.recipe_write_span(
+        {
+            "generator": "coordinator",
+            "phase": "close_finalize",
+            "result": {"canonical_id": "cid-x", "version": 3, "created": False},
+            "delta": {"lessons": 2, "pitfalls": 0, "sessions": 1},
+        }
+    )
+    assert name == "kb:recipe_write:coordinator"
+    assert meta["kind"] == "recipe_write"
+    assert meta["canonical_id"] == "cid-x"
+    assert meta["version"] == 3
+    assert meta["lessons_delta"] == 2
+    assert meta["sessions_delta"] == 1
+    # Zero deltas are omitted rather than reported as noise.
+    assert "pitfalls_delta" not in meta
+
+
+def test_recipe_write_span_tolerates_a_malformed_row():
+    """A truncated/garbled row still yields a usable span rather than raising."""
+    name, meta = lm.recipe_write_span({})
+    assert name == "kb:recipe_write:unknown"
+    assert meta["canonical_id"] == ""
+    assert meta["created"] is False
+    name, meta = lm.recipe_write_span({"result": "not-a-dict", "delta": None})
+    assert name == "kb:recipe_write:unknown"
+    assert not any(k.endswith("_delta") for k in meta)
+
+
+def test_recipe_read_span_defaults_method():
+    name, meta = lm.recipe_read_span({})
+    assert name == "kb:recipe_snapshot:read"
+    assert meta["kind"] == "recipe_snapshot"
+    assert meta["hit"] is False
+
+
 def test_mean_proposal_score_edge_cases():
     assert lm._mean_proposal_score("not-a-list") is None
     assert lm._mean_proposal_score([]) is None

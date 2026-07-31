@@ -14,8 +14,11 @@ so no real ``op_to_source.json`` / on-disk sources are required.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -145,3 +148,77 @@ def test_editable_trace_source_rejects_generated_and_empty():
 def test_missing_json_yields_unresolved(monkeypatch):
     _patch_mapping(monkeypatch, {})
     assert resolver.resolve_source("anything", framework="vllm") == ("", "unresolved")
+
+
+def test_demangle_itanium_nested():
+    n = "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataE"
+    assert resolver._demangle_kernel_name(n) == "cross_device_reduce_2stage"
+
+
+def test_demangle_plain_triton_name_passthrough():
+    assert resolver._demangle_kernel_name("_fwd_grouped_kernel_stage1") == "_fwd_grouped_kernel_stage1"
+
+
+def test_demangle_anonymous_namespace_template():
+    n = "void (anonymous namespace)::kda_packed_decode_kernel<8, false>(x)"
+    assert resolver._demangle_kernel_name(n) == "kda_packed_decode_kernel"
+
+
+@pytest.fixture
+def repo_dir():
+    """A repo-like dir avoiding /tmp and the 'test' skip marker in its path."""
+    base = Path(__file__).resolve().parents[2] / "_bypass_repo_scan_fixture" / "src"
+    base.mkdir(parents=True, exist_ok=True)
+    yield base
+    shutil.rmtree(base.parent, ignore_errors=True)
+
+
+def test_resolve_by_kernel_name_triton_and_native(monkeypatch, repo_dir):
+    py = repo_dir / "fused.py"
+    py.write_text("@triton.jit\ndef foo(x):\n    return x\n", encoding="utf-8")
+    cu = repo_dir / "kern.cu"
+    cu.write_text("__global__ void bar(float* p) {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        resolver,
+        "_build_repo_kernel_index",
+        lambda: {"foo": str(py), "bar": str(cu), "gen": "/tmp/torchinductor_x/gen.py"},
+    )
+    assert resolver.resolve_by_kernel_name("foo") == (str(py), "repo_scan")
+    assert resolver.resolve_by_kernel_name("bar") == (str(cu), "repo_scan")
+    assert resolver.resolve_by_kernel_name("gen") == ("", "unresolved")
+    assert resolver.resolve_by_kernel_name("missing") == ("", "unresolved")
+
+
+def test_build_repo_kernel_index_scans_roots(monkeypatch, repo_dir):
+    (repo_dir / "a.py").write_text("@triton.jit\ndef tri_k(x):\n    pass\n", encoding="utf-8")
+    (repo_dir / "b.cu").write_text("__global__ void nat_k(int* p) {}\n", encoding="utf-8")
+    monkeypatch.setattr(resolver, "_repo_scan_roots", lambda: (str(repo_dir),))
+    resolver._build_repo_kernel_index.cache_clear()
+    index = resolver._build_repo_kernel_index()
+    resolver._build_repo_kernel_index.cache_clear()
+    assert index["tri_k"] == str(repo_dir / "a.py")
+    assert index["nat_k"] == str(repo_dir / "b.cu")
+
+
+def test_repo_scan_disabled_by_env(monkeypatch, repo_dir):
+    py = repo_dir / "fused.py"
+    py.write_text("@triton.jit\ndef foo(x):\n    return x\n", encoding="utf-8")
+    monkeypatch.setattr(resolver, "_build_repo_kernel_index", lambda: {"foo": str(py)})
+    monkeypatch.setenv("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN", "1")
+    assert resolver.resolve_by_kernel_name("foo") == ("", "unresolved")
+
+
+def test_repo_index_marks_duplicate_name_ambiguous(monkeypatch, repo_dir):
+    # Same kernel name defined in two files: the index maps it to "" and
+    # resolve_by_kernel_name refuses to guess (no arbitrary first-seen file).
+    (repo_dir / "a.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
+    (repo_dir / "b.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(resolver, "_repo_scan_roots", lambda: (str(repo_dir),))
+    resolver._build_repo_kernel_index.cache_clear()
+    try:
+        index = resolver._build_repo_kernel_index()
+        assert index["dup_k"] == ""
+        # resolve_by_kernel_name reads the same cached index and refuses to guess.
+        assert resolver.resolve_by_kernel_name("dup_k") == ("", "unresolved")
+    finally:
+        resolver._build_repo_kernel_index.cache_clear()

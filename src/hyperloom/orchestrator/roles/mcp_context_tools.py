@@ -258,7 +258,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     ),
     (
         "get_warm_start",
-        "Return the Cortex T0 warm-start snapshot (cross-session priors: "
+        "Return the Recipe KB T0 warm-start snapshot (cross-session priors: "
         "what worked / failed in prior runs on a similar stack).",
         _NO_ARGS_SCHEMA,
         "warm_start",

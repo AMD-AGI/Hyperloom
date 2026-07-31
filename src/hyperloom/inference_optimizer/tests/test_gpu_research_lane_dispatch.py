@@ -35,7 +35,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=None,
+        recipe_kb=None,
         knowledge_plane=None,
     )
 

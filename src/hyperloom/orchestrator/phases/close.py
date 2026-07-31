@@ -286,11 +286,11 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # ---------------- Fact finalize (Cortex commit) -------------------
+        # ---------------- Fact finalize (Recipe KB commit) -------------------
         # Writes update_recipe + finalises the local journal (final_throughput /
         # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
         try:
-            self.cortex_finalize_recipe_and_journal()
+            self.finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
         except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 4 (fact_finalize) failed")

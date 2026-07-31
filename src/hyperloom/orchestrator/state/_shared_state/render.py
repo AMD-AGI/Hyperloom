@@ -390,7 +390,7 @@ class _RenderMixin:
                 out.append(f"  · {first_line[:240]}")
         if max_lines and len(out) > max_lines:
             out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines; see runtime/cortex/.kb_warm.json for full snapshot)")
+            out.append(f"  · (truncated to {max_lines} lines; see runtime/recipe_kb/.kb_warm.json for full snapshot)")
         return "\n".join(out)
 
     def to_gaps_summary(self, *, max_entries: int = 10) -> str:

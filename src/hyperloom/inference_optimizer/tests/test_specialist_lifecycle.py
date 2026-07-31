@@ -384,7 +384,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
             session_dir=session_dir,
             backends=backends,
             role_registry=default_role_registry(),
-            cortex_kb=None,
+            recipe_kb=None,
             knowledge_plane=None,
         )
         executor = _build_specialist_executor(

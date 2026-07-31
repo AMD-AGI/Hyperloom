@@ -32,7 +32,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=kb,
+        recipe_kb=kb,
         knowledge_plane=None,
     )
 

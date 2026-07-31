@@ -10,25 +10,27 @@ integration uses the FRAMEWORK discovery path:
 - **Standalone PR exploration** (`fa candidates` / `fa explore`) —
   ad-hoc tooling outside the `inference_optimizer` runtime path.
 
-- **Enablement** (opt-in) — make a currently **non-runnable**
-  `(model, backend)` combo *run at all* by authoring a bridging patch. Unlike
-  the perf path (gated on throughput), enablement is gated on **runnability**
-  (server boots + minimal correctness). See
+- **Enablement** (opt-in) — make a `(model, backend)` combo that is
+  **non-runnable**, or that boots but **fails its accuracy eval**, *run
+  correctly* by authoring a bridging patch. Unlike the perf path (gated on
+  throughput), enablement is gated on **runnability** (server boots + minimal
+  correctness) or, for an eval-origin trigger, meeting the accuracy floor. See
   [Enablement path](#enablement-path-non-runnable-model--backend-combos).
 
 See [`SKILL.md`](./SKILL.md) for the full architectural overview.
 
 ## Enablement path (non-runnable model + backend combos)
 
-When a `(model, backend)` combo will not start, the enablement building
-blocks turn the failure into an authored bridging patch, gated on *does it
-run* rather than *is it faster*:
+When a `(model, backend)` combo will not start, or it starts but fails its
+accuracy eval, the enablement building blocks turn the failure into an authored
+bridging patch, gated on *does it run correctly* rather than *is it faster*:
 
 1. **Classify** — `hyperloom.agents.framework.enablement.classify_failure(log)` parses a
-   launch/import/build log into a `FailureSignature`
+   launch/import/build/eval log into a `FailureSignature`
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
-   `capability_disabled`) with the offending file/symbol and a `bridge_layer`.
+   `capability_disabled` / `accuracy_below_floor` / `eval_runtime_failure`)
+   with the offending file/symbol and a `bridge_layer`.
 2. **Discover** — `hyperloom.agents.framework.enablement_ops.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
    `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
@@ -40,7 +42,9 @@ run* rather than *is it faster*:
    `SpecialistRunner`, which writes the patch into an isolated worktree.
 4. **Verify** — `hyperloom.agents.framework.enablement.runnable_decision(...)` is the
    KEEP/REVERT gate: the launch probe must exit 0 (no timeout) and any minimal
-   correctness check must pass; the same failure re-appearing is a reject.
+   correctness check must pass; the same failure re-appearing is a reject. For an
+   eval-origin trigger the gate additionally re-runs the accuracy eval and
+   REVERTs a patch that boots but still misses the accuracy floor.
 
 Editing ROCm/HIP source (`/opt/rocm`) is a **default-on** part of the
 enablement path — the IO-side allowlist always surfaces those roots (alongside

@@ -274,6 +274,21 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
+# Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY + OPENAI_BASE_URL
+# are configured. Mirror the CLI's _resolve_llm_endpoints(): the Anthropic base
+# is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK re-appends it) and the
+# gateway key doubles as the Anthropic key. Explicit values always win.
+if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
+  if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+    _gw_url="${OPENAI_BASE_URL%/}"
+    export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
+    unset _gw_url
+    echo "[kernel-agent] derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
+  fi
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    export ANTHROPIC_API_KEY="$SAFE_API_KEY"
+  fi
+fi
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -443,8 +458,8 @@ preflight_validate_credentials() {
   local has_url=0 has_key=0
   { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
   { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL)")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or DEEPSEEK_API_KEY")
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or SAFE_API_KEY + OPENAI_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0

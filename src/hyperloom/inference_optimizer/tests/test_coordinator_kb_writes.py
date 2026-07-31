@@ -6,7 +6,7 @@
 KEEP/REVERT/CLOSE amend the recipe row via ``_kb_amend_recipe`` ->
 ``_workload_canonical_id``; if that helper is missing every write silently
 no-ops. Also pins the canonical_id consistency contract between Coordinator
-writes and ``cortex_t0`` anchors.
+writes and ``recipe_kb_t0`` anchors.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        cortex_kb=kb,
+        recipe_kb=kb,
         knowledge_plane=None,
     )
     ss = coord.shared_state
@@ -85,7 +85,7 @@ def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None, "lesson write silently no-opped"
     statements = [l.get("statement") for l in (row.get("lessons") or [])]
     assert "raise tp to 8" in statements
@@ -96,7 +96,7 @@ def test_kb_amend_recipe_persists_pitfall(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_pitfall={"description": "ep=8 OOMs on 30B"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
     assert "ep=8 OOMs on 30B" in descs
@@ -122,7 +122,7 @@ def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> N
             "metrics": {"gain_pct": 0.66, "output_throughput": 6700.0},
         },
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     bc = row.get("best_config") or {}
     assert bc.get("extra_server_args") == "--disable-radix-cache"
@@ -138,7 +138,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
 
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.cortex_kb.put_recipe(
+    coord.recipe_kb.put_recipe(
         canonical_id=cid,
         model=_MODEL,
         hardware=_HW,
@@ -159,7 +159,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             "metrics": {"gain_pct": 0.1, "output_throughput": 6600.0},
         },
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     bc = row.get("best_config") or {}
     assert bc.get("extra_server_args") == "--page-size 32"
     assert float(row.get("best_throughput") or 0.0) == 7000.0
@@ -173,7 +173,7 @@ def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=coord._workload_canonical_id())
+    row = coord.recipe_kb.get_recipe(canonical_id=coord._workload_canonical_id())
     assert row is not None
     assert row.get("architectures") == ["LlamaForCausalLM"]
     assert row.get("model_type") == "llama"
@@ -185,21 +185,21 @@ def test_kb_amend_recipe_skips_empty_architecture_tags(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     assert "architectures" not in row
     assert "model_type" not in row
 
 
-def test_sdk_fallback_t0_anchors_into_self_cortex_kb(tmp_path: Path) -> None:
+def test_sdk_fallback_t0_anchors_into_self_recipe_kb(tmp_path: Path) -> None:
     """The SDK-fallback T0 anchor runs and writes into the SAME dispatcher the Coordinator holds."""
     coord = _make_coordinator(tmp_path)
     # Clear the already-anchored markers and re-anchor with the 5-tuple seeded.
     coord.shared_state.warm_start_ts = ""
-    coord.shared_state.cortex_session_id = ""
-    coord._ensure_cortex_t0_anchored()
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
-    assert row is not None, "SDK-fallback T0 did not anchor into self.cortex_kb"
+    coord.shared_state.recipe_kb_session_id = ""
+    coord._ensure_recipe_kb_t0_anchored()
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row is not None, "SDK-fallback T0 did not anchor into self.recipe_kb"
 
 
 # The on-disk row must preserve severity / dict measured_impact / session
@@ -258,7 +258,7 @@ def test_local_store_preserves_session_provenance(tmp_path: Path) -> None:
 def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.cortex_kb.put_recipe(
+    coord.recipe_kb.put_recipe(
         canonical_id=cid,
         model=_MODEL,
         hardware=_HW,
@@ -272,7 +272,7 @@ def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord._kb_amend_recipe(
         append_lesson={"statement": "x", "measured_impact": "+1%"},
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["model_class"] == "moe"
     assert row["image_digest"] == "sha256:abc"
     assert row["authority"] == "AUTHORITATIVE"
@@ -285,7 +285,7 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
     cid = _expected_cid()
     coord._kb_amend_recipe(append_lesson={"statement": "first", "measured_impact": "+1%"})
     coord._kb_amend_recipe(append_lesson={"statement": "second", "measured_impact": "+2%"})
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert [l["statement"] for l in row["lessons"]] == ["first", "second"]
 
 
@@ -294,7 +294,7 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
 def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.cortex_kb.put_recipe(
+    coord.recipe_kb.put_recipe(
         canonical_id=cid,
         model=_MODEL,
         hardware=_HW,
@@ -306,8 +306,8 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
         stack_fingerprint={"vllm_version": "0.6.0"},
     )
     coord.shared_state.current_best = {}
-    coord.cortex_finalize_recipe_and_journal()
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    coord.finalize_recipe_and_journal()
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 1000.0, "empty CLOSE clobbered a better config"
     assert row["best_config"].get("name") == "good"
     assert row["stack_fingerprint"].get("vllm_version") == "0.6.0"
@@ -361,8 +361,8 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     """After CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
-    coord.cortex_finalize_recipe_and_journal()
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    coord.finalize_recipe_and_journal()
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     assert row is not None
     kopts = row.get("kernel_optimizations") or []
     ids = [k.get("kernel_id") for k in kopts]
@@ -379,7 +379,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
 ) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.cortex_kb.put_recipe(
+    coord.recipe_kb.put_recipe(
         canonical_id=cid,
         model=_MODEL,
         hardware=_HW,
@@ -400,8 +400,8 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     ss.optimization_stack = []
     ss.cumulative_gain_validated = 0.0
     ss.cumulative_gain = 0.0
-    coord.cortex_finalize_recipe_and_journal()
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    coord.finalize_recipe_and_journal()
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2532.0, "bare-baseline CLOSE clobbered a validated best_throughput"
     assert row["best_config"].get("extra_server_args") == ("--schedule-policy lpm --page-size 16"), (
         "warm_replay launch flags were dropped by a flagless baseline overwrite"
@@ -440,7 +440,7 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     """Counterpart guard: a genuine validated win DOES update best_config/best_throughput."""
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
-    coord.cortex_kb.put_recipe(
+    coord.recipe_kb.put_recipe(
         canonical_id=cid,
         model=_MODEL,
         hardware=_HW,
@@ -464,8 +464,8 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    coord.cortex_finalize_recipe_and_journal()
-    row = coord.cortex_kb.get_recipe(canonical_id=cid)
+    coord.finalize_recipe_and_journal()
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
 
@@ -574,7 +574,7 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
             "metrics": {"gain_pct": -10.0},
         },
     )
-    row = coord.cortex_kb.get_recipe(canonical_id=_expected_cid())
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
     descs = [p.get("description") for p in (row.get("pitfalls") or [])]
     assert any("page64_no_radix" in (d or "") for d in descs), descs
     assert not any((d or "") == f"[{_FW}] explore → regress on {_MODEL}/{_HW}" for d in descs), descs

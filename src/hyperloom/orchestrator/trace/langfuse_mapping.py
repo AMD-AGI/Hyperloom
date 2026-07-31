@@ -454,6 +454,78 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     return scores
 
 
+def recipe_audit_is_write(row: Mapping[str, Any]) -> bool:
+    """Whether one recipe-KB audit row describes a write.
+
+    Rows written before the write-audit event carry no ``op`` field; they are
+    reads, so the absence of ``op`` must not be mistaken for a write.
+
+    Args:
+        row: One row from ``runtime/recipe_snapshot/.audit.jsonl``.
+
+    Returns:
+        ``True`` for a write row, ``False`` for a read (or legacy) row.
+    """
+    return str(row.get("op") or "read") == "write"
+
+
+def recipe_write_span(row: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Project a recipe-KB write audit row onto a span name + metadata.
+
+    The generator suffix in the name separates the two write sites: the
+    session-opening ``t0_anchor`` stamp and the ``coordinator``
+    KEEP/REVERT/PR/CLOSE amends.
+
+    ``delta`` is flattened into ``<field>_delta`` scalars because Langfuse
+    filters on flat metadata values; the full row is attached separately as the
+    span output. Only fields that actually changed are flattened, so a
+    no-content write (the T0 anchor) yields no delta keys rather than a row of
+    zeros.
+
+    Args:
+        row: One ``op="write"`` row from the recipe-KB audit log.
+
+    Returns:
+        A ``(span_name, metadata)`` pair.
+    """
+    result = row.get("result") if isinstance(row.get("result"), Mapping) else {}
+    delta = row.get("delta") if isinstance(row.get("delta"), Mapping) else {}
+    generator = str(row.get("generator") or "unknown")
+    metadata: dict[str, Any] = {
+        "kind": "recipe_write",
+        "generator": generator,
+        "phase": row.get("phase") or "",
+        "canonical_id": result.get("canonical_id") or "",
+        "version": result.get("version"),
+        "created": bool(result.get("created")),
+        "best_throughput": result.get("best_throughput"),
+        "best_config_nonempty": bool(result.get("best_config_nonempty")),
+    }
+    for field, value in delta.items():
+        if value:
+            metadata[f"{field}_delta"] = value
+    return f"kb:recipe_write:{generator}", metadata
+
+
+def recipe_read_span(row: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Project a recipe-KB read audit row onto a span name + metadata.
+
+    Args:
+        row: One read row from the recipe-KB audit log.
+
+    Returns:
+        A ``(span_name, metadata)`` pair.
+    """
+    method = str(row.get("method") or "read")
+    return f"kb:recipe_snapshot:{method}", {
+        "kind": "recipe_snapshot",
+        "method": method,
+        "remote": row.get("remote"),
+        "resolution": row.get("resolution"),
+        "hit": bool(row.get("hit")),
+    }
+
+
 def _mean_proposal_score(proposal_scores: Any) -> float | None:
     """Mean of the per-rater ``score`` values in a decision's proposal_scores.
 
@@ -489,6 +561,9 @@ __all__ = [
     "pair_key",
     "parse_ts",
     "phase_of",
+    "recipe_audit_is_write",
+    "recipe_read_span",
+    "recipe_write_span",
     "redact_env",
     "session_start_payload",
     "span_agent_for",

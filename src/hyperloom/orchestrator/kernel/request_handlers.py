@@ -189,8 +189,8 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-# Shape sources trusted for kernel-opt dispatch.
-_ALLOWED_SHAPE_PROVENANCE = frozenset({"torch_trace", "tuning_csv"})
+from hyperloom.common.env import is_truthy
+from hyperloom.common.kernel_shape_contract import ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
@@ -1079,9 +1079,22 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     tool = _load_apply_tool()
-    descriptors = tool.parse_patch_manifest(patch.read_text(encoding="utf-8", errors="replace"))
+    patch_text = patch.read_text(encoding="utf-8", errors="replace")
+    descriptors = tool.parse_patch_manifest(patch_text)
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
+
+    # Paths the patch CREATES: these must be produced by ``git apply``, never
+    # pre-seeded with a base, or apply fails "already exists". Everything else
+    # is a modify whose base we must supply. ``is_new`` comes from
+    # ``parse_patch_manifest`` (single source of truth for both the path
+    # normalization and the create/modify disposition), which avoids a second,
+    # drift-prone parse of the raw patch text.
+    _new_file_paths = {
+        str(desc.get("path") or "")
+        for desc in descriptors
+        if desc.get("op") == "write" and desc.get("is_new")
+    }
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
@@ -1101,6 +1114,26 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
+        elif rel.as_posix() not in _new_file_paths:
+            # ``git show HEAD:`` failed and this is a MODIFY (not a create):
+            # non-git repo_root (e.g. vLLM/sglang under site-packages/
+            # dist-packages) or an untracked-but-present file. Fall back to the
+            # on-disk source. forge-fusion (PR #75) emits the patch for these
+            # non-git frameworks; without this fallback the snapshot lacks the
+            # base file and ``git apply`` fails "<path>: No such file or
+            # directory". New files are intentionally left for ``git apply`` to
+            # create.
+            src = root / rel
+            if not src.is_file():
+                # Neither git HEAD nor the on-disk layout has the base. Surface
+                # a precise error here instead of the opaque ``git apply`` "No
+                # such file or directory" that would otherwise follow.
+                raise FileNotFoundError(
+                    f"patch base missing for {rel.as_posix()}: not in git HEAD "
+                    f"and not on disk under {root}"
+                )
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
 
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", str(patch)],
@@ -4104,12 +4137,14 @@ async def run_optimization_handler(
     candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
     if len(candidates) <= 1:
         single_payload = dict(payload)
+        kernel_id_pinned = False
         if candidates:
-            # Reconcile the (possibly hallucinated) LLM kernel_id against the real id.
-            single_payload["kernel_id"] = _reconcile_kernel_id(
-                single_payload.get("kernel_id"),
+            requested_kernel_id = single_payload.get("kernel_id")
+            reconciled_id, kernel_id_pinned = _reconcile_kernel_id_for_single_batch(
+                requested_kernel_id,
                 candidates,
             )
+            single_payload["kernel_id"] = reconciled_id
             # Preserve the selected candidate itself: it may carry a task_group
             # that does not exist on the raw hot-kernel row reloaded by the
             # kernel_optimization subprocess.
@@ -4143,6 +4178,10 @@ async def run_optimization_handler(
             single_payload,
             session_dir=session_dir,
         )
+        if kernel_id_pinned and isinstance(result, dict):
+            result["kernel_id_pinned"] = True
+            if requested_kernel_id is not None:
+                result["requested_kernel_id"] = str(requested_kernel_id)
         return _stamp_task_group_result(
             result,
             candidates[0] if candidates else None,
@@ -4337,6 +4376,37 @@ def _reconcile_kernel_id(
     return fallback
 
 
+def _reconcile_kernel_id_for_single_batch(
+    requested: Any,
+    candidates: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    """Reconcile ``requested`` and pin to the sole batch row when ids diverge.
+
+    When the batch filter leaves exactly one candidate, the LLM may still
+    request a different ``kernel_id``; keep candidate metadata and
+    ``kernel_id`` aligned so predispatch validation uses the same row.
+
+    Returns:
+        ``(kernel_id, kernel_id_pinned)`` where ``kernel_id_pinned`` is True
+        when the requested id was overridden to match the sole batch row.
+    """
+    if not candidates:
+        return str(requested or ""), False
+    reconciled = _reconcile_kernel_id(requested, candidates)
+    valid = {str(c.get("kernel_id") or "") for c in candidates if c.get("kernel_id")}
+    if reconciled in valid:
+        return reconciled, False
+    pinned = str(candidates[0].get("kernel_id") or "")
+    if pinned and reconciled != pinned:
+        log.warning(
+            "kernel_id %r pinned to sole batch candidate %r",
+            reconciled,
+            pinned,
+        )
+        return pinned, True
+    return pinned or reconciled, False
+
+
 def _resolve_candidate_id(
     requested: Any,
     candidates: list[dict[str, Any]],
@@ -4523,6 +4593,15 @@ def _batch_kernel_candidates(
     kernels = data.get("hot_kernels") or data.get("hot_kernels_top15") or []
     if not isinstance(kernels, list):
         return []
+    # Drop geometry-only kernels (bypass path tags shape_dispatchable=False) up
+    # front so both the grouped and legacy passes agree: they resolve a source
+    # yet fail the kernel-opt gate on untrusted shape provenance. Absent field
+    # (TraceLens path) stays dispatchable to avoid regressing it.
+    kernels = [
+        k
+        for k in kernels
+        if not (isinstance(k, dict) and k.get("shape_dispatchable") is False)
+    ]
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 
@@ -5824,6 +5903,11 @@ async def integrate_handler(
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            # Synthetic kind="baseline": a throughput-only A/B probe of the
+            # patched kernel against the already-anchored baseline. It never
+            # establishes the quality reference, so it is exempt from the
+            # genuine-baseline accuracy guard.
+            "quality_ref_exempt": True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -6034,6 +6118,9 @@ async def integrate_handler(
                     "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
                     "extra_server_args": extra_args,
                     "extra_envs": dict(payload.get("extra_envs") or {}),
+                    # Pristine arm of the paired A/B: compares against the
+                    # anchored baseline, never establishes it.
+                    "quality_ref_exempt": True,
                 },
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )

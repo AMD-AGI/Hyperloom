@@ -45,19 +45,6 @@ For each proposal in `proposals`:
    [references/verdict_schema.md](../references/verdict_schema.md) for
    per-verdict required fields, and any
    `kb_priors_by_proposal[<msg_id>]` returned in Step 1.
-4. If present, factor in
-   `kb_assess_by_proposal[<msg_id>]` — an optional substrate-KB reasonableness
-   verdict for that proposal's optimisation levers (standalone critic runtime
-   only; Hyperloom does not wire this path):
-   - `reasonable = "supported"` → measured KB evidence backs the levers;
-     a point in favour, but not on its own a reason to approve.
-   - `reasonable = "contested"` → at least one lever **contradicts** measured
-     evidence (`verdicts[].status` is `deviated` / `conflicts`); treat as a
-     risk signal and cite the offending lever in `kb_evidence`.
-   - `reasonable = "insufficient_basis"` (or field absent) → the KB has no
-     opinion; ignore it, do **not** penalise the proposal.
-   This field is advisory enrichment and is usually absent; never block solely
-   on its absence.
 
 Default behavior summary:
 
@@ -68,11 +55,13 @@ Default behavior summary:
 - `patch_landing` proposal without comparable benchmark + accuracy
   gate → `needs_review` (or `reject` if the packet itself shows a
   regression).
-- `enablement_landing` proposal (pre-boot enablement / framework-agent
+- `enablement_landing` proposal (enablement / framework-agent
   `integrate_patch`) → **approve** on the structural bar; do NOT block on
-  a missing before/after benchmark, accuracy gate, or restated rollback
-  plan (the model cannot boot yet and rollback is automatic). The
-  downstream runnable-decision gate REVERTs any patch that fails to boot.
+  a missing throughput before/after or a restated rollback plan (rollback is
+  automatic). Boot-origin has no baseline yet; eval-origin booted but missed the
+  accuracy floor. Either way the downstream runnable-decision gate REVERTs any
+  patch that fails to boot, and for eval-origin additionally re-runs the accuracy
+  eval and REVERTs a patch that still misses the floor.
 - `framework_op` proposal → approve by default; only block when
   structurally malformed.
 

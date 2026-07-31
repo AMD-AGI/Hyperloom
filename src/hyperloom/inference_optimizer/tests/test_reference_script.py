@@ -20,6 +20,9 @@ check_env_vars MODEL TP CONC ISL OSL
 
 export VLLM_USE_BREAKABLE_CUDAGRAPH=0
 export VLLM_ROCM_USE_AITER=1
+export VLLM_ALLREDUCE_USE_FLASHINFER=1
+export VLLM_USE_RUST_FRONTEND=1
+export NCCL_DMABUF_ENABLE=0
 export VLLM_CACHE_ROOT=/workspace/cache
 export SOME_SECRET=hunter2
 
@@ -83,6 +86,9 @@ def test_parse_env_whitelist(tmp_path):
     r = parse_reference_script(src, framework="vllm")
     assert r.envs.get("VLLM_USE_BREAKABLE_CUDAGRAPH") == "0"
     assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
+    assert r.envs.get("VLLM_ALLREDUCE_USE_FLASHINFER") == "1"
+    assert r.envs.get("VLLM_USE_RUST_FRONTEND") == "1"
+    assert r.envs.get("NCCL_DMABUF_ENABLE") == "0"
     assert "VLLM_CACHE_ROOT" not in r.envs
     assert "SOME_SECRET" not in r.envs
 

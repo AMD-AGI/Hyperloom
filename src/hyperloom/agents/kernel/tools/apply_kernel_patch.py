@@ -456,9 +456,10 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
         list[dict[str, Any]]: One descriptor per affected path. Each has
             ``op`` (``"write"`` or ``"delete"``), ``path`` (repo-relative
             target), ``mode`` (octal string or ``""``), ``binary`` (bool), and
-            for renames/copies a ``source`` (origin repo-relative path). A
-            rename yields two descriptors: a ``delete`` of the source and a
-            ``write`` of the dest.
+            ``is_new`` (bool: the path is created by the patch — ``--- /dev/null``,
+            a ``new file mode`` header, or a rename/copy destination — so it must
+            not be pre-seeded with a base). A rename yields two descriptors: a
+            ``delete`` of the source and a ``write`` of the dest.
 
     Raises:
         ValueError: When the patch is empty/unparseable, or a section's
@@ -491,12 +492,20 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
         if rename_to and rename_from:
             src = _unquote_git_path(rename_from.group(1).strip())
             dst = _unquote_git_path(rename_to.group(1).strip())
-            descriptors.append({"op": "delete", "path": src, "mode": "", "binary": False})
-            descriptors.append({"op": "write", "path": dst, "mode": mode, "binary": binary})
+            descriptors.append(
+                {"op": "delete", "path": src, "mode": "", "binary": False, "is_new": False}
+            )
+            # The rename destination is produced by the apply; it must not be
+            # pre-seeded from a base (treated as a create).
+            descriptors.append(
+                {"op": "write", "path": dst, "mode": mode, "binary": binary, "is_new": True}
+            )
             continue
         if copy_to:
             dst = _unquote_git_path(copy_to.group(1).strip())
-            descriptors.append({"op": "write", "path": dst, "mode": mode, "binary": binary})
+            descriptors.append(
+                {"op": "write", "path": dst, "mode": mode, "binary": binary, "is_new": True}
+            )
             continue
 
         minus = re.search(r"(?m)^--- (.+)$", block)
@@ -509,10 +518,15 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
             target = _strip_ab_prefix(minus_path)
             if not target:
                 raise ValueError(f"deletion section missing source path:\n{block[:200]}")
-            descriptors.append({"op": "delete", "path": target, "mode": "", "binary": binary})
+            descriptors.append(
+                {"op": "delete", "path": target, "mode": "", "binary": binary, "is_new": False}
+            )
             continue
 
         # Addition (--- /dev/null) or modification: dest comes from the +++ line.
+        # A creation is signalled by ``--- /dev/null`` or a ``new file mode``
+        # header; modifications carry an ``a/<path>`` on the ``---`` line.
+        is_new = minus_path == "/dev/null" or bool(new_mode_m)
         target = _strip_ab_prefix(plus_path)
         if not target:
             # Header-only entries (pure chmod) carry the path on the diff line.
@@ -521,7 +535,9 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
                 target = _unquote_git_path(gitline.group(2).strip())
         if not target:
             raise ValueError(f"cannot determine target path for section:\n{block[:200]}")
-        descriptors.append({"op": "write", "path": target, "mode": mode, "binary": binary})
+        descriptors.append(
+            {"op": "write", "path": target, "mode": mode, "binary": binary, "is_new": is_new}
+        )
 
     return descriptors
 

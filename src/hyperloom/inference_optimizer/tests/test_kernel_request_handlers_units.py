@@ -491,6 +491,140 @@ class TestForgeGemmHelperCoverage:
 
         assert (snapshot / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
+    def test_materialize_unified_patch_snapshot_nongit_repo(self, tmp_path):
+        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed
+        under site-packages/dist-packages).
+
+        forge-fusion (PR #75) emits a patch for non-git frameworks so KEPT
+        fusions reach e2e integrate, but the consumer resolved base content via
+        ``git show HEAD:<path>`` which fails outside a git repo -> the snapshot
+        never gets the base file -> ``git apply`` fails with
+        ``<path>: No such file or directory`` (observed on Qwen3-0.6B / Llama
+        vLLM sessions). The base must fall back to the on-disk source.
+        """
+        repo = tmp_path / "site-packages"
+        (repo / "vllm" / "model_executor" / "models").mkdir(parents=True)
+        target = repo / "vllm" / "model_executor" / "models" / "qwen3.py"
+        target.write_text("old = 1\n", encoding="utf-8")
+        # NOTE: deliberately NOT a git repo (no git init) -- mirrors dist-packages.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/vllm/model_executor/models/qwen3.py b/vllm/model_executor/models/qwen3.py\n"
+            "--- a/vllm/model_executor/models/qwen3.py\n"
+            "+++ b/vllm/model_executor/models/qwen3.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (
+            snapshot / "vllm" / "model_executor" / "models" / "qwen3.py"
+        ).read_text(encoding="utf-8") == "new = 2\n"
+
+    def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
+        """A created file whose ``+++`` line carries a tab-suffixed timestamp
+        must still be recognized as a create on a NON-git root.
+
+        The new-file path is normalized exactly like ``parse_patch_manifest``
+        (strip the ``\\t<timestamp>`` suffix and the ``b/`` prefix); otherwise it
+        is misclassified as a modify, pre-seeded from disk, and ``git apply``
+        fails "already exists". Pairs a modify (base from disk) with a create in
+        the same patch.
+        """
+        repo = tmp_path / "site-packages"
+        (repo / "vllm").mkdir(parents=True)
+        (repo / "vllm" / "existing.py").write_text("old = 1\n", encoding="utf-8")
+        # NOTE: deliberately NOT a git repo -- mirrors dist-packages.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/vllm/existing.py b/vllm/existing.py\n"
+            "--- a/vllm/existing.py\n"
+            "+++ b/vllm/existing.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n"
+            "diff --git a/vllm/fused_new.py b/vllm/fused_new.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/vllm/fused_new.py\t2026-07-31 17:00:00.000000000 +0800\n"
+            "@@ -0,0 +1 @@\n"
+            "+created = 3\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "vllm" / "existing.py").read_text(encoding="utf-8") == "new = 2\n"
+        assert (snapshot / "vllm" / "fused_new.py").read_text(encoding="utf-8") == "created = 3\n"
+
+    def test_materialize_unified_patch_snapshot_nongit_new_file_quoted(self, tmp_path):
+        """A created file whose header path is C-quoted (git quotes paths with
+        spaces) must be recognized as a create via the shared
+        ``parse_patch_manifest`` normalization, not pre-seeded, and produced by
+        ``git apply``. Regression guard for the quoted-path branch.
+        """
+        repo = tmp_path / "site-packages"
+        (repo / "vllm").mkdir(parents=True)
+        # NOTE: deliberately NOT a git repo -- mirrors dist-packages.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            'diff --git "a/vllm/fused new.py" "b/vllm/fused new.py"\n'
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            '+++ "b/vllm/fused new.py"\n'
+            "@@ -0,0 +1 @@\n"
+            "+created = 1\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (snapshot / "vllm" / "fused new.py").read_text(encoding="utf-8") == "created = 1\n"
+
+    def test_materialize_unified_patch_snapshot_modify_base_missing_raises(self, tmp_path):
+        """A modify whose base is neither in git HEAD nor on disk must fail with
+        a precise error instead of the opaque ``git apply`` "No such file or
+        directory".
+        """
+        repo = tmp_path / "site-packages"
+        repo.mkdir(parents=True)
+        # NOTE: NOT a git repo, and the target file does not exist on disk.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/vllm/missing.py b/vllm/missing.py\n"
+            "--- a/vllm/missing.py\n"
+            "+++ b/vllm/missing.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(FileNotFoundError, match="patch base missing"):
+            krh.materialize_unified_patch_snapshot(patch_path=patch, repo_root=repo)
+
     def test_materialize_unified_patch_snapshot_rejects_bad_inputs(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -3174,6 +3308,26 @@ class TestReconcileKernelId:
         )
 
 
+class TestReconcileKernelIdForSingleBatch:
+    CANDS = [
+        {
+            "kernel_id": "k002",
+            "name": "_fwd_grouped_kernel_stage1",
+            "shape_provenance": "launch_grid",
+        },
+    ]
+
+    def test_pins_mismatched_id_to_sole_candidate(self):
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS)
+        assert kid == "k002"
+        assert pinned is True
+
+    def test_keeps_exact_match(self):
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS)
+        assert kid == "k002"
+        assert pinned is False
+
+
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
 # against the full hot ∪ skipped set (no fallback).
 class TestResolveCandidateId:
@@ -3354,6 +3508,44 @@ class TestBatchKernelCandidatesRetryBudget:
 
         out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
 
+        assert [item["kernel_id"] for item in out] == ["k001"]
+
+    def test_geometry_only_shape_excluded_from_batch(self, tmp_path):
+        # A reusable kernel with a resolved source but shape_dispatchable=False
+        # fails the kernel-opt gate; it must be dropped before dispatch.
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "kernel_id": "k001",
+                            "gpu_pct": 12.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/moe_op.py",
+                            "shape_dispatchable": False,
+                        },
+                        {
+                            "kernel_id": "k002",
+                            "gpu_pct": 11.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/attn_op.py",
+                            "shape_dispatchable": True,
+                        },
+                    ],
+                    "reusable_native_kernel_ids": ["k001", "k002"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+        assert [item["kernel_id"] for item in out] == ["k002"]
+
+    def test_missing_shape_dispatchable_stays_batch_eligible(self, tmp_path):
+        # TraceLens candidates omit shape_dispatchable; absent field must not be
+        # filtered so the main path is preserved.
+        cp = self._write_candidates(tmp_path)  # no shape_dispatchable key
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
         assert [item["kernel_id"] for item in out] == ["k001"]
 
 

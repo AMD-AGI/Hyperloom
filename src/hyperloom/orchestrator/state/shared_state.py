@@ -385,6 +385,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot: a cuda-graph capture failure asks the next baseline to retry with
     # cuda-graph capture disabled. Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Eval-origin enablement carriers: set when the first baseline runs but its
+    # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
+    # and re-run the same eval contract. Empty for boot-origin enablement.
+    enablement_origin: str = ""
+    enablement_accuracy_floor: float = 0.0
+    enablement_probe_config_path: str = ""
+    enablement_eval_contract_fingerprint: str = ""
+    enablement_baseline_eval_evidence: str = ""
+    enablement_baseline_eval_kind: str = ""
+    enablement_observed_accuracy: float = 0.0
+    enablement_observed_task: str = ""
+    enablement_observed_metric: str = ""
+    enablement_pending: bool = False
+    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
+    # must revalidate accuracy before the run is considered enabled.
+    enablement_validation_pending: bool = False
     # Enablement path (framework-agent) state.
     # ``enablement_launch_log``: captured launch/traceback text when baseline
     #   cannot launch.
@@ -426,6 +442,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Path to the materialized config produced by the KEEP'd candidate bench.
+    # This is the effective config (with server fixes applied) used for
+    # revalidation; distinct from enablement_probe_config_path (the original
+    # trigger config before any enablement patches).  Optional; defaults via
+    # from_dict, no schema bump.
+    enablement_accepted_config_path: str = ""
+    # Task identity for the current revalidation baseline task. Cleared when
+    # the task finishes (success or failure).  Optional; defaults via from_dict.
+    enablement_revalidation_task_id: str = ""
+    # Monotonically increasing counter: incremented each time an eval-origin
+    # KEEP opens a new revalidation window so each window gets a fresh idempotency
+    # key and cannot reuse a prior terminal TaskRegistry row.
+    enablement_revalidation_generation: int = 0
     # Attempt-scoped runtime acquisition state. All optional; NOT in
     # fact_layer_keys and do NOT bump schema_version (default via from_dict).
     # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
@@ -790,11 +819,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Per-cycle advisory focus log; persisted so cycle strategy survives resume.
     cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
-    # Cortex KB integration fields — Coordinator-only writers.
-    # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
-    cortex_session_id: str = ""
+    # Recipe KB integration fields — Coordinator-only writers.
+    # ``recipe_kb_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
+    recipe_kb_session_id: str = ""
     # Kept (always ``{}``) for resume back-compat.
-    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
@@ -803,7 +832,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``cortex_t0`` from the KB recipe
+    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
     # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
     # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
     # the experiential lists. Empty dict when T0 was bypassed or failed.
@@ -1584,7 +1613,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             phase in ("PRELUDE", "FRAMEWORK_AGENT")
             and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
             and not bool(getattr(self, "enablement_succeeded", False))
-        )
+        ) or bool(getattr(self, "enablement_validation_pending", False))
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
