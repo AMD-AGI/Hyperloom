@@ -26,7 +26,7 @@ from .executors import (
     _register_executors,
 )
 from .kb import (
-    _bootstrap_cortex_kb,
+    _bootstrap_recipe_kb,
     _bootstrap_knowledge_plane,
 )
 from .backends import (
@@ -1010,7 +1010,7 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
     Args:
         session_dir (Path): The session root directory holding ``state.json``.
@@ -1626,7 +1626,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
-        cortex_client = _bootstrap_cortex_kb(
+        recipe_kb_client = _bootstrap_recipe_kb(
             args,
             session_dir=session_dir,
             manifest=manifest,
@@ -1638,7 +1638,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if not getattr(args, "pr_monitor_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
-                cortex_client=cortex_client,
+                recipe_kb_client=recipe_kb_client,
                 session_dir=session_dir,
             )
         )
@@ -1804,7 +1804,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
         # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
-        cortex_client = _bootstrap_cortex_kb(
+        recipe_kb_client = _bootstrap_recipe_kb(
             args,
             session_dir=session_dir,
             manifest=manifest,
@@ -1816,7 +1816,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             if not getattr(args, "pr_monitor_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
-                cortex_client=cortex_client,
+                recipe_kb_client=recipe_kb_client,
                 session_dir=session_dir,
             )
         )
@@ -1990,7 +1990,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         backends=backends,
         role_registry=role_registry,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        cortex_kb=cortex_client,
+        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
         # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,

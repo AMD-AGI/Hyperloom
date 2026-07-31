@@ -139,9 +139,9 @@ def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
     assert kb.audit_hook is None
 
 
-def test_bootstrap_cortex_kb_degraded_returns_none(tmp_path, monkeypatch, capsys) -> None:
+def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    kb = cli_kb._bootstrap_cortex_kb(
+    kb = cli_kb._bootstrap_recipe_kb(
         _args(degraded_kb=True),
         session_dir=tmp_path,
         manifest={"model_name": "m"},
@@ -151,12 +151,12 @@ def test_bootstrap_cortex_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
     assert "DISABLED (--degraded-kb)" in capsys.readouterr().out
 
 
-def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
+def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
     calls = []
     monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: calls.append(k))
-    kb = cli_kb._bootstrap_cortex_kb(
+    kb = cli_kb._bootstrap_recipe_kb(
         _args(),
         session_dir=tmp_path,
         manifest={"model_name": "m"},
@@ -166,7 +166,7 @@ def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
     assert calls
 
 
-def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
+def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
 
@@ -175,7 +175,7 @@ def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
 
     monkeypatch.setattr(cli_kb, "run_t0_anchor", _boom)
     args = _args()
-    kb = cli_kb._bootstrap_cortex_kb(
+    kb = cli_kb._bootstrap_recipe_kb(
         args,
         session_dir=tmp_path,
         manifest={"model_path": "/models/Qwen", "stack_fingerprint": {"rocm": "6.2"}, "image": "img@sha"},

@@ -230,9 +230,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "time_exhausted",
         "time_exhausted_during_prelude",
         "user_stop_requested",
-        "cortex_t0_failed",
-        "cortex_drain_failed",
-        "cortex_commit_failed",
+        "recipe_kb_t0_failed",
+        "recipe_kb_drain_failed",
+        "recipe_kb_commit_failed",
         "prelude_baseline_failed",
         "prelude_policy_loop",
         "policy_loop",
@@ -268,9 +268,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "prelude_baseline_failed",
         "prelude_policy_loop",
         "time_exhausted_during_prelude",
-        "cortex_t0_failed",
-        "cortex_drain_failed",
-        "cortex_commit_failed",
+        "recipe_kb_t0_failed",
+        "recipe_kb_drain_failed",
+        "recipe_kb_commit_failed",
         "plateau_explore",
         "plateau_kernel",
         "no_kernel_skipped",
@@ -1609,7 +1609,7 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Detect a PRELUDE-aborting stop reason on the state.
 
-    Recognizes terminal stop reasons (e.g. ``cortex_t0_failed``,
+    Recognizes terminal stop reasons (e.g. ``recipe_kb_t0_failed``,
     ``time_exhausted_during_prelude``) so phase history captures the
     boundary.
 
@@ -1622,7 +1622,7 @@ def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     # Treat these stop reasons as a PRELUDE abort so phase_history records it.
     sr = (getattr(state, "stop_reason", "") or "").strip()
-    if sr in ("cortex_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
+    if sr in ("recipe_kb_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
 

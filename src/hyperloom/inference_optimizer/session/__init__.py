@@ -9,7 +9,7 @@ Subpackage defining "where a session lives on disk":
   paths (``workspace_root``, ``session_dir``, ``make_session_dir``, ...).
 * ``session_paths.py`` — per-session artifact path helpers (everything
   *inside* a session directory: ``manifest_path``, ``runs_dir``,
-  ``reports_dir``, ``cortex_*``, ...).
+  ``reports_dir``, ``recipe_kb_*``, ...).
 * ``lock.py`` — the single-optimizer advisory ``flock`` guard.
 * ``manifest.py`` — the ``manifest.json`` writer/reader (schema v3).
 

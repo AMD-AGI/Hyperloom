@@ -124,7 +124,7 @@ def test_mcp_config_writes_pr_monitor_only(tmp_path):
     cfg = json.loads(path.read_text())
     servers = cfg["mcpServers"]
     assert servers["pr_monitor"] == {"type": "http", "url": "http://pr.test/mcp/"}
-    assert "cortex_kb" not in servers
+    assert "recipe_kb" not in servers
 
 
 def test_mcp_config_returns_none_when_nothing_wireable(tmp_path):

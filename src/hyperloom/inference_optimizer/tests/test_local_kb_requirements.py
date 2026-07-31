@@ -30,7 +30,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
         "HYPERLOOM_LOCAL_KB_ROOT",
         "USER_DATA_PATH",
-        "CORTEX_KB_URL",
         "KB_SERVICE_TOKEN",
         "GBRAIN_BASE_URL",
         "GBRAIN_TOKEN",

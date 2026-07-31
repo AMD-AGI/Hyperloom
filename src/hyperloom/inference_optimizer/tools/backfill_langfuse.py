@@ -235,7 +235,9 @@ def print_plan(plan: dict[str, Any]) -> None:
         f"  Scores: {len(plan['decisions'])} decisions "
         f"(KEEP={keep} REVERT={rev} no_promote={nop}; gain_pct set={gainful})"
     )
-    print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} audit row(s)")
+    recipe_rows = plan.get("recipe_audit") or []
+    recipe_writes = sum(1 for r in recipe_rows if lfmap.recipe_audit_is_write(r))
+    print(f"  Recipe KB: {len(recipe_rows) - recipe_writes} read(s) + {recipe_writes} write(s)")
 
 
 # Real ingest (needs the langfuse SDK)
@@ -329,36 +331,42 @@ def ingest(plan: dict[str, Any]) -> int:
         if p_hi is not None:
             last_end = p_hi
 
-    # Recipe-snapshot remote reads -> spans under a recipe_kb agent.
+    # Recipe-KB reads + writes -> spans under a recipe_kb agent. Mirrors the
+    # live emitter's ``_flush_recipe_kb_audit`` / ``_emit_recipe_write_span``
+    # so a backfilled trace is shaped like a live one.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
         ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
         ra_times = [t for t in ra_times if t is not None]
         ra_lo = min(ra_times) if ra_times else last_end
+        write_count = sum(1 for r in recipe_audit if lfmap.recipe_audit_is_write(r))
         ra_span = _start_obs(
             root,
             name="agent:recipe_kb",
             as_type="span",
             start_time=ra_lo or trace_start,
-            metadata={"phase": UNPHASED, "agent": "recipe_kb", "read_count": len(recipe_audit)},
+            metadata={
+                "phase": UNPHASED,
+                "agent": "recipe_kb",
+                "read_count": len(recipe_audit) - write_count,
+                "write_count": write_count,
+            },
         )
         for r in recipe_audit:
             r_start = lfmap.parse_ts(r.get("ts"))
-            method = str(r.get("method") or "read")
+            # Rows predating the write-audit event carry no ``op`` -> read.
+            if lfmap.recipe_audit_is_write(r):
+                name, metadata = lfmap.recipe_write_span(r)
+            else:
+                name, metadata = lfmap.recipe_read_span(r)
             obs = _start_obs(
                 ra_span,
-                name=f"kb:recipe_snapshot:{method}",
+                name=name,
                 as_type="span",
                 start_time=r_start,
                 input=None,
                 output=r,
-                metadata={
-                    "kind": "recipe_snapshot",
-                    "method": method,
-                    "remote": r.get("remote"),
-                    "resolution": r.get("resolution"),
-                    "hit": bool(r.get("hit")),
-                },
+                metadata=metadata,
             )
             _end_obs(obs, r_start)
         _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)

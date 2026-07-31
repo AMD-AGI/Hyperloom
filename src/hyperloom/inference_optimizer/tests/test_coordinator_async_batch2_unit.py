@@ -3,7 +3,7 @@
 
 """Batch 2 coverage for Coordinator: synchronous context readers, the
 no-progress circuit-breaker signal, resume replay, orchestration-conversation
-reset, and lifecycle teardown (stop / Cortex T4 safety net)."""
+reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -661,11 +661,11 @@ def test_context_analysis_reader_unreadable_path(
     assert "unreadable" in out or "no analysis.md" in out
 
 
-# -- _cortex_t4_hook + stop -------------------------------------------------
+# -- _recipe_kb_t4_hook + stop -------------------------------------------------
 @pytest.mark.asyncio
-async def test_cortex_t4_hook_noop_without_kb(coord: Coordinator) -> None:
-    coord.cortex_kb = None
-    await coord._cortex_t4_hook()
+async def test_recipe_kb_t4_hook_noop_without_kb(coord: Coordinator) -> None:
+    coord.recipe_kb = None
+    await coord._recipe_kb_t4_hook()
 
 
 @pytest.mark.asyncio
@@ -1450,12 +1450,12 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert "roofline_evidence" in params
 
 
-# -- _record_fact_per_task (cortex KB path) ---------------------------------
+# -- _record_fact_per_task (recipe KB KB path) ---------------------------------
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.cortex_kb = object()  # non-None -> KB amend path
+    coord.recipe_kb = object()  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -1474,7 +1474,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.cortex_kb = object()
+    coord.recipe_kb = object()
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
@@ -1607,7 +1607,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
     )
 
 
-# -- cortex_finalize_recipe_and_journal (KB path) ---------------------------
+# -- finalize_recipe_and_journal (KB path) ---------------------------
 class _FakeLocal:
     def get_recipe(self, *, canonical_id):
         return {
@@ -1618,29 +1618,29 @@ class _FakeLocal:
         }
 
 
-class _FakeCortexKB:
+class _FakeRecipeKB:
     def __init__(self) -> None:
         self.local = _FakeLocal()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_skips_without_model(coord: Coordinator) -> None:
-    coord.cortex_kb = _FakeCortexKB()
+async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
+    coord.recipe_kb = _FakeRecipeKB()
     coord.shared_state.model_name = ""  # missing model -> skip update_recipe
     coord.shared_state.gpu_type = "mi300x"
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
-    coord.cortex_kb = _FakeCortexKB()
+async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
+    coord.recipe_kb = _FakeRecipeKB()
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
 
@@ -2000,7 +2000,7 @@ def test_promote_warm_replay_below_historical_bar(coord: Coordinator) -> None:
     assert out.get("below_historical_reproduce_pct") is True
 
 
-# -- cortex_finalize_recipe_and_journal (rich existing row merge) -----------
+# -- finalize_recipe_and_journal (rich existing row merge) -----------
 class _FakeLocalRich:
     def get_recipe(self, *, canonical_id):
         return {
@@ -2011,21 +2011,21 @@ class _FakeLocalRich:
         }
 
 
-class _FakeCortexKBRich:
+class _FakeRecipeKBRich:
     def __init__(self) -> None:
         self.local = _FakeLocalRich()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
-    coord.cortex_kb = _FakeCortexKBRich()
+async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
+    coord.recipe_kb = _FakeRecipeKBRich()
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
