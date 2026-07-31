@@ -84,3 +84,27 @@ def test_no_attempts_all_untried_but_deduped():
     untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
     assert len(untried) == 1
     assert untried[0] in {"k001", "k002"}
+
+
+def test_geometry_only_shape_excluded_from_untried():
+    # A reusable kernel with a resolved source but shape_dispatchable=False
+    # (geometry-only provenance) fails the kernel-opt gate, so it must never
+    # enter the untried queue and spin KERNEL_AGENT.
+    geom = _hot("k001", name="combine_kernel")
+    geom["shape_dispatchable"] = False
+    ok = _hot("k002", name="gemm_a8w8")
+    ok["shape_dispatchable"] = True
+    state = _state([geom, ok])
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == ["k002"]
+
+
+def test_missing_shape_dispatchable_field_stays_untried():
+    # TraceLens path never emits shape_dispatchable; absent field must be treated
+    # as dispatchable so the main path is not regressed.
+    hot = [_hot("k001", name="gemm_a8w8")]  # no shape_dispatchable key
+    state = _state(hot)
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == ["k001"]

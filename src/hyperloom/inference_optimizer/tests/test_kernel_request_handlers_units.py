@@ -3308,6 +3308,26 @@ class TestReconcileKernelId:
         )
 
 
+class TestReconcileKernelIdForSingleBatch:
+    CANDS = [
+        {
+            "kernel_id": "k002",
+            "name": "_fwd_grouped_kernel_stage1",
+            "shape_provenance": "launch_grid",
+        },
+    ]
+
+    def test_pins_mismatched_id_to_sole_candidate(self):
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS)
+        assert kid == "k002"
+        assert pinned is True
+
+    def test_keeps_exact_match(self):
+        kid, pinned = krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS)
+        assert kid == "k002"
+        assert pinned is False
+
+
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
 # against the full hot ∪ skipped set (no fallback).
 class TestResolveCandidateId:
@@ -3488,6 +3508,44 @@ class TestBatchKernelCandidatesRetryBudget:
 
         out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
 
+        assert [item["kernel_id"] for item in out] == ["k001"]
+
+    def test_geometry_only_shape_excluded_from_batch(self, tmp_path):
+        # A reusable kernel with a resolved source but shape_dispatchable=False
+        # fails the kernel-opt gate; it must be dropped before dispatch.
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "kernel_id": "k001",
+                            "gpu_pct": 12.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/moe_op.py",
+                            "shape_dispatchable": False,
+                        },
+                        {
+                            "kernel_id": "k002",
+                            "gpu_pct": 11.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/attn_op.py",
+                            "shape_dispatchable": True,
+                        },
+                    ],
+                    "reusable_native_kernel_ids": ["k001", "k002"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+        assert [item["kernel_id"] for item in out] == ["k002"]
+
+    def test_missing_shape_dispatchable_stays_batch_eligible(self, tmp_path):
+        # TraceLens candidates omit shape_dispatchable; absent field must not be
+        # filtered so the main path is preserved.
+        cp = self._write_candidates(tmp_path)  # no shape_dispatchable key
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
         assert [item["kernel_id"] for item in out] == ["k001"]
 
 
