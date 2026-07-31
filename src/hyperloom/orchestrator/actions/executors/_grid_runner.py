@@ -922,25 +922,18 @@ def _run_magpie(
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-    # AgentX: deploy the aiperf client into the InferenceX ``benchmarks/`` dir
-    # and capability-preflight aiperf right before Magpie runs it. The OFF-path
-    # gate (agentx_enabled) stays here so the agentx package is imported only
-    # when AgentX is on (A2); the deploy+preflight body lives in a unit-testable
-    # helper (the in-place hook self-disables under pytest). Skipped under pytest.
-    if not os.environ.get("PYTEST_CURRENT_TEST") and inferencex_path:
-        from ._workload_envs import agentx_enabled
+    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
+    # aiperf right before Magpie runs it, via the shared helper (also used by the
+    # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
+    # helper keeps the agentx package import lazy for the OFF path, A2). A failed
+    # preflight becomes a structured nonzero rc so the grid records a failed
+    # benchmark instead of crashing.
+    from ._workload_envs import prepare_agentx_runtime
 
-        if agentx_enabled(os.environ):
-            from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-            from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
-
-            try:
-                maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
-            except AgentXPreflightError as exc:
-                # Fail loud but STRUCTURED: return a nonzero rc so the caller records
-                # a failed benchmark rather than crashing the whole grid.
-                log.error("AgentX preflight failed; failing this benchmark: %s", exc)
-                return (AGENTX_PREFLIGHT_RETURNCODE, "", f"AgentX preflight failed: {exc}")
+    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
+    if _agx_err:
+        log.error("%s; failing this benchmark", _agx_err)
+        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
