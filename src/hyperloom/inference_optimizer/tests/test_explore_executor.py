@@ -66,12 +66,12 @@ def _force_cold_decision(monkeypatch) -> None:
     )
 
 
-def _write_baseline_yaml(path: Path) -> None:
+def _write_baseline_yaml(path: Path, *, precision: str = "bf16") -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
             "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
+            "precision": precision,
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
             "benchmark_script": "sglang_mi300x.sh",
@@ -1542,7 +1542,8 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
 async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
+    # FP8 has no programmatic seed, so the empty grid stays a hard failure.
+    _write_baseline_yaml(base, precision="fp8")
     task = await tr.create(
         kind="explore",
         params={
@@ -1684,15 +1685,101 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
     assert any(v.name == "atom_level_2" for v in grid)
 
 
-@pytest.mark.parametrize("framework", ["sglang", "vllm", "", "unknown"])
-def test_default_grid_for_framework_non_atom_returns_empty(framework):
-    """Sglang/vllm rely on LLM-emitted variants; unknown frameworks also return ``[]`` (no crash)."""
+@pytest.mark.parametrize("framework", ["vllm", "", "unknown"])
+def test_default_grid_for_framework_unseeded_returns_empty(framework):
+    """Vllm relies on LLM-emitted variants; unknown frameworks also return ``[]`` (no crash)."""
     grid = _default_grid_for_framework(
         framework,
         model_class="moe_mla",
         conc=64,
     )
     assert grid == []
+
+
+def _write_quant_config(tmp_path: Path, quant_method: str | None) -> str:
+    """Write a checkpoint config.json with or without a quantisation block."""
+    cfg: dict = {"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}
+    if quant_method:
+        cfg["quantization_config"] = {"quant_method": quant_method}
+    d = tmp_path / ("ckpt_%s" % (quant_method or "plain"))
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps(cfg))
+    return str(d)
+
+
+def test_default_grid_for_framework_sglang_bf16_seeds_kv_fp8():
+    """BF16 wants the KV knob; it helped on all five BF16 models measured."""
+    grid = _default_grid_for_framework(
+        "sglang",
+        model_class="dense",
+        precision="bf16",
+        conc=64,
+    )
+    assert _names(grid) == ["sglang_kv_fp8"]
+    assert grid[0].extra_server_args == "--kv-cache-dtype fp8_e4m3"
+    assert getattr(grid[0], "provenance", "") == "default_grid"
+
+
+def test_default_grid_for_framework_sglang_bf16_never_seeds_torch_compile():
+    """It regresses BF16 throughput and aborts Qwen3-MoE, so it must stay out."""
+    grid = _default_grid_for_framework("sglang", model_class="moe", precision="bf16")
+    assert not any("torch-compile" in (v.extra_server_args or "") for v in grid)
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp8"])
+def test_default_grid_for_framework_sglang_unquantised_checkpoint(tmp_path, precision):
+    """An unquantised checkpoint wants KV whatever the precision label says.
+
+    ``--quantization fp8`` makes a BF16 checkpoint report fp8 while still
+    behaving like BF16, so the label must not drive the seed.
+    """
+    path = _write_quant_config(tmp_path, None)
+    grid = _default_grid_for_framework(
+        "sglang", model_class="dense", precision=precision, model_path=path)
+    assert _names(grid) == ["sglang_kv_fp8"]
+    assert "torch-compile" not in (grid[0].extra_server_args or "")
+
+
+def test_default_grid_for_framework_sglang_prequantised_fp8_seeds_compile(tmp_path):
+    """A pre-quantised fp8 checkpoint inverts the ordering: compile is the win."""
+    path = _write_quant_config(tmp_path, "fp8")
+    grid = _default_grid_for_framework(
+        "sglang", model_class="dense", precision="fp8", model_path=path)
+    assert _names(grid) == ["sglang_kv_compile", "sglang_kv_fp8"]
+    assert "--enable-torch-compile" in grid[0].extra_server_args
+    assert "--torch-compile-max-bs 64" in grid[0].extra_server_args
+    # The KV-only fallback stays, because compile is the arm that can fail to start.
+    assert grid[1].extra_server_args == "--kv-cache-dtype fp8_e4m3"
+
+
+@pytest.mark.parametrize("quant", ["awq", "gptq", "mxfp4", "quark"])
+def test_default_grid_for_framework_sglang_unmeasured_quant_returns_empty(tmp_path, quant):
+    """Nothing has been measured for these formats, so nothing is seeded."""
+    path = _write_quant_config(tmp_path, quant)
+    grid = _default_grid_for_framework(
+        "sglang", model_class="dense", precision="fp8", model_path=path)
+    assert grid == []
+
+
+@pytest.mark.parametrize("precision", ["fp8", "fp16", "unknown"])
+def test_default_grid_for_framework_sglang_no_checkpoint_off_bf16(precision):
+    """With no checkpoint to read, an fp8 label is ambiguous, so seed nothing."""
+    grid = _default_grid_for_framework("sglang", model_class="dense", precision=precision)
+    assert grid == []
+
+
+def test_default_grid_for_framework_sglang_without_precision_returns_empty():
+    """Callers that pass neither a checkpoint nor a BF16 label get no seed."""
+    assert _default_grid_for_framework("sglang", model_class="moe_mla_fp8") == []
+    assert _default_grid_for_framework("sglang", model_class="dense") == []
+
+
+def test_default_grid_for_framework_sglang_unreadable_checkpoint_falls_back(tmp_path):
+    """An unreadable config must not block EXPLORE; the label decides instead."""
+    missing = str(tmp_path / "does_not_exist")
+    assert _names(_default_grid_for_framework(
+        "sglang", model_class="dense", precision="bf16",
+        model_path=missing)) == ["sglang_kv_fp8"]
 
 
 def _write_atom_baseline_yaml(path: Path) -> None:
@@ -1770,14 +1857,14 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
+async def test_explore_executor_sglang_fp8_empty_grid_still_fails_with_empty_grid(
     sub_agent_runner,
     tmp_path,
 ):
-    """Inverse of the atom test: an empty grid on sglang/vllm still returns ``error_class='empty_grid'``."""
+    """Off BF16 sglang has no seed, so an empty grid still returns ``error_class='empty_grid'``."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_sglang.yaml"
-    _write_baseline_yaml(base)
+    _write_baseline_yaml(base, precision="fp8")
     task = await tr.create(
         kind="explore",
         params={
@@ -1791,6 +1878,50 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_sglang_bf16_empty_grid_seeds_kv_fp8(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """An empty grid on a BF16 sglang session reaches ``run_grid`` with the KV seed."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_sglang_bf16.yaml"
+    _write_baseline_yaml(base, precision="bf16")
+
+    monkeypatch.setenv("MODEL_PATH", "/path/models/Qwen-Qwen3-8B")
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    received_grid: list[list[str]] = []
+
+    from hyperloom.orchestrator.actions.executors import (
+        explore as explore_mod,
+    )
+
+    async def _capture_run_grid(**kwargs):
+        received_grid.append([v.name for v in (kwargs.get("grid") or [])])
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput": 800.0,
+            "grid": [],
+        },
+        idempotency_key="ex-sglang-bf16-seeded",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+
+    await sub.run_task(task)
+
+    assert received_grid, "run_grid was not invoked by the seed path"
+    flat_names = [n for sub_names in received_grid for n in sub_names]
+    assert flat_names == ["sglang_kv_fp8"]
 
 
 def test_atom_default_grid_survives_compatibility_filter_without_help_probe(

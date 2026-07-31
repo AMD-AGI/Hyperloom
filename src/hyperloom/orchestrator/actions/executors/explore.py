@@ -384,23 +384,117 @@ def _xdit_default_grid(
     return variants
 
 
+def _sglang_default_grid(
+    *,
+    model_class: str,
+    precision: str,
+    model_path: str = "",
+    conc: int = 0,
+    isl: int = 0,
+    osl: int = 0,
+) -> list[GridVariant]:
+    """sglang EXPLORE default grid, split on how the checkpoint is quantised.
+
+    Which knob wins does not follow the ``precision`` label, because a BF16
+    checkpoint served with ``--quantization fp8`` is also labelled fp8 while
+    behaving nothing like a pre-quantised one. What separates the two cases is
+    the checkpoint itself, so that is what this reads.
+
+    Checkpoints that declare no quantisation -- BF16, and BF16 quantised at load
+    time -- want the KV knob and must not be given torch-compile:
+
+        Olmo-3-7B +91.6%   Granite-3.1-8B +16.4% (bf16) / +18.0% (runtime fp8)
+        Qwen3-8B  +16.1%   Qwen3-32B      +7.9%  (bf16) / +10.7% (runtime fp8)
+        Qwen3-30B-A3B +9.8%
+        torch-compile on these: at most +2.1% on BF16, and it does not even
+        start on Qwen3-MoE (dynamo assertion) or under runtime fp8
+        quantisation (InductorError: LoweringException).
+
+    Pre-quantised fp8 checkpoints invert that: on Qwen3-14B-FP8 the KV knob
+    alone bought +13.6% while torch-compile bought +239%, and the two together
+    +327.7%. That is one model, so both are emitted as candidates rather than
+    one being trusted -- a seed variant is measured by the caller before it is
+    kept, so a wrong seed costs a benchmark slot, not a bad configuration.
+
+    Other quantisation formats (awq, gptq, mxfp4, quark) get no seed: nothing
+    has been measured for them.
+
+    Args:
+        model_class: Model-class label (unused; signature parity).
+        precision: Workload precision, used only when the checkpoint cannot be read.
+        model_path: Checkpoint directory, read to detect declared quantisation.
+        conc: Live concurrency (unused; signature parity).
+        isl: Input sequence length (unused; signature parity).
+        osl: Output sequence length (unused; signature parity).
+
+    Returns:
+        The curated list of sglang ``GridVariant`` seeds, or ``[]`` when the
+        checkpoint's quantisation is one nothing has been measured for.
+    """
+    kv = "--kv-cache-dtype fp8_e4m3"
+    compile_args = "--enable-torch-compile --torch-compile-max-bs 64"
+
+    def _variant(name: str, args: str) -> GridVariant:
+        """Build one ``default_grid``-provenance variant."""
+        gv = GridVariant(name=name, extra_server_args=args, extra_envs={},
+                         note="default_grid")
+        gv.provenance = "default_grid"  # type: ignore[attr-defined]
+        return gv
+
+    # "config.json says no quantisation" and "config.json could not be read" are
+    # different states and they lead to different seeds, so keep them apart.
+    inspected, quant = False, ""
+    if model_path:
+        try:
+            from hyperloom.inference_optimizer.cli.model_gate import (
+                _load_model_config_dict,
+                _model_declared_quant_method,
+            )
+
+            if _load_model_config_dict(model_path) is not None:
+                inspected = True
+                quant = _model_declared_quant_method(model_path)
+        except Exception:  # noqa: BLE001 -- an unreadable config must not block EXPLORE
+            log.debug("explore: could not read quantisation of %s", model_path,
+                      exc_info=True)
+
+    if not inspected:
+        # Without the checkpoint, an fp8 label is ambiguous -- it covers both a
+        # pre-quantised checkpoint and a BF16 one quantised at load time, and the
+        # two want opposite seeds. Only a BF16 label is decisive on its own.
+        if (precision or "").strip().lower() not in {"bf16", "bfloat16"}:
+            return []
+        return [_variant("sglang_kv_fp8", kv)]
+
+    if "fp8" in quant:
+        return [_variant("sglang_kv_compile", "%s %s" % (kv, compile_args)),
+                _variant("sglang_kv_fp8", kv)]
+    if quant:
+        return []
+    return [_variant("sglang_kv_fp8", kv)]
+
+
 def _default_grid_for_framework(
     framework: str,
     *,
     model_class: str,
+    precision: str = "",
+    model_path: str = "",
     conc: int = 0,
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch.
 
-    Atom and xDiT return curated seed grids; sglang / vllm / unknown return
+    Atom, xDiT and sglang return curated seed grids; vllm / unknown return
     ``[]`` ("no programmatic seed") and rely on LLM-emitted ``default_grid``
-    variants.
+    variants. sglang's seed depends on the checkpoint's quantisation.
 
     Args:
         framework: Inference framework name to dispatch on.
         model_class: Model-class label forwarded to the seed grid builder.
+        precision: Workload precision forwarded to the sglang seed grid builder.
+        model_path: Checkpoint directory forwarded to the sglang seed grid builder.
         conc: Live concurrency forwarded to the seed grid builder.
         isl: Input sequence length forwarded to the seed grid builder.
         osl: Output sequence length forwarded to the seed grid builder.
@@ -419,6 +513,15 @@ def _default_grid_for_framework(
     if fw == "xdit":
         return _xdit_default_grid(
             model_class=model_class,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+        )
+    if fw == "sglang":
+        return _sglang_default_grid(
+            model_class=model_class,
+            precision=precision,
+            model_path=model_path,
             conc=conc,
             isl=isl,
             osl=osl,
@@ -675,6 +778,7 @@ class ExploreExecutor:
         except (OSError, yaml.YAMLError) as exc:
             log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
             framework = ""
+            _cfg = {}
             _yaml_envs = {}
             _base_inherited_args = ""
         _effective_inherited_args = "" if base_args_mode == "replace" else _base_inherited_args
@@ -699,9 +803,17 @@ class ExploreExecutor:
             except (TypeError, ValueError):
                 # Non-integer seed hint; fall back to the default grid below.
                 pass
+            seed_precision = str(
+                (_cfg.get("benchmark") or {}).get("precision") or os.environ.get("PRECISION", "")
+            ).strip()
+            seed_model_path = str(
+                (_cfg.get("benchmark") or {}).get("model") or os.environ.get("MODEL_PATH", "")
+            ).strip()
             seed = _default_grid_for_framework(
                 framework,
                 model_class=seed_model_class,
+                precision=seed_precision,
+                model_path=seed_model_path,
                 conc=seed_conc,
                 isl=seed_isl,
                 osl=seed_osl,

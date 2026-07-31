@@ -4983,6 +4983,8 @@ class FrameworkPhase(PhaseHandler):
                 seeds = _default_grid_for_framework(
                     str(getattr(self.shared_state, "framework", "") or ""),
                     model_class=str(getattr(self.shared_state, "model_class", "") or ""),
+                    precision=str(getattr(self.shared_state, "precision", "") or ""),
+                    model_path=str(getattr(self.shared_state, "model_path", "") or ""),
                 )
             except Exception:  # noqa: BLE001 -- seed grid is best-effort
                 log.debug(

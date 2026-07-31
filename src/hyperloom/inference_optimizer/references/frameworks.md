@@ -2,8 +2,8 @@
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`,
-or `hunyuan_image3` via `--framework` or `$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, or
+`xdit` via `--framework` or `$FRAMEWORK`:
 
 ```bash
 python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
@@ -15,22 +15,23 @@ python3 -m hyperloom.inference_optimizer.cli optimize --framework xdit --model "
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
-- Which Magpie YAML the executors default to —
-  `baseline_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`
-  and `profile_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`. The per-framework resolver
+- Which Magpie YAML the executors default to — `baseline_{sglang,vllm,atom,xdit}.yaml`
+  and `profile_{sglang,vllm,atom,xdit}.yaml`. The per-framework resolver
   `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks the right
   file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls back to when no
-  `params.grid` is supplied. atom and xdit are the frameworks with programmatic
-  seeds today (`_default_grid_for_framework` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py` dispatches to
-  `_atom_default_grid()` / `_xdit_default_grid()`); sglang
-  and vllm continue to rely on the orchestration LLM emitting
-  `provenance='default_grid'` variants and will fail with
-  `error_class="empty_grid"` on a cold-start with no LLM input.
+  `params.grid` is supplied. `_default_grid_for_framework()` in
+  `src/hyperloom/orchestrator/actions/executors/explore.py` seeds atom, xDiT and
+  sglang; vllm and unknown frameworks continue to rely on the orchestration LLM
+  emitting `provenance='default_grid'` variants and will fail with
+  `error_class="empty_grid"` on a cold-start with no LLM input. sglang's seed is
+  keyed on the checkpoint's declared quantisation rather than `--precision`: an
+  unquantised checkpoint (including one served with `--quantization fp8`) gets
+  `--kv-cache-dtype fp8_e4m3` and deliberately not torch-compile, which fails to
+  start under load-time quantisation and on Qwen3-MoE; a pre-quantised fp8
+  checkpoint gets torch-compile as well, since there it is worth far more.
 - Which extra-args env name `_grid_runner` writes (`EXTRA_VLLM_ARGS` /
-  `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS` /
-  `EXTRA_HUNYUAN_IMAGE3_ARGS`).
+  `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS`).
 - Which KB partition orchestration reads for hints.
 
 Mixing frameworks in a single session is not supported; the CLI locks
@@ -44,12 +45,11 @@ Single-node only (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml`
 `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`) are in
 PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
-`https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`. Unlike
-sglang/vllm, atom ships a programmatic cold-start seed grid
-(`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on
-FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,
-`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), while
-sglang/vllm fail `error_class="empty_grid"` on a
+`https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`. atom has
+the broadest programmatic cold-start seed grid (`_atom_default_grid`:
+`atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on FP8, model-class-gated
+`atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`, `atom_cudagraph_bracket`), against
+the one or two variants sglang seeds — vllm fails `error_class="empty_grid"` on a
 cold start with no LLM variants.
 
 ## GPU Runner Type

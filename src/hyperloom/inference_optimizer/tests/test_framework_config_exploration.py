@@ -539,7 +539,7 @@ def test_build_grid_uses_default_seed_grid(monkeypatch):
     from hyperloom.orchestrator.actions.executors import explore as _exp
 
     gv = SimpleNamespace(name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n")
-    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv])
+    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class, precision="", model_path="": [gv])
     grid = _build(_fake_self(framework="atom"))
     assert grid[0]["name"] == "seed1"
     assert grid[0]["provenance"] == "framework_agent:config"
@@ -549,7 +549,7 @@ def test_build_grid_uses_default_seed_grid(monkeypatch):
 def test_build_grid_seed_error_is_swallowed(monkeypatch):
     from hyperloom.orchestrator.actions.executors import explore as _exp
 
-    def _boom(framework, *, model_class):
+    def _boom(framework, *, model_class, precision="", model_path=""):
         raise RuntimeError("seed fail")
 
     monkeypatch.setattr(_exp, "_default_grid_for_framework", _boom)
@@ -819,7 +819,7 @@ def test_hold_generating_empty_harvest_finishes_not_seeds(monkeypatch):
     from hyperloom.orchestrator.actions.executors import explore as _exp
 
     gv = SimpleNamespace(name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n")
-    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv])
+    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class, precision="", model_path="": [gv])
     s = _fake_self(
         framework="atom",
         framework_config_exploration_enabled=True,
