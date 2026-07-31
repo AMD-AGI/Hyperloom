@@ -1342,6 +1342,17 @@ class TestCompactJsonServerArgs:
             "model": "RedHatAI/Llama-3.1-8B-Instruct-speculator",
         }
 
+    def test_quote_stripped_nested_json_is_repaired(self):
+        out = _grid_runner.compact_json_server_args(
+            "--compilation-config {method:ngram,nested:{a:1}}",
+            "vllm",
+        )
+        blob = out.split(" ", 1)[1]
+        assert json.loads(blob) == {
+            "method": "ngram",
+            "nested": {"a": 1},
+        }
+
     def test_unrepairable_json_left_verbatim(self):
         # Genuinely broken blobs that cannot be repaired to valid JSON are left
         # verbatim (no worse than before), never raising.

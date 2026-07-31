@@ -235,7 +235,7 @@ _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 
 
 def _repair_unquoted_json(blob: str) -> str | None:
-    """Repair a JSON object/array whose double quotes were stripped.
+    """Best-effort repair of a JSON blob whose double quotes were stripped.
 
     A shlex round-trip (``shlex.split`` then space-join without re-quoting)
     strips the inner double quotes of a JSON-valued server arg, turning a
@@ -243,6 +243,9 @@ def _repair_unquoted_json(blob: str) -> str | None:
     ``json.loads`` rejects at boot. Re-quote bare object keys and bare string
     values, then VALIDATE by parsing: return the compact valid-JSON string, or
     ``None`` when it still does not parse (caller keeps the blob verbatim).
+
+    This is a narrowly scoped recovery heuristic for known JSON-valued server
+    flags after shlex damage, not a general parser for JSON-like syntax.
     """
     def _quote_value(m: "re.Match[str]") -> str:
         prefix, word = m.group(1), m.group(2)
