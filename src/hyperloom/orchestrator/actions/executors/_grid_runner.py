@@ -998,6 +998,30 @@ def _num_gpus_for_config(config_path: Path) -> float:
         return 1.0
 
 
+def _mn_restart_env(
+    reference_envs: dict[str, str],
+    variant: Any,
+    unset_envs: list[str],
+) -> dict[str, str]:
+    """Merge the reference server envs under one variant's own overrides.
+
+    Priority reference < variant, matching how the args side layers reference <
+    operator < per-task. Keys the variant unsets are dropped rather than
+    re-added, so an unset still means unset once the reference carries the key.
+
+    Args:
+        reference_envs: Reference-recipe server envs for the whole grid.
+        variant: The grid variant supplying ``extra_envs``.
+        unset_envs: Env names this variant removes.
+
+    Returns:
+        The env mapping to forward to the multi-node server restart.
+    """
+    merged = {k: v for k, v in reference_envs.items() if k not in unset_envs}
+    merged.update({str(k): str(v) for k, v in (variant.extra_envs or {}).items()})
+    return merged
+
+
 def _resolve_mn_effective_server_args(
     cfg_path: Path,
     base_yaml_path: Path,
@@ -1113,6 +1137,24 @@ async def run_grid(
             )
     except Exception as exc:  # noqa: BLE001 — best-effort hygiene, never blocks the grid
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
+
+    # Reference-recipe server envs, resolved once for the whole grid. Single-node
+    # gets these from the materialized YAML (materialize_config_with_envs seeds
+    # them) because Magpie launches the server from that YAML; multi-node launches
+    # through restart_server_for_round, which never reads it. The baseline already
+    # forwards them explicitly, so without this every variant runs on a server
+    # missing the envs the baseline was measured with and the gain is misattributed
+    # -- the env twin of the skewed-baseline bug the operator-args folding fixed.
+    from ._multi_node_env import is_multi_node as _mn_is_multi_node
+
+    _mn_ref_envs: dict[str, str] = {}
+    if _mn_is_multi_node():
+        try:
+            from .baseline import _resolve_reference_base
+
+            _, _mn_ref_envs = _resolve_reference_base(Path("."), model_path=str(model_path or ""))
+        except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
+            log.debug("grid_runner: reference env resolve swallowed: %r", exc)
 
     # Variant-boundary robustness pulse: a bounded tick after every variant so
     # a mid-grid leak/crash surfaces between variants. Best-effort.
@@ -1478,14 +1520,16 @@ async def run_grid(
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
+            _variant_unset = [str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()]
+            _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
             await restart_server_for_round(
                 extra_server_args=_mn_effective_args,
                 # Per-variant env overrides (e.g. MORI_* MoE-dispatch
                 # tuning) so server-side env knobs proposed by specialists
                 # actually take effect on the restarted sglang. Empty dict
                 # for arg-only variants → forwarded as a no-op.
-                extra_env=dict(variant.extra_envs),
-                unset_env=[str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()],
+                extra_env=_restart_env,
+                unset_env=_variant_unset,
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
