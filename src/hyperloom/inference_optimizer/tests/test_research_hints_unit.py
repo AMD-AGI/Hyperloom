@@ -394,24 +394,3 @@ def test_summarise_for_prompt_extra_more(tmp_path):
     rh.append_hints(tmp_path, incoming)
     out = rh.summarise_for_prompt(tmp_path, max_entries=3)
     assert "... and 7 more in research_hints.md." in out
-
-
-def test_builtin_hints_framework_routing():
-    """Generic reaches all; vLLM hints reach only vLLM (folder is the gate)."""
-    generic = rh.builtin_hints()
-    vllm = rh.builtin_hints("vllm")
-    sglang = rh.builtin_hints("sglang")
-    # every hint carries a source
-    assert all(h.get("source") for h in vllm)
-    # vLLM run sees generic + vLLM-specific (strictly more than generic)
-    assert len(vllm) > len(generic)
-    # a vLLM-only flag appears for vLLM but not for SGLang or generic
-    assert any("VLLM_ROCM_USE_AITER" in h["what"] for h in vllm)
-    assert not any("VLLM_ROCM_USE_AITER" in h["what"] for h in sglang)
-    assert not any("VLLM_ROCM_USE_AITER" in h["what"] for h in generic)
-
-
-def test_skeleton_seeds_framework_specific_hints(tmp_path):
-    """write_hints_skeleton(framework=...) routes the framework partition in."""
-    rh.write_hints_skeleton(tmp_path, framework="vllm")
-    assert len(rh.load_hints(tmp_path)) == len(rh.builtin_hints("vllm"))

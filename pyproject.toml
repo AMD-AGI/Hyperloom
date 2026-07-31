@@ -160,16 +160,6 @@ where = ["src"]
 hyperloom = [
     "orchestrator/prompts/*.md",
 ]
-# Human-editable, framework-partitioned advisory KB (markdown). Shipped so the
-# advisory_kb loader finds the .md at runtime in a wheel/site-packages install.
-# setuptools package-data globs are not recursive, so list each partition dir.
-"hyperloom.orchestrator.knowledge" = [
-    "advisory_kb/*.md",
-    "advisory_kb/generic/*.md",
-    "advisory_kb/vllm/*.md",
-    "advisory_kb/sglang/*.md",
-    "advisory_kb/atom/*.md",
-]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
     "README.md",

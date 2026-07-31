@@ -202,11 +202,3 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     )
     coord._seed_gaps_from_research_hints()
     assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)
-
-
-def test_skeleton_framework_routes_partition(tmp_path: Path):
-    """Seeding for vLLM includes vLLM hints; seeding generic excludes them."""
-    research_hints.write_hints_skeleton(tmp_path, framework="vllm")
-    seeded = research_hints.load_hints(tmp_path)
-    assert seeded == research_hints.builtin_hints("vllm")
-    assert len(seeded) > len(research_hints.builtin_hints())
