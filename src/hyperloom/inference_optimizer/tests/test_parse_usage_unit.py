@@ -150,7 +150,7 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
         '{"type": "assistant", "message": {"content": ['
         '{"type": "text", "text": "thinking"},'
         '{"type": "tool_use", "name": "WebSearch", "input": {"query": "rocm flash attn"}},'
-        '{"type": "tool_use", "name": "mcp__cortex_kb__lookup", "input": {"q": "x"}}'
+        '{"type": "tool_use", "name": "mcp__recipe_kb__lookup", "input": {"q": "x"}}'
         "]}}\n"
         "garbled\n"
         '{"type": "assistant", "message": {"content": ['
@@ -162,7 +162,7 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
     calls = pu.parse_claude_stream_json_tool_calls(log)
     assert [c["tool"] for c in calls] == [
         "WebSearch",
-        "mcp__cortex_kb__lookup",
+        "mcp__recipe_kb__lookup",
         "Read",
     ]
     assert calls[0]["query"] == "rocm flash attn"
@@ -243,47 +243,3 @@ def test_parse_claude_response_no_text(tmp_path):
     log = tmp_path / "p.log"
     log.write_text('{"type": "system"}\n', encoding="utf-8")
     assert pu.parse_claude_stream_json_response(log) is None
-
-
-# ---- parse_geak_usage ----
-
-
-def test_parse_geak_none_and_empty():
-    assert pu.parse_geak_usage(None) is None
-    assert pu.parse_geak_usage("") is None
-    assert pu.parse_geak_usage("{bad json") is None
-
-
-def test_parse_geak_translates_openai_names():
-    out = pu.parse_geak_usage({"usage": {"prompt_tokens": 11, "completion_tokens": 22}})
-    assert out["input_tokens"] == 11
-    assert out["output_tokens"] == 22
-
-
-def test_parse_geak_json_string():
-    out = pu.parse_geak_usage(json.dumps({"usage": {"input_tokens": 4}}))
-    assert out["input_tokens"] == 4
-
-
-def test_parse_geak_no_usage():
-    assert pu.parse_geak_usage({"foo": 1}) is None
-
-
-# ---- _find_usage_in_obj ----
-
-
-def test_find_usage_token_usage_key():
-    assert pu._find_usage_in_obj({"token_usage": {"x": 1}}) == {"x": 1}
-
-
-def test_find_usage_nested_list():
-    obj = {"choices": [{"message": {"usage": {"input_tokens": 1}}}]}
-    assert pu._find_usage_in_obj(obj) == {"input_tokens": 1}
-
-
-def test_find_usage_depth_limit():
-    assert pu._find_usage_in_obj({"usage": {"x": 1}}, _depth=5) is None
-
-
-def test_find_usage_non_dict():
-    assert pu._find_usage_in_obj("string") is None

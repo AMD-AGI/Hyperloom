@@ -117,6 +117,24 @@ def _maybe_build_runtime_candidate(
         return None
 
 
+def _enablement_carrier_params(state: Any) -> dict[str, Any]:
+    """eval-origin trigger context threaded to specialist/integrate/build tasks.
+
+    Empty for boot-origin enablement so the boot path is unchanged.
+    """
+    origin = str(getattr(state, "enablement_origin", "") or "")
+    if not origin:
+        return {}
+    out: dict[str, Any] = {
+        "enablement_origin": origin,
+        "enablement_accuracy_floor": float(getattr(state, "enablement_accuracy_floor", 0.0) or 0.0),
+    }
+    cfg = str(getattr(state, "enablement_probe_config_path", "") or "")
+    if cfg:
+        out["enablement_probe_config_path"] = cfg
+    return out
+
+
 def _maybe_build_localization_candidate(
     capability_gap: Any,
     *,
@@ -1208,6 +1226,8 @@ class FrameworkPhase(PhaseHandler):
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
+            # eval-origin trigger context (empty for boot-origin enablement).
+            **_enablement_carrier_params(state),
         }
         if runtime_candidate is not None:
             params_out["runtime_candidate"] = runtime_candidate
@@ -1475,26 +1495,33 @@ class FrameworkPhase(PhaseHandler):
         return tuple(refs)
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
-        """Dispatch an enablement_specialist when baseline cannot launch.
+        """Dispatch an enablement_specialist when a baseline cannot launch or its
+        accuracy eval fails.
 
-        Retries until the combo runs or the run wall-clock deadline passes (no
-        attempt-count cap). Guards:
+        Retries until the combo runs correctly or the run wall-clock deadline
+        passes (no attempt-count cap). Guards:
 
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
+        * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
+          genuine-baseline revalidation; authoring is paused until it resolves.
         * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
           on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
           with the next bridging candidate (``enablement_attempts`` rotates it).
         * run deadline passed — stop dispatching new work near the close.
 
-        When the captured log classifies to ``UNKNOWN``, no authoring is
-        dispatched; a one-shot ``needs_human_review`` record is emitted (deduped
-        per distinct log). No-op on multi-node.
+        A non-blank log is always dispatched (the specialist repairs from the raw
+        log even when it classifies to ``UNKNOWN``); only a blank log is a no-op,
+        recorded once as ``needs_human_review``. No-op on multi-node.
 
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).
         """
         state = self.shared_state
         if bool(getattr(state, "enablement_succeeded", False)):
+            return ""
+        if bool(getattr(state, "enablement_validation_pending", False)):
+            # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation;
+            # do not dispatch another authoring round until that resolves.
             return ""
         if bool(getattr(state, "enablement_dispatched", False)):
             # Watchdog: an enablement round is marked in-flight. If it has
@@ -1796,11 +1823,31 @@ class FrameworkPhase(PhaseHandler):
                 state.enablement_localization_manifest = existing
 
         if status == "kept":
-            state.enablement_succeeded = True
-            state.enablement_stall_streak = 0
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
             _stack_kept_runtime()
+            # Persist the actual materialized config used for the KEEP'd bench so
+            # the revalidation baseline re-runs the identical effective config.
+            accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
+            if accepted_cfg:
+                state.enablement_accepted_config_path = accepted_cfg
+            if str(getattr(state, "enablement_origin", "") or "") == "eval":
+                # eval-origin: the patch boots and re-passed accuracy in the gate,
+                # but tput/accuracy only become official once a GENUINE baseline
+                # promotes. Hold succeeded; open the revalidation window. Keep the
+                # stall streak so repeated KEEP->revalidation-fail cycles still
+                # reach the stall cap.
+                state.enablement_validation_pending = True
+                state.enablement_dispatched = False
+                # Increment generation so the new window gets a fresh idempotency
+                # key and cannot reuse a prior terminal TaskRegistry row.
+                state.enablement_revalidation_generation = (
+                    int(getattr(state, "enablement_revalidation_generation", 0) or 0) + 1
+                )
+                state.enablement_revalidation_task_id = ""
+            else:
+                state.enablement_succeeded = True
+                state.enablement_stall_streak = 0
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
@@ -3029,7 +3076,7 @@ class FrameworkPhase(PhaseHandler):
         kept: bool,
     ) -> None:
         """Write framework KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         result_dict = result.result if hasattr(result, "result") else (result or {})
         if not isinstance(result_dict, dict):
@@ -3310,9 +3357,12 @@ class FrameworkPhase(PhaseHandler):
         batch_id = ""
         any_call_ok = False
         last_exc: Exception | None = None
-        # Spread the phase timeout across repos so one slow repo can't blow the whole budget.
-        per_repo_timeout = timeout_sec / float(len(repo_urls)) if repo_urls else timeout_sec
-        per_repo_timeout = max(per_repo_timeout, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
+        # ``timeout_sec`` bounds one repo, not the whole fan-out: each call is an
+        # independent primus_cortex round-trip, so dividing it starves every repo
+        # once the repo list grows (9 repos drove it to the 30s floor while a
+        # single discover needs ~20s plus PR-Monitor latency). The whole-phase
+        # bound is the caller's budget plus DISCOVER_FAILURE_RETRY_LIMIT.
+        per_repo_timeout = max(timeout_sec, _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC)
         for repo_url in repo_urls:
             try:
                 repo_payload = await _fa_client.phase_discover(
@@ -4299,7 +4349,11 @@ class FrameworkPhase(PhaseHandler):
             if candidate:
                 _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
                 repo_url = _repo or repo_url
-                ref = _ref or ref
+                # Take the resolved ref verbatim, including empty. An empty ref
+                # means "not checkoutable, autoselect a tag" (an issue citation),
+                # so falling back to the raw request here would hand the builder
+                # back the very string resolution just rejected.
+                ref = _ref
                 source_pr_url = _pr
             if not _repo_matches_targeted_build_component(repo_url, component):
                 log.warning(
@@ -4484,8 +4538,13 @@ class FrameworkPhase(PhaseHandler):
             "enablement_before_signature": before_sig,
             "source": "coordinator_internal",
             **self._framework_gpu_params(),
+            **_enablement_carrier_params(state),
         }
-        cfg = str(getattr(state, "baseline_config_path", "") or "")
+        # Prefer the eval-origin probe config so the re-run keeps the original
+        # workload/eval contract; fall back to the promoted baseline config.
+        cfg = str(getattr(state, "enablement_probe_config_path", "") or "") or str(
+            getattr(state, "baseline_config_path", "") or ""
+        )
         if cfg:
             params["config_path"] = cfg
         idem = f"build_launch_probe:{build_task_id}"
@@ -4504,6 +4563,69 @@ class FrameworkPhase(PhaseHandler):
             probe_tid,
             existing,
         )
+
+    async def _maybe_enqueue_enablement_baseline_revalidation(self) -> str:
+        """Enqueue one genuine baseline to revalidate a KEEP'd eval-origin patch.
+
+        Uses the accepted config from the KEEP'd candidate bench (preferred) or
+        falls back to the original probe config.  The frozen eval controls from
+        the carrier params ensure RUN_EVAL and eval task/limit match the trigger
+        contract. Idempotent and one-at-a-time.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "enablement_validation_pending", False)):
+            return ""
+        # If we already have a tracked revalidation task that is still alive, do
+        # not create another one.
+        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        if tracked_tid:
+            try:
+                for t in (*await self.tasks.queued(), *await self.tasks.running()):
+                    if str(getattr(t, "task_id", "") or "") == tracked_tid:
+                        return tracked_tid
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+        params: dict[str, Any] = {
+            "source": "coordinator_internal",
+            "reason": "enablement_eval_revalidation",
+            "disable_run_eval": False,
+            **_enablement_carrier_params(state),
+        }
+        # Prefer the accepted (post-fix) config so revalidation uses the same
+        # effective config the KEEP'd candidate ran; fall back to the trigger
+        # probe config only when no accepted config was recorded.
+        accepted_cfg = str(getattr(state, "enablement_accepted_config_path", "") or "").strip()
+        probe_cfg = str(getattr(state, "enablement_probe_config_path", "") or "").strip()
+        cfg = accepted_cfg or probe_cfg
+        if cfg:
+            params["config_path"] = cfg
+        # Carry the active runtime override so the revalidation baseline runs
+        # under the same framework runtime as the KEEP'd candidate.
+        active_rt = getattr(state, "enablement_active_runtime", None) or {}
+        if isinstance(active_rt, dict) and active_rt:
+            from ..framework.stack_actions import FrameworkRuntime
+
+            rt_obj = FrameworkRuntime.from_state(active_rt)
+            rt_override = rt_obj.to_runtime_override()
+            if rt_override:
+                params["runtime_override"] = rt_override
+        # Use generation in the idempotency key so each revalidation window gets
+        # a fresh row even when a prior window's row is in a terminal state.
+        gen = int(getattr(state, "enablement_revalidation_generation", 0) or 0)
+        task, _existing = await self.tasks.create_or_return_existing(
+            kind="baseline",
+            params=params,
+            idempotency_key=f"enablement_revalidation:gen{gen}",
+        )
+        task_id = str(getattr(task, "task_id", "") or "")
+        # Persist the task_id so _promote_baseline can verify identity.
+        if task_id and task_id != str(getattr(state, "enablement_revalidation_task_id", "") or ""):
+            state.enablement_revalidation_task_id = task_id
+            try:
+                state.save(self.session_dir)
+            except Exception:  # noqa: BLE001 — defensive
+                log.debug("enablement revalidation: save of task_id failed", exc_info=True)
+        return task_id
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
@@ -4530,6 +4652,10 @@ class FrameworkPhase(PhaseHandler):
             await self._maybe_route_build_outcomes()
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.exception("ENABLEMENT route_build_outcomes (%s) failed", caller)
+        try:
+            await self._maybe_enqueue_enablement_baseline_revalidation()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT revalidation (%s) failed", caller)
         try:
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick

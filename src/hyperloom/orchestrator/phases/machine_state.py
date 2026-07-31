@@ -230,9 +230,9 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "time_exhausted",
         "time_exhausted_during_prelude",
         "user_stop_requested",
-        "cortex_t0_failed",
-        "cortex_drain_failed",
-        "cortex_commit_failed",
+        "recipe_kb_t0_failed",
+        "recipe_kb_drain_failed",
+        "recipe_kb_commit_failed",
         "prelude_baseline_failed",
         "prelude_policy_loop",
         "policy_loop",
@@ -268,9 +268,9 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "prelude_baseline_failed",
         "prelude_policy_loop",
         "time_exhausted_during_prelude",
-        "cortex_t0_failed",
-        "cortex_drain_failed",
-        "cortex_commit_failed",
+        "recipe_kb_t0_failed",
+        "recipe_kb_drain_failed",
+        "recipe_kb_commit_failed",
         "plateau_explore",
         "plateau_kernel",
         "no_kernel_skipped",
@@ -584,6 +584,25 @@ def should_reloop_to_explore(
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
+
+
+def _kernel_idle_max_ticks() -> int:
+    """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP.
+
+    Env-overridable via ``INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS``. Default 3
+    tolerates transient no-work windows (e.g. a candidate being set up) while
+    still winding down promptly once candidates are genuinely exhausted, instead
+    of spinning until the KERNEL wall-clock cap.
+    """
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", "") or "").strip()
+    try:
+        val = int(raw)
+        return val if val >= 1 else 3
+    except (TypeError, ValueError):
+        return 3
+
+
+KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
@@ -1590,7 +1609,7 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Detect a PRELUDE-aborting stop reason on the state.
 
-    Recognizes terminal stop reasons (e.g. ``cortex_t0_failed``,
+    Recognizes terminal stop reasons (e.g. ``recipe_kb_t0_failed``,
     ``time_exhausted_during_prelude``) so phase history captures the
     boundary.
 
@@ -1603,7 +1622,7 @@ def abort_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """
     # Treat these stop reasons as a PRELUDE abort so phase_history records it.
     sr = (getattr(state, "stop_reason", "") or "").strip()
-    if sr in ("cortex_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
+    if sr in ("recipe_kb_t0_failed", "time_exhausted_during_prelude", "prelude_policy_loop", "user_stop_requested"):
         return sr, {"reason_origin": "shared_state.stop_reason"}
     return None
 
@@ -1713,6 +1732,21 @@ def exit_normal_kernel(
             return "kernel_no_more_leverage", {
                 "evidence": "kernel_no_more_leverage",
                 "hint": ESCALATE_HINT_SKIP_TO_SWEEP,
+            }
+    # Idle-spin guard: the escalate-hint handoff above needs the kernel_agent to
+    # emit ``escalate_strategy_change``, but PolicyGate denies that intent for the
+    # kernel_agent role — so when candidates are exhausted the phase can otherwise
+    # spin (hallucinated kernel-id requests / no-intent turns) until the wall-clock
+    # cap. When work has been unavailable for KERNEL_IDLE_MAX_TICKS consecutive
+    # ticks, wind down to SWEEP without the hint. (kernel_idle_ticks is maintained
+    # per-tick by the phase machine.)
+    if not kernel_work_pending(state):
+        idle_ticks = int(getattr(state, "kernel_idle_ticks", 0) or 0)
+        if idle_ticks >= KERNEL_IDLE_MAX_TICKS:
+            return "kernel_no_more_leverage", {
+                "evidence": "kernel_idle_no_progress",
+                "idle_ticks": idle_ticks,
+                "idle_max_ticks": KERNEL_IDLE_MAX_TICKS,
             }
     rejected = getattr(state, "rejected_kernel_ids", None) or []
     rejected_count = len(rejected) if isinstance(rejected, list) else 0

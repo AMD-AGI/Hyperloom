@@ -230,24 +230,6 @@ def test_emit_fact_creates_fence_when_absent() -> None:
     assert "## Facts" in mcp.pages["p"]
 
 
-def test_retract_fact_removes_matching_line() -> None:
-    pages = {"recipe/x": _page(_RECIPE_BODY)}
-    kg, mcp = _client(pages)
-    removed = kg.retract_fact(
-        page_slug="recipe/x", subject="fp8_kernel_patch", predicate="REVERTED_ON", object="qwen2forcausallm"
-    )
-    assert removed is True
-    facts = parse_facts_fence(mcp.pages["recipe/x"])
-    assert not any(f.subject == "fp8_kernel_patch" for f in facts)
-
-
-def test_retract_fact_noop_when_absent() -> None:
-    pages = {"recipe/x": _page(_RECIPE_BODY)}
-    kg, mcp = _client(pages)
-    removed = kg.retract_fact(page_slug="recipe/x", subject="nope", predicate="IMPROVES", object="x")
-    assert removed is False
-
-
 class _StructuredMcp:
     """Fake MCP whose get_page returns parsed {frontmatter: dict, body}."""
 
@@ -469,9 +451,8 @@ def test_knob_guided_no_archs_returns_empty() -> None:
 class _LinkGraphMcp:
     """Fake MCP modeling gbrain's native link graph.
 
-    ``add_link`` requires both endpoint pages to exist, edges are unique on
-    ``(from, to, link_type)`` (re-add upserts context), and ``remove_link``
-    deletes every edge between a pair.
+    ``add_link`` requires both endpoint pages to exist and edges are unique on
+    ``(from, to, link_type)`` (re-add upserts context).
     """
 
     def __init__(self, pages: list[str] | None = None, edges: list[dict[str, Any]] | None = None) -> None:
@@ -498,10 +479,6 @@ class _LinkGraphMcp:
                     e["context"] = args.get("context", "{}")
                     return {"status": "ok"}
             self.edges.append({"from_slug": f, "to_slug": t, "link_type": lt, "context": args.get("context", "{}")})
-            return {"status": "ok"}
-        if tool == "remove_link":
-            f, t = args["from"], args["to"]
-            self.edges = [e for e in self.edges if not (e["from_slug"] == f and e["to_slug"] == t)]
             return {"status": "ok"}
         if tool == "get_links":
             return [dict(e) for e in self.edges if e["from_slug"] == args["slug"]]
@@ -630,31 +607,6 @@ def test_native_emit_fact_idempotent() -> None:
     kg = KGClient(mcp, use_native_kg=True)
     kg.emit_fact(page_slug="p", subject="a", predicate="IMPROVES", object="b")
     kg.emit_fact(page_slug="p", subject="a", predicate="IMPROVES", object="b")
-    assert len(mcp.edges) == 1
-
-
-def test_native_retract_preserves_other_link_types() -> None:
-    mcp = _LinkGraphMcp(
-        pages=["a", "b"],
-        edges=[
-            {"from_slug": "a", "to_slug": "b", "link_type": "keep_knob", "context": "{}"},
-            {"from_slug": "a", "to_slug": "b", "link_type": "conflicts_with", "context": "{}"},
-        ],
-    )
-    kg = KGClient(mcp, use_native_kg=True)
-    removed = kg.retract_fact(page_slug="p", subject="a", predicate="KEEP_KNOB", object="b")
-    assert removed is True
-    remaining = {e["link_type"] for e in mcp.edges}
-    assert remaining == {"conflicts_with"}
-
-
-def test_native_retract_noop_when_absent() -> None:
-    mcp = _LinkGraphMcp(
-        pages=["a", "b"],
-        edges=[{"from_slug": "a", "to_slug": "b", "link_type": "keep_knob", "context": "{}"}],
-    )
-    kg = KGClient(mcp, use_native_kg=True)
-    assert kg.retract_fact(page_slug="p", subject="a", predicate="IMPROVES", object="b") is False
     assert len(mcp.edges) == 1
 
 

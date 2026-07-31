@@ -349,7 +349,8 @@ class LangfuseEmitter:
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
             "kb_spans_sent": 0,  # KB trace spans (assess/priors/recipe)
-            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl rows swept
+            "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
+            "recipe_write_audit_read": 0,  # of which were recipe-KB writes
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept
             "forge_steps_read": 0,  # forge_steps.jsonl rows swept
             "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
@@ -576,7 +577,7 @@ class LangfuseEmitter:
         unless live push is enabled.
 
         Args:
-            name (str): Span name (e.g. ``"kb_assess:iter_3"``).
+            name (str): Span name (e.g. ``"kb_priors:iter_3"``).
             agent (str): Owning agent (``"critic"`` / ``"recipe_kb"``).
             output (Any): The trace payload attached as the span output.
             phase (str): Phase bucket; defaults to ``(unphased)``.
@@ -914,28 +915,32 @@ class LangfuseEmitter:
                 self._emit_generation(token_row=row, conv_row=None)
 
     def _flush_recipe_kb_audit(self) -> None:
-        """Backfill recipe-snapshot / gbrain remote reads from the audit log.
+        """Backfill recipe-KB reads and writes from the audit log.
 
-        The recipe KB dispatcher appends one row per remote read to
-        ``runtime/recipe_snapshot/.audit.jsonl``. Each row becomes a
-        ``kb:recipe_snapshot:<method>`` span under the ``recipe_kb`` agent. Read
-        out-of-band at session end; idempotent via the ``flush_session`` guard.
+        The recipe KB dispatcher appends one row per read and per write to
+        ``runtime/recipe_snapshot/.audit.jsonl``. Reads become
+        ``kb:recipe_snapshot:<method>`` spans; writes become
+        ``kb:recipe_write:<generator>`` spans carrying what this session sank
+        into the KB (which fields grew, by how much, and at which version).
+        Both nest under the ``recipe_kb`` agent. Read out-of-band at session
+        end; idempotent via the ``flush_session`` guard.
+
+        Rows predating the write-audit event carry no ``op`` and are treated as
+        reads, so historical sessions replay exactly as before.
         """
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
             self._counts["recipe_audit_read"] += 1
-            method = str(row.get("method") or "read")
+            if lfmap.recipe_audit_is_write(row):
+                self._counts["recipe_write_audit_read"] += 1
+                name, metadata = lfmap.recipe_write_span(row)
+            else:
+                name, metadata = lfmap.recipe_read_span(row)
             self.record_kb_span(
-                name=f"kb:recipe_snapshot:{method}",
+                name=name,
                 agent="recipe_kb",
                 output=row,
-                metadata={
-                    "kind": "recipe_snapshot",
-                    "method": method,
-                    "remote": row.get("remote"),
-                    "resolution": row.get("resolution"),
-                    "hit": bool(row.get("hit")),
-                },
+                metadata=metadata,
                 ts=row.get("ts"),
             )
 
@@ -1276,22 +1281,6 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
-def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
-    """Load the written ``session_breakdown.json`` for ``session_dir`` ({} if absent).
-
-    Args:
-        session_dir: Session directory whose breakdown file is read.
-
-    Returns:
-        dict[str, Any]: the parsed breakdown object, or ``{}`` when the file is
-            missing, unreadable, or not a JSON object.
-    """
-    from hyperloom.common.jsonio import read_json
-    from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
-
-    return read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
-
-
 def record_session_breakdown(
     session_dir: Path,
     breakdown: dict[str, Any] | None = None,
@@ -1307,7 +1296,10 @@ def record_session_breakdown(
         breakdown: the breakdown document; read from disk when ``None``.
     """
     if breakdown is None:
-        breakdown = _read_breakdown_file(Path(session_dir))
+        from hyperloom.common.jsonio import read_json
+        from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
+
+        breakdown = read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
     get_emitter(session_dir).record_session_breakdown(breakdown)
 
 

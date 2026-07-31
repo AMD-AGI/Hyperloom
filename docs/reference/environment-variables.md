@@ -200,6 +200,20 @@ do not publish it unchanged in support bundles.
 
 ---
 
+## Enablement accuracy trigger
+
+When a first baseline boots and measures throughput but its accuracy eval fails
+(crashes, produces no result, or scores below the floor), enablement can repair
+the model instead of halting the run. Single-node only; multi-node keeps the
+existing behavior.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL` | `1` (on) | Route a baseline accuracy-eval failure into enablement instead of halting. Set `0`/`false`/`no`/`off` to keep the legacy salvage/stop behavior. Reader: `_accuracy_gate.enablement_on_eval_fail_enabled`. |
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR` | `0.05` | Shared accuracy floor used by BOTH the baseline eval-failure trigger and the enablement KEEP gate. A collapse guard rather than a quality bar — raise it for a genuine quality gate. A score of exactly `0.0` always fails regardless of the floor (strictly positive is required); otherwise `score >= floor` passes. Accepts a finite value in `[0, 1]`; out-of-range values are ignored with a warning. Reader: `_accuracy_gate.enablement_accuracy_floor`. |
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.
@@ -253,7 +267,6 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`1`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb` by default for production compatibility. The generated config is chmod `0600`. Set to `0` to skip bearer-auth Cortex KB MCP wiring when no auth header should be persisted. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -264,11 +277,10 @@ The following variables configure the Critic, Robustness, and knowledge base com
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe/Cortex knowledge base in Hyperloom](integrate-kb.md).             |
+| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe knowledge base in Hyperloom](integrate-kb.md).             |
 | `GBRAIN_BASE_URL`                     | Unset                  | Base URL of the remote recipe-snapshot page store — the **read** side of the recipe KB. When unset, recipe reads are local-only.       |
 | `GBRAIN_TOKEN`                        | Unset                  | Bearer token for `GBRAIN_BASE_URL`.                                                                                                   |
 | `RECIPE_KB_MIRROR_MODE`               | `external`             | `external` (default): a separate ingest process mirrors the local store into the remote recipe KB. `inline`: best-effort mirror each local write into the remote store in-process (local write stays authoritative). |
-| `CORTEX_KB_URL`                       | Unset                  | Optional Cortex KB URL used **only** by the Critic agent's per-proposal assess enrichment (`/v2/reasoning/assess`) — *not* the recipe KB. Also set by `--cortex-kb-url`. No Cortex call is made unless configured. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |
@@ -295,6 +307,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Recipe-KB spans**: under the `recipe_kb` agent span, both directions of the cross-session recipe KB are recorded — `kb:recipe_snapshot:<method>` for reads (`get_recipe` / `search`) and `kb:recipe_write:<generator>` for writes. The generator suffix separates the session-opening `t0_anchor` identity stamp from the `coordinator` KEEP/REVERT/PR/CLOSE amends. Because a write rewrites the whole row, each write span carries `<field>_delta` metadata (`lessons_delta`, `pitfalls_delta`, …) reporting what that write actually contributed — a restamp that adds nothing shows no delta keys, so it is distinguishable from a real amend. The full audit row is attached as span output.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
   - The redacted connection config (host and key-presence booleans — never the keys themselves)

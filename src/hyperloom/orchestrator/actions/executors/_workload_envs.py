@@ -1107,6 +1107,14 @@ def materialize_config_with_envs(
     if "RUN_EVAL" not in envs:
         env_run_eval = os.environ.get("RUN_EVAL")
         envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else "true"
+    # Persist eval task/limit into the YAML so they become part of the
+    # fingerprint-able contract and bypass_runner reads them from a stable source.
+    _eval_tasks_env = os.environ.get("MAGPIE_EVAL_TASKS", "").strip()
+    if _eval_tasks_env and "MAGPIE_EVAL_TASKS" not in envs:
+        envs["MAGPIE_EVAL_TASKS"] = _eval_tasks_env
+    _eval_limit_env = os.environ.get("MAGPIE_EVAL_LIMIT", "").strip()
+    if _eval_limit_env and "MAGPIE_EVAL_LIMIT" not in envs:
+        envs["MAGPIE_EVAL_LIMIT"] = _eval_limit_env
     if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:

@@ -132,6 +132,34 @@ def _coerce_args_str(value: Any) -> str:
     return str(value)
 
 
+# Audit/provenance metadata stashed on a GridVariant that must survive being
+# rebuilt into a derived variant.
+_CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
+    "provenance",
+    "scope",
+    "overlay_pythonpath",
+    "kb_evidence",
+    "pr_evidence",
+    "source_evidence",
+)
+
+
+def _carry_variant_metadata(src: Any, dst: Any) -> Any:
+    """Copy the carried audit metadata from ``src`` onto ``dst``.
+
+    Args:
+        src: The variant to read metadata from.
+        dst: The derived variant to stamp.
+
+    Returns:
+        ``dst``, for chaining.
+    """
+    for attr in _CARRIED_VARIANT_ATTRS:
+        if hasattr(src, attr):
+            setattr(dst, attr, getattr(src, attr))
+    return dst
+
+
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
     """Return non-default remove/unset/replace controls for ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
@@ -161,25 +189,6 @@ def _entry_control_fields(entry: Any) -> dict[str, Any]:
         out["unset_envs"] = unset_envs
     if args_mode == "replace":
         out["args_mode"] = "replace"
-    return out
-
-
-def _flag_names_for_removal(args_text: str) -> list[str]:
-    """Return flag names from an arg string for base replace-mode ablation."""
-    if not args_text.strip():
-        return []
-    import shlex
-
-    try:
-        tokens = shlex.split(args_text)
-    except ValueError:
-        tokens = args_text.split()
-    out: list[str] = []
-    for tok in tokens:
-        if tok.startswith("--"):
-            flag = tok.split("=", 1)[0]
-            if flag not in out:
-                out.append(flag)
     return out
 
 
@@ -475,19 +484,6 @@ def _compute_explore_variant_timeout(
     effective_kill_ratio = max(1.0, float(kill_ratio))
     derived = float(baseline_runtime_sec) * (effective_kill_ratio + float(safety_margin))
     return int(max(floor_sec, min(ceiling_sec, derived)))
-
-
-def _join_args(*parts: str) -> str:
-    """Join non-empty, stripped argument fragments with single spaces.
-
-    Args:
-        *parts (str): Argument fragments; empty/whitespace ones are
-            dropped.
-
-    Returns:
-        str: The space-joined argument string.
-    """
-    return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 class ExploreExecutor:
@@ -1037,16 +1033,28 @@ class ExploreExecutor:
                     unset_envs=run_unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
-                for attr in (
-                    "provenance",
-                    "scope",
-                    "overlay_pythonpath",
-                    "kb_evidence",
-                    "pr_evidence",
-                    "source_evidence",
-                ):
-                    if hasattr(gv, attr):
-                        setattr(run_gv, attr, getattr(gv, attr))
+                _carry_variant_metadata(gv, run_gv)
+                # The decision round is timed against a throughput-only anchor, so
+                # it measures throughput only: the warmup round already evaluated
+                # accuracy and ``parse_eval_results`` falls back to that score.
+                # Without a warmup there is nothing to fall back to, so the
+                # decision round keeps its own eval.
+                decision_gv = run_gv
+                if use_warm_decision:
+                    decision_envs = dict(run_extra_envs)
+                    decision_envs["RUN_EVAL"] = "false"
+                    decision_gv = _carry_variant_metadata(
+                        run_gv,
+                        GridVariant(
+                            name=gv.name,
+                            extra_server_args=gv.extra_server_args,
+                            extra_envs=decision_envs,
+                            note=gv.note,
+                            remove_args=run_remove_args,
+                            unset_envs=run_unset_envs,
+                            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                        ),
+                    )
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # Round 1 + round 2 share this slot as the lifecycle pid_dir so
@@ -1154,7 +1162,7 @@ class ExploreExecutor:
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
-                        grid=[run_gv],
+                        grid=[decision_gv],
                         output_root=slot,
                         variant_timeout_sec=timeout_sec,
                         model_path=resolved_model,
@@ -1428,10 +1436,16 @@ class ExploreExecutor:
                             # comparable; otherwise a fresh cold boot. The
                             # overtime-kill deadline applies as in the decision
                             # round.
+                            rebench_envs = dict(gv.extra_envs)
+                            if use_warm_decision:
+                                # Throughput-stability check only; it shares the
+                                # decision round's throughput-only deadline and
+                                # never reads an accuracy score.
+                                rebench_envs["RUN_EVAL"] = "false"
                             rebench_variant = GridVariant(
                                 name=f"{gv.name}__stack_rebench",
                                 extra_server_args=gv.extra_server_args,
-                                extra_envs=dict(gv.extra_envs),
+                                extra_envs=rebench_envs,
                                 note="stack_rebench",
                                 remove_args=list(run_remove_args),
                                 unset_envs=list(run_unset_envs),

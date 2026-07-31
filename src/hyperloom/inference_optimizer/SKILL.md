@@ -183,7 +183,7 @@ Any failure → treat as fresh launch and re-run `install.sh`.
 > The in-loop equivalent is `_preflight()` steps 1–12 (drift repair, not
 > a substitute for this outer gate).
 
-### IR-3 — KB + PR Monitor reachability (in-loop, soft degrade)
+### IR-3 — PR Monitor reachability (in-loop, soft degrade)
 
 `_preflight()` invokes:
 
@@ -193,15 +193,17 @@ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/preflight_kb.sh"
 
 Exit codes (soft degrade — IR-3 never aborts launch):
 
-- `0` → KB + PR Monitor both reachable. `cortex_enabled` / `pr_monitor_enabled` stay `True`.
-- `1` → at least one branch unreachable. The cli automatically enables the
-  matching `--degraded-*` and continues; `manifest.json` records
-  `kb_degraded_reason=ir3_auto` (or `pr_degraded_reason=ir3_auto`).
+- `0` → PR Monitor reachable (or probe skipped). `pr_monitor_enabled` stays `True`.
+- `1` → PR Monitor unreachable. The cli auto-enables `--degraded-pr` and
+  continues; `manifest.json` records `pr_degraded_reason=ir3_auto`.
 
-Operator opt-out: pass `--degraded-kb` / `--degraded-pr` to skip the
-corresponding probe (one round-trip saved); `manifest.json` then
-records `reason=explicit_flag`. Both flags together short-circuit the
-entire IR-3 step.
+Recipe KB enablement is independent: `--degraded-kb` sets `recipe_kb_enabled=False`
+(T0/T2/T3/T4 no-ops) without affecting PR Monitor.
+
+Operator opt-out: pass `--degraded-pr` to skip the PR Monitor probe (one
+round-trip saved); `manifest.json` then records `reason=explicit_flag`.
+Pass `--degraded-kb` and `--degraded-pr` together to short-circuit the entire
+IR-3 step.
 
 ### IR-4 / IR-6 / IR-7 — EXPLORE phase contracts (Coordinator-internal)
 

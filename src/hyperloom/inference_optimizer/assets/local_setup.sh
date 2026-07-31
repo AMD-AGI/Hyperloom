@@ -56,7 +56,7 @@ Options:
 
 Advanced env overrides:
   REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
-  FORGE_PATH, KERNEL_FORGE_ROOT, KERNEL_FORGE_PATH, KERNEL_FORGE_REPO
+  FORGE_PATH, KERNEL_FORGE_REPO
 EOF
 }
 
@@ -165,8 +165,7 @@ clone_or_update() {
 resolve_forge() {
   if [ -n "${FORGE_PATH:-}" ]; then
     [ -d "$FORGE_PATH" ] || die "FORGE_PATH is set but does not exist: ${FORGE_PATH}"
-    KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
-    export FORGE_PATH KERNEL_FORGE_ROOT
+    export FORGE_PATH
     log "FORGE_PATH: using existing ${FORGE_PATH}"
     return 0
   fi
@@ -179,8 +178,7 @@ resolve_forge() {
   local root="${_open_source_root}/KernelForge"
   if clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""; then
     FORGE_PATH="${FORGE_PATH:-$root}"
-    KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
-    export FORGE_PATH KERNEL_FORGE_ROOT
+    export FORGE_PATH
     log "FORGE_PATH: ${FORGE_PATH}"
   else
     warn "KernelForge checkout unavailable (${KERNEL_FORGE_REPO}); skipping forge backend setup."
@@ -210,7 +208,6 @@ write_local_env() {
     write_export HYPERLOOM_CACHE_DIR "$_open_source_root"
     if [ -n "${FORGE_PATH:-}" ]; then
       write_export FORGE_PATH "$FORGE_PATH"
-      write_export KERNEL_FORGE_ROOT "$KERNEL_FORGE_ROOT"
     fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"

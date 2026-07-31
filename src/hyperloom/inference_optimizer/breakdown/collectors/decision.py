@@ -135,22 +135,6 @@ def _load_llm_calls(
     return [r for r in rows if isinstance(r, dict)]
 
 
-def aggregate_session_cache_tokens(
-    session_dir: Path,
-    warnings: list[str] | None = None,
-) -> tuple[int, int]:
-    """Sum (cache_creation, cache_read) over ``reports/trace/llm_calls.jsonl``.
-
-    Reuses the same ledger read + fold as the token rollup, so the figures match
-    ``session_breakdown.json``. Best-effort: missing trace files yield ``(0, 0)``.
-    """
-    warns = warnings if warnings is not None else []
-    bucket = _empty_token_bucket()
-    for call in _load_llm_calls(session_dir, warns):
-        _fold_call_into_bucket(bucket, call)
-    return bucket["total_cache_creation"], bucket["total_cache_read"]
-
-
 def _load_proposal_task_map(
     session_dir: Path,
     warnings: list[str],

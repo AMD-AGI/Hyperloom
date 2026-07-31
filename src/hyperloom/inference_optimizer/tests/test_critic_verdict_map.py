@@ -206,7 +206,7 @@ def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
 class _BareSharedState:
     """SharedState double exposing the fields the review-verdict handler touches."""
 
-    cortex_session_id: str = "sid-test"
+    recipe_kb_session_id: str = "sid-test"
     save_count: int = 0
     # Empty string means "nothing in flight"; the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
@@ -247,7 +247,7 @@ class _StubBus:
         return None
 
 
-class _StubCortexKB:
+class _StubRecipeKB:
     enabled: bool = True
 
     def __init__(self) -> None:
@@ -264,7 +264,7 @@ def coord(tmp_path: Path):
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
     c.state = CoordinatorState()
-    c.cortex_kb = _StubCortexKB()
+    c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
@@ -514,7 +514,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
     coord.state = CoordinatorState()
-    coord.cortex_kb = _StubCortexKB()
+    coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
     coord._record_observation = AsyncMock()  # type: ignore[method-assign]
 
@@ -568,7 +568,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
-    coord.cortex_kb = _StubCortexKB()
+    coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
     coord._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
@@ -599,7 +599,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     class _MoreState:
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        cortex_session_id: str = "sid-test"
+        recipe_kb_session_id: str = "sid-test"
         save_count: int = 0
         synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
@@ -636,7 +636,7 @@ def _delegate_coord(tmp_path: Path):
 
     c.shared_state = _State()
     c.state = CoordinatorState()
-    c.cortex_kb = _StubCortexKB()
+    c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]

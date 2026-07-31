@@ -167,7 +167,7 @@ def pd_topology_from_state() -> dict[str, Any]:
     Reads the ``pd_mode`` / ``last_restart_pd_*`` / prefill+decode pod fields the
     CLI persisted into ``multi_node_state.json``. Returns ``{}`` when not
     multi-node or when ``pd_mode != 'disaggregated'`` so every caller no-ops on
-    the single-node / colocated paths.
+    the single-node / aggregated paths.
 
     Returns:
         dict[str, Any]: ``{mode, prefill_nodes, decode_nodes, prefill_tp,

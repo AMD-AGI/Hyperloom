@@ -26,7 +26,7 @@ from .executors import (
     _register_executors,
 )
 from .kb import (
-    _bootstrap_cortex_kb,
+    _bootstrap_recipe_kb,
     _bootstrap_knowledge_plane,
 )
 from .backends import (
@@ -63,11 +63,9 @@ from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
-    _resolve_critic_agent_root as _resolve_critic_agent_root,
-    _validate_critic_agent_runtime as _validate_critic_agent_runtime,
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
-    _resolve_robustness_agent_root as _resolve_robustness_agent_root,
-    _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
+    _resolve_agent_root as _resolve_agent_root,
+    _validate_agent_runtime as _validate_agent_runtime,
 )
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
@@ -1012,7 +1010,7 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
 
 
 def _reset_state_file(session_dir: Path) -> None:
-    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Cortex KB untouched).
+    """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
     Args:
         session_dir (Path): The session root directory holding ``state.json``.
@@ -1030,7 +1028,7 @@ def _reset_state_file(session_dir: Path) -> None:
         import logging as _logging
 
         _logging.getLogger(__name__).warning(
-            "v0.8 §3.10 --reset-state: could not move %s → %s: %s",
+            "--reset-state: could not move %s → %s: %s",
             state_path,
             backup_path,
             exc,
@@ -1039,26 +1037,9 @@ def _reset_state_file(session_dir: Path) -> None:
     import logging as _logging
 
     _logging.getLogger(__name__).info(
-        "v0.8 §3.10 --reset-state: backed up state.json to %s; session starts blank.",
+        "--reset-state: backed up state.json to %s; session starts blank.",
         backup_path.name,
     )
-
-
-def _argv_has_option(argv: list[str], option: str) -> bool:
-    """Report whether ``argv`` explicitly carries a given option.
-
-    Matches both the bare flag (``--tp``) and the ``=``-joined form
-    (``--tp=8``).
-
-    Args:
-        argv (list[str]): The argument vector to scan.
-        option (str): The long-option flag to look for (e.g. ``"--tp"``).
-
-    Returns:
-        bool: ``True`` when the option appears in ``argv``, else ``False``.
-    """
-    prefix = f"{option}="
-    return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
@@ -1246,6 +1227,29 @@ def _export_workload_envs_for_optimize(
     os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
+# Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
+# Anything else (baseline / preflight failures, crashes, enablement stalls) exits
+# non-zero so CI surfaces genuine problems.
+_SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
+    {
+        "target_reached",
+        "global_converged",
+        "time_exhausted",
+        "max_ticks",
+        # SWEEP finished cleanly. exit_normal_sweep returns sweep_done (shape grid)
+        # or conc_sweep_done (concurrency ladder); both mean the run optimized and
+        # closed normally (e.g. the no-kernel path), so neither is a CI failure.
+        "sweep_done",
+        "conc_sweep_done",
+    }
+)
+
+
+def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure)."""
+    return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end.
 
@@ -1324,14 +1328,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
     # Surface PD_* knobs for executors; empty means "resolve from state.json", pd_mode always exported.
-    pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
+    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     if pd_mode == "disaggregated" and nodes_resolved < 2:
         # PD disaggregation needs >=2 nodes (separate prefill + decode pods); fail at parse time.
         print(
             f"ERROR: --pd-mode disaggregated requires --nodes >= 2 "
             f"(got --nodes {nodes_resolved}). PD splits the cluster "
             "into prefill + decode groups; a single pod cannot host "
-            "both. Either drop --pd-mode (defaults to colocated) or "
+            "both. Either drop --pd-mode (defaults to aggregated) or "
             "raise --nodes.",
             file=sys.stderr,
         )
@@ -1466,13 +1470,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
-        migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
-        state = SharedState.load_or_init(
-            session_dir,
-            legacy_action_scores=legacy_mode,
-            migration_mode=migration_mode,
-        )
+        state = SharedState.load_or_init(session_dir)
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1627,20 +1625,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
-        # Re-bootstrap the Cortex KB client (recreates client + reruns T0 warm-start); resume=True is banner-only.
-        cortex_client = _bootstrap_cortex_kb(
+        # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
+        recipe_kb_client = _bootstrap_recipe_kb(
             args,
             session_dir=session_dir,
             manifest=manifest,
             resume=True,
         )
-        # KnowledgePlane facade (fail-soft degrades when PR Monitor/Cortex unreachable); None only when --degraded-kb.
+        # KnowledgePlane facade (PR Monitor MCP); None when --degraded-pr.
         knowledge_plane = (
             None
-            if not getattr(args, "cortex_enabled", True)
+            if not getattr(args, "pr_monitor_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
-                cortex_client=cortex_client,
+                recipe_kb_client=recipe_kb_client,
                 session_dir=session_dir,
             )
         )
@@ -1805,20 +1803,20 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Context-window preflight: reject when ISL+OSL+headroom exceeds max_position_embeddings (no stretch by policy).
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
-        # Cortex KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); fails fast unless --degraded-kb.
-        cortex_client = _bootstrap_cortex_kb(
+        # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
+        recipe_kb_client = _bootstrap_recipe_kb(
             args,
             session_dir=session_dir,
             manifest=manifest,
             resume=False,
         )
-        # KnowledgePlane facade for specialists (fail-soft both sides; always non-None for dispatch).
+        # KnowledgePlane facade for specialists (PR Monitor MCP); None when --degraded-pr.
         knowledge_plane = (
             None
-            if not getattr(args, "cortex_enabled", True)
+            if not getattr(args, "pr_monitor_enabled", True)
             else _bootstrap_knowledge_plane(
                 args,
-                cortex_client=cortex_client,
+                recipe_kb_client=recipe_kb_client,
                 session_dir=session_dir,
             )
         )
@@ -1901,7 +1899,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         critic_choice,
         codex_follows_claude=codex_follows_claude,
     ):
-        critic_agent_root = _resolve_critic_agent_root()
+        critic_agent_root = _resolve_agent_root("critic")
         if critic_agent_root is None:
             print(
                 f"ERROR: --critic-agent selected but critic-agent runtime not "
@@ -1913,7 +1911,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_critic_agent_runtime(critic_agent_root)
+        _validate_agent_runtime(critic_agent_root, agent="critic")
         if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
             print(
                 "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "
@@ -1930,7 +1928,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     robustness_agent_root: Path | None = None
     robustness_options = _build_robustness_options(args)
     if robustness_choice == "agent":
-        robustness_agent_root = _resolve_robustness_agent_root()
+        robustness_agent_root = _resolve_agent_root("robustness")
         if robustness_agent_root is None:
             print(
                 f"ERROR: --robustness-agent selected but robustness-agent "
@@ -1942,7 +1940,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_robustness_agent_runtime(robustness_agent_root)
+        _validate_agent_runtime(robustness_agent_root, agent="robustness")
 
     backends = _build_backends(
         claude_model=args.claude_model,
@@ -1952,7 +1950,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
-        cortex_kb_url=(getattr(args, "cortex_kb_url", None) or "").strip() or None,
         robustness_choice=robustness_choice,
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
@@ -1976,8 +1973,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _reset_state_file(session_dir)
     from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
-    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
-    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
     transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
     set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
@@ -1994,13 +1989,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir,
         backends=backends,
         role_registry=role_registry,
-        compare_against_gpu=getattr(args, "compare_against_gpu", None),
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        cortex_kb=cortex_client,
+        recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
-        legacy_action_scores=legacy_mode,
-        migration_mode=migration_mode,
-        # KnowledgePlane facade (None when --degraded-kb).
+        # KnowledgePlane facade (None when --degraded-pr).
         knowledge_plane=knowledge_plane,
         # Advisory multi-model specialist-proposal scorer, disabled by default
         # (enable via --proposal-scoring). When active it scores each
@@ -2077,9 +2069,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         max_minutes=max_minutes_for_prompt,
     )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
+    # ``--framework-discover-timeout-sec`` lands on argparse dest
+    # ``framework_discover_timeout_sec``; reading only the ``framework_agent_``
+    # spelling always missed it, so the flag silently did nothing and discovery
+    # stayed on the default budget. Accept the parser's dest first and keep the
+    # longer name as a fallback for callers that set it directly.
     try:
         coordinator.framework_agent_discover_timeout_sec = float(
-            getattr(args, "framework_agent_discover_timeout_sec", 0.0) or 0.0
+            getattr(args, "framework_discover_timeout_sec", 0.0)
+            or getattr(args, "framework_agent_discover_timeout_sec", 0.0)
+            or 0.0
         )
     except (TypeError, ValueError):
         coordinator.framework_agent_discover_timeout_sec = 0.0
@@ -2262,17 +2261,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return (
-        0
-        if stop_reason
-        in (
-            "target_reached",
-            "global_converged",
-            "time_exhausted",
-            "max_ticks",
-        )
-        else 1
-    )
+    return _exit_code_for_stop_reason(stop_reason)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
+from hyperloom.common.coerce import to_float
 from ..loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
@@ -31,6 +32,21 @@ from ..loop.coordinator import (
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
+
+
+def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
+    """Copy eval-origin trigger context from specialist params to the integrate task."""
+    origin = str(src.get("enablement_origin") or "")
+    if not origin:
+        return
+    dst["enablement_origin"] = origin
+    dst["enablement_accuracy_floor"] = float(src.get("enablement_accuracy_floor") or 0.0)
+    cfg = str(src.get("enablement_probe_config_path") or "")
+    if cfg:
+        dst["enablement_probe_config_path"] = cfg
+        # Bench the candidate against the original workload/eval contract rather
+        # than the shipped default config.
+        dst.setdefault("config_path", cfg)
 
 
 class ExplorePhase(PhaseHandler):
@@ -1030,9 +1046,9 @@ class ExplorePhase(PhaseHandler):
             log.exception("gaps refresh: attempts extraction failed")
 
         plane = getattr(self, "knowledge_plane", None)
-        if plane is not None and hasattr(plane, "cortex_traverse_issues"):
+        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
-                traverse = getattr(plane, "cortex_traverse_issues")
+                traverse = getattr(plane, "recipe_kb_traverse_issues")
                 rows = traverse(
                     model_class=getattr(state, "model_class", "") or "",
                     gpu_type=getattr(state, "gpu_type", "") or "",
@@ -1041,11 +1057,11 @@ class ExplorePhase(PhaseHandler):
                     for entry in rows:
                         if isinstance(entry, dict):
                             entry = dict(entry)
-                            entry.setdefault("source", "cortex")
+                            entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
             except Exception:  # noqa: BLE001 — defensive
                 log.warning(
-                    "gaps refresh: cortex_traverse_issues failed (reason=%s)",
+                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
                     exc_info=True,
                 )
@@ -1471,6 +1487,7 @@ class ExplorePhase(PhaseHandler):
             # integrate_patch applies the runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
+                _forward_enablement_carriers(spec_params, integrate_params)
                 probe = str(spec_params.get("launch_probe") or "").strip()
                 if probe:
                     integrate_params["launch_probe"] = probe
@@ -1587,6 +1604,8 @@ class ExplorePhase(PhaseHandler):
         sid = str(task.task_id or "").strip()
         if not sid:
             return
+        if config_levers and self._config_lever_known_bad(config_levers):
+            return
         # Already ruled on (e.g. after resume) — nothing to do.
         try:
             if self.shared_state.get_specialist_patch_verdict(sid):
@@ -1631,6 +1650,7 @@ class ExplorePhase(PhaseHandler):
         # framework.py::_maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
+            _forward_enablement_carriers(spec_params, integrate_params)
             probe = str(spec_params.get("launch_probe") or "").strip()
             if probe:
                 integrate_params["launch_probe"] = probe
@@ -1701,6 +1721,36 @@ class ExplorePhase(PhaseHandler):
                 "FRAMEWORK: save after config autosubmit failed for task=%s",
                 sid,
             )
+
+    def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
+        """True when this exact config already lost an accuracy gate.
+
+        Different upstream PRs often reduce to the same server args / envs, so
+        the ledger is keyed by content fingerprint rather than by PR.
+        """
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+
+        try:
+            from hyperloom.agents.framework.kb import read_pr_ledger
+
+            fingerprint = canonical_fingerprint(
+                config_levers.get("extra_server_args"),
+                config_levers.get("extra_envs"),
+            )
+            for rec in read_pr_ledger():
+                if str(rec.get("applicability") or "") != fingerprint:
+                    continue
+                if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
+                    log.info(
+                        "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
+                        fingerprint,
+                        to_float(rec.get("accuracy_delta_pct"), default=0.0),
+                        rec.get("pr_url") or "a prior candidate",
+                    )
+                    return True
+        except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
+            log.debug("FRAMEWORK: config-lever ledger check failed", exc_info=True)
+        return False
 
     def _build_specialist_round_entry(
         self,

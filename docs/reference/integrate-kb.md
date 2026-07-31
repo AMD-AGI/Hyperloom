@@ -1,23 +1,22 @@
 ---
 myst:
     html_meta:
-        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local recipe KB setup, remote Cortex KB, resolver order, and degraded-mode behavior."
-        "keywords": "Hyperloom, knowledge base, KB, recipe KB, Cortex KB, local KB, LLM inference, AMD GPU, ROCm, optimization, warm-start, session, configuration"
+        "description": "Learn how to configure the optional knowledge base integration in Hyperloom. Covers local recipe KB setup, gbrain remote reads, resolver order, and degraded-mode behavior."
+        "keywords": "Hyperloom, knowledge base, KB, recipe KB, gbrain, local KB, LLM inference, AMD GPU, ROCm, optimization, warm-start, session, configuration"
 ---
-# Integrate Recipe/Cortex knowledge base in Hyperloom
+# Integrate Recipe knowledge base in Hyperloom
 
-This topic explains the optional Recipe/Cortex knowledge-base (KB) integration used by Hyperloom, how local and remote stores are selected, and
+This topic explains the optional recipe knowledge-base (KB) integration used by Hyperloom, how local and remote stores are selected, and
 how the runtime behaves when KB sources are unavailable. The KB is optional;
 Hyperloom can run in local-only or degraded mode.
 
-Hyperloom uses a recipe-snapshot KB. Three distinct stores are involved; they
+Hyperloom uses a recipe-snapshot KB. Two distinct stores are involved; they
 serve different purposes and are configured independently:
 
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
 | Local recipe KB | `inference_optimizer` | Always the write target for recipes, attempts, and session-derived optimization knowledge. Root resolved by `--local-kb-root` / `HYPERLOOM_LOCAL_KB_ROOT`. |
 | Remote gbrain recipe KB (optional) | gbrain page store | Read side of the recipe KB. Consulted for warm-start reads when `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` are set. Writes never go here directly (an out-of-band CronJob ingests the local store unless `RECIPE_KB_MIRROR_MODE=inline`). |
-| Remote Cortex KB (optional) | Cortex KB service | Separate from the recipe KB. Used only by the Critic agent's per-proposal assess enrichment (`/v2/reasoning/assess`) when `--cortex-kb-url` / `CORTEX_KB_URL` is set. |
 
 The old `INFERENCE_OPTIMIZER_KB_ROOT` JSONL store is retired. Current code doesn't read it; use `HYPERLOOM_LOCAL_KB_ROOT` or `--local-kb-root` instead.
 
@@ -75,8 +74,8 @@ Recommended locations:
 
 ## Remote recipe KB reads (gbrain)
 
-The read side of the recipe KB is the gbrain page store, not Cortex. It is
-enabled only when gbrain is configured; writes always stay local.
+The read side of the recipe KB is the gbrain page store. It is enabled only
+when gbrain is configured; writes always stay local.
 
 ```bash
 export GBRAIN_BASE_URL=https://your-gbrain
@@ -88,26 +87,6 @@ reads. Use `--degraded-kb` to skip all KB hooks deliberately. By default
 (`RECIPE_KB_MIRROR_MODE=external`) an out-of-band CronJob ingests the local
 store into gbrain; set `RECIPE_KB_MIRROR_MODE=inline` to best-effort mirror each
 local write in-process (the local write stays authoritative either way).
-
-## Remote Cortex KB (Critic assess only)
-
-The Cortex KB is a *separate* service from the recipe KB. It is consulted only
-by the Critic agent's per-proposal assess enrichment (`/v2/reasoning/assess`),
-never for recipe reads or writes. It is enabled only when you explicitly pass a
-URL:
-
-```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --cortex-kb-url https://your-cortex-kb ...
-```
-
-or export:
-
-```bash
-export CORTEX_KB_URL=https://your-cortex-kb
-```
-
-Leave it unset to skip Critic assess enrichment entirely. Recipe reads/writes
-are unaffected by this setting.
 
 ---
 
@@ -136,8 +115,7 @@ use the default local store.
 **Q: Does a missing remote KB fail the run?**
 
 No. An unset or unreachable gbrain recipe read side degrades to local-only
-operation, and an unset Cortex KB skips Critic assess enrichment.
-`--degraded-kb` skips the recipe KB path intentionally.
+operation. `--degraded-kb` skips the recipe KB path intentionally.
 
 **Q: Can I back up the KB?**
 

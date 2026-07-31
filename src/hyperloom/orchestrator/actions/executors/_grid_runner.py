@@ -45,6 +45,7 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 from .benchmark_backend import build_benchmark_command
+from ._inferencex_patcher import ensure_benchmark_lib_eval_start_patched
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -922,6 +923,17 @@ def _run_magpie(
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+        # Baseline patches its own checkout, but explore / sweep never pass
+        # through that hook: re-assert here so a resumed session or a re-cloned
+        # checkout still emits the eval-start marker. Idempotent.
+        try:
+            ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
+        except Exception as exc:  # noqa: BLE001 — patch is best-effort
+            log.warning(
+                "_grid_runner: eval-start patch skipped for %s: %s",
+                inferencex_path,
+                exc,
+            )
     # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
     # aiperf right before Magpie runs it, via the shared helper (also used by the
     # baseline/profile shell-out). No-op under pytest / when AgentX is off (the

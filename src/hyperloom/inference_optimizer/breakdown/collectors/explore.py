@@ -232,11 +232,11 @@ def collect_explore_search(
     explore_ledger = _shape_ledger(state.get("explore_search"))
     # Persist provenance+fingerprint winners_history for offline recompute.
     explore_ledger["winners_history"] = _shape_winners_history(state.get("explore_search"))
-    explore_ledger["winner_history"] = list(state.get("params_winner_history") or [])
+    explore_ledger["winner_history"] = []
     explore_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     params_ledger = _shape_ledger(state.get("params_search"))
-    params_ledger["winner_history"] = list(state.get("params_winner_history") or [])
+    params_ledger["winner_history"] = []
     params_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
@@ -246,12 +246,9 @@ def collect_explore_search(
         "explore": explore_ledger,
         "params": params_ledger,
         "backends": backends_ledger,
-        "synergy_attempted": list(state.get("synergy_attempted") or []),
+        "synergy_attempted": list((state.get("explore_search") or {}).get("synergy_attempted") or []),
         "discovered_flags": dict(state.get("discovered_flags") or {}),
-        "backend_winners_history": _patch_winners_history(
-            state.get("backend_winners_history") or [],
-            baseline_tput,
-        ),
+        "backend_winners_history": _patch_winners_history([], baseline_tput),
     }
 
 

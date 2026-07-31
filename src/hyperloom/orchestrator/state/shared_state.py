@@ -62,34 +62,10 @@ _CRASH_TIMESTAMP_CAP: int = 200
 
 # Compatibility aliases kept on shared_state for existing callers/tests.
 _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
-_DEFAULT_HOT_KERNEL_GATE_TOP_N = _kernel_decision_settings._DEFAULT_HOT_KERNEL_GATE_TOP_N
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_FAILURES
-_DEFAULT_KERNEL_OPT_MAX_PARTIAL = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_PARTIAL
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 _now_iso = _kernel_decision_settings._now_iso
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
-
-
-# Cached lazy handle to ``..kernel.request_handlers``. A top-level import would
-# resurrect a circular import (request_handlers imports SharedState), so the
-# kernel forwarding shims below resolve the module through this getter and cache
-# it after the first call.
-_RH = None
-
-
-def _request_handlers():
-    """Return (and cache) the ``..kernel.request_handlers`` module.
-
-    Deferred to first use to avoid the circular import between
-    ``request_handlers`` and this module.
-    """
-    global _RH
-    if _RH is None:
-        from ..kernel import request_handlers as _m
-
-        _RH = _m
-    return _RH
 
 
 def _first_positive_tput(d: Any) -> float:
@@ -409,6 +385,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot: a cuda-graph capture failure asks the next baseline to retry with
     # cuda-graph capture disabled. Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
+    # Eval-origin enablement carriers: set when the first baseline runs but its
+    # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
+    # and re-run the same eval contract. Empty for boot-origin enablement.
+    enablement_origin: str = ""
+    enablement_accuracy_floor: float = 0.0
+    enablement_probe_config_path: str = ""
+    enablement_eval_contract_fingerprint: str = ""
+    enablement_baseline_eval_evidence: str = ""
+    enablement_baseline_eval_kind: str = ""
+    enablement_observed_accuracy: float = 0.0
+    enablement_observed_task: str = ""
+    enablement_observed_metric: str = ""
+    enablement_pending: bool = False
+    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
+    # must revalidate accuracy before the run is considered enabled.
+    enablement_validation_pending: bool = False
     # Enablement path (framework-agent) state.
     # ``enablement_launch_log``: captured launch/traceback text when baseline
     #   cannot launch.
@@ -450,6 +442,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Path to the materialized config produced by the KEEP'd candidate bench.
+    # This is the effective config (with server fixes applied) used for
+    # revalidation; distinct from enablement_probe_config_path (the original
+    # trigger config before any enablement patches).  Optional; defaults via
+    # from_dict, no schema bump.
+    enablement_accepted_config_path: str = ""
+    # Task identity for the current revalidation baseline task. Cleared when
+    # the task finishes (success or failure).  Optional; defaults via from_dict.
+    enablement_revalidation_task_id: str = ""
+    # Monotonically increasing counter: incremented each time an eval-origin
+    # KEEP opens a new revalidation window so each window gets a fresh idempotency
+    # key and cannot reuse a prior terminal TaskRegistry row.
+    enablement_revalidation_generation: int = 0
     # Attempt-scoped runtime acquisition state. All optional; NOT in
     # fact_layer_keys and do NOT bump schema_version (default via from_dict).
     # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
@@ -698,8 +703,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     # Their lifecycle is independent of trace-local kernel ordinals.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
-    # Cross-round params/backends/sweep aggregation (cap 10); legacy rows folded into the unified winners_history on resume.
-    params_winner_history: list[dict[str, Any]] = field(default_factory=list)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
     # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
@@ -711,9 +714,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
-    # Legacy session_steward slots (steward removed); kept only for resume + report.py back-compat, never written.
-    last_remaining_gaps_assessment: dict[str, Any] = field(default_factory=dict)
-    remaining_gaps_assessments: list[dict[str, Any]] = field(default_factory=list)
+    # Legacy session_steward slots (steward removed); kept only for resume back-compat, never written.
     steward_continuation_used: bool = False
     steward_infra_failures_by_round: dict[str, int] = field(
         default_factory=dict,
@@ -766,13 +767,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
+    # Consecutive KERNEL_AGENT ticks with no actionable work pending. Lets the
+    # phase machine wind down to SWEEP instead of spinning on hallucinated
+    # kernel-id requests / no-intent turns until the wall-clock cap. Reset to 0
+    # whenever kernel work is pending or the phase is not KERNEL_AGENT.
+    kernel_idle_ticks: int = 0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
-    # Rolling per-action winners log (cap 20) for dynamic idea generation.
-    backend_winners_history: list[dict[str, Any]] = field(default_factory=list)
-    # Synergy combo keys already tested this session; prevents re-running combinations.
-    synergy_attempted: list[str] = field(default_factory=list)
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
@@ -817,11 +819,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Per-cycle advisory focus log; persisted so cycle strategy survives resume.
     cycle_strategy_log: list[dict[str, Any]] = field(default_factory=list)
 
-    # Cortex KB integration fields — Coordinator-only writers.
-    # ``cortex_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
-    cortex_session_id: str = ""
+    # Recipe KB integration fields — Coordinator-only writers.
+    # ``recipe_kb_session_id`` — hyperloom-local id carried into KB fact-write attrs; defaults to session_dir.name.
+    recipe_kb_session_id: str = ""
     # Kept (always ``{}``) for resume back-compat.
-    cortex_session_summary: dict[str, Any] = field(default_factory=dict)
+    recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
@@ -830,7 +832,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
-    # Model-facing WarmStartContext built by ``cortex_t0`` from the KB recipe
+    # Model-facing WarmStartContext built by ``recipe_kb_t0`` from the KB recipe
     # row (parallel to the raw ``warm_start_recipe`` envelope). Carries an
     # explicit ``status``, a ready-to-replay ``recommended_replay`` champion, and
     # the experiential lists. Empty dict when T0 was bypassed or failed.
@@ -975,10 +977,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         recorded = getattr(self, "last_profile_workload", None)
         if not isinstance(recorded, dict) or not recorded:
             return False
+        # Default to the *current-best* runtime identity, not the bare context:
+        # last_profile_workload is recorded with the real profile params (actual
+        # server_args / extra_envs), while profile_workload_context() with no
+        # overrides reports server_args="" and skips the current_best runtime
+        # backfill, so any workload with server args/extra envs would compare
+        # unequal and every fresh profile would be discarded as stale. This
+        # matches the vLLM block-FP8 path, which passes
+        # current_profile_workload_context() as ``expected``.
         target = (
             expected
             if isinstance(expected, dict) and expected
-            else self.profile_workload_context()
+            else self.current_profile_workload_context()
         )
         return recorded == target
 
@@ -1110,13 +1120,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return Path(session_dir) / "state.json"
 
     @classmethod
-    def load_or_init(
-        cls,
-        session_dir: Path,
-        *,
-        legacy_action_scores: str = "drop",
-        migration_mode: str = "strict",
-    ) -> "SharedState":
+    def load_or_init(cls, session_dir: Path) -> "SharedState":
         """Load existing ``state.json`` or return a fresh blank instance.
 
         Reads and migrates the persisted state via :meth:`from_dict` when
@@ -1137,23 +1141,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         else:
             with path.open(encoding="utf-8") as f:
                 raw = json.load(f)
-            inst = cls.from_dict(
-                raw,
-                legacy_action_scores=legacy_action_scores,
-                migration_mode=migration_mode,
-            )
+            inst = cls.from_dict(raw)
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
 
     @classmethod
-    def from_dict(
-        cls,
-        raw: dict[str, Any],
-        *,
-        legacy_action_scores: str = "drop",
-        migration_mode: str = "strict",
-    ) -> "SharedState":
+    def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
         """Construct a :class:`SharedState` from a raw mapping, migrating it.
 
         Acts as the unified migration entry point: an absent
@@ -1169,8 +1163,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
         incoming_version = int(raw.get("schema_version") or 1)
-        needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
-        migration_events: list[str] = []
 
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
@@ -1207,113 +1199,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     task_key,
                     migrated,
                 )
-            migration_events.append(
-                "migrated kernel optimization attempts to stable task identities"
-            )
-        # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
-        _legacy_drop_fields = (
-            "action_scores",
-            "score_violation",
-            "cooldown_until_tick",
-            "locked_reason",
-            "ucb_bonus",
-            "aging_bonus",
-            "score_mult",
-            "effective_score",
-            "last_action_score_snapshot",
-            "last_select_kernels",
-        )
-        legacy_seen: list[tuple[str, int]] = []
-        for legacy in _legacy_drop_fields:
-            if legacy in raw:
-                payload = raw.get(legacy)
-                size = len(payload) if isinstance(payload, (dict, list, str)) else 1
-                legacy_seen.append((legacy, int(size)))
-            filtered.pop(legacy, None)
-        if legacy_seen:
-            mode = str(legacy_action_scores or "drop").strip().lower()
-            import logging as _logging
-
-            log = _logging.getLogger(__name__)
-            summary = ", ".join(f"{k}={n}" for k, n in legacy_seen)
-            migration_events.append(f"§3.9 dropped scoreboard fields ({summary})")
-            if mode == "warn":
-                log.warning(
-                    "v0.8 §3.9: dropped legacy scoreboard fields from "
-                    "state.json (%s). set "
-                    "--legacy-action-scores=drop to silence this.",
-                    summary,
-                )
-            else:
-                log.info(
-                    "v0.8 §3.9: dropped legacy scoreboard fields from state.json (%s).",
-                    summary,
-                )
-        # Normalize the unified ``explore_search`` ledger at load; winners/synergy history folded in.
+        # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
-            backend_winners_history=filtered.get("backend_winners_history"),
-            params_winner_history=filtered.get("params_winner_history"),
-            synergy_attempted=filtered.get("synergy_attempted"),
         )
 
-        # fact-layer integrity check: strict (default) aborts when a fact-layer key was present but didn't load; lenient warns.
-        if needs_migration and raw:
-            mode = str(migration_mode or "strict").strip().lower()
-            fact_layer_keys = (
-                "baseline_tput",
-                "baseline_cold_tput",
-                "baseline_hot_tput",
-                "baseline_accuracy",
-                "current_best",
-                "cumulative_gain",
-                "cumulative_gain_validated",
-                "optimization_stack",
-                "reference_server_args",
-                "reference_envs",
-                "last_remaining_gaps_assessment",
-                "remaining_gaps_assessments",
-            )
-            missing: list[str] = []
-            for key in fact_layer_keys:
-                if key in raw and key not in filtered:
-                    missing.append(key)
-            if missing:
-                import logging as _logging
-
-                log = _logging.getLogger(__name__)
-                fmt = (
-                    "v0.8 §3.10: fact-layer field(s) %s present in "
-                    "state.json but not loaded into SharedState "
-                    "(Inv-10.1 violation)."
-                )
-                if mode == "lenient":
-                    log.warning(
-                        fmt + " --migration-mode=lenient → continuing.",
-                        ", ".join(missing),
-                    )
-                else:
-                    log.error(fmt, ", ".join(missing))
-                    raise ValueError(
-                        f"v0.8 §3.10 strict migration failed: fact-layer "
-                        f"field(s) {missing!r} lost. Re-run with "
-                        f"--migration-mode=lenient to continue."
-                    )
-
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
-
-        # Operator-visible migration summary.
-        if needs_migration:
-            import logging as _logging
-
-            log = _logging.getLogger(__name__)
-            event_str = "; ".join(migration_events) or "(no field changes)"
-            log.info(
-                "v0.8 §3.10: state.json migrated v%d → v%d. Events: %s",
-                incoming_version,
-                LATEST_STATE_SCHEMA_VERSION,
-                event_str,
-            )
 
         return cls(**filtered)
 
@@ -1321,25 +1212,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _build_explore_search(
         *,
         existing: Any,
-        backend_winners_history: Any,
-        params_winner_history: Any,
-        synergy_attempted: Any,
     ) -> dict[str, Any]:
-        """Shape the unified ``explore_search`` ledger at load time; folds live history so resume preserves cross-round aggregation.
+        """Shape the unified ``explore_search`` ledger at load time.
 
         Args:
             existing (Any): The persisted ``explore_search`` dict (or any
                 value; non-dicts are treated as empty).
-            backend_winners_history (Any): Legacy backend-winners rows folded
-                into the unified ``winners_history``.
-            params_winner_history (Any): Legacy params-winner rows folded into
-                the unified ``winners_history``.
-            synergy_attempted (Any): Legacy synergy combos folded (deduped)
-                into ``synergy_attempted``.
 
         Returns:
             dict[str, Any]: The normalized ``explore_search`` ledger with all
-                required keys defaulted and live history folded in.
+                required keys defaulted and history normalized.
         """
         from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
 
@@ -1355,13 +1237,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})
 
-        # winners_history: fold live history + prior rows, sorted by (round_id, ts).
+        # winners_history: normalize persisted rows, sorted by (round_id, ts).
         wh: list[dict[str, Any]] = []
-        for source_list in (
-            backend_winners_history,
-            params_winner_history,
-            existing.get("winners_history") or [],
-        ):
+        for source_list in (existing.get("winners_history") or [],):
             if not isinstance(source_list, list):
                 continue
             for entry in source_list:
@@ -1402,7 +1280,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
-        # synergy_attempted: fold live field + executor-side additions, deduped.
+        # synergy_attempted: normalize executor-side combos, deduped.
         sa_set: set[tuple[str, ...]] = set()
 
         def _normalize_combo(c: Any) -> tuple[str, ...] | None:
@@ -1424,7 +1302,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 return parts if parts else None
             return None
 
-        for source in (synergy_attempted, existing.get("synergy_attempted") or []):
+        for source in (existing.get("synergy_attempted") or [],):
             if not isinstance(source, list):
                 continue
             for c in source:
@@ -1735,7 +1613,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             phase in ("PRELUDE", "FRAMEWORK_AGENT")
             and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
             and not bool(getattr(self, "enablement_succeeded", False))
-        )
+        ) or bool(getattr(self, "enablement_validation_pending", False))
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
@@ -2993,29 +2871,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         entry_gain_pct = gain_pct(tput, base)
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
-
-    def seed_stack_from_current_best(self) -> None:
-        """Backfill stack for old sessions that only had current_best."""
-        if self.optimization_stack or not isinstance(self.current_best, dict):
-            return
-        variant = self.current_best.get("variant_name")
-        extra_args = self.current_best.get("extra_server_args")
-        if not variant and not extra_args:
-            return
-        self.optimization_stack = [
-            {
-                "action": self.current_best.get("action", "unknown"),
-                "variant_name": variant or "legacy_current_best",
-                "extra_server_args": extra_args or "",
-                "extra_envs": dict(self.current_best.get("extra_envs") or {}),
-                "tput": self.current_best.get("tput"),
-                "workspace": self.current_best.get("workspace"),
-                "source": "seeded_from_current_best",
-            }
-        ]
-        # Keep gain_per_stack_entry aligned with optimization_stack (None == unknown gain for seeded entries).
-        if len(self.gain_per_stack_entry) < len(self.optimization_stack):
-            self.gain_per_stack_entry.extend([None] * (len(self.optimization_stack) - len(self.gain_per_stack_entry)))
 
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:

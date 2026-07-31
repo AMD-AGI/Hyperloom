@@ -1589,7 +1589,7 @@ def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
 def marker_path(tmp_path, monkeypatch) -> Path:
     user_data = tmp_path / "user_data"
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))
-    return user_data / "runtime" / "cortex" / ".kb_preflight.json"
+    return user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
 
 
 def test_ir3_kb_ok_pr_ok(marker_path):
@@ -1600,13 +1600,14 @@ def test_ir3_kb_ok_pr_ok(marker_path):
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.cortex_enabled is True
+    assert args.recipe_kb_enabled is True
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_degraded_reason is None
 
 
-def test_ir3_kb_5xx_auto_degrade(marker_path):
+def test_ir3_kb_probe_unreachable_does_not_auto_degrade_recipe_kb(marker_path):
+    """Recipe KB has no remote IR-3 probe; unreachable kb marker must not flip recipe_kb_enabled."""
     args = _ns()
     with patch.object(
         cli_preflight.subprocess,
@@ -1619,9 +1620,9 @@ def test_ir3_kb_5xx_auto_degrade(marker_path):
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.cortex_enabled is False
+    assert args.recipe_kb_enabled is True
     assert args.pr_monitor_enabled is True
-    assert args.kb_degraded_reason == "ir3_auto"
+    assert args.kb_degraded_reason is None
     assert args.pr_degraded_reason is None
 
 
@@ -1636,9 +1637,9 @@ def test_ir3_kb_explicit_flag(marker_path):
 
     with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
         cli_preflight._run_ir3_preflight(args)
-    assert seen_env.get("SKIP_KB_PROBE") == "1"
+    assert "SKIP_KB_PROBE" not in seen_env
     assert "SKIP_PR_PROBE" not in seen_env
-    assert args.cortex_enabled is False
+    assert args.recipe_kb_enabled is False
     assert args.kb_degraded_reason == "explicit_flag"
     assert args.pr_monitor_enabled is True
     assert args.pr_degraded_reason is None
@@ -1653,11 +1654,11 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.cortex_enabled is True
+    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
 
 
-def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
+def test_ir3_kb_401_missing_token_does_not_auto_degrade_recipe_kb(marker_path, monkeypatch):
     monkeypatch.delenv("KB_SERVICE_TOKEN", raising=False)
     args = _ns()
     with patch.object(
@@ -1671,10 +1672,8 @@ def test_ir3_kb_401_missing_token(marker_path, monkeypatch):
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.cortex_enabled is False
-    assert args.kb_degraded_reason == "ir3_auto"
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    assert marker["kb_failure_reason"] == "missing_token"
+    assert args.recipe_kb_enabled is True
+    assert args.kb_degraded_reason is None
 
 
 def test_ir3_pr_explicit_flag_kb_ok(marker_path):
@@ -1689,8 +1688,7 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
         cli_preflight._run_ir3_preflight(args)
     assert seen_env.get("SKIP_PR_PROBE") == "1"
-    assert "SKIP_KB_PROBE" not in seen_env
-    assert args.cortex_enabled is True
+    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_monitor_enabled is False
     assert args.pr_degraded_reason == "explicit_flag"
@@ -1701,14 +1699,14 @@ def test_ir3_both_flags_short_circuit(marker_path):
     with patch.object(cli_preflight.subprocess, "run") as run_mock:
         cli_preflight._run_ir3_preflight(args)
         run_mock.assert_not_called()
-    assert args.cortex_enabled is False
+    assert args.recipe_kb_enabled is False
     assert args.pr_monitor_enabled is False
     assert args.kb_degraded_reason == "explicit_flag"
     assert args.pr_degraded_reason == "explicit_flag"
 
 
-def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
+def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
+    monkeypatch.delenv("RECIPE_KB_KB_URL", raising=False)
     args = _ns()
     seen_env: dict = {}
 
@@ -1724,25 +1722,8 @@ def test_ir3_no_kb_url_skips_probe_local_only(marker_path, monkeypatch):
 
     with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
         cli_preflight._run_ir3_preflight(args)
-    assert "CORTEX_KB_URL" not in seen_env
-    assert args.cortex_enabled is True
-    assert args.kb_degraded_reason is None
-
-
-def test_ir3_explicit_kb_url_injected_into_probe_env(marker_path, monkeypatch):
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    args = _ns(cortex_kb_url="http://my-kb.example")
-    seen_env: dict = {}
-
-    def _runner(cmd, env=None, check=False, timeout=None):
-        seen_env.update(env or {})
-        _write_marker(marker_path, kb_reachable=True, pr_reachable=True)
-        return subprocess.CompletedProcess(cmd, 0)
-
-    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
-        cli_preflight._run_ir3_preflight(args)
-    assert seen_env.get("CORTEX_KB_URL") == "http://my-kb.example"
-    assert args.cortex_enabled is True
+    assert "RECIPE_KB_KB_URL" not in seen_env
+    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
 
 
