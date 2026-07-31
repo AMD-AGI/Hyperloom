@@ -1084,17 +1084,16 @@ def materialize_unified_patch_snapshot(
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
 
-    # Paths the patch CREATES (``--- /dev/null``): these must be produced by
-    # ``git apply``, never pre-seeded with a base, or apply fails "already
-    # exists". Everything else is a modify whose base we must supply. Normalize
-    # each ``+++`` path exactly as ``parse_patch_manifest`` does (strip a
-    # tab-suffixed timestamp, unquote C-quoting, drop the ``a/``/``b/`` prefix)
-    # so these match the descriptor ``path`` values below.
+    # Paths the patch CREATES: these must be produced by ``git apply``, never
+    # pre-seeded with a base, or apply fails "already exists". Everything else
+    # is a modify whose base we must supply. ``is_new`` comes from
+    # ``parse_patch_manifest`` (single source of truth for both the path
+    # normalization and the create/modify disposition), which avoids a second,
+    # drift-prone parse of the raw patch text.
     _new_file_paths = {
-        tool._strip_ab_prefix(
-            tool._unquote_git_path(m.group(1).split("\t", 1)[0].strip())
-        )
-        for m in re.finditer(r"(?m)^--- /dev/null\n\+\+\+ (.+)$", patch_text)
+        str(desc.get("path") or "")
+        for desc in descriptors
+        if desc.get("op") == "write" and desc.get("is_new")
     }
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
@@ -1122,12 +1121,19 @@ def materialize_unified_patch_snapshot(
             # on-disk source. forge-fusion (PR #75) emits the patch for these
             # non-git frameworks; without this fallback the snapshot lacks the
             # base file and ``git apply`` fails "<path>: No such file or
-            # directory". New files (``--- /dev/null``) are intentionally left
-            # for ``git apply`` to create.
+            # directory". New files are intentionally left for ``git apply`` to
+            # create.
             src = root / rel
-            if src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_bytes(src.read_bytes())
+            if not src.is_file():
+                # Neither git HEAD nor the on-disk layout has the base. Surface
+                # a precise error here instead of the opaque ``git apply`` "No
+                # such file or directory" that would otherwise follow.
+                raise FileNotFoundError(
+                    f"patch base missing for {rel.as_posix()}: not in git HEAD "
+                    f"and not on disk under {root}"
+                )
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
 
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", str(patch)],
