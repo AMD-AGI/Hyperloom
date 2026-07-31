@@ -921,6 +921,18 @@ def _run_magpie(
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+    # AgentX: deploy the aiperf client into the InferenceX ``benchmarks/`` dir
+    # and capability-preflight aiperf right before Magpie runs it. The OFF-path
+    # gate (agentx_enabled) stays here so the agentx package is imported only
+    # when AgentX is on (A2); the deploy+preflight body lives in a unit-testable
+    # helper (the in-place hook self-disables under pytest). Skipped under pytest.
+    if not os.environ.get("PYTEST_CURRENT_TEST") and inferencex_path:
+        from ._workload_envs import agentx_enabled
+
+        if agentx_enabled(os.environ):
+            from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
+
+            maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
