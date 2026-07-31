@@ -491,6 +491,45 @@ class TestForgeGemmHelperCoverage:
 
         assert (snapshot / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
+    def test_materialize_unified_patch_snapshot_nongit_repo(self, tmp_path):
+        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed
+        under site-packages/dist-packages).
+
+        forge-fusion (PR #75) emits a patch for non-git frameworks so KEPT
+        fusions reach e2e integrate, but the consumer resolved base content via
+        ``git show HEAD:<path>`` which fails outside a git repo -> the snapshot
+        never gets the base file -> ``git apply`` fails with
+        ``<path>: No such file or directory`` (observed on Qwen3-0.6B / Llama
+        vLLM sessions). The base must fall back to the on-disk source.
+        """
+        repo = tmp_path / "site-packages"
+        (repo / "vllm" / "model_executor" / "models").mkdir(parents=True)
+        target = repo / "vllm" / "model_executor" / "models" / "qwen3.py"
+        target.write_text("old = 1\n", encoding="utf-8")
+        # NOTE: deliberately NOT a git repo (no git init) -- mirrors dist-packages.
+
+        patch = tmp_path / "fusion.patch"
+        patch.write_text(
+            "diff --git a/vllm/model_executor/models/qwen3.py b/vllm/model_executor/models/qwen3.py\n"
+            "--- a/vllm/model_executor/models/qwen3.py\n"
+            "+++ b/vllm/model_executor/models/qwen3.py\n"
+            "@@ -1 +1 @@\n"
+            "-old = 1\n"
+            "+new = 2\n",
+            encoding="utf-8",
+        )
+
+        snapshot = Path(
+            krh.materialize_unified_patch_snapshot(
+                patch_path=patch,
+                repo_root=repo,
+            )
+        )
+
+        assert (
+            snapshot / "vllm" / "model_executor" / "models" / "qwen3.py"
+        ).read_text(encoding="utf-8") == "new = 2\n"
+
     def test_materialize_unified_patch_snapshot_rejects_bad_inputs(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()

@@ -1079,9 +1079,18 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     tool = _load_apply_tool()
-    descriptors = tool.parse_patch_manifest(patch.read_text(encoding="utf-8", errors="replace"))
+    patch_text = patch.read_text(encoding="utf-8", errors="replace")
+    descriptors = tool.parse_patch_manifest(patch_text)
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
+
+    # Paths the patch CREATES (``--- /dev/null``): these must be produced by
+    # ``git apply``, never pre-seeded with a base, or apply fails "already
+    # exists". Everything else is a modify whose base we must supply.
+    _new_file_paths = {
+        m.group(1).strip()
+        for m in re.finditer(r"(?m)^--- /dev/null\n\+\+\+ b/(.+)$", patch_text)
+    }
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
@@ -1101,6 +1110,19 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
+        elif rel.as_posix() not in _new_file_paths:
+            # ``git show HEAD:`` failed and this is a MODIFY (not a create):
+            # non-git repo_root (e.g. vLLM/sglang under site-packages/
+            # dist-packages) or an untracked-but-present file. Fall back to the
+            # on-disk source. forge-fusion (PR #75) emits the patch for these
+            # non-git frameworks; without this fallback the snapshot lacks the
+            # base file and ``git apply`` fails "<path>: No such file or
+            # directory". New files (``--- /dev/null``) are intentionally left
+            # for ``git apply`` to create.
+            src = root / rel
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
 
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", str(patch)],
