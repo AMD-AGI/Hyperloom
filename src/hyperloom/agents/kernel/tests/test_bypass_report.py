@@ -37,7 +37,15 @@ def _analyze(kernels):
 
 
 _KERNELS = [
-    {"name": "paged_attention_v1", "op_name": "aten::paged_attn", "gpu_time_us": 300.0, "count": 3},
+    {
+        "name": "paged_attention_v1",
+        "op_name": "aten::paged_attn",
+        "gpu_time_us": 300.0,
+        "count": 3,
+        # torch_trace shape => dispatch-grade so it routes as a task.
+        "op_shapes": [[17, 7168]],
+        "op_dtypes": ["c10::BFloat16"],
+    },
     {"name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm", "gpu_time_us": 200.0, "count": 2},
 ]
 

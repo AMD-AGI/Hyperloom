@@ -4550,6 +4550,15 @@ def _batch_kernel_candidates(
     kernels = data.get("hot_kernels") or data.get("hot_kernels_top15") or []
     if not isinstance(kernels, list):
         return []
+    # Drop geometry-only kernels (bypass path tags shape_dispatchable=False) up
+    # front so both the grouped and legacy passes agree: they resolve a source
+    # yet fail the kernel-opt gate on untrusted shape provenance. Absent field
+    # (TraceLens path) stays dispatchable to avoid regressing it.
+    kernels = [
+        k
+        for k in kernels
+        if not (isinstance(k, dict) and k.get("shape_dispatchable") is False)
+    ]
     reusable_ids = data.get("reusable_native_kernel_ids") or []
     reusable_id_set = {str(item) for item in reusable_ids if item}
 

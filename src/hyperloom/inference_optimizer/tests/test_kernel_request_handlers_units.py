@@ -3372,6 +3372,44 @@ class TestBatchKernelCandidatesRetryBudget:
 
         assert [item["kernel_id"] for item in out] == ["k001"]
 
+    def test_geometry_only_shape_excluded_from_batch(self, tmp_path):
+        # A reusable kernel with a resolved source but shape_dispatchable=False
+        # fails the kernel-opt gate; it must be dropped before dispatch.
+        cp = tmp_path / "kc.json"
+        cp.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "kernel_id": "k001",
+                            "gpu_pct": 12.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/moe_op.py",
+                            "shape_dispatchable": False,
+                        },
+                        {
+                            "kernel_id": "k002",
+                            "gpu_pct": 11.0,
+                            "reusable_native_kernel": True,
+                            "source_file": "/p/attn_op.py",
+                            "shape_dispatchable": True,
+                        },
+                    ],
+                    "reusable_native_kernel_ids": ["k001", "k002"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+        assert [item["kernel_id"] for item in out] == ["k002"]
+
+    def test_missing_shape_dispatchable_stays_batch_eligible(self, tmp_path):
+        # TraceLens candidates omit shape_dispatchable; absent field must not be
+        # filtered so the main path is preserved.
+        cp = self._write_candidates(tmp_path)  # no shape_dispatchable key
+        out = krh._batch_kernel_candidates({"candidates_path": str(cp)}, session_dir=tmp_path)
+        assert [item["kernel_id"] for item in out] == ["k001"]
+
 
 class TestTracelensRootResolution:
     """TraceLens root is resolved/validated independently of inherited env."""
