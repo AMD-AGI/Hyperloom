@@ -435,8 +435,8 @@ class MemoRemoteRecipeClient:
             return False
         if not isinstance(row, dict) or not row:
             return False
-        # Deferred: cortex_t0 imports this package at module level.
-        from hyperloom.orchestrator.knowledge.cortex_t0 import _recipe_is_actionable
+        # Deferred: recipe_kb_t0 imports this package at module level.
+        from hyperloom.orchestrator.knowledge.recipe_kb_t0 import _recipe_is_actionable
 
         return bool(_recipe_is_actionable(row))
 
