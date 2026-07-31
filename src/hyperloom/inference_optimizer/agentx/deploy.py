@@ -53,7 +53,7 @@ def deploy_agentx_assets(benchmarks_dir: str | Path) -> list[Path]:
         os.close(fd)
         try:
             shutil.copyfile(src, tmp)
-            os.chmod(tmp, 0o755 if name.endswith(".sh") else 0o644)
+            os.chmod(tmp, 0o700 if name.endswith(".sh") else 0o600)
             os.replace(tmp, dst)
         finally:
             if os.path.exists(tmp):

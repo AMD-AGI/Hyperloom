@@ -40,8 +40,8 @@ def test_deploy_idempotent(tmp_path):
 def test_deploy_modes(tmp_path):
     dst = tmp_path / "benchmarks"
     deploy_agentx_assets(dst)
-    assert (os.stat(dst / "aiperf_client.sh").st_mode & 0o777) == 0o755
-    assert (os.stat(dst / "map_aiperf.py").st_mode & 0o777) == 0o644
+    assert (os.stat(dst / "aiperf_client.sh").st_mode & 0o777) == 0o700
+    assert (os.stat(dst / "map_aiperf.py").st_mode & 0o777) == 0o600
 
 
 def test_deploy_leaves_no_temp_files(tmp_path):
