@@ -3174,6 +3174,22 @@ class TestReconcileKernelId:
         )
 
 
+class TestReconcileKernelIdForSingleBatch:
+    CANDS = [
+        {
+            "kernel_id": "k002",
+            "name": "_fwd_grouped_kernel_stage1",
+            "shape_provenance": "launch_grid",
+        },
+    ]
+
+    def test_pins_mismatched_id_to_sole_candidate(self):
+        assert krh._reconcile_kernel_id_for_single_batch("k003", self.CANDS) == "k002"
+
+    def test_keeps_exact_match(self):
+        assert krh._reconcile_kernel_id_for_single_batch("k002", self.CANDS) == "k002"
+
+
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
 # against the full hot ∪ skipped set (no fallback).
 class TestResolveCandidateId:

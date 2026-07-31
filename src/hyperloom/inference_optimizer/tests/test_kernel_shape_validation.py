@@ -56,6 +56,20 @@ def test_untrusted_provenance_is_rejected(tmp_path: Path):
     assert res["error_class"] == "untrusted_shape_provenance"
 
 
+def test_capture_backfill_provenance_passes(tmp_path: Path):
+    payload = {
+        "kernel_id": "k001",
+        "candidate": _candidate(shape_provenance="capture_backfill"),
+    }
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
+
+
 def test_missing_source_path_is_rejected(tmp_path: Path):
     payload = {
         "kernel_id": "k001",
