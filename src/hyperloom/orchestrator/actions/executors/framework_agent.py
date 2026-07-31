@@ -1022,7 +1022,7 @@ class FrameworkAgentExecutor:
         session_id = ""
         ss = extra.get("shared_state") or extra.get("state")
         if ss is not None:
-            session_id = str(getattr(ss, "cortex_session_id", "") or "")
+            session_id = str(getattr(ss, "recipe_kb_session_id", "") or "")
         try:
             gap_keywords = candidate.get("gap_keywords") or []
             if isinstance(gap_keywords, str):

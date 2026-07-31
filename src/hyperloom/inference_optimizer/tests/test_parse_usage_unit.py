@@ -150,7 +150,7 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
         '{"type": "assistant", "message": {"content": ['
         '{"type": "text", "text": "thinking"},'
         '{"type": "tool_use", "name": "WebSearch", "input": {"query": "rocm flash attn"}},'
-        '{"type": "tool_use", "name": "mcp__cortex_kb__lookup", "input": {"q": "x"}}'
+        '{"type": "tool_use", "name": "mcp__recipe_kb__lookup", "input": {"q": "x"}}'
         "]}}\n"
         "garbled\n"
         '{"type": "assistant", "message": {"content": ['
@@ -162,7 +162,7 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
     calls = pu.parse_claude_stream_json_tool_calls(log)
     assert [c["tool"] for c in calls] == [
         "WebSearch",
-        "mcp__cortex_kb__lookup",
+        "mcp__recipe_kb__lookup",
         "Read",
     ]
     assert calls[0]["query"] == "rocm flash attn"

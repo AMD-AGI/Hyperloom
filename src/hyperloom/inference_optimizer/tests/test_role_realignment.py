@@ -301,7 +301,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
         }
         c.shared_state.save(session_dir)
         prompt = await c._compose_prompt("orchestration")
-        assert "=== Warm start (Cortex T0) ===" in prompt
+        assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "workload=qwen3-8b" in prompt
         assert "recipe_id=99" in prompt
     finally:
