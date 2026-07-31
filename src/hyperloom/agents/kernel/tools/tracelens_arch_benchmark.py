@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -473,8 +474,12 @@ def populate_gpu_arch_json(
 
         log(f"gpu_arch_json: measured spec ready at {out_path}")
         return out_path
-    except RuntimeError as exc:
-        mb_error = exc
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        # A microbenchmark that overruns ``timeout_s`` surfaces as
+        # subprocess.TimeoutExpired, not RuntimeError, so catching RuntimeError
+        # alone let the most common failure escape and killed the whole
+        # trace_analyze instead of taking the documented fallback below.
+        mb_error = exc if isinstance(exc, RuntimeError) else RuntimeError(f"{type(exc).__name__}: {exc}")
         log(f"gpu_arch_json: microbenchmark unusable ({exc}); falling back to hyperloom achievable spec")
 
     hyperloom_spec = write_hyperloom_arch_spec(tracelens_root, canonical, log)

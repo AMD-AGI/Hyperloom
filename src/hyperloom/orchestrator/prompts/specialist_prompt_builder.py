@@ -655,11 +655,13 @@ def _focus_enablement_specialist(
     """
     return [
         "You are the **enablement specialist** — an AUTHORING sub-agent for a",
-        "currently non-runnable (model, backend) combo. The gate is RUNNABILITY",
-        "(the server boots and passes a minimal inference), not throughput.",
+        "(model, backend) combo that is non-runnable OR that boots but fails its",
+        "accuracy eval. The gate is RUNNABILITY (the server boots and passes a",
+        "minimal inference) or, for an eval-origin dispatch, the real model output",
+        "meeting the accuracy floor — not throughput.",
         "",
         "Your deliverable is the smallest **runnable delta** that advances the",
-        "boot — which may be a serve flag, an in-tree source patch, an",
+        "boot (or the accuracy) — which may be a serve flag, an in-tree source patch, an",
         "attempt-scoped runtime, or a ``needs_targeted_build`` request. Do NOT",
         "stop at a token registration / two-line alias when the diagnosis says the",
         "architecture is genuinely new: advancing one boot step counts, and a",
@@ -2062,9 +2064,9 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     if inp.domain.key == "enablement_specialist":
         # Pre-baseline enablement: the perf context (roofline / recipe / lessons /
-        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot even
-        # boot. Carry only the failure, the tiered playbook, and the tools to
-        # discover + navigate a fix.
+        # pitfalls / KG knobs / KB subgraph) is noise when the server cannot boot
+        # or the baseline fails its accuracy eval. Carry only the failure, the
+        # tiered playbook, and the tools to discover + navigate a fix.
         user_sections = [
             _section_hardware(inp),
             _section_pd_disaggregation(inp),  # § 1a (omitted unless disaggregated)

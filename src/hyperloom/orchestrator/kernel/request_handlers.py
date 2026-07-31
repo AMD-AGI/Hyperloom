@@ -5824,6 +5824,11 @@ async def integrate_handler(
             "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            # Synthetic kind="baseline": a throughput-only A/B probe of the
+            # patched kernel against the already-anchored baseline. It never
+            # establishes the quality reference, so it is exempt from the
+            # genuine-baseline accuracy guard.
+            "quality_ref_exempt": True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
@@ -6034,6 +6039,9 @@ async def integrate_handler(
                     "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
                     "extra_server_args": extra_args,
                     "extra_envs": dict(payload.get("extra_envs") or {}),
+                    # Pristine arm of the paired A/B: compares against the
+                    # anchored baseline, never establishes it.
+                    "quality_ref_exempt": True,
                 },
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )

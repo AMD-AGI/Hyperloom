@@ -256,16 +256,32 @@ import re as _re
 
 _GITHUB_PR_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", _re.IGNORECASE)
 _PR_REF_RE = _re.compile(r"^PR:(\d+)$")
+# An issue is a discussion thread, not a branch: GitHub publishes
+# ``refs/pull/{n}/head`` for pull requests but nothing checkoutable for issues.
+_GITHUB_ISSUE_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/issues/(\d+)", _re.IGNORECASE)
+_ISSUE_REF_RE = _re.compile(r"^issues?:(\d+)$", _re.IGNORECASE)
 
 
 def resolve_build_ref(candidate: str, default_repo_url: str) -> tuple[str, str, str]:
     """Resolve a discovered candidate string to ``(repo_url, ref, source_pr_url)``.
 
-    Handles the three forms discovery produces:
+    Handles the forms discovery and the enablement specialist produce:
     - ``https://github.com/{owner}/{repo}/pull/{n}`` → PR ref with full provenance.
     - ``PR:{n}`` bare ref → PR ref against ``default_repo_url``.
+    - an issue URL or ``issue:{n}`` → repo with an EMPTY ref, i.e. fall back to
+      tag autoselect (see below).
     - plain tag/branch/sha → verbatim ref against ``default_repo_url``.
     - any other URL → ``("", "", "")`` (skip; cannot derive a checkoutable ref).
+
+    Issues need their own branch because they are *not* checkoutable. GitHub
+    publishes ``refs/pull/{n}/head`` for a PR but exposes no ref for an issue,
+    so an ``issue:{n}`` string that reaches ``git worktree add`` verbatim dies
+    with ``fatal: invalid reference``. A specialist citing an upstream issue as
+    the rationale for a from-source build is a normal and useful signal, so the
+    issue number is dropped from the ref rather than the whole request being
+    rejected: the empty ref makes the builder autoselect the newest matching
+    tag, which is exactly where an issue fix would have landed. The issue URL is
+    still returned as provenance so the audit trail keeps the citation.
 
     Args:
         candidate: The candidate ref string from discovery.
@@ -287,6 +303,14 @@ def resolve_build_ref(candidate: str, default_repo_url: str) -> tuple[str, str, 
     if _PR_REF_RE.match(s):
         number = s.split(":", 1)[1]
         return (default_repo_url, f"PR:{number}", "")
+
+    m = _GITHUB_ISSUE_RE.match(s)
+    if m:
+        slug = m.group(1)
+        return (f"https://github.com/{slug}", "", s)
+
+    if _ISSUE_REF_RE.match(s):
+        return (default_repo_url, "", "")
 
     if "://" in s or s.startswith("git@"):
         return ("", "", "")

@@ -387,10 +387,26 @@ preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
   local has_url=0 has_key=0
+  # Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY +
+  # OPENAI_BASE_URL are configured. Mirror the CLI's _resolve_llm_endpoints():
+  # the Anthropic base is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK
+  # re-appends it) and the gateway key doubles as the Anthropic key, so the
+  # chained kernel-agent installer sees a complete provider pair. Explicit
+  # values always win.
+  if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
+    if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+      local _gw_url="${OPENAI_BASE_URL%/}"
+      export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
+      log "derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
+    fi
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+      export ANTHROPIC_API_KEY="$SAFE_API_KEY"
+    fi
+  fi
   { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
   { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL)")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or DEEPSEEK_API_KEY")
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or SAFE_API_KEY + OPENAI_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0

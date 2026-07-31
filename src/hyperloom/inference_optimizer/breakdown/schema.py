@@ -2121,6 +2121,23 @@ class EnablementBreakdown(TypedDict, total=False):
         last_build_failure: ``{failure_class, failure_summary}`` from the most
             recent failed build attempt (framework-channel decision input).
         build_attempt_count: Total number of targeted-build rows attempted.
+        origin: Enablement trigger origin: "" (boot) or "eval".
+        trigger_kind: Eval trigger kind (eval_runtime_failure /
+            accuracy_below_floor / accuracy_unavailable) when origin is "eval".
+        observed_accuracy: Baseline accuracy observed at the eval trigger.
+        accuracy_floor: Effective accuracy floor for the trigger + KEEP gate.
+        observed_task: Eval task name observed at the trigger.
+        observed_metric: Eval metric observed at the trigger.
+        probe_config_path: Materialized config re-run to reproduce the contract.
+        accepted_config_path: Effective config from the KEEP'd candidate bench
+            used as the revalidation baseline config.
+        eval_contract_fingerprint: Fingerprint of the captured eval contract.
+        validation_pending: True while an eval-origin KEEP awaits baseline
+            revalidation.
+        succeeded: True once the revalidation baseline promoted with accuracy
+            at or above the floor.
+        revalidation_task_id: TaskRegistry id of the tracked revalidation task,
+            or "" when no revalidation is in progress.
     """
 
     stack_actions: list[EnablementStackActionSummary]
@@ -2130,6 +2147,18 @@ class EnablementBreakdown(TypedDict, total=False):
     build_attempts: list[TargetedBuildAttemptSummary]
     last_build_failure: dict[str, str]
     build_attempt_count: int
+    origin: str
+    trigger_kind: str
+    observed_accuracy: float
+    accuracy_floor: float
+    observed_task: str
+    observed_metric: str
+    probe_config_path: str
+    accepted_config_path: str
+    eval_contract_fingerprint: str
+    validation_pending: bool
+    succeeded: bool
+    revalidation_task_id: str
 
 
 # ---------------------------------------------------------------------------
