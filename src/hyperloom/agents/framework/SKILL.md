@@ -104,8 +104,9 @@ A discovered candidate reference now drives the enablement targeted build
 
 ## Enablement ladder (methodology)
 
-When a candidate is for enablement (making a non-runnable `(model, backend)`
-combo boot at all, not perf), the repair follows a tiered ladder — diagnose the
+When a candidate is for enablement (making a `(model, backend)` combo that is
+non-runnable, or boots but fails its accuracy eval, run correctly — not perf),
+the repair follows a tiered ladder — diagnose the
 missing capability layer once, then climb only as far as needed: Rung 0
 diagnose, 1 serve-flag/config wire-up, 2 in-tree source patch, 3 attempt-scoped
 runtime, 4 source localization, 5 off-loop compiled build. A supported-but-un-wired

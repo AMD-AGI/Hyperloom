@@ -200,6 +200,20 @@ do not publish it unchanged in support bundles.
 
 ---
 
+## Enablement accuracy trigger
+
+When a first baseline boots and measures throughput but its accuracy eval fails
+(crashes, produces no result, or scores below the floor), enablement can repair
+the model instead of halting the run. Single-node only; multi-node keeps the
+existing behavior.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL` | `1` (on) | Route a baseline accuracy-eval failure into enablement instead of halting. Set `0`/`false`/`no`/`off` to keep the legacy salvage/stop behavior. Reader: `_accuracy_gate.enablement_on_eval_fail_enabled`. |
+| `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR` | `0.05` | Shared accuracy floor used by BOTH the baseline eval-failure trigger and the enablement KEEP gate. A collapse guard rather than a quality bar — raise it for a genuine quality gate. A score of exactly `0.0` always fails regardless of the floor (strictly positive is required); otherwise `score >= floor` passes. Accepts a finite value in `[0, 1]`; out-of-range values are ignored with a warning. Reader: `_accuracy_gate.enablement_accuracy_floor`. |
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.
@@ -293,6 +307,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Recipe-KB spans**: under the `recipe_kb` agent span, both directions of the cross-session recipe KB are recorded — `kb:recipe_snapshot:<method>` for reads (`get_recipe` / `search`) and `kb:recipe_write:<generator>` for writes. The generator suffix separates the session-opening `t0_anchor` identity stamp from the `coordinator` KEEP/REVERT/PR/CLOSE amends. Because a write rewrites the whole row, each write span carries `<field>_delta` metadata (`lessons_delta`, `pitfalls_delta`, …) reporting what that write actually contributed — a restamp that adds nothing shows no delta keys, so it is distinguishable from a real amend. The full audit row is attached as span output.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
   - The redacted connection config (host and key-presence booleans — never the keys themselves)

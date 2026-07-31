@@ -30,10 +30,16 @@ from __future__ import annotations
 import functools
 import importlib.util
 import json
+import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import is_truthy
+
+log = logging.getLogger(__name__)
 
 _OP_TO_SOURCE_JSON = Path(__file__).resolve().parent / "data" / "op_to_source.json"
 
@@ -237,6 +243,148 @@ def resolve_source(
     return sources[0], "op_to_source"
 
 
+# Triton kernel definition: @triton.jit then optional decorators then def NAME.
+_TRITON_DEF_RE = re.compile(r"@triton\.jit[^\n]*\n(?:\s*@[^\n]*\n)*\s*def\s+(\w+)")
+# Native kernel definition: __global__ with optional qualifiers then NAME.
+_GLOBAL_DEF_RE = re.compile(
+    r"__global__\s*(?:(?:void|static|inline|__forceinline__|"
+    r"__launch_bounds__\s*\([^)]*\))\s*)*(\w+)\s*[\(<]"
+)
+# Directories/paths to skip while scanning source repos.
+_SCAN_SKIP_MARKERS = ("/__pycache__", "/3rdparty/", "/example", "/test", "/jit/build/", "/.git/")
+_TRITON_SCAN_EXTS = (".py",)
+_NATIVE_SCAN_EXTS = (".cu", ".cuh", ".hip", ".h")
+
+
+def _demangle_kernel_name(name: str) -> str | None:
+    """Extract the bare function identifier from a device kernel name.
+
+    Handles Itanium mangling (``_ZN<len><ns>...`` / ``_Z<len><name>...``) and
+    plain C++/Triton names (strips ``void``, namespaces, and template/arg tails).
+    """
+    n = (name or "").strip()
+    if not n:
+        return None
+    if n.startswith("_ZN") or n.startswith("_Z"):
+        body = n[3:] if n.startswith("_ZN") else n[2:]
+        tokens: list[str] = []
+        i = 0
+        while i < len(body) and body[i].isdigit():
+            j = i
+            while j < len(body) and body[j].isdigit():
+                j += 1
+            length = int(body[i:j])
+            token = body[j : j + length]
+            if not token:
+                break
+            tokens.append(token)
+            i = j + length
+        if tokens:
+            return tokens[-1] if n.startswith("_ZN") else tokens[0]
+        return None
+    if n.startswith("void "):
+        n = n[len("void ") :].strip()
+    n = n.replace("(anonymous namespace)::", "")
+    n = re.sub(r"<.*$", "", n)
+    n = re.sub(r"\(.*$", "", n)
+    n = n.strip()
+    if "::" in n:
+        n = n.rsplit("::", 1)[-1]
+    return n or None
+
+
+@functools.lru_cache(maxsize=1)
+def _repo_scan_roots() -> tuple[str, ...]:
+    """Discover live sglang/aiter source roots (and aiter csrc) without importing."""
+    roots: list[str] = []
+    seen: set[str] = set()
+    for pkg in ("sglang", "aiter"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except (ImportError, ValueError, ModuleNotFoundError):
+            continue
+        if spec is None:
+            continue
+        for loc in list(getattr(spec, "submodule_search_locations", None) or []):
+            for cand in (loc, os.path.join(os.path.dirname(loc), "csrc")):
+                if cand not in seen and os.path.isdir(cand):
+                    seen.add(cand)
+                    roots.append(cand)
+    return tuple(roots)
+
+
+@functools.lru_cache(maxsize=1)
+def _build_repo_kernel_index() -> dict[str, str]:
+    """Map kernel function name -> source path by scanning repo roots once.
+
+    A name that resolves to more than one distinct source path is ambiguous and
+    mapped to ``""`` so :func:`resolve_by_kernel_name` refuses it rather than
+    routing a rewrite at an arbitrary first-seen file.
+    """
+    index: dict[str, str] = {}
+    roots = _repo_scan_roots()
+    if not roots:
+        return index
+    t0 = time.monotonic()
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root):
+            if any(m in dirpath for m in _SCAN_SKIP_MARKERS):
+                continue
+            for fname in files:
+                path = os.path.join(dirpath, fname)
+                if any(m in path for m in _SCAN_SKIP_MARKERS):
+                    continue
+                low = fname.lower()
+                if low.endswith(_TRITON_SCAN_EXTS):
+                    pattern, marker = _TRITON_DEF_RE, "@triton.jit"
+                elif low.endswith(_NATIVE_SCAN_EXTS):
+                    pattern, marker = _GLOBAL_DEF_RE, "__global__"
+                else:
+                    continue
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                if marker not in text:
+                    continue
+                for match in pattern.finditer(text):
+                    name = match.group(1)
+                    prev = index.get(name)
+                    if prev is None:
+                        index[name] = path
+                    elif prev and prev != path:
+                        # Same kernel name in two files: ambiguous, do not guess.
+                        log.info("repo scan: kernel name %r is ambiguous (%s vs %s)", name, prev, path)
+                        index[name] = ""
+    elapsed = time.monotonic() - t0
+    log.info(
+        "repo scan: indexed %d kernel name(s) from %d root(s) in %.2fs",
+        len(index),
+        len(roots),
+        elapsed,
+    )
+    return index
+
+
+def resolve_by_kernel_name(device_kernel_name: str) -> tuple[str, str]:
+    """Resolve a device kernel name to an editable source via repo scan.
+
+    Demangles the kernel name and looks it up in the repo kernel index, returning
+    ``(path, "repo_scan")`` on an unambiguous editable on-disk hit, else
+    ``("", "unresolved")`` (an empty index entry marks an ambiguous name).
+    """
+    if is_truthy(os.environ.get("HYPERLOOM_BYPASS_DISABLE_REPO_SCAN")):
+        return "", "unresolved"
+    bare = _demangle_kernel_name(device_kernel_name)
+    if not bare:
+        return "", "unresolved"
+    path = _build_repo_kernel_index().get(bare)
+    if path and is_editable_source(path) and _exists(path):
+        return path, "repo_scan"
+    return "", "unresolved"
+
+
 def editable_trace_source(kernel_file: str, kernel_kind: str = "") -> str:
     """Return a trace-provided Triton ``kernel_file`` iff it is an editable source.
 
@@ -257,4 +405,4 @@ def editable_trace_source(kernel_file: str, kernel_kind: str = "") -> str:
     return kf if is_editable_source(kf, kernel_kind or None) else ""
 
 
-__all__ = ["resolve_source", "editable_trace_source", "is_editable_source"]
+__all__ = ["resolve_source", "resolve_by_kernel_name", "editable_trace_source", "is_editable_source"]

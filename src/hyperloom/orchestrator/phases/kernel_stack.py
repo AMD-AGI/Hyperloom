@@ -471,6 +471,13 @@ class KernelStackPhase(PhaseHandler):
                     "output_dir": str(workspace),
                     "timeout_sec": 20 * 60,
                     "extra_server_args": ((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                    # Synthetic kind="baseline": validates the stacked kernels
+                    # against the already-anchored baseline on throughput alone.
+                    # Exempt from the genuine-baseline accuracy guard -- this ctx
+                    # carries the live SharedState, so without the exemption a
+                    # missing accuracy here would stamp an eval-failure contract
+                    # and drag a healthy run back into enablement.
+                    "quality_ref_exempt": True,
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )

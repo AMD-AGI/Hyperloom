@@ -370,7 +370,7 @@ class ConversationCollaborator:
                 if denial_summary:
                     sections.append(denial_summary)
 
-        # Cortex T0 warm-start snapshot + structured gaps[] ledger.
+        # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration" and push_full:
             try:
                 warm_block = self.shared_state.to_warm_start_summary()
@@ -378,7 +378,7 @@ class ConversationCollaborator:
                 log.exception("Coordinator: warm_start_summary failed")
                 warm_block = ""
             if warm_block:
-                sections.append("=== Warm start (Cortex T0) ===")
+                sections.append("=== Warm start (Recipe KB T0) ===")
                 sections.append(warm_block)
             try:
                 gaps_block = self.shared_state.to_gaps_summary()

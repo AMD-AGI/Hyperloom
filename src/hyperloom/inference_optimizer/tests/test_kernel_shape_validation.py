@@ -56,6 +56,33 @@ def test_untrusted_provenance_is_rejected(tmp_path: Path):
     assert res["error_class"] == "untrusted_shape_provenance"
 
 
+def test_capture_backfill_provenance_passes(tmp_path: Path):
+    payload = {
+        "kernel_id": "k001",
+        "candidate": _candidate(shape_provenance="capture_backfill"),
+    }
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("provenance", ["launch_grid", "tile_name"])
+def test_geometry_provenance_is_rejected(tmp_path: Path, provenance: str):
+    # launch_grid / tile_name are coarse geometry, not operand dims: the gate
+    # must reject them even though the candidate carries a non-empty shape.
+    payload = {
+        "kernel_id": "k001",
+        "candidate": _candidate(shape_provenance=provenance),
+    }
+    res = krh._validate_kernel_shape_and_paths(payload, session_dir=tmp_path)
+    assert res is not None
+    assert res["error_class"] == "untrusted_shape_provenance"
+
+
 def test_missing_source_path_is_rejected(tmp_path: Path):
     payload = {
         "kernel_id": "k001",

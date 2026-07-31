@@ -71,6 +71,19 @@ HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
 
 
+# List-valued knowledge fields whose pre/post-write sizes ``put_recipe``
+# reports back, so an audit consumer can derive per-write deltas.
+_COUNTED_COLLECTIONS: tuple[str, ...] = (
+    "lessons",
+    "pitfalls",
+    "what_worked",
+    "what_failed",
+    "remaining_gaps",
+    "prs_tested",
+    "sessions",
+)
+
+
 # Order_by whitelist — mirrors the central /recipes/search contract.
 # Everything else raises ValueError.
 _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
@@ -376,7 +389,13 @@ class LocalRecipeStore:
         # Free-form session-level keys preserved verbatim across rewrite.
         extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically upsert a recipe row and archive the prior live version."""
+        """Atomically upsert a recipe row and archive the prior live version.
+
+        Returns ``{"canonical_id", "version", "created", "prior_counts",
+        "counts"}``. The two count maps are the sizes of each list-valued
+        knowledge field before and after the write; audit consumers diff them
+        to report what this write actually contributed.
+        """
         if not canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
         recipe_dir = self._recipe_dir(canonical_id)
@@ -386,6 +405,7 @@ class LocalRecipeStore:
             now = now_iso(timespec="microseconds")
             live = _read_json(self._live_path(canonical_id))
             created = live is None
+            prior_counts = _collection_counts(live)
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
@@ -446,19 +466,23 @@ class LocalRecipeStore:
                     payload_dict.setdefault(key, val)
 
             recipe = Recipe.from_dict(payload_dict)
+            written = recipe.to_dict()
             atomic_write_json(
                 self._live_path(canonical_id),
-                recipe.to_dict(),
+                written,
                 indent=2,
                 sort_keys=True,
                 make_parents=True,
                 fsync=True,
             )
+            counts = _collection_counts(written)
 
         return {
             "canonical_id": canonical_id,
             "version": new_version,
             "created": created,
+            "prior_counts": prior_counts,
+            "counts": counts,
         }
 
     # get_recipe
@@ -904,6 +928,28 @@ def _coerce_dict(item: Any) -> dict[str, Any] | None:
         out = item.to_dict()
         return out if isinstance(out, dict) else None
     return None
+
+
+def _collection_counts(row: dict[str, Any] | None) -> dict[str, int]:
+    """Count the entries in each list-valued knowledge field of a recipe row.
+
+    Callers diff the pre-write counts against the post-write ones to tell an
+    amend that contributed new knowledge apart from a read-modify-write that
+    merely round-tripped the existing lists (the T0 anchor does the latter).
+
+    Args:
+        row (dict[str, Any] | None): A recipe row, or ``None`` for a row that
+            does not exist yet.
+
+    Returns:
+        dict[str, int]: Entry count per field in :data:`_COUNTED_COLLECTIONS`;
+            all zeros when ``row`` is absent or malformed.
+    """
+    out: dict[str, int] = {}
+    for key in _COUNTED_COLLECTIONS:
+        value = row.get(key) if isinstance(row, dict) else None
+        out[key] = len(value) if isinstance(value, list) else 0
+    return out
 
 
 def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list[dict[str, Any]]:

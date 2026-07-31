@@ -271,8 +271,8 @@ def test_core_state_fields_contains_v08_new_additions():
         "phase_started_ts",
         "phase_history",
         "phase_budget_pct",
-        "cortex_session_id",
-        "cortex_session_summary",
+        "recipe_kb_session_id",
+        "recipe_kb_session_summary",
         "warm_start_recipe",
         "warm_start_pitfalls",
         "warm_start_lessons",
@@ -363,6 +363,19 @@ def test_search_ledgers_in_core_state_fields():
     assert "explore_search" in CORE_STATE_FIELDS, (
         "'explore_search' must be in CORE_STATE_FIELDS so LLM update_state cannot rewrite the search ledger"
     )
+
+
+def test_enablement_accepted_config_path_roundtrips(tmp_path):
+    """enablement_accepted_config_path is persisted and reloaded correctly."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState()
+    s.enablement_accepted_config_path = "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    s.enablement_active_runtime = {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+    s.save(sd)
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.enablement_accepted_config_path == "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    assert loaded.enablement_active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
 
 
 @pytest.mark.parametrize("field_name", ["explore_search"])

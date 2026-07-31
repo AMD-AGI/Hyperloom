@@ -111,6 +111,45 @@ def _is_git_tree(path: Path) -> bool:
         return False
 
 
+def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
+    """True when ``patch_path`` is already fully applied in ``framework_root``.
+
+    A reverse dry-run (``patch -R --dry-run``) succeeds only when every hunk's
+    *post*-state is already present in the tree — i.e. the tree is exactly what
+    a successful forward apply would have produced. That makes it the reliable
+    already-applied probe: POSIX ``patch`` exits non-zero for both "does not
+    apply" and "previously applied", so the forward exit code alone cannot tell
+    the two apart.
+
+    Strictly a probe: ``--dry-run`` is passed at every level, so the tree is
+    never mutated. Partial overlap is correctly rejected — a patch whose hunks
+    are only *partly* present fails the reverse check and stays a real failure.
+
+    Args:
+        framework_root: The source-tree root the patch targets.
+        patch_path: The unified-diff patch file to probe.
+
+    Returns:
+        ``True`` when some strip level reverse-applies cleanly.
+    """
+    for lvl in _P_LEVELS:
+        try:
+            cp = subprocess.run(
+                ["patch", f"-p{lvl}", "-R", "--dry-run", "-i", str(patch_path)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                cwd=str(framework_root),
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        if cp.returncode == 0:
+            return True
+    return False
+
+
 def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
     """Return a backup filename unique within a shared ``backup_root``.
 
@@ -192,6 +231,10 @@ def _apply_patch_no_git(
                 timeout=60,
                 check=False,
                 cwd=str(framework_root),
+                # ``patch`` prompts ("Assume -R? [n]") on an already-applied
+                # hunk; without a closed stdin it can inherit the parent's and
+                # block until the 60s timeout.
+                stdin=subprocess.DEVNULL,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             err_msg = f"patch CLI unavailable or timed out: {exc}"
@@ -207,6 +250,28 @@ def _apply_patch_no_git(
             detected_level = lvl
             break
     if detected_level is None:
+        # Before reporting failure, distinguish "does not apply" from "already
+        # applied". A specialist commonly writes a superset patch AND the subset
+        # it contains (e.g. an FLA-layout revert plus that same revert bundled
+        # with a config fix). Applying the superset makes every later subset
+        # hunk a no-op, and POSIX ``patch`` reports that as "Reversed (or
+        # previously applied) patch detected ... Skipping patch" with a non-zero
+        # exit -- indistinguishable, at the exit code, from a patch that simply
+        # does not fit. Treating it as a hard failure aborted the whole apply and
+        # reverted a combo that was in fact fully and correctly applied.
+        #
+        # A clean *reverse* dry-run is the unambiguous already-applied probe: it
+        # succeeds only when every hunk's post-state is already present in the
+        # tree, which is exactly the state a forward apply would produce. In that
+        # case the apply is a satisfied no-op -- report success with no backups
+        # (the patch that really made those edits owns the backups needed for a
+        # correct revert).
+        if _reverse_applies_cleanly(framework_root, patch_path):
+            log.info(
+                "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
+                patch_path.name,
+            )
+            return True, "", [], None
         combined_stderr = "\n".join(dry_run_stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
         try:
@@ -379,6 +444,7 @@ def _apply_patch_no_git(
             timeout=120,
             check=False,
             cwd=str(framework_root),
+            stdin=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         err_msg = f"patch apply failed: {exc}"

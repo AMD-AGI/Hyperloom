@@ -29,6 +29,22 @@ DEFAULT_EP = 1
 DEFAULT_PRECISION = "bf16"
 
 
+def _default_pr_monitor_mcp_url() -> str | None:
+    """Derive the PR Monitor MCP URL from ``$PRIMUS_CORTEX_PR_API``.
+
+    Follows the same ``<base>/mcp`` convention the gbrain ``cortex_kb`` server
+    uses, so one env var wires both the REST client and the specialist MCP
+    server instead of silently leaving the MCP half disabled. The trailing
+    slash is kept because the bare ``/mcp`` form answers 307 and MCP clients do
+    not re-POST across the redirect.
+
+    Returns:
+        The derived URL, or ``None`` when the env var is unset.
+    """
+    base = (os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip().rstrip("/")
+    return f"{base}/mcp/" if base else None
+
+
 def _positive_int_arg(value: str) -> int:
     """argparse type for positive integer knobs."""
     try:
@@ -829,8 +845,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "explicitly.",
     )
     opt.add_argument(
-        "--cortex-strict-fingerprint",
-        dest="cortex_strict_fingerprint",
+        "--recipe-kb-strict-fingerprint",
+        dest="recipe_kb_strict_fingerprint",
         action="store_true",
         default=False,
         help="When set, T0 refuses warm_start_recipe rows whose "
@@ -890,10 +906,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pr-monitor-mcp-url",
         dest="pr_monitor_mcp_url",
         type=str,
-        default=None,
+        default=_default_pr_monitor_mcp_url(),
         help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: unset, which disables PR Monitor MCP tools. The "
-        "trailing slash is mandatory when configured.",
+        "wins). Default: $PRIMUS_CORTEX_PR_API + '/mcp/', else unset, which "
+        "disables PR Monitor MCP tools. The trailing slash is mandatory when "
+        "configured.",
     )
     opt.add_argument(
         "--degraded-pr",
@@ -1200,7 +1217,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Back up the existing ``state.json`` (if any) to "
         "``state.json.preReset.<unix_ts>`` and start the session "
-        "from a blank SharedState. Cortex KB is NOT touched.",
+        "from a blank SharedState. Recipe KB is NOT touched.",
     )
     # observability
     opt.add_argument(

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.cortex_t0 import (
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
     _warm_recipe_source,
     run_t0_anchor,
@@ -32,13 +32,13 @@ def test_warm_recipe_source_falls_back_to_remote_type() -> None:
         remote = GbrainRemoteRecipeClient()
 
     assert _warm_recipe_source({}, kb=_Kb()) == "gbrain"
-    assert _warm_recipe_source(None, kb=object()) == "cortex-kb"
+    assert _warm_recipe_source(None, kb=object()) == "recipe-kb"
 
 
 # Fake SharedState — only the fields the anchor reads
 @dataclass
 class _FakeSharedState:
-    cortex_session_id: str = ""
+    recipe_kb_session_id: str = ""
     warm_start_ts: str = ""
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[Any] = field(default_factory=list)
@@ -149,7 +149,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """``warm_start_recipe`` snapshot lands at ``runtime/cortex/.kb_warm.json``."""
+    """``warm_start_recipe`` snapshot lands at ``runtime/recipe_kb/.kb_warm.json``."""
     state = _FakeSharedState()
     run_t0_anchor(
         kb,
@@ -159,7 +159,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
         extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
-    warm_path = session_dir / "runtime" / "cortex" / ".kb_warm.json"
+    warm_path = session_dir / "runtime" / "recipe_kb" / ".kb_warm.json"
     assert warm_path.is_file()
     import json
 
@@ -228,9 +228,9 @@ def test_t0_anchor_short_circuits_when_already_anchored(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """``cortex_session_id`` AND ``warm_start_ts`` set, no resume → anchor short-circuits."""
+    """``recipe_kb_session_id`` AND ``warm_start_ts`` set, no resume → anchor short-circuits."""
     state = _FakeSharedState(
-        cortex_session_id="prior-sid",
+        recipe_kb_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
     run_t0_anchor(
@@ -252,7 +252,7 @@ def test_t0_anchor_resume_does_not_short_circuit(
 ) -> None:
     """``resume=True`` bypasses the skipped-already short-circuit so warm-start gets refreshed."""
     state = _FakeSharedState(
-        cortex_session_id="prior-sid",
+        recipe_kb_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
     run_t0_anchor(
@@ -268,12 +268,12 @@ def test_t0_anchor_resume_does_not_short_circuit(
     assert kb.get_recipe(canonical_id=cid) is not None
 
 
-def test_t0_anchor_uses_existing_cortex_session_id_when_present(
+def test_t0_anchor_uses_existing_recipe_kb_session_id_when_present(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """A pre-existing ``cortex_session_id`` survives the anchor."""
-    state = _FakeSharedState(cortex_session_id="prior-sid-from-resume")
+    """A pre-existing ``recipe_kb_session_id`` survives the anchor."""
+    state = _FakeSharedState(recipe_kb_session_id="prior-sid-from-resume")
     run_t0_anchor(
         kb,
         state,
@@ -282,14 +282,14 @@ def test_t0_anchor_uses_existing_cortex_session_id_when_present(
         extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
-    assert state.cortex_session_id == "prior-sid-from-resume"
+    assert state.recipe_kb_session_id == "prior-sid-from-resume"
 
 
 def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
     kb: RecipeKB,
     session_dir: Path,
 ) -> None:
-    """With no cortex_session_id, the anchor uses the session_dir basename as the local sid."""
+    """With no recipe_kb_session_id, the anchor uses the session_dir basename as the local sid."""
     state = _FakeSharedState()
     run_t0_anchor(
         kb,
@@ -299,7 +299,7 @@ def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
         extra_attrs={"framework_name": "sglang"},
         session_dir=session_dir,
     )
-    assert state.cortex_session_id == session_dir.name
+    assert state.recipe_kb_session_id == session_dir.name
 
 
 # Read-modify-write correctness

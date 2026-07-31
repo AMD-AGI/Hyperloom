@@ -449,7 +449,7 @@ class Recipe:
             "confidence",
             "evidence_refs",
             "provenance",
-            # Composite-Cortex provenance markers — dead weight in a local
+            # Composite-KB provenance markers — dead weight in a local
             # recipe row, never persisted into extras.
             "_field_sources",
             "_sources",

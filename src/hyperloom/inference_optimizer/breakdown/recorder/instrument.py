@@ -3234,7 +3234,6 @@ def record_critic_iteration(
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
-    kb_assess: dict[str, Any] | None = None,
     kb_priors: dict[str, Any] | None = None,
     producer: str = "critic",
 ) -> None:
@@ -3244,10 +3243,10 @@ def record_critic_iteration(
     workdir pruning never erases history; payload mirrors
     ``collectors.collect_critic_robustness``.
 
-    ``kb_assess`` / ``kb_priors`` (when provided) carry the per-iteration KB
-    integration trace: whether the substrate assess / historical priors were
-    used, the request, the response, and whether the final verdict referenced
-    them. Omitted from the payload when empty so historical items are unchanged.
+    ``kb_priors`` (when provided) carries the per-iteration KB integration
+    trace: whether the historical priors were used, the request, the response,
+    and whether the final verdict referenced them. Omitted from the payload
+    when empty so historical items are unchanged.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -3257,8 +3256,6 @@ def record_critic_iteration(
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
             per-iteration artifact files.
-        kb_assess (dict[str, Any] | None): the per-iteration substrate KB assess
-            trace; omitted when empty.
         kb_priors (dict[str, Any] | None): the per-iteration historical KB
             priors trace; omitted when empty.
         producer (str): the breakdown producer label (defaults to ``critic``).
@@ -3281,8 +3278,6 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
-        if isinstance(kb_assess, dict) and kb_assess:
-            payload["kb_assess"] = kb_assess
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
         _recorder(session_dir, producer).record_item(

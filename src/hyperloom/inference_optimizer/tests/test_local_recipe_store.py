@@ -152,7 +152,12 @@ def test_put_recipe_first_call_creates_live_at_version_1(
         best_throughput=24300.5,
         provenance={"source": "test", "generator": "ut"},
     )
-    assert result == {"canonical_id": cid, "version": 1, "created": True}
+    assert result["canonical_id"] == cid
+    assert result["version"] == 1
+    assert result["created"] is True
+    # A fresh row has no prior knowledge entries to diff against.
+    assert set(result["prior_counts"].values()) == {0}
+    assert set(result["counts"].values()) == {0}
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 1
@@ -191,7 +196,9 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
         best_throughput=2000.0,
         provenance={"source": "second", "generator": "ut"},
     )
-    assert second == {"canonical_id": cid, "version": 2, "created": False}
+    assert second["canonical_id"] == cid
+    assert second["version"] == 2
+    assert second["created"] is False
     archived = store.get_recipe(canonical_id=cid, version=1)
     assert archived is not None
     assert archived["version"] == 1
@@ -200,6 +207,47 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
     assert live is not None
     assert live["version"] == 2
     assert live["best_throughput"] == 2000.0
+
+
+def test_put_recipe_counts_report_pre_and_post_write_sizes(
+    tmp_path: Path,
+) -> None:
+    """``prior_counts``/``counts`` let a caller derive what a write contributed.
+
+    ``put_recipe`` rewrites the whole row, so absolute sizes alone cannot tell
+    an amend that appended a lesson from a read-modify-write that round-trips
+    the existing lists untouched (what the T0 anchor does).
+    """
+    store = LocalRecipeStore(root=tmp_path)
+    cid = _cid()
+    store.put_recipe(
+        canonical_id=cid,
+        lessons=[{"statement": "raise tp to 8", "measured_impact": "+12%"}],
+    )
+
+    # Amend: one more lesson, one new pitfall.
+    amend = store.put_recipe(
+        canonical_id=cid,
+        lessons=[
+            {"statement": "raise tp to 8", "measured_impact": "+12%"},
+            {"statement": "enable chunked prefill", "measured_impact": "+4%"},
+        ],
+        pitfalls=[{"description": "ep=8 OOMs on 30B", "severity": "crash"}],
+    )
+    assert amend["prior_counts"]["lessons"] == 1
+    assert amend["counts"]["lessons"] == 2
+    assert amend["prior_counts"]["pitfalls"] == 0
+    assert amend["counts"]["pitfalls"] == 1
+
+    # Round-trip: same content written back; sizes unchanged (delta == 0).
+    live = store.get_recipe(canonical_id=cid)
+    assert live is not None
+    roundtrip = store.put_recipe(
+        canonical_id=cid,
+        lessons=list(live["lessons"]),
+        pitfalls=list(live["pitfalls"]),
+    )
+    assert roundtrip["prior_counts"] == roundtrip["counts"]
 
 
 def test_put_recipe_preserves_created_at_across_updates(

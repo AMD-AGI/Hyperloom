@@ -169,8 +169,8 @@ except ImportError:
         "baseline_failed", "prelude_baseline_failed", "policy_loop",
         "prelude_policy_loop", "emergency", "signal", "unknown", "custom",
         "crash_threshold_exceeded", "user_stop_requested",
-        "time_exhausted_during_prelude", "cortex_t0_failed",
-        "cortex_drain_failed", "cortex_commit_failed",
+        "time_exhausted_during_prelude", "recipe_kb_t0_failed",
+        "recipe_kb_drain_failed", "recipe_kb_commit_failed",
         "model_context_window_too_small", "unsupported_model_arch",
         "model_config_incompatible", "baseline_accuracy_failed",
     })

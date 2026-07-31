@@ -1184,7 +1184,7 @@ class SourceBreakdown(TypedDict, total=False):
         geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
         explore_pct_of_total (float): Gain share from the primary explore family.
         replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
-            replay (cortex best_config replay); 0.0 when none was adopted.
+            replay (recipe KB best_config replay); 0.0 when none was adopted.
         framework_pct_of_total (float): Gain share from FRAMEWORK bake-ins.
         gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
             (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
@@ -1200,7 +1200,7 @@ class SourceBreakdown(TypedDict, total=False):
     geak_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
-    # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution.
+    # REPLAY_WARM_RECIPE (warm-recipe / recipe KB best_config replay) contribution.
     replay_warm_recipe_pct_of_total: float
     # FRAMEWORK_AGENT phase contribution (upstream-PR bake-ins).
     framework_pct_of_total: float
@@ -1377,18 +1377,18 @@ class WarmReplayOutcome(TypedDict, total=False):
 
 
 class KBProvenance(TypedDict, total=False):
-    """Cortex KB integration audit for the session.
+    """Recipe KB integration audit for the session.
 
     Covers warm-start context seeded from the KB, the warm-replay outcome,
     pending/created KB points, queue depth, and the flusher daemon status.
 
     Attributes:
-        cortex_session_id (str): Cortex KB session id.
+        recipe_kb_session_id (str): Recipe KB session id.
         warm_start_ts (str): ISO UTC timestamp of warm start.
         warm_start_recipe_seen (bool): Whether a warm recipe was seen.
         warm_start_recipe_tier (str): Tier of the seen warm recipe.
         warm_start_recipe_source (str): KB path that supplied the applied
-            warm recipe (e.g. ``gbrain`` / ``cortex``); empty when none.
+            warm recipe (e.g. ``gbrain`` / ``recipe KB``); empty when none.
         warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
         warm_start_lesson_count (int): Number of lessons injected at warm start.
         warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
@@ -1409,11 +1409,11 @@ class KBProvenance(TypedDict, total=False):
             ``explicit_flag`` / ``ir3_auto``).
     """
 
-    cortex_session_id: str
+    recipe_kb_session_id: str
     warm_start_ts: str
     warm_start_recipe_seen: bool
     warm_start_recipe_tier: str
-    # Which KB path (e.g. "gbrain" / "cortex") supplied the applied warm recipe.
+    # Which KB path (e.g. "gbrain" / "recipe_kb") supplied the applied warm recipe.
     warm_start_recipe_source: str
     warm_start_pitfall_count: int
     warm_start_lesson_count: int
@@ -2121,6 +2121,23 @@ class EnablementBreakdown(TypedDict, total=False):
         last_build_failure: ``{failure_class, failure_summary}`` from the most
             recent failed build attempt (framework-channel decision input).
         build_attempt_count: Total number of targeted-build rows attempted.
+        origin: Enablement trigger origin: "" (boot) or "eval".
+        trigger_kind: Eval trigger kind (eval_runtime_failure /
+            accuracy_below_floor / accuracy_unavailable) when origin is "eval".
+        observed_accuracy: Baseline accuracy observed at the eval trigger.
+        accuracy_floor: Effective accuracy floor for the trigger + KEEP gate.
+        observed_task: Eval task name observed at the trigger.
+        observed_metric: Eval metric observed at the trigger.
+        probe_config_path: Materialized config re-run to reproduce the contract.
+        accepted_config_path: Effective config from the KEEP'd candidate bench
+            used as the revalidation baseline config.
+        eval_contract_fingerprint: Fingerprint of the captured eval contract.
+        validation_pending: True while an eval-origin KEEP awaits baseline
+            revalidation.
+        succeeded: True once the revalidation baseline promoted with accuracy
+            at or above the floor.
+        revalidation_task_id: TaskRegistry id of the tracked revalidation task,
+            or "" when no revalidation is in progress.
     """
 
     stack_actions: list[EnablementStackActionSummary]
@@ -2130,6 +2147,18 @@ class EnablementBreakdown(TypedDict, total=False):
     build_attempts: list[TargetedBuildAttemptSummary]
     last_build_failure: dict[str, str]
     build_attempt_count: int
+    origin: str
+    trigger_kind: str
+    observed_accuracy: float
+    accuracy_floor: float
+    observed_task: str
+    observed_metric: str
+    probe_config_path: str
+    accepted_config_path: str
+    eval_contract_fingerprint: str
+    validation_pending: bool
+    succeeded: bool
+    revalidation_task_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -2407,7 +2436,7 @@ class SessionBreakdown(TypedDict, total=False):
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
         attribution (Attribution): Gain attribution across stack/source/phase.
-        kb_provenance (KBProvenance): Cortex KB integration audit.
+        kb_provenance (KBProvenance): Recipe KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
         optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
         gemm_tuning (GemmTuning): Fixed FP8 GEMM-tuning stage, engine-tagged
@@ -2450,7 +2479,7 @@ class SessionBreakdown(TypedDict, total=False):
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
-    kb_provenance: KBProvenance  # Cortex KB audit
+    kb_provenance: KBProvenance  # Recipe KB audit
     specialist_runs: list[SpecialistRound]
     # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
     optimization_stack: list["OptimizationStackEntry"]

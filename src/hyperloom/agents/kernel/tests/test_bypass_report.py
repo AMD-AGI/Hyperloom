@@ -37,7 +37,15 @@ def _analyze(kernels):
 
 
 _KERNELS = [
-    {"name": "paged_attention_v1", "op_name": "aten::paged_attn", "gpu_time_us": 300.0, "count": 3},
+    {
+        "name": "paged_attention_v1",
+        "op_name": "aten::paged_attn",
+        "gpu_time_us": 300.0,
+        "count": 3,
+        # torch_trace shape => dispatch-grade so it routes as a task.
+        "op_shapes": [[17, 7168]],
+        "op_dtypes": ["c10::BFloat16"],
+    },
     {"name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm", "gpu_time_us": 200.0, "count": 2},
 ]
 
@@ -59,6 +67,177 @@ def test_build_candidates_routing():
     assert gemm["reusable_native_kernel"] is False
     # Non-reusable vendor GEMM is always skipped.
     assert any(c["name"] == "aten::mm" for c in cands["skipped_kernels"])
+
+
+def _one(cand_kernel):
+    """Build candidates for a single kernel row and return its candidate dict."""
+    cands = report.build_candidates(_analyze([cand_kernel]), framework="sglang", target_platform="MI300X")
+    return cands["hot_kernels"][0]
+
+
+def test_shape_provenance_torch_trace_wins():
+    # A kernel with its own cpu_op Input Dims resolves to torch_trace even when
+    # backfill/launch-grid data is also present (waterfall priority).
+    c = _one(
+        {
+            "name": "_score_kernel",
+            "op_name": "aten::score",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[17, 7168]],
+            "op_dtypes": ["c10::BFloat16"],
+            "backfill_shapes": [[99, 99]],
+            "launch_grid": [17, 2, 1],
+            "launch_block": [512, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "torch_trace"
+    assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
+
+
+def test_shape_provenance_capture_backfill():
+    # No own cpu_op shape, but the same-name kernel resolved a shape at capture
+    # time: inherit it, tagged capture_backfill.
+    c = _one(
+        {
+            "name": "aiter::add_rmsnorm_quant_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[17, 7168]],
+            "backfill_dtypes": ["c10::BFloat16"],
+            "launch_grid": [17, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "capture_backfill"
+    assert c["shapes"] and "17,7168" in c["shapes"][0]["shape"]
+
+
+def test_backfill_ambiguous_skips_capture_backfill():
+    c = _one(
+        {
+            "name": "dyn_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[64, 64]],
+            "backfill_dtypes": ["c10::BFloat16"],
+            "backfill_ambiguous": True,
+        }
+    )
+    assert c["shape_provenance"] != "capture_backfill"
+    assert c["shape_dispatchable"] is False
+
+
+def test_shape_provenance_launch_grid():
+    # No cpu_op shape and no backfill: fall to launch grid/block geometry.
+    c = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert c["shape_provenance"] == "launch_grid"
+    s = c["shapes"][0]["shape"]
+    assert "grid=(17,7,1)" in s and "block=(256,1,1)" in s
+    # Geometry must NOT feed the analytical roofline.
+    assert c["roofline_source"] == report._RL_PLACEHOLDER
+
+
+def test_shape_provenance_tile_name():
+    # No shape and no launch geometry: parse the BLOCK_SIZE_* tile from the name.
+    c = _one(
+        {
+            "name": "_gemm_a16_w16_kernel_BLOCK_SIZE_M_32_BLOCK_SIZE_N_32_BLOCK_SIZE_K_256_x",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+        }
+    )
+    assert c["shape_provenance"] == "tile_name"
+    s = c["shapes"][0]["shape"]
+    assert "M32" in s and "N32" in s and "K256" in s
+
+
+def test_shape_provenance_unresolved_when_no_signal():
+    # Nothing to go on: stays unresolved (unchanged behaviour).
+    c = _one({"name": "mystery_kernel", "op_name": "", "gpu_time_us": 100.0, "count": 1})
+    assert c["shape_provenance"] == "unresolved"
+    assert c["shapes"] == []
+
+
+def test_shape_dispatchable_flag_by_provenance():
+    # torch_trace / capture_backfill are dispatch-grade; launch_grid / tile_name
+    # are geometry-only and must be flagged not dispatchable.
+    torch = _one(
+        {
+            "name": "k",
+            "op_name": "aten::x",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[8, 8]],
+            "op_dtypes": ["c10::BFloat16"],
+        }
+    )
+    assert torch["shape_dispatchable"] is True
+    grid = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert grid["shape_provenance"] == "launch_grid"
+    assert grid["shape_dispatchable"] is False
+
+
+def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
+    # A reusable kernel with a resolved source but only launch-grid geometry is
+    # visible but not auto-dispatchable: skip_reason must say so.
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/k.cu", "op_to_source"))
+    c = _one(
+        {
+            "name": "_combine_kernel",
+            "op_name": "aiter::combine",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "launch_grid": [17, 7, 1],
+            "launch_block": [256, 1, 1],
+        }
+    )
+    assert c["reusable_native_kernel"] is True
+    assert c["source_file"] == "/opt/aiter/csrc/k.cu"
+    assert c["shape_dispatchable"] is False
+    assert "not dispatchable" in c["skip_reason"]
+
+
+def test_workload_roofline_uses_capture_backfill_shape():
+    # A graph-replay kernel with no own cpu_op dims but a same-name capture-time
+    # backfill shape must still contribute an analytical roofline to the totals.
+    kernels = [
+        {
+            "name": "add_rmsnorm_kernel",
+            "op_name": "",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [],
+            "backfill_shapes": [[17, 7168]],
+            "backfill_dtypes": ["c10::BFloat16"],
+        }
+    ]
+    totals = report.build_workload_roofline_totals(_analyze(kernels), target_platform="MI300X")
+    assert totals["sigma_actual_kernel_us"] == 500.0
+    # backfill shape feeds the roofline: some bound bucket is non-zero.
+    assert (totals["compute_bound_us"] + totals["memory_bound_us"]) > 0.0
 
 
 def test_build_workload_roofline_totals_covers_all_kernels():
@@ -680,7 +859,7 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
     md = report.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
     # dispatchable split line present
-    assert "rewritable candidate(s) have a resolved editable source" in md
+    assert "rewritable candidate(s) are auto-dispatchable" in md
     # resolved source surfaced with method
     assert "/opt/aiter/csrc/act.cu" in md and "via op_to_source" in md
     # unresolved reusable candidate flagged as not auto-dispatchable

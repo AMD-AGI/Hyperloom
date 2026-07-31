@@ -78,6 +78,56 @@ def test_correlation_attribution(tmp_path):
     assert kernels["paged_attention_v1"]["op_name"] == ""
 
 
+_FALLBACK_TRACE_EVENTS = [
+    # Capture-time launch of add_rmsnorm: cpu_op carries Input Dims (shape source).
+    {"cat": "cpu_op", "name": "aiter::add_rmsnorm", "args": {"External id": 100, "Input Dims": [[17, 7168]], "Input type": ["c10::BFloat16"]}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 5, "External id": 100}},
+    {"cat": "kernel", "ph": "X", "name": "add_rmsnorm_kernel", "ts": 1000, "dur": 100, "args": {"correlation": 5, "grid": [17, 1, 1], "block": [256, 1, 1]}},
+    # Graph-replay of the SAME kernel: no cpu_op link, grid-less Dispatch Task.
+    {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": 6}},
+    {"cat": "kernel", "ph": "X", "name": "add_rmsnorm_kernel", "ts": 2000, "dur": 100, "args": {"correlation": 6}},
+    # Pure-Triton kernel: no cpu_op, but launch carries grid/block geometry.
+    {"cat": "cuda_runtime", "name": "hipModuleLaunchKernel", "args": {"correlation": 7}},
+    {"cat": "kernel", "ph": "X", "name": "_score_kernel", "ts": 3000, "dur": 100, "args": {"correlation": 7, "grid": [17, 2, 1], "block": [512, 1, 1]}},
+]
+
+
+def test_launch_geom_and_backfill_threaded_to_rows(tmp_path):
+    payload = json.dumps({"traceEvents": _FALLBACK_TRACE_EVENTS}).encode("utf-8")
+    tf = tmp_path / "fb.trace.json"
+    tf.write_bytes(payload)
+    out = reader.analyze_trace(tf, top_k=0)
+    rows = {k["name"]: k for k in out["kernels"]}
+
+    # Same-name kernel resolved a shape at capture time -> backfill index seeded.
+    assert rows["add_rmsnorm_kernel"]["backfill_shapes"] == [[17, 7168]]
+    # Pure-Triton kernel: no cpu_op shape, but launch geometry is retained.
+    score = rows["_score_kernel"]
+    assert score["op_shapes"] == []
+    assert score["launch_grid"] == [17, 2, 1]
+    assert score["launch_block"] == [512, 1, 1]
+
+
+_MULTI_SHAPE_BACKFILL_EVENTS = [
+    {"cat": "cpu_op", "name": "aten::small", "args": {"External id": 1, "Input Dims": [[8, 8]], "Input type": ["c10::BFloat16"]}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 1, "External id": 1}},
+    {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 1000, "dur": 10, "args": {"correlation": 1}},
+    {"cat": "cpu_op", "name": "aten::large", "args": {"External id": 2, "Input Dims": [[64, 64]], "Input type": ["c10::BFloat16"]}},
+    {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 2, "External id": 2}},
+    {"cat": "kernel", "ph": "X", "name": "dyn_kernel", "ts": 2000, "dur": 100, "args": {"correlation": 2}},
+]
+
+
+def test_backfill_majority_shape_and_ambiguous_flag(tmp_path):
+    payload = json.dumps({"traceEvents": _MULTI_SHAPE_BACKFILL_EVENTS}).encode("utf-8")
+    tf = tmp_path / "multi.trace.json"
+    tf.write_bytes(payload)
+    row = reader.analyze_trace(tf, top_k=0)["kernels"][0]
+    assert row["name"] == "dyn_kernel"
+    assert row["backfill_shapes"] == [[64, 64]]
+    assert row["backfill_ambiguous"] is True
+
+
 def test_timeline_union_math(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     tl = reader.analyze_trace(tf, top_k=0)["timeline"]
