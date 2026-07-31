@@ -214,6 +214,71 @@ def test_provision_external_infera_requires_ssh(
     assert ei.value.code == 2
 
 
+def _adopt_rayjob(monkeypatch: pytest.MonkeyPatch) -> argparse.Namespace:
+    """Neutralize the session-side setup so adoption reduces to its reporting."""
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: 0)
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
+    return argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image=None, model="/models/test", no_kernel=True)
+
+
+def test_rayjob_with_head_ip_is_not_reported_benchmark_only(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """rayjob restarts through the Ray dashboard, with no SSH anywhere.
+
+    Keying the adoption line on SSH labelled this fully controllable cluster
+    "benchmark-only" -- the same words the genuinely uncontrollable one gets --
+    so the one line an operator reads to learn whether the run can tune anything
+    said the opposite of the truth.
+    """
+    # The distinguishing shape: a real rayjob hand-off carries HEAD_IP and no SSH
+    # material at all, so keying on SSH flips the verdict while control is intact.
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+    _prepare_multi_node_state(_adopt_rayjob(monkeypatch))
+
+    out = capsys.readouterr()
+    assert "server_control=yes" in out.out
+    assert "ssh_control=no" in out.out
+    assert "benchmark-only" not in out.out
+    assert "WARNING: no server control" not in out.err
+
+
+def test_rayjob_without_head_ip_warns_results_are_meaningless(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Benchmark-only is legal but must not pass for a real optimization run.
+
+    Without server control every candidate re-measures the one unchanged server,
+    so the run still reports gains no config produced. That was a single info
+    line from the per-round restart helper; adoption has to say it where the
+    operator is actually looking.
+    """
+    # A rayjob hand-off carries neither the SSH key nor the pod IPs; only
+    # SERVICE_URL is guaranteed, and HEAD_IP is the documented opt-in.
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+    _prepare_multi_node_state(_adopt_rayjob(monkeypatch))
+
+    out = capsys.readouterr()
+    assert "server_control=no (benchmark-only)" in out.out
+    assert "WARNING: no server control" in out.err
+    assert "measures the SAME unchanged server" in out.err
+
+
 def test_adopting_a_rayjob_bootstraps_and_replays_patches(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,

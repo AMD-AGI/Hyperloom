@@ -149,6 +149,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     from ..multi_node._internal.external_state import (
         build_external_state_from_env,
+        external_has_server_control,
         external_has_ssh_control,
         external_service_url,
     )
@@ -184,12 +185,31 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
     os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
     os.environ["MAGPIE_RUN_PHASE"] = "client"
     export_ray_address_to_os()
+    # Report server *control*, not SSH specifically: rayjob restarts through the
+    # Ray dashboard with no SSH at all, so keying this on SSH labelled a fully
+    # controllable rayjob cluster "benchmark-only" and gave the genuinely
+    # uncontrollable one the same words -- exactly backwards on the one line an
+    # operator reads to find out whether the run can tune anything.
+    has_control = external_has_server_control()
     print(
         "multi-node: adopted the platform-provisioned cluster. "
         f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
         f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
-        f"ssh_control={'yes' if external_has_ssh_control() else 'no (benchmark-only)'}"
+        f"server_control={'yes' if has_control else 'no (benchmark-only)'} "
+        f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
     )
+    if not has_control:
+        # Loud, not fatal: benchmark-only is a documented mode (multi_node/SKILL.md),
+        # but without a restart every candidate re-measures the one unchanged
+        # server, so the run still reports gains that no config produced.
+        print(
+            "WARNING: no server control -- per-round restarts will be skipped, so every "
+            "candidate config measures the SAME unchanged server and the reported gains "
+            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob) or "
+            "HYPERLOOM_MN_EXT_SSH_KEY plus one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS "
+            "(infera) to tune. Continuing in benchmark-only mode.",
+            file=sys.stderr,
+        )
     _prepare_adopted_cluster(args, str(ext_state["backend"]))
 
 
