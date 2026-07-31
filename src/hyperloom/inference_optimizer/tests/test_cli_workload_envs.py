@@ -14,6 +14,7 @@ import yaml
 
 from hyperloom.inference_optimizer.cli import (
     _export_workload_envs_for_optimize,
+    _redact_unknown_args,
     _resolve_run_max_model_len,
     _resolve_workload_knobs,
 )
@@ -236,3 +237,33 @@ def test_env_max_model_len_wins_over_auto(tmp_path, monkeypatch):
 
     assert value == 200000
     assert source == "$MAX_MODEL_LEN"
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # The platform hands pod env through --extra-env, so the secret sits in
+        # the value rather than in the flag name.
+        (["--extra-env", "HF_TOKEN=hf_live"], "--extra-env HF_TOKEN=***"),
+        (["--extra-env=HF_TOKEN=hf_live"], "--extra-env=HF_TOKEN=***"),
+        (["--api-key", "sk-live"], "--api-key ***"),
+        (["--api-key=sk-live"], "--api-key=***"),
+        (["--extra-env", "OPENAI_API_KEY=sk-live"], "--extra-env OPENAI_API_KEY=***"),
+        (["--extra-env", "AWS_SECRET_ACCESS_KEY=abc"], "--extra-env AWS_SECRET_ACCESS_KEY=***"),
+        # Non-secret flags stay fully readable: a misspelled real flag lands here
+        # too, and redacting its value would hide the mistake.
+        (["--pod-cpu", "8"], "--pod-cpu 8"),
+        (["--gpus-per-nod", "4"], "--gpus-per-nod 4"),
+        (["--extra-env", "LOG_LEVEL=debug"], "--extra-env LOG_LEVEL=debug"),
+        # A secret flag must not leak its sensitivity onto the next flag's value.
+        (["--api-key", "sk-live", "--pod-cpu", "8"], "--api-key *** --pod-cpu 8"),
+        ([], ""),
+    ],
+)
+def test_unknown_args_are_logged_without_credential_values(tokens, expected):
+    """Unrecognised argv is warned about verbatim, which used to print secrets.
+
+    The platform forwards one FLAGS block to both itself and ``optimize``, so its
+    own flags -- including pod credentials -- always land in the unknown list.
+    """
+    assert _redact_unknown_args(tokens) == expected
