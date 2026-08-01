@@ -59,6 +59,33 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
 
 
+def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
+    """Bench-capable specialists receive enough time for their advertised rebench."""
+    from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
+    from hyperloom.orchestrator.specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+
+    params = {"scope": "domain", "mode": "patch", "bench": True}
+    budget = coord._specialist_wall_budget_sec(
+        needs_gpu=True,
+        params=params,
+    )
+
+    assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
+    assert coord._gpu_lease_ttl_sec(params=params) == int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
+
+
+def test_specialist_budget_does_not_outlast_session(coord: Coordinator, monkeypatch) -> None:
+    """A profile floor cannot extend a finite session's wall-clock budget."""
+    monkeypatch.setattr(coord.shared_state, "remaining_minutes", lambda: 30.0)
+
+    budget = coord._specialist_wall_budget_sec(
+        needs_gpu=True,
+        params={"scope": "domain", "mode": "patch", "bench": True},
+    )
+
+    assert budget == 30 * 60
+
+
 # -- WS2: GPU lease TTL re-source + structured-finally release --------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); lease must outlive the kill.

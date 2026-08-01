@@ -166,25 +166,15 @@ def test_compute_plateau_framework_agent_returns_signal():
     """compute_plateau_framework_agent remains as a pure advisory."""
     batches = [
         {
-            "batch_id": "b1",
-            "max_gain_pct_observed_in_batch": 0.2,
-            "candidates": [{"id": "c1a"}],
-        },
-        {
-            "batch_id": "b2",
+            "batch_id": f"b{i}",
             "max_gain_pct_observed_in_batch": 0.0,
-            "candidates": [{"id": "c2a"}],
-        },
-        {
-            "batch_id": "b3",
-            "max_gain_pct_observed_in_batch": 0.5,
-            "candidates": [{"id": "c3a"}],
-        },
+            "candidates": [{"id": f"c{i}a"}],
+        }
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK)
     ]
     progress = [
-        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
-        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
-        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
+        {"batch_id": f"b{i}", "candidate_id": f"c{i}a", "status": "reject"}
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK)
     ]
     state = _State(
         framework_agent_batches=batches,
@@ -192,7 +182,7 @@ def test_compute_plateau_framework_agent_returns_signal():
     )
     triggered, ev = phase_state.compute_plateau_framework_agent(state)
     assert triggered is True
-    assert ev["lookback"] == 3
+    assert ev["lookback"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK
 
 
 def test_framework_batch_plateau_ignores_prior_macro_cycle():
