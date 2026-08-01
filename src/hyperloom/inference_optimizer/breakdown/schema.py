@@ -2107,12 +2107,40 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
 
 
 class EnablementBreakdown(TypedDict, total=False):
-    """Enablement attempt-runtime observability section.
+    """Enablement subsystem observability section.
 
-    Empty {} on sessions that never provisioned an attempt runtime, so the
-    dashboard hides the block.
+    Empty {} only on sessions where enablement was neither admitted nor engaged,
+    so the dashboard hides the block. A boot-origin round repaired by a plain
+    source patch provisions no runtime and builds nothing, so admission and round
+    lifecycle are reported independently of those artifacts.
 
     Attributes:
+        mode: Admitted lane from ``--enablement``: off / launch / eval / all.
+        engaged: True once a round was dispatched, attempted, or landed a patch.
+        origin: Trigger origin: "boot" (cannot launch) or "eval" (accuracy).
+        attempts: Number of authoring rounds dispatched this session.
+        dispatched: True while an authoring round is in flight.
+        succeeded: True once a round was KEPT (eval-origin additionally requires
+            the revalidation baseline to promote at or above the floor).
+        pending: True while a trigger is captured but unconsumed.
+        validation_pending: True while an eval-origin KEEP awaits baseline
+            revalidation.
+        stall_streak: Consecutive no-progress rounds toward ``enablement_stalled``.
+        inflight_task_id: Specialist task id of the in-flight round.
+        last_specialist_task_id: Specialist task id of the most recent round.
+        dispatch_tick: Coordinator tick the in-flight round was dispatched on.
+        revalidation_task_id: TaskRegistry id of the tracked revalidation task.
+        revalidation_generation: Revalidation window counter (idempotency).
+        launch_log_excerpt: Tail of the captured boot failure text that triggered
+            the round.
+        trigger_evidence_excerpt: Tail of the captured eval-failure evidence.
+        kept_patches: Session-relative paths of patches landed by enablement.
+        kept_stack_action: The stack action behind the KEPT attempt runtime.
+        candidate_refs: Bridging candidate refs considered for rotation.
+        setup_commands: Setup commands the specialist requested.
+        localization_manifest: Files the localization pass identified.
+        build_novelty: Novelty keys of the targeted builds requested.
+        human_review_count: Number of logs parked for human review.
         stack_actions: Candidate stack actions considered this session.
         active_runtime: The currently-promoted attempt runtime, or {} when none.
         attempt_runtimes: Retained attempt-runtime records (capped).
@@ -2121,7 +2149,6 @@ class EnablementBreakdown(TypedDict, total=False):
         last_build_failure: ``{failure_class, failure_summary}`` from the most
             recent failed build attempt (framework-channel decision input).
         build_attempt_count: Total number of targeted-build rows attempted.
-        origin: Enablement trigger origin: "" (boot) or "eval".
         trigger_kind: Eval trigger kind (eval_runtime_failure /
             accuracy_below_floor / accuracy_unavailable) when origin is "eval".
         observed_accuracy: Baseline accuracy observed at the eval trigger.
@@ -2132,14 +2159,31 @@ class EnablementBreakdown(TypedDict, total=False):
         accepted_config_path: Effective config from the KEEP'd candidate bench
             used as the revalidation baseline config.
         eval_contract_fingerprint: Fingerprint of the captured eval contract.
-        validation_pending: True while an eval-origin KEEP awaits baseline
-            revalidation.
-        succeeded: True once the revalidation baseline promoted with accuracy
-            at or above the floor.
-        revalidation_task_id: TaskRegistry id of the tracked revalidation task,
-            or "" when no revalidation is in progress.
     """
 
+    mode: str
+    engaged: bool
+    origin: str
+    attempts: int
+    dispatched: bool
+    succeeded: bool
+    pending: bool
+    validation_pending: bool
+    stall_streak: int
+    inflight_task_id: str
+    last_specialist_task_id: str
+    dispatch_tick: int
+    revalidation_task_id: str
+    revalidation_generation: int
+    launch_log_excerpt: str
+    trigger_evidence_excerpt: str
+    kept_patches: list[str]
+    kept_stack_action: EnablementStackActionSummary
+    candidate_refs: list[str]
+    setup_commands: list[str]
+    localization_manifest: list[str]
+    build_novelty: list[str]
+    human_review_count: int
     stack_actions: list[EnablementStackActionSummary]
     active_runtime: EnablementAttemptRuntime
     attempt_runtimes: list[EnablementAttemptRuntime]
@@ -2147,7 +2191,6 @@ class EnablementBreakdown(TypedDict, total=False):
     build_attempts: list[TargetedBuildAttemptSummary]
     last_build_failure: dict[str, str]
     build_attempt_count: int
-    origin: str
     trigger_kind: str
     observed_accuracy: float
     accuracy_floor: float
@@ -2156,9 +2199,6 @@ class EnablementBreakdown(TypedDict, total=False):
     probe_config_path: str
     accepted_config_path: str
     eval_contract_fingerprint: str
-    validation_pending: bool
-    succeeded: bool
-    revalidation_task_id: str
 
 
 # ---------------------------------------------------------------------------
