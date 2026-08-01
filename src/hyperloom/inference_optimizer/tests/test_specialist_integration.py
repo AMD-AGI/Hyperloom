@@ -40,7 +40,7 @@ class _FakeKnowledgePlane:
     """Minimal KnowledgePlane double with both planes enabled."""
 
     pr_monitor_enabled = True
-    cortex_enabled = True
+    recipe_kb_enabled = True
 
 
 def _build_args(**overrides) -> argparse.Namespace:

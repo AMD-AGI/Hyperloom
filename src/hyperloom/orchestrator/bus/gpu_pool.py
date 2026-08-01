@@ -382,6 +382,28 @@ class SpecialistGpuPool:
                 params,
             )
 
+    async def extend(self, task_id: str, ttl_sec: int) -> int:
+        """Push a task's GPU rows out to ``ttl_sec`` from now.
+
+        Keeps the ``kill <= gpu_lease TTL <= gpu_research_lane TTL`` ordering
+        when a lane lease is extended.
+
+        Args:
+            task_id: The task whose GPU rows should be refreshed.
+            ttl_sec: New lifetime in seconds from now.
+
+        Returns:
+            The number of GPU rows refreshed.
+        """
+        expires_iso = datetime.fromtimestamp(time.time() + max(0, int(ttl_sec)), tz=timezone.utc).isoformat()
+        now_iso = _now_iso()
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
+                (expires_iso, now_iso, task_id),
+            )
+            return int(cur.rowcount or 0)
+
     async def reap_expired(self) -> int:
         """Actively delete TTL-expired GPU leases; returns rows reaped.
 

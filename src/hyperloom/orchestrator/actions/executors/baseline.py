@@ -59,7 +59,10 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
-from ._inferencex_patcher import ensure_benchmark_lib_eval_dest_patched
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_eval_dest_patched,
+    ensure_benchmark_lib_eval_start_patched,
+)
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -335,7 +338,7 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     return (output_dir / result_dir).resolve()
 
 
-def _should_establish_quality_ref(task_kind: str | None) -> bool:
+def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
 
     ``replay_warm_recipe`` reuses this executor but is an optimization
@@ -343,14 +346,25 @@ def _should_establish_quality_ref(task_kind: str | None) -> bool:
     than redefine it (otherwise the gate would mask the warm recipe's own
     deviation from the baseline output).
 
+    The kernel lane also drives this executor through synthetic tasks that
+    carry ``kind="baseline"`` literally (integrate re-baseline, the paired-A/B
+    pristine arm, stack validation). Those are throughput-only A/B probes
+    against an already-anchored baseline -- they never anchor one -- so they
+    opt out via ``params["quality_ref_exempt"]`` and are treated exactly like
+    ``replay_warm_recipe``: compare, never establish.
+
     Args:
         task_kind: The task kind (``ctx.task.kind``); ``None`` is treated as
             "not a baseline".
+        params: The task params (``ctx.task.params``); a truthy
+            ``quality_ref_exempt`` disqualifies an otherwise-genuine baseline.
 
     Returns:
-        bool: ``True`` only when the task kind is exactly ``"baseline"``.
+        bool: ``True`` only for a ``"baseline"`` task that is not exempt.
     """
-    return str(task_kind or "") == "baseline"
+    if str(task_kind or "") != "baseline":
+        return False
+    return not (params or {}).get("quality_ref_exempt")
 
 
 def _resolve_reference_base(
@@ -1132,6 +1146,14 @@ class BaselineExecutor:
                     ix_root,
                     exc,
                 )
+            try:
+                ensure_benchmark_lib_eval_start_patched(Path(ix_root))
+            except Exception as exc:  # noqa: BLE001 — patch is best-effort
+                log.warning(
+                    "baseline_executor: eval-start patch skipped for %s: %s",
+                    ix_root,
+                    exc,
+                )
         # Fail LOUDLY (never warn-and-continue) when the fatal eval flag cannot
         # be removed AND this run is meant to execute lm-eval: the benchmark is
         # guaranteed to abort in run_lm_eval, and the accuracy gate then stops
@@ -1240,6 +1262,68 @@ class BaselineExecutor:
         return False
 
     @staticmethod
+    def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
+        """Detect an eval-rooted baseline failure and capture bounded evidence.
+
+        Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
+        benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
+        for ``run_eval``-failure markers. Climbs to the shared task root so the
+        double-run warmup logs are covered. Returns the first matched window
+        (marker plus a bounded slice) so callers need not rescan. Never raises.
+
+        Returns:
+            ``(is_eval_rooted, evidence)``; ``evidence`` is empty when not rooted.
+        """
+
+        def _window(text: str) -> str | None:
+            for m in _EVAL_FAILURE_MARKERS:
+                i = text.find(m)
+                if i != -1:
+                    return text[max(0, i - 200) : i + len(m) + 400]
+            return None
+
+        w = _window(str(result.get("error") or ""))
+        if w is not None:
+            return True, w
+        for warn in result.get("nonfatal_warnings") or []:
+            w = _window(str(warn))
+            if w is not None:
+                return True, w
+        out_dir = result.get("output_dir")
+        if not out_dir:
+            return False, ""
+        root = Path(out_dir)
+        # Double-run: the failure markers may live in the sibling warmup round,
+        # so climb to the shared task root to scan both rounds.
+        if root.name in ("warmup_round", "measure_round"):
+            root = root.parent
+        if not root.exists():
+            return False, ""
+        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+        seen = 0
+        try:
+            for path in root.rglob("*.log"):
+                if path.name not in log_names:
+                    continue
+                seen += 1
+                if seen > 64:  # bound the scan on pathological trees
+                    break
+                try:
+                    with path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
+                        chunk = f.read().decode("utf-8", "replace")
+                except OSError:
+                    continue
+                w = _window(chunk)
+                if w is not None:
+                    return True, f"{path.name}: {w}"
+        except OSError:
+            return False, ""
+        return False, ""
+
+    @staticmethod
     def _is_eval_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline result was caused by the accuracy eval.
 
@@ -1315,7 +1399,19 @@ class BaselineExecutor:
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
         eval_disabled_by_fallback = False
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+            _, evidence = self._eval_failure_evidence(result)
+            if self._eval_enablement_active(ctx):
+                from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+                log.warning(
+                    "baseline_executor: eval-rooted failure; routing to "
+                    "enablement instead of salvaging (RUN_EVAL stays on)."
+                )
+                self._stamp_eval_failure_contract(
+                    ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                )
+                return result
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
                 log.error(
                     "baseline_executor: failure is eval-rooted (InferenceX "
                     "run_eval aborted the benchmark) on a genuine baseline, "
@@ -1367,6 +1463,66 @@ class BaselineExecutor:
             retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
+        return result
+
+    def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
+        """Whether an eval failure should route into enablement this run.
+
+        Only for a genuine baseline, single-node, with the flag enabled.
+        """
+        from ._accuracy_gate import enablement_on_eval_fail_enabled
+        from ._multi_node_env import is_multi_node
+
+        if not enablement_on_eval_fail_enabled():
+            return False
+        if is_multi_node():
+            return False
+        return _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {})
+
+    def _stamp_eval_failure_contract(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+        *,
+        kind: str,
+        observed_accuracy: float | None,
+        evidence: str,
+    ) -> dict[str, Any]:
+        """Mark ``result`` as an eval-rooted baseline failure for enablement.
+
+        Records the failure kind, observed accuracy, effective floor, bounded
+        evidence and an eval-contract fingerprint so writeback can persist the
+        trigger and a later enablement round can re-run the same contract.
+        """
+        from ._accuracy_gate import (
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+            BASELINE_EVAL_EVIDENCE_KEY,
+            BASELINE_EVAL_FAILED_KEY,
+            BASELINE_EVAL_FAILURE_KIND_KEY,
+            BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+            enablement_accuracy_floor,
+            eval_contract_fingerprint,
+        )
+
+        params = ctx.task.params or {}
+        framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
+        model = params.get("model") or params.get("resolved_model")
+        floor = enablement_accuracy_floor()
+        result[BASELINE_EVAL_FAILED_KEY] = True
+        result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
+        result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
+        result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] = floor
+        result[BASELINE_EVAL_EVIDENCE_KEY] = (evidence or "")[:4000]
+        # Fingerprint derives from the materialized YAML contract fields only —
+        # task/metric are result outputs and may be absent on eval crash, so they
+        # must not participate in the stable identity.
+        result[BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY] = eval_contract_fingerprint(
+            config_path=result.get("materialized_config"),
+            framework=framework,
+            model=model,
+        )
+        result["eval_origin"] = "eval"
         return result
 
     def _request_eval_rooted_baseline_stop(
@@ -1442,21 +1598,25 @@ class BaselineExecutor:
         workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
         absent, and serving records no accuracy at all, so both are covered.
 
-        "Expected" means accuracy was not intentionally turned off. Scriptable
-        workloads always carry the quality gate. For serving, the operator can
-        opt out via ``disable_run_eval``, an explicit ``RUN_EVAL=false`` env, or
-        a YAML/reference-env ``RUN_EVAL=false`` -- all folded into the
-        authoritative ``run_eval_disabled`` on the result. The eval-failure
-        fallback also disables eval, but it is tagged
-        ``accuracy_source="eval_unavailable"`` and must still stop (eval was
-        expected and broke). Throughput-level baseline failures are handled by
-        the Coordinator's existing ``baseline_failed`` streak logic.
+        There is no opt-out. Disabling the eval (via ``disable_run_eval``, an
+        explicit ``RUN_EVAL=false`` env, or a YAML/reference-env value) does not
+        make a missing accuracy acceptable on a genuine baseline -- it only
+        means the reference was never measured, which is exactly the state this
+        guard exists to reject. Synthetic kernel-lane re-baselines that reuse
+        ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``.
+
+        With eval-on-fail enablement active (the default), the result is stamped
+        as an eval-failure contract and routed to enablement rather than
+        stopping; ``_is_promotable_result`` then blocks it from anchoring
+        ``baseline_tput`` / ``baseline_accuracy`` / ``baseline_config_path``.
+        Otherwise the run stops. Throughput-level baseline failures are handled
+        by the Coordinator's existing ``baseline_failed`` streak logic.
 
         Args:
             ctx (RunnerContext): The runner context (task kind + shared_state).
             result (dict): The final baseline result dict.
         """
-        if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+        if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
             return
         # A failed status must NOT skip straight past the salvage below. An eval
         # that dies mid-run (e.g. the server vanishes while lm_eval is working
@@ -1473,22 +1633,19 @@ class BaselineExecutor:
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
         acc = result.get("accuracy")
-        if acc is not None and float(acc) > 0.0:
+        eval_enablement = self._eval_enablement_active(ctx)
+        from ._accuracy_gate import accuracy_meets_floor, classify_accuracy_failure, enablement_accuracy_floor
+
+        floor = enablement_accuracy_floor()
+        if eval_enablement:
+            if accuracy_meets_floor(acc, floor):
+                return  # a usable baseline accuracy at/above the floor exists
+        elif acc is not None and float(acc) > 0.0:
             return  # a usable baseline accuracy exists
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
-        from hyperloom.inference_optimizer import framework_registry
         from ._accuracy_gate import request_baseline_accuracy_stop
 
-        scriptable = framework_registry.is_scriptable(framework)
-        # Operator opt-out only when eval was disabled AND this is not the
-        # eval-failure fallback (which forces RUN_EVAL=false but still means the
-        # eval was expected and broke). Scriptable always runs its quality gate.
-        operator_disabled_eval = bool(result.get("run_eval_disabled")) and (
-            result.get("accuracy_source") != "eval_unavailable"
-        )
-        if not (scriptable or not operator_disabled_eval):
-            return
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
         # Session-level salvage (complements #942): the cold-start guard and the
@@ -1499,6 +1656,17 @@ class BaselineExecutor:
         # produced a valid ``results*.json``. Before halting, reuse a positive
         # accuracy measured by any sibling attempt rather than discarding a good
         # baseline and stopping the whole run.
+        #
+        # This runs BEFORE the enablement branch below, not after it. The
+        # cold-start guard splits one baseline into warmup_round (RUN_EVAL=true
+        # -- the only round that measures accuracy) and measure_round
+        # (RUN_EVAL=false -- hot throughput only), then decides on the
+        # measure_round result, which by construction carries no accuracy. With
+        # enablement active the branch below used to fire first and dispatch a
+        # specialist to chase a quality regression that never happened, while
+        # the sibling warmup_round held a perfectly good score (gsm8k 0.8954 on
+        # Kimi-K3, 2026-07-29). Only a genuinely missing or below-floor accuracy
+        # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
             acc_val = float(salvaged["accuracy"])
@@ -1519,6 +1687,36 @@ class BaselineExecutor:
                 "attempt (%s); not stopping the run",
                 acc_val,
                 salvaged.get("source_file", ""),
+            )
+            if not eval_enablement or accuracy_meets_floor(acc_val, floor):
+                return
+            # Salvaged, but still under the floor: that is a real quality
+            # signal, so fall through to enablement with the observed value.
+            acc = acc_val
+
+        # No opt-out: a genuine baseline exists to establish the accuracy
+        # reference, so turning the eval off does not make a missing accuracy
+        # acceptable -- it only means the reference was never measured. Every
+        # disable path (the ``disable_run_eval`` param, an explicit
+        # ``RUN_EVAL=false`` env, a YAML/reference-env value) now lands here.
+        # Route into enablement instead of stopping: the throughput baseline
+        # stays for diagnostics but is blocked from anchoring.
+        if eval_enablement:
+            kind = classify_accuracy_failure(acc, floor)
+            observed = float(acc) if isinstance(acc, (int, float)) else None
+            evidence = (
+                f"baseline accuracy did not meet floor: accuracy={acc} floor={floor} "
+                f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
+                f"source={result.get('accuracy_source')}"
+            )
+            self._stamp_eval_failure_contract(
+                ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
+            )
+            log.warning(
+                "baseline_executor: accuracy %s below floor %.4f; routing to "
+                "enablement instead of stopping the run.",
+                acc,
+                floor,
             )
             return
         request_baseline_accuracy_stop(
@@ -1603,7 +1801,7 @@ class BaselineExecutor:
         # Only a genuine ``baseline`` task may establish/overwrite the quality
         # reference; ``replay_warm_recipe`` reuses this executor but must compare
         # against the pure baseline reference rather than redefine it.
-        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
+        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params)
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
@@ -1735,6 +1933,23 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        # Apply runtime_override from params into the materialized YAML so the
+        # revalidation baseline boots under the same framework runtime as the
+        # KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
+        _rt_from_params = params.get("runtime_override")
+        if isinstance(_rt_from_params, dict) and _rt_from_params:
+            try:
+                import yaml as _yaml
+
+                from ._grid_runner import apply_runtime_override
+
+                _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                _cfg_bench = _cfg_data.setdefault("benchmark", {})
+                _cfg_envs = _cfg_bench.setdefault("envs", {})
+                apply_runtime_override(_cfg_envs, _rt_from_params)
+                config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
+            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+                log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Whether THIS run actually executes lm-eval, read back from the
         # materialized config the subprocess consumes -- the single source of
         # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base
@@ -2201,6 +2416,13 @@ class BaselineExecutor:
         # that ignore it are caught by the salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
         env["RESULT_DIR"] = str(result_dir)
+        # Config/eval-contract facts echoed onto every failure result so an
+        # eval-rooted failure can be fingerprinted and re-run by enablement.
+        capture_meta = {
+            "materialized_config": str(materialized_config_path),
+            "result_dir": str(result_dir),
+            "run_eval_disabled": bool(run_eval_disabled),
+        }
         # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
         # lm-eval output. Keep it under the task workspace but separate from
         # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
@@ -2391,6 +2613,7 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
+                **capture_meta,
             }
 
         # Detokenizer-stall watchdog reap: the server came up healthy but went
@@ -2421,6 +2644,7 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in stall_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
+                **capture_meta,
             }
 
         # When the server's engine/worker bootstrap dies, the root cause is in
@@ -2473,6 +2697,7 @@ class BaselineExecutor:
             failure_extras = {
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
+                **capture_meta,
             }
             # Magpie never created a benchmark_* workspace, so the wrapper never
             # wrote server.log. Persist captured stderr/stdout so the failure
@@ -2584,6 +2809,7 @@ class BaselineExecutor:
                 "reported_success": measurement.get("reported_success"),
                 "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                 "nonfatal_warnings": warnings,
+                **capture_meta,
             }
 
         result = {

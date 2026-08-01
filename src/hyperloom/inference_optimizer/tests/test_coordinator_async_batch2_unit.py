@@ -3,7 +3,7 @@
 
 """Batch 2 coverage for Coordinator: synchronous context readers, the
 no-progress circuit-breaker signal, resume replay, orchestration-conversation
-reset, and lifecycle teardown (stop / Cortex T4 safety net)."""
+reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -661,11 +661,11 @@ def test_context_analysis_reader_unreadable_path(
     assert "unreadable" in out or "no analysis.md" in out
 
 
-# -- _cortex_t4_hook + stop -------------------------------------------------
+# -- _recipe_kb_t4_hook + stop -------------------------------------------------
 @pytest.mark.asyncio
-async def test_cortex_t4_hook_noop_without_kb(coord: Coordinator) -> None:
-    coord.cortex_kb = None
-    await coord._cortex_t4_hook()
+async def test_recipe_kb_t4_hook_noop_without_kb(coord: Coordinator) -> None:
+    coord.recipe_kb = None
+    await coord._recipe_kb_t4_hook()
 
 
 @pytest.mark.asyncio
@@ -800,9 +800,6 @@ async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
         def should_checkpoint(self, **kw):
             return False
 
-        def is_hard_compaction(self, n):
-            return False
-
     coord._checkpoint_policy = _Policy()
     assert await coord._maybe_checkpoint_orchestration(tick=5) is False
 
@@ -819,9 +816,6 @@ async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
     class _Policy:
         def should_checkpoint(self, **kw):
             return True
-
-        def is_hard_compaction(self, n):
-            return False
 
     coord._checkpoint_policy = _Policy()
     took = await coord._maybe_checkpoint_orchestration(tick=12, phase_changed=True)
@@ -863,7 +857,6 @@ async def test_checkpoint_history_ring_caps_at_ten(coord: Coordinator) -> None:
 def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION", "0.5")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_HARD_FRACTION", "0.75")
     sd = make_session_dir()
     from .conftest import seed_target_analysis_marker
 
@@ -872,7 +865,6 @@ def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
     backends["orchestration"].model = "claude-opus-4-8"  # type: ignore[attr-defined]
     c = Coordinator(sd, backends=backends)
     assert c._checkpoint_policy.context_token_soft == 100_000
-    assert c._checkpoint_policy.context_token_hard == 150_000
 
 
 def test_orchestration_memory_rollback_env(tmp_path, monkeypatch) -> None:
@@ -900,9 +892,6 @@ def _always_checkpoint(coord: Coordinator) -> None:
     class _Policy:
         def should_checkpoint(self, **kw):
             return True
-
-        def is_hard_compaction(self, n):  # default: not hard
-            return False
 
     coord._checkpoint_policy = _Policy()
 
@@ -945,30 +934,6 @@ async def test_checkpoint_degenerate_three_times_emits_medium_observation(coord:
     rows = await coord.bus.tail(topic="observation", n=20)
     degraded = [m.payload for m in rows if m.payload.get("kind") == "orchestration_checkpoint_degraded"]
     assert any(p.get("severity") == "medium" and p.get("consecutive") == 3 for p in degraded)
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_degenerate_hard_uses_fallback(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord, raw_text="still no JSON")
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-    coord.shared_state.phase = "EXPLORE"
-
-    class _Policy:
-        def should_checkpoint(self, **kw):
-            return True
-
-        def is_hard_compaction(self, n):  # near the window → force
-            return True
-
-    coord._checkpoint_policy = _Policy()
-    took = await coord._maybe_checkpoint_orchestration(tick=20)
-    assert took is True
-    assert coord._orchestration_seeded is False
-    assert coord.shared_state.orchestration_memory.get("current_plan", "").startswith("[auto]")
 
 
 @pytest.mark.asyncio
@@ -1109,35 +1074,10 @@ async def test_compose_prompt_robustness_telemetry_raises(
         raise RuntimeError("telemetry failed")
 
     monkeypatch.setattr(coord.shared_state, "to_phase_budget_telemetry", _boom)
-
-    async def _scan_boom():
-        raise RuntimeError("scan failed")
-
-    monkeypatch.setattr(coord.phase_explore, "_scan_stale_specialists", _scan_boom)
     monkeypatch.setattr(coord.conversation, "_conversation_progress_signal", _boom)
     out = await coord._compose_prompt("robustness")
-    assert "Specialist health" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_lists_stale_specialists(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    async def _stale():
-        return [{"task_id": "spec-stale", "running_seconds": 999}]
-
-    monkeypatch.setattr(coord.phase_explore, "_scan_stale_specialists", _stale)
-    out = await coord._compose_prompt("robustness")
-    assert "stale specialists" in out
-    assert "spec-stale" in out
-
-
-# -- _promote_to_shared_state additional branches ---------------------------
-def _ptask(tid: str, kind: str):
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
+    # Every advisory failure is swallowed; the prompt still renders.
+    assert "SESSION_DIR=" in out
 
 
 @pytest.mark.asyncio
@@ -1355,26 +1295,47 @@ async def test_budget_limited_conc_sweep_skip_records_done(coord: Coordinator) -
     assert evidence["conc_sweep_status"] == "skipped"
 
 
-# -- _scan_stale_specialists (running rows) ---------------------------------
+# -- _promote_to_shared_state additional branches ---------------------------
+def _ptask(tid: str, kind: str):
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
+
+
+# -- specialist visibility contract -----------------------------------------
 @pytest.mark.asyncio
-async def test_scan_stale_specialists_flags_running(coord: Coordinator) -> None:
-    coord._specialist_stale_sec = 0  # any running specialist is "stale"
+async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator) -> None:
+    """No periodic specialist block: it can never observe a live specialist.
+
+    The prompt renders only between blocking actions, so a running specialist
+    is structurally absent from it. Reporting "none running" there would
+    manufacture a false belief; in-flight work reaches the agent via
+    ``specialist_progress`` observations and ``get_running_tasks`` instead.
+    """
     spec = await coord.tasks.create(
         kind="specialist",
-        params={},
-        idempotency_key="stale-spec",
+        params={"domain": "serving_specialist"},
+        idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    # A non-specialist running task is skipped by the kind guard.
-    other = await coord.tasks.create(
-        kind="explore",
-        params={},
-        idempotency_key="stale-other",
+    for agent in ("orchestration", "robustness"):
+        out = await coord._compose_prompt(agent)
+        assert "Specialist health" not in out
+        assert "stale" not in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> None:
+    """``get_running_tasks`` is the on-demand path and is not turn-bound."""
+    spec = await coord.tasks.create(
+        kind="specialist",
+        params={"domain": "serving_specialist", "gap_canonical_id": "gap.xyz"},
+        idempotency_key="queryable-spec",
     )
-    await coord.tasks.transition(other.task_id, "running")
-    stale = await coord._scan_stale_specialists()
-    assert any(r["task_id"] == spec.task_id for r in stale)
-    assert all(r["task_id"] != other.task_id for r in stale)
+    await coord.tasks.transition(spec.task_id, "running")
+    out = coord.conversation._context_running_tasks_reader()
+    assert spec.task_id in out
+    assert "serving_specialist" in out
 
 
 # -- _fan_out_specialist_wave (valid entries) -------------------------------
@@ -1450,12 +1411,12 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert "roofline_evidence" in params
 
 
-# -- _record_fact_per_task (cortex KB path) ---------------------------------
+# -- _record_fact_per_task (recipe KB KB path) ---------------------------------
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.cortex_kb = object()  # non-None -> KB amend path
+    coord.recipe_kb = object()  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -1474,7 +1435,7 @@ async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatc
 async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.cortex_kb = object()
+    coord.recipe_kb = object()
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
     monkeypatch.setattr(coord.writeback, "_pitfall_severity_for", lambda rd: "high")
@@ -1607,7 +1568,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
     )
 
 
-# -- cortex_finalize_recipe_and_journal (KB path) ---------------------------
+# -- finalize_recipe_and_journal (KB path) ---------------------------
 class _FakeLocal:
     def get_recipe(self, *, canonical_id):
         return {
@@ -1618,29 +1579,29 @@ class _FakeLocal:
         }
 
 
-class _FakeCortexKB:
+class _FakeRecipeKB:
     def __init__(self) -> None:
         self.local = _FakeLocal()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_skips_without_model(coord: Coordinator) -> None:
-    coord.cortex_kb = _FakeCortexKB()
+async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
+    coord.recipe_kb = _FakeRecipeKB()
     coord.shared_state.model_name = ""  # missing model -> skip update_recipe
     coord.shared_state.gpu_type = "mi300x"
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
-    coord.cortex_kb = _FakeCortexKB()
+async def test_recipe_kb_finalize_amends_recipe(coord: Coordinator, monkeypatch) -> None:
+    coord.recipe_kb = _FakeRecipeKB()
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 12.0
     coord.shared_state.current_best = {"tput": 950.0}
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
     assert amends and "recipe_overrides" in amends[0]
 
 
@@ -1712,7 +1673,6 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
         IntentType.PRUNE_BRANCH: "_handle_prune_branch",
         IntentType.ALERT: "_handle_alert",
         IntentType.UPDATE_STATE: "_handle_update_state",
-        IntentType.SPECIALIST_DONE: "_handle_specialist_done",
     }
     for it, attr in routes.items():
 
@@ -2000,7 +1960,7 @@ def test_promote_warm_replay_below_historical_bar(coord: Coordinator) -> None:
     assert out.get("below_historical_reproduce_pct") is True
 
 
-# -- cortex_finalize_recipe_and_journal (rich existing row merge) -----------
+# -- finalize_recipe_and_journal (rich existing row merge) -----------
 class _FakeLocalRich:
     def get_recipe(self, *, canonical_id):
         return {
@@ -2011,21 +1971,21 @@ class _FakeLocalRich:
         }
 
 
-class _FakeCortexKBRich:
+class _FakeRecipeKBRich:
     def __init__(self) -> None:
         self.local = _FakeLocalRich()
 
 
 @pytest.mark.asyncio
-async def test_cortex_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
-    coord.cortex_kb = _FakeCortexKBRich()
+async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:
+    coord.recipe_kb = _FakeRecipeKBRich()
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.cumulative_gain_validated = 15.0
     coord.shared_state.current_best = {"tput": 999.0}
     amends: list[dict] = []
     monkeypatch.setattr(coord.proposals, "_kb_amend_recipe", lambda **k: amends.append(k))
-    coord.cortex_finalize_recipe_and_journal()
+    coord.finalize_recipe_and_journal()
     assert amends
     overrides = amends[0]["recipe_overrides"]
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])

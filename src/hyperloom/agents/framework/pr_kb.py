@@ -11,7 +11,7 @@ framework-agent already consumes:
 * :func:`parse_index_prs` — candidate discovery inputs (P2).
 
 All helpers are defensive: missing keys / unparseable blocks yield empty
-results so callers fall back to Cortex / GitHub.
+results so callers fall back to Primus Cortex / GitHub.
 """
 
 from __future__ import annotations
@@ -136,7 +136,7 @@ def fetch_pr_kb_diff(
     """Fetch + synthesize a PR's unified diff from its PR KB files page.
 
     Returns ``("", "")`` on any miss / truncation / omission so the caller
-    falls back to a full source (``diff_url`` / Cortex), never a partial diff.
+    falls back to a full source (``diff_url`` / Primus Cortex), never a partial diff.
 
     Args:
         repo: Repo full name or URL.

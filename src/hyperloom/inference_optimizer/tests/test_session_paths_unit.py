@@ -109,16 +109,16 @@ def test_target_analysis_paths():
     assert sp.target_analysis_report_md(SD).name == "target_analysis_report.md"
 
 
-def test_cortex_paths():
-    assert sp.cortex_dir(SD) == SD / "runtime" / "cortex"
-    assert sp.cortex_warm_json(SD).name == ".kb_warm.json"
-    assert sp.cortex_pitfalls_json(SD).name == ".kb_pitfalls.json"
-    assert sp.cortex_pending_ndjson(SD).name == ".kb_pending.ndjson"
-    assert sp.cortex_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
-    assert sp.cortex_dead_letter_ndjson(SD).name == ".kb_dead_letter.ndjson"
-    assert sp.cortex_audit_jsonl(SD).name == ".kb_audit.jsonl"
-    assert sp.cortex_flusher_pid(SD).name == ".kb_flusher.pid"
-    assert sp.cortex_flusher_status_json(SD).name == ".kb_flusher_status.json"
+def test_recipe_kb_paths():
+    assert sp.recipe_kb_dir(SD) == SD / "runtime" / "recipe_kb"
+    assert sp.recipe_kb_warm_json(SD).name == ".kb_warm.json"
+    assert sp.recipe_kb_pitfalls_json(SD).name == ".kb_pitfalls.json"
+    assert sp.recipe_kb_pending_ndjson(SD).name == ".kb_pending.ndjson"
+    assert sp.recipe_kb_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
+    assert sp.recipe_kb_dead_letter_ndjson(SD).name == ".kb_dead_letter.ndjson"
+    assert sp.recipe_kb_audit_jsonl(SD).name == ".kb_audit.jsonl"
+    assert sp.recipe_kb_flusher_pid(SD).name == ".kb_flusher.pid"
+    assert sp.recipe_kb_flusher_status_json(SD).name == ".kb_flusher_status.json"
     assert sp.pr_monitor_status_json(SD).name == ".pr_monitor_status.json"
 
 

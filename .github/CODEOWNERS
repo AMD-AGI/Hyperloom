@@ -34,7 +34,25 @@
 /*.yml                                                          @AMD-AGI/SaFE
 /*.toml                                                         @AMD-AGI/SaFE
 
-# v0.6 product code (Coordinator + agents)
-/inference_optimizer/                                           @AMD-AGI/SaFE
-/critic-agent/                                                  @AMD-AGI/SaFE
-/kernel-agent/                                                  @AMD-AGI/SaFE
+# Hyperloom Core
+/src/hyperloom/inference_optimizer/                             @AMD-AGI/SaFE
+/src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/                                   @AMD-AGI/SaFE
+
+# TraceLens Agent (agent-driven analysis route + agent-output sanitizer)
+/src/hyperloom/agents/kernel/tools/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/inference_optimizer/tracelens_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
+
+# Benchmarking / profiling
+/src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/apply_and_bench.py           @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/profile.py        @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/roofline.py       @devalshahamd @AMD-AGI/SaFE
+
+# Post-TraceLens -> GEAK processing layer + glue
+/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/data/op_to_source.json       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/docs/components/tracelens.md                                   @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE

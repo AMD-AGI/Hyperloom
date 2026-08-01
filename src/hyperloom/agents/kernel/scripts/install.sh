@@ -147,12 +147,12 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v0.9.0 integration (#474): head of
-# release/hyperloom_integration_v0.9.0. The optional internal extension tracks
-# the matching release/hyperloom_integration_v0.9.0 branch of
+# TraceLens v1.0 integration: head of
+# release/hyperloom_integration_v1.0. The optional internal extension tracks
+# the matching release/hyperloom_integration_v1.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"
+TRACELENS_REF="545396501e4024055b72a254e97306860f3f090d"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -223,6 +223,19 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 DOTENV="${REPO_ROOT}/.env"
+
+# Vars whose already-resolved value must survive the `. $REPO_ROOT/.env` below.
+# The dotenv is a *credentials* fallback, but it is a full env file: sourcing it
+# under `set -a` re-imports every path var it happens to carry. A stale entry —
+# or one written by a DIFFERENT checkout / workspace sharing this .env — then
+# silently overwrites what the caller resolved, and the run installs against one
+# workspace while writing its env file into another (#Hyperloom-2 / atom mixup).
+# Only non-empty pre-source values are restored, so the dotenv still fills gaps.
+_DOTENV_PROTECTED_VARS='REPO_ROOT KERNEL_AGENT_ROOT HYPERLOOM_KERNEL_AGENT_ROOT
+USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
+MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
+GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
+
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
    || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${DEEPSEEK_API_KEY:-}" ] \
    || [ -z "${DEEPSEEK_BASE_URL:-}" ]; then
@@ -232,6 +245,9 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
     _snap_deepseek_key="${DEEPSEEK_API_KEY-}"
     _snap_deepseek_url="${DEEPSEEK_BASE_URL-}"
+    for _v in $_DOTENV_PROTECTED_VARS; do
+      eval "_snap_prot_${_v}=\"\${${_v}-}\""
+    done
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
@@ -241,9 +257,36 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
     [ -n "$_snap_deepseek_key" ] && export DEEPSEEK_API_KEY="$_snap_deepseek_key"
     [ -n "$_snap_deepseek_url" ] && export DEEPSEEK_BASE_URL="$_snap_deepseek_url"
+    for _v in $_DOTENV_PROTECTED_VARS; do
+      eval "_snap_val=\"\${_snap_prot_${_v}-}\""
+      if [ -n "${_snap_val}" ]; then
+        eval "_cur_val=\"\${${_v}-}\""
+        if [ "${_cur_val}" != "${_snap_val}" ]; then
+          echo "[kernel-agent] .env would have overridden ${_v}=${_snap_val} with ${_cur_val}; keeping the caller's value" >&2
+        fi
+        eval "export ${_v}=\"\${_snap_prot_${_v}}\""
+      fi
+      unset "_snap_prot_${_v}"
+    done
+    unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
     unset _snap_deepseek_key _snap_deepseek_url
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
+  fi
+fi
+# Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY + OPENAI_BASE_URL
+# are configured. Mirror the CLI's _resolve_llm_endpoints(): the Anthropic base
+# is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK re-appends it) and the
+# gateway key doubles as the Anthropic key. Explicit values always win.
+if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
+  if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+    _gw_url="${OPENAI_BASE_URL%/}"
+    export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
+    unset _gw_url
+    echo "[kernel-agent] derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
+  fi
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    export ANTHROPIC_API_KEY="$SAFE_API_KEY"
   fi
 fi
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
@@ -415,8 +458,8 @@ preflight_validate_credentials() {
   local has_url=0 has_key=0
   { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
   { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL)")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or DEEPSEEK_API_KEY")
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or SAFE_API_KEY + OPENAI_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0

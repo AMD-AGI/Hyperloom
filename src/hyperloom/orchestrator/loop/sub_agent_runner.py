@@ -21,7 +21,7 @@ import logging
 from hyperloom.inference_optimizer.session.session_paths import _runs_actions, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
-from ..state.task_registry import Task, TaskNotFound, TaskRegistry
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskRegistry
 
 if TYPE_CHECKING:
     from ..policy.gate import PolicyGate
@@ -56,14 +56,13 @@ class SubAgentResult:
 
     Attributes:
         task_id (str): Id of the task that ran.
-        state (str): Terminal state — ``"succeeded"`` / ``"failed"`` /
-            ``"needs_manual_review"``.
+        state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
     """
 
     task_id: str
-    state: str  # "succeeded" / "failed" / "needs_manual_review"
+    state: str  # "succeeded" / "failed"
     result: dict
     error: str | None = None
 
@@ -149,37 +148,43 @@ class SubAgentRunner:
         *,
         evidence: dict | None = None,
         context: str,
-    ) -> bool:
-        """Transition a task to ``new_state`` but tolerate ``TaskNotFound``.
-
-        A long-running task's row can vanish before its terminal
-        transition; swallowing TaskNotFound keeps the pipeline running.
-        Returns True on success, False on the swallowed-TaskNotFound branch.
+        allow_terminal: bool = False,
+    ) -> None:
+        """Transition a task to ``new_state``, tolerating a row lost to retention.
 
         Args:
             task_id: The task to transition.
             new_state: The target state.
             evidence: Optional evidence dict recorded with the transition.
             context: Short label describing the transition call site.
+            allow_terminal: Also tolerate an already-terminal row. Only for
+                terminal transitions; on ``queued -> running`` the rejection is
+                the double-spawn guard and must propagate.
 
-        Returns:
-            ``True`` on success, ``False`` on the swallowed-``TaskNotFound``
-            branch.
+        Raises:
+            IllegalTransition: When the row is already terminal and
+                ``allow_terminal`` is False.
         """
         try:
             await self.tasks.transition(task_id, new_state, evidence=evidence or {})
-            return True
         except TaskNotFound:
             log.warning(
                 "sub_agent_runner: tasks row for task_id=%s vanished before "
-                "transition→%s (context=%s); continuing so the executor "
-                "result is not lost. See sub_agent_runner._transition_"
-                "resilient docstring for the disappearing-row hypothesis.",
+                "transition→%s (context=%s); keeping the executor result",
                 task_id,
                 new_state,
                 context,
             )
-            return False
+        except IllegalTransition:
+            if not allow_terminal:
+                raise
+            log.warning(
+                "sub_agent_runner: task_id=%s already terminal before "
+                "transition→%s (context=%s); keeping the executor result",
+                task_id,
+                new_state,
+                context,
+            )
 
     async def run_task(
         self,
@@ -243,6 +248,7 @@ class SubAgentRunner:
                 "failed",
                 evidence={"reason": "no_executor", "kind": task.kind},
                 context="no_executor",
+                allow_terminal=True,
             )
             if prebound_lease is not None:
                 await self.locks.release(prebound_lease)
@@ -283,6 +289,7 @@ class SubAgentRunner:
                     "failed",
                     evidence={"error": repr(exc)},
                     context="executor_exception",
+                    allow_terminal=True,
                 )
                 return SubAgentResult(
                     task_id=task.task_id,
@@ -295,6 +302,7 @@ class SubAgentRunner:
                 "succeeded",
                 evidence={"result_keys": sorted(result_payload.keys())},
                 context="executor_success",
+                allow_terminal=True,
             )
             return SubAgentResult(
                 task_id=task.task_id,

@@ -206,7 +206,7 @@ def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
 class _BareSharedState:
     """SharedState double exposing the fields the review-verdict handler touches."""
 
-    cortex_session_id: str = "sid-test"
+    recipe_kb_session_id: str = "sid-test"
     save_count: int = 0
     # Empty string means "nothing in flight"; the auto-roofline dispatch gate is a no-op.
     auto_roofline_pending_task_id: str = ""
@@ -247,7 +247,7 @@ class _StubBus:
         return None
 
 
-class _StubCortexKB:
+class _StubRecipeKB:
     enabled: bool = True
 
     def __init__(self) -> None:
@@ -264,7 +264,7 @@ def coord(tmp_path: Path):
     c.session_dir = tmp_path
     c.shared_state = _BareSharedState()
     c.state = CoordinatorState()
-    c.cortex_kb = _StubCortexKB()
+    c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
@@ -514,7 +514,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     coord.session_dir = tmp_path
     coord.shared_state = _BareSharedState()
     coord.state = CoordinatorState()
-    coord.cortex_kb = _StubCortexKB()
+    coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
     coord._record_observation = AsyncMock()  # type: ignore[method-assign]
 
@@ -568,7 +568,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
-    coord.cortex_kb = _StubCortexKB()
+    coord.recipe_kb = _StubRecipeKB()
     coord.bus = _StubBus()
     coord._record_observation = AsyncMock()  # type: ignore[method-assign]
     create_calls: list[dict[str, Any]] = []
@@ -599,7 +599,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     class _MoreState:
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        cortex_session_id: str = "sid-test"
+        recipe_kb_session_id: str = "sid-test"
         save_count: int = 0
         synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
@@ -636,7 +636,7 @@ def _delegate_coord(tmp_path: Path):
 
     c.shared_state = _State()
     c.state = CoordinatorState()
-    c.cortex_kb = _StubCortexKB()
+    c.recipe_kb = _StubRecipeKB()
     c.bus = _StubBus()
     c._record_observation = AsyncMock()  # type: ignore[method-assign]
     c._record_policy_denied = AsyncMock()  # type: ignore[method-assign]
@@ -688,8 +688,8 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     assert create_calls[0]["params"]["grid"] == grid
 
 
-# 7. Specialist prompt — max_proposals self-curation contract (Section 1 + 8)
-def _build_specialist_prompt_text(max_proposals: int) -> str:
+# 7. Specialist prompt — proposal self-curation contract (Section 1 + 8)
+def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
     from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
@@ -700,40 +700,17 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
         task_id="t-test",
         domain=get_domain("serving_specialist"),
         max_turns=12,
-        max_proposals=max_proposals,
         gap_canonical_id="gap-x",
     )
     system_prompt, user_prompt = build_specialist_prompts(inputs)
     return system_prompt + "\n" + user_prompt
 
 
-def test_default_specialist_max_proposals_is_twelve():
-    """Single-source-of-truth: policy.py owns the self-curation target (=12) and the builder re-exports it."""
-    from hyperloom.orchestrator.policy.gate import (
-        DEFAULT_SPECIALIST_MAX_PROPOSALS,
-    )
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
-    )
-
-    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 12
-    assert PROMPT_DEFAULT == 12
-
-
-def test_specialist_prompt_renders_max_proposals_5():
-    """Caller can shrink the prompt-side self-curation target."""
-    text = _build_specialist_prompt_text(max_proposals=5)
-    assert "AT MOST **5** entries" in text
-    assert "top-5" in text
-    # Critic-feedback warning present so the specialist knows marginal candidates cost.
+def test_specialist_prompt_renders_top_6_target():
+    text = _build_specialist_prompt_text()
+    assert "AT MOST **6** entries" in text
+    assert "top-6" in text
     assert "reviews each surviving variant" in text
-
-
-def test_specialist_prompt_renders_default_top_12_target():
-    text = _build_specialist_prompt_text(max_proposals=12)
-    assert "AT MOST **12** entries" in text
-    assert "top-12" in text
-    assert "AT MOST **5** entries" not in text
 
 
 # critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)

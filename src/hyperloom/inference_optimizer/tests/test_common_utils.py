@@ -1883,26 +1883,6 @@ def test_llm_prompt_parse_response_edges() -> None:
 
 
 # ---------------------------------------------------------------------------
-# orchestrator.state.orchestration_memory.deterministic_memory_fallback
-# ---------------------------------------------------------------------------
-
-
-def test_deterministic_memory_fallback_bad_gain() -> None:
-    from hyperloom.orchestrator.state.orchestration_memory import deterministic_memory_fallback
-
-    state = SimpleNamespace(
-        current_best={"tput": 123.0},
-        optimization_stack=[],
-        cumulative_gain_validated="not-a-number",
-        phase="EXPLORE",
-        macro_cycle=2,
-    )
-    record = deterministic_memory_fallback(state)
-    assert "current_plan" in record
-    assert "phase=EXPLORE" in record["current_plan"]
-
-
-# ---------------------------------------------------------------------------
 # orchestrator.specialists.profile
 # ---------------------------------------------------------------------------
 

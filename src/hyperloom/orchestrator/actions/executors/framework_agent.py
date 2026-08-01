@@ -36,6 +36,7 @@ from ._workload_envs import (
 from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
+    _accuracy_delta_pct,
     _git_apply_collect_feedback,
     _git_stash_if_dirty,
     _with_stash_restore,
@@ -873,6 +874,7 @@ class FrameworkAgentExecutor:
             )
         tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
         gate_pass = tput_ok and not acc_block
+        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
         if not gate_pass:
             reverted = self._revert_patches(
@@ -898,6 +900,7 @@ class FrameworkAgentExecutor:
                 tps_delta_pct=float(delta_pct or 0.0),
                 patch_path=str(applied[0]) if applied else "",
                 extra=extra,
+                accuracy_delta_pct=acc_delta_pct,
             )
             return _with_stash_restore(
                 framework_root,
@@ -964,6 +967,7 @@ class FrameworkAgentExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             patch_path=str(applied[0]) if applied else "",
             extra=extra,
+            accuracy_delta_pct=acc_delta_pct,
         )
         return _with_stash_restore(
             framework_root,
@@ -997,6 +1001,7 @@ class FrameworkAgentExecutor:
         tps_delta_pct: float,
         patch_path: str,
         extra: dict[str, Any],
+        accuracy_delta_pct: float | None = None,
     ) -> None:
         """Append a FRAMEWORK outcome to ``lessons.jsonl`` so the next
         ``fa phase-discover`` can dedup integrated PRs.
@@ -1011,6 +1016,7 @@ class FrameworkAgentExecutor:
             patch_path: Path to the applied patch (for provenance).
             extra: The runner ``extra`` mapping (provides the shared state /
                 session id).
+            accuracy_delta_pct: Measured accuracy delta, when available.
         """
         pr_url = str(candidate.get("pr_url") or "").strip()
         pr_sha = str(candidate.get("head_sha") or "").strip()
@@ -1022,7 +1028,7 @@ class FrameworkAgentExecutor:
         session_id = ""
         ss = extra.get("shared_state") or extra.get("state")
         if ss is not None:
-            session_id = str(getattr(ss, "cortex_session_id", "") or "")
+            session_id = str(getattr(ss, "recipe_kb_session_id", "") or "")
         try:
             gap_keywords = candidate.get("gap_keywords") or []
             if isinstance(gap_keywords, str):
@@ -1045,6 +1051,7 @@ class FrameworkAgentExecutor:
                 precision=str(getattr(ss, "precision", "") if ss is not None else "").strip(),
                 applicability=str(candidate.get("applicability") or "").strip(),
                 provenance="framework_agent",
+                accuracy_delta_pct=float(accuracy_delta_pct or 0.0),
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
                 session_dir=self.session_dir,
             )

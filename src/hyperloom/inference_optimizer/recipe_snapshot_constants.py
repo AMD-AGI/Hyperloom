@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 # No DEFAULT_KB_URL by design: the optimizer never silently connects to a
-# remote KB; a remote source is used only with --cortex-kb-url / $CORTEX_KB_URL.
+# remote KB; the optional read side is gbrain (`GBRAIN_BASE_URL` / `GBRAIN_TOKEN`).
 
 # Request body field names — PUT /recipes/{canonical_id}. Server validates
 # only authority + provenance (rest are caller-defined).

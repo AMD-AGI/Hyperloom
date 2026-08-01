@@ -927,7 +927,7 @@ def _emit_preflight_diagnostics(
     else:
         print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
     if args is not None:
-        kb_enabled = bool(getattr(args, "cortex_enabled", True))
+        kb_enabled = bool(getattr(args, "recipe_kb_enabled", True))
         pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
         kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
         pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
@@ -938,30 +938,30 @@ def _emit_preflight_diagnostics(
         print(f"  kb_degraded_reason  = {kb_reason}")
         print(f"  pr_degraded_reason  = {pr_reason}")
 
-    # Surface Cortex KB offline-queue state; dead-letter pile-up signals a cold start.
+    # Surface Recipe KB offline-queue state; dead-letter pile-up signals a cold start.
     try:
-        _print_cortex_kb_queue_status()
+        _print_recipe_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
-        print(f"  cortex_kb_queue     = <probe_failed: {exc!r}>")
+        print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
 
 
-def _print_cortex_kb_queue_status() -> None:
-    """Emit a one-line summary of the Cortex KB offline NDJSON queue (dead-letter = permanent-reject signal).
+def _print_recipe_kb_queue_status() -> None:
+    """Emit a one-line summary of the Recipe KB offline NDJSON queue (dead-letter = permanent-reject signal).
 
     Note:
         Side-effecting: writes the queue status summary to stdout and returns
         nothing.
     """
     from ..session.session_paths import (
-        cortex_dead_letter_ndjson,
-        cortex_flushed_ndjson,
-        cortex_pending_ndjson,
+        recipe_kb_dead_letter_ndjson,
+        recipe_kb_flushed_ndjson,
+        recipe_kb_pending_ndjson,
     )
 
     sd = _session_dir_resolve()
-    pending = cortex_pending_ndjson(sd)
-    dead = cortex_dead_letter_ndjson(sd)
-    flushed = cortex_flushed_ndjson(sd)
+    pending = recipe_kb_pending_ndjson(sd)
+    dead = recipe_kb_dead_letter_ndjson(sd)
+    flushed = recipe_kb_flushed_ndjson(sd)
 
     def _count(p: Path) -> int:
         """Count non-blank lines (NDJSON rows) in a queue file.
@@ -982,7 +982,7 @@ def _print_cortex_kb_queue_status() -> None:
             return 0
 
     p_n, d_n, f_n = _count(pending), _count(dead), _count(flushed)
-    print(f"  cortex_kb_queue     = pending={p_n} dead_letter={d_n} flushed={f_n} (root={pending.parent})")
+    print(f"  recipe_kb_queue     = pending={p_n} dead_letter={d_n} flushed={f_n} (root={pending.parent})")
     if d_n > 0:
         print(
             f"                        ⚠ {d_n} dead-letter row(s) — "
@@ -1483,7 +1483,7 @@ def _preflight(
                 f"(skipped; --no-kernel + roofline disabled)"
             )
 
-    # --- IR-3: Cortex KB + PR Monitor reachability (soft degrade) ---
+    # --- IR-3: PR Monitor reachability probe (soft degrade) ---
     if args is not None:
         _run_ir3_preflight(args)
 
@@ -1498,9 +1498,12 @@ def _preflight(
 
 
 def _run_ir3_preflight(args: argparse.Namespace) -> None:
-    """IR-3 — Cortex KB + PR Monitor reachability probe (soft degrade); never raises/exits.
+    """IR-3 — PR Monitor reachability probe (soft degrade); never raises/exits.
 
-    Mutates args: ``cortex_enabled``/``pr_monitor_enabled`` plus
+    Recipe KB enablement is controlled by ``--degraded-kb`` (``recipe_kb_enabled``);
+    this probe only affects ``pr_monitor_enabled``.
+
+    Mutates args: ``recipe_kb_enabled``/``pr_monitor_enabled`` plus
     ``kb_degraded_reason``/``pr_degraded_reason`` (None|"explicit_flag"|"ir3_auto").
 
     Args:
@@ -1510,38 +1513,23 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
 
-    args.cortex_enabled = True
-    args.pr_monitor_enabled = True
-    args.kb_degraded_reason = None
-    args.pr_degraded_reason = None
+    args.recipe_kb_enabled = not explicit_kb
+    args.kb_degraded_reason = "explicit_flag" if explicit_kb else None
+    args.pr_monitor_enabled = not explicit_pr
+    args.pr_degraded_reason = "explicit_flag" if explicit_pr else None
 
     if explicit_kb and explicit_pr:
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "explicit_flag"
-        args.pr_monitor_enabled = False
-        args.pr_degraded_reason = "explicit_flag"
         return
 
     user_data = _workspace_root_resolve()
-    marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
+    marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    # The Cortex KB endpoint is a CLI-flag concern (no env fallback): drop any
-    # inherited CORTEX_KB_URL, then inject the flag when set.
-    env.pop("CORTEX_KB_URL", None)
-    cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
-    if cortex_url:
-        env["CORTEX_KB_URL"] = cortex_url
-    # PR Monitor endpoint is a CLI-flag concern: compute the probe's healthz base
-    # from the resolved flag. The REST base omits /v1 (the client appends it) but
-    # healthz lives under /v1, so normalise the probe base to end with /v1.
     env.pop("PR_MONITOR_URL", None)
     pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
     if pr_url:
         probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
         env["PR_MONITOR_URL"] = probe_base
-    if explicit_kb:
-        env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 
@@ -1553,12 +1541,11 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
             timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        # Script died — treat both branches as unreachable so soft-degrade kicks in.
         log.warning("IR-3 preflight script error: %s", exc)
         marker: dict[str, Any] = {
             "kb_reachable": False,
             "pr_reachable": False,
-            "kb_skipped": explicit_kb,
+            "kb_skipped": True,
             "pr_skipped": explicit_pr,
         }
     else:
@@ -1569,20 +1556,10 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
             marker = {
                 "kb_reachable": False,
                 "pr_reachable": False,
-                "kb_skipped": explicit_kb,
+                "kb_skipped": True,
                 "pr_skipped": explicit_pr,
             }
 
-    if explicit_kb:
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "explicit_flag"
-    elif not marker.get("kb_reachable", False) and not marker.get("kb_skipped", False):
-        args.cortex_enabled = False
-        args.kb_degraded_reason = "ir3_auto"
-
-    if explicit_pr:
-        args.pr_monitor_enabled = False
-        args.pr_degraded_reason = "explicit_flag"
-    elif not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
+    if not explicit_pr and not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
         args.pr_monitor_enabled = False
         args.pr_degraded_reason = "ir3_auto"

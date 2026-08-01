@@ -204,6 +204,15 @@ def test_is_promotable_result(coord: Coordinator) -> None:
     assert coord._is_promotable_result("explore", {"status": "failed"}) is False
 
 
+def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
+    measured = {"output_throughput": 1000.0, "completed_requests": 10}
+    assert coord._is_promotable_result("baseline", measured) is True
+    eval_failed = {**measured, "baseline_eval_failed": True}
+    assert coord._is_promotable_result("baseline", eval_failed) is False
+    # profile with the same key still promotes (blocker is baseline-only).
+    assert coord._is_promotable_result("profile", eval_failed) is True
+
+
 # -- phase / id helpers ----------------------------------------------------
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
@@ -212,10 +221,10 @@ def test_journal_entry_phase(coord: Coordinator) -> None:
     assert coord._journal_entry_phase() == "EXPLORE"
 
 
-def test_source_session_id_prefers_cortex(coord: Coordinator) -> None:
-    coord.shared_state.cortex_session_id = "cortex-99"
-    assert coord._source_session_id() == "cortex-99"
-    coord.shared_state.cortex_session_id = ""
+def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
+    coord.shared_state.recipe_kb_session_id = "recipe-kb-99"
+    assert coord._source_session_id() == "recipe-kb-99"
+    coord.shared_state.recipe_kb_session_id = ""
     assert coord._source_session_id() == coord.session_dir.name
 
 

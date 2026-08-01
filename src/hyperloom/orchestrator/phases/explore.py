@@ -13,13 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
-from ..loop.coordinator_helpers import _parse_iso_unix
+from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..bus.message_bus import Message
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..loop.sub_agent_runner import SubAgentResult
+from ..specialists.runner import SpecialistFailureType
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
@@ -31,6 +32,21 @@ from ..loop.coordinator import (
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
+
+
+def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
+    """Copy eval-origin trigger context from specialist params to the integrate task."""
+    origin = str(src.get("enablement_origin") or "")
+    if not origin:
+        return
+    dst["enablement_origin"] = origin
+    dst["enablement_accuracy_floor"] = float(src.get("enablement_accuracy_floor") or 0.0)
+    cfg = str(src.get("enablement_probe_config_path") or "")
+    if cfg:
+        dst["enablement_probe_config_path"] = cfg
+        # Bench the candidate against the original workload/eval contract rather
+        # than the shipped default config.
+        dst.setdefault("config_path", cfg)
 
 
 class ExplorePhase(PhaseHandler):
@@ -594,40 +610,6 @@ class ExplorePhase(PhaseHandler):
                     cid,
                 )
 
-    async def _scan_stale_specialists(self) -> list[dict[str, Any]]:
-        """Return specialist task rows running longer than ``_specialist_stale_sec``; never raises, returns [] on failure.
-
-        Returns:
-            A list of stale specialist task row dicts; empty on failure or when
-            none are stale.
-        """
-        try:
-            running = await self.tasks.running()
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("Coordinator: tasks.running() failed during stale scan")
-            return []
-        if not running:
-            return []
-        stale: list[dict[str, Any]] = []
-        now_unix = time.time()
-        for t in running:
-            if (t.kind or "").strip() != "specialist":
-                continue
-            # updated_at on a running task = when the dispatcher promoted it.
-            started_unix = _parse_iso_unix(t.updated_at)
-            if started_unix <= 0:
-                continue
-            running_sec = max(0.0, now_unix - started_unix)
-            if running_sec >= self._specialist_stale_sec:
-                stale.append(
-                    {
-                        "task_id": t.task_id,
-                        "kind": t.kind,
-                        "running_seconds": running_sec,
-                    }
-                )
-        return stale
-
     async def _fan_out_specialist_wave(
         self,
         source: str,
@@ -686,6 +668,51 @@ class ExplorePhase(PhaseHandler):
                 Intent(type=intent.type, payload=sub_payload),
             )
 
+    async def _record_specialist_retry_exhausted(
+        self,
+        *,
+        task: "Task",
+        ftype: SpecialistFailureType,
+        error: str,
+        attempts_used: int,
+        cap: int,
+        detail: str,
+    ) -> None:
+        """Broadcast that an infra-failed specialist is being abandoned.
+
+        Args:
+            task: The specialist task whose final attempt failed.
+            ftype: The classified failure type.
+            error: The failure reason carried by the attempt.
+            attempts_used: Retry attempts already spent.
+            cap: Configured retry ceiling.
+            detail: Why no further retry was scheduled.
+        """
+        params = task.params or {}
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "specialist_auto_retry_exhausted",
+                "task_id": task.task_id,
+                "domain": str(params.get("domain") or ""),
+                "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
+                "attempts_used": attempts_used,
+                "max_attempts": cap,
+                "failure_type": ftype.value,
+                "reason": error[:200],
+                "detail": detail,
+            },
+        )
+        log.warning(
+            "specialist auto-retry exhausted: task=%s failure=%s attempts=%d/%d (%s)",
+            task.task_id,
+            ftype.value,
+            attempts_used,
+            cap,
+            detail,
+        )
+
     async def _maybe_auto_retry_specialist(
         self,
         task: "Task",
@@ -734,13 +761,23 @@ class ExplorePhase(PhaseHandler):
 
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
-        error = str(result.error or "")
+        # The specialist executor never raises, so the reason lives in the
+        # result envelope rather than on SubAgentResult.
+        error = str(result.error or result_dict.get("error") or "")
         ftype, retry_eligible = classify_specialist_failure(runner_status, error)
         if not retry_eligible:
             return False
         params = task.params or {}
         attempt = int(params.get("_auto_retry_attempt", 0) or 0)
         if attempt >= cap:
+            await self._record_specialist_retry_exhausted(
+                task=task,
+                ftype=ftype,
+                error=error,
+                attempts_used=attempt,
+                cap=cap,
+                detail="retry cap reached",
+            )
             return False
         next_attempt = attempt + 1
 
@@ -788,6 +825,14 @@ class ExplorePhase(PhaseHandler):
         )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
+            await self._record_specialist_retry_exhausted(
+                task=task,
+                ftype=ftype,
+                error=error,
+                attempts_used=attempt,
+                cap=cap,
+                detail="retry slot already taken",
+            )
             return False
         await self._record_observation(
             "coordinator",
@@ -1004,13 +1049,6 @@ class ExplorePhase(PhaseHandler):
                 "hot_kernels_top15": hot_kernels,
             }
 
-        # proposal_set cap into params so SpecialistRunner reads it.
-        from hyperloom.orchestrator.policy.gate import (
-            DEFAULT_SPECIALIST_MAX_PROPOSALS,
-        )
-
-        params.setdefault("max_proposals", DEFAULT_SPECIALIST_MAX_PROPOSALS)
-
     async def _refresh_gaps(self, *, reason: str) -> None:
         """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id; best-effort.
 
@@ -1030,9 +1068,9 @@ class ExplorePhase(PhaseHandler):
             log.exception("gaps refresh: attempts extraction failed")
 
         plane = getattr(self, "knowledge_plane", None)
-        if plane is not None and hasattr(plane, "cortex_traverse_issues"):
+        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
             try:
-                traverse = getattr(plane, "cortex_traverse_issues")
+                traverse = getattr(plane, "recipe_kb_traverse_issues")
                 rows = traverse(
                     model_class=getattr(state, "model_class", "") or "",
                     gpu_type=getattr(state, "gpu_type", "") or "",
@@ -1041,11 +1079,11 @@ class ExplorePhase(PhaseHandler):
                     for entry in rows:
                         if isinstance(entry, dict):
                             entry = dict(entry)
-                            entry.setdefault("source", "cortex")
+                            entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
             except Exception:  # noqa: BLE001 — defensive
                 log.warning(
-                    "gaps refresh: cortex_traverse_issues failed (reason=%s)",
+                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
                     exc_info=True,
                 )
@@ -1471,6 +1509,7 @@ class ExplorePhase(PhaseHandler):
             # integrate_patch applies the runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
+                _forward_enablement_carriers(spec_params, integrate_params)
                 probe = str(spec_params.get("launch_probe") or "").strip()
                 if probe:
                     integrate_params["launch_probe"] = probe
@@ -1587,6 +1626,8 @@ class ExplorePhase(PhaseHandler):
         sid = str(task.task_id or "").strip()
         if not sid:
             return
+        if config_levers and self._config_lever_known_bad(config_levers):
+            return
         # Already ruled on (e.g. after resume) — nothing to do.
         try:
             if self.shared_state.get_specialist_patch_verdict(sid):
@@ -1631,6 +1672,7 @@ class ExplorePhase(PhaseHandler):
         # framework.py::_maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
+            _forward_enablement_carriers(spec_params, integrate_params)
             probe = str(spec_params.get("launch_probe") or "").strip()
             if probe:
                 integrate_params["launch_probe"] = probe
@@ -1702,6 +1744,36 @@ class ExplorePhase(PhaseHandler):
                 sid,
             )
 
+    def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
+        """True when this exact config already lost an accuracy gate.
+
+        Different upstream PRs often reduce to the same server args / envs, so
+        the ledger is keyed by content fingerprint rather than by PR.
+        """
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+
+        try:
+            from hyperloom.agents.framework.kb import read_pr_ledger
+
+            fingerprint = canonical_fingerprint(
+                config_levers.get("extra_server_args"),
+                config_levers.get("extra_envs"),
+            )
+            for rec in read_pr_ledger():
+                if str(rec.get("applicability") or "") != fingerprint:
+                    continue
+                if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
+                    log.info(
+                        "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
+                        fingerprint,
+                        to_float(rec.get("accuracy_delta_pct"), default=0.0),
+                        rec.get("pr_url") or "a prior candidate",
+                    )
+                    return True
+        except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
+            log.debug("FRAMEWORK: config-lever ledger check failed", exc_info=True)
+        return False
+
     def _build_specialist_round_entry(
         self,
         *,
@@ -1725,7 +1797,6 @@ class ExplorePhase(PhaseHandler):
         if not isinstance(proposals, list):
             proposals = []
         round_id = str((task.params or {}).get("round_id") or task.task_id)
-        truncated_from = done_payload.get("proposals_truncated_from")
         from ..specialists.domains import normalize_dispatch_tags
 
         # Knowledge-domain tags; reported tags win over dispatch params.
@@ -1754,6 +1825,4 @@ class ExplorePhase(PhaseHandler):
             entry["allocated_gpu_ids"] = [
                 int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
             ]
-        if isinstance(truncated_from, int) and truncated_from > len(proposals):
-            entry["proposals_truncated_from"] = truncated_from
         return entry

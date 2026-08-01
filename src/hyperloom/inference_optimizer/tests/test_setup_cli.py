@@ -621,7 +621,18 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "export OPENAI_API_KEY" not in write_text
     assert "upsert_dotenv_var OPENAI_BASE_URL" not in write_text
     assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
-    assert "SAFE_API_KEY:-" not in script_text
+
+    # The gateway credentials may be *read* in memory -- the single-gateway
+    # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
+    # OPENAI_BASE_URL + SAFE_API_KEY, mirroring the CLI's
+    # _resolve_llm_endpoints(). What must never happen is persisting them:
+    # neither exported into kernel-agent.env.sh nor written back to .env.
+    assert "export SAFE_API_KEY" not in write_text
+    assert "upsert_dotenv_var SAFE_API_KEY" not in write_text
+    # ... and the generated env file scrubs any stale copy left by an older run.
+    assert "remove_dotenv_var SAFE_API_KEY" in write_text
+    assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
+    assert "remove_dotenv_var OPENAI_API_KEY" in write_text
 
 
 def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):

@@ -361,7 +361,7 @@ def gemm_tuning_steps_path(session_dir: Path) -> Path:
 def specialist_intel_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the
     intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor /
-    cortex_kb / Read / Grep / ...), recovered from the subprocess stream-json
+    recipe_kb / Read / Grep / ...), recovered from the subprocess stream-json
     log. Backfilled into the trace as per-call ``intel:<tool>`` spans so a
     trace shows what a specialist *read*, not just its token total."""
     return trace_dir(session_dir) / "specialist_intel.jsonl"
@@ -503,22 +503,31 @@ def target_analysis_report_md(session_dir: Path) -> Path:
     return target_analysis_dir(session_dir) / "target_analysis_report.md"
 
 
-# Cortex KB integration paths — single source of truth for every file under
-# ``<sd>/runtime/cortex/``. Callers MUST go through these helpers so the NDJSON
+# Recipe KB integration paths — single source of truth for every file under
+# ``<sd>/runtime/recipe_kb/``. Callers MUST go through these helpers so the NDJSON
 # protocol stays homogeneous across producers/consumers.
-def cortex_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/cortex/``, the Cortex KB per-session bookkeeping root.
+
+def recipe_kb_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
+
+    This directory holds only *derived* bookkeeping — the authoritative recipe
+    store is the local KB root (``$HYPERLOOM_LOCAL_KB_ROOT`` / ``workspace_root()/kb``,
+    mirrored to gbrain), which lives outside the session tree. The snapshots
+    here (``.kb_warm.json`` / ``.kb_pitfalls.json`` / ``.kb_lessons.json``) are
+    rewritten by every T0 anchor and duplicate ``shared_state.warm_start_recipe``,
+    so a session that predates the ``runtime/cortex`` -> ``runtime/recipe_kb``
+    rename simply regenerates them on resume; no migration is needed.
 
     Args:
         session_dir (Path): The session root directory.
 
     Returns:
-        Path: The absolute path to ``<session_dir>/runtime/cortex``.
+        Path: The absolute path to ``<session_dir>/runtime/recipe_kb``.
     """
-    return Path(session_dir) / "runtime" / "cortex"
+    return Path(session_dir) / "runtime" / "recipe_kb"
 
 
-def cortex_warm_json(session_dir: Path) -> Path:
+def recipe_kb_warm_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_warm.json``, the T0 ``find-recipe`` snapshot.
 
     Read by specialist assembly.
@@ -528,12 +537,12 @@ def cortex_warm_json(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_warm.json``.
+            ``<session_dir>/runtime/recipe_kb/.kb_warm.json``.
     """
-    return cortex_dir(session_dir) / ".kb_warm.json"
+    return recipe_kb_dir(session_dir) / ".kb_warm.json"
 
 
-def cortex_pitfalls_json(session_dir: Path) -> Path:
+def recipe_kb_pitfalls_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_pitfalls.json``, the T0 ``traps`` snapshot.
 
     Read by specialist assembly.
@@ -543,12 +552,12 @@ def cortex_pitfalls_json(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_pitfalls.json``.
+            ``<session_dir>/runtime/recipe_kb/.kb_pitfalls.json``.
     """
-    return cortex_dir(session_dir) / ".kb_pitfalls.json"
+    return recipe_kb_dir(session_dir) / ".kb_pitfalls.json"
 
 
-def cortex_lessons_json(session_dir: Path) -> Path:
+def recipe_kb_lessons_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_lessons.json``, the T0 ``lessons`` snapshot.
 
     Args:
@@ -556,26 +565,26 @@ def cortex_lessons_json(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_lessons.json``.
+            ``<session_dir>/runtime/recipe_kb/.kb_lessons.json``.
     """
-    return cortex_dir(session_dir) / ".kb_lessons.json"
+    return recipe_kb_dir(session_dir) / ".kb_lessons.json"
 
 
-def cortex_pending_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_pending.ndjson`` — append-only async write
-    queue for T2/T3 ops. Consumed by the cortex_kb_flusher daemon; drained at
+def recipe_kb_pending_ndjson(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — append-only async write
+    queue for T2/T3 ops. Consumed by the recipe_kb_flusher daemon; drained at
     T4 before ``session commit``.
 
     Args:
         session_dir: The session root directory.
 
     Returns:
-        ``<session_dir>/runtime/cortex/.kb_pending.ndjson``.
+        ``<session_dir>/runtime/recipe_kb/.kb_pending.ndjson``.
     """
-    return cortex_dir(session_dir) / ".kb_pending.ndjson"
+    return recipe_kb_dir(session_dir) / ".kb_pending.ndjson"
 
 
-def cortex_flushed_ndjson(session_dir: Path) -> Path:
+def recipe_kb_flushed_ndjson(session_dir: Path) -> Path:
     """Compute the path to ``.kb_flushed.ndjson``, the successfully-POSTed rows.
 
     Kept around for offline audit / breakdown collection.
@@ -585,12 +594,12 @@ def cortex_flushed_ndjson(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_flushed.ndjson``.
+            ``<session_dir>/runtime/recipe_kb/.kb_flushed.ndjson``.
     """
-    return cortex_dir(session_dir) / ".kb_flushed.ndjson"
+    return recipe_kb_dir(session_dir) / ".kb_flushed.ndjson"
 
 
-def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
+def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
     """Compute the path to ``.kb_dead_letter.ndjson``, the permanent-failure rows.
 
     Holds rows that failed permanently (HTTP 4xx business-logic rejects);
@@ -601,26 +610,26 @@ def cortex_dead_letter_ndjson(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_dead_letter.ndjson``.
+            ``<session_dir>/runtime/recipe_kb/.kb_dead_letter.ndjson``.
     """
-    return cortex_dir(session_dir) / ".kb_dead_letter.ndjson"
+    return recipe_kb_dir(session_dir) / ".kb_dead_letter.ndjson"
 
 
-def cortex_audit_jsonl(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_audit.jsonl`` — append-only audit of every
-    direct Cortex CLI invocation. Source of truth for breakdown.kb_provenance.
+def recipe_kb_audit_jsonl(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — append-only audit of every
+    direct Recipe KB CLI invocation. Source of truth for breakdown.kb_provenance.
 
     Args:
         session_dir: The session root directory.
 
     Returns:
-        ``<session_dir>/runtime/cortex/.kb_audit.jsonl``.
+        ``<session_dir>/runtime/recipe_kb/.kb_audit.jsonl``.
     """
-    return cortex_dir(session_dir) / ".kb_audit.jsonl"
+    return recipe_kb_dir(session_dir) / ".kb_audit.jsonl"
 
 
 # recipe-snapshot per-session bookkeeping. Separate ``runtime/recipe_snapshot/``
-# subtree (not runtime/cortex/). Writes are local-only, so only the read-side
+# subtree (not runtime/recipe_kb/). Writes are local-only, so only the read-side
 # audit log survives here.
 def recipe_snapshot_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_snapshot/``, the dispatcher bookkeeping root.
@@ -649,7 +658,7 @@ def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
 
 
 def pr_monitor_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.pr_monitor_status.json`` — boot-time PR Monitor
+    """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor
     reachability snapshot; breakdown reads it for pr_monitor:* warnings.
 
     Schema: ``{enabled, url, reachable, mcp_url, window_days, status_text}``.
@@ -658,12 +667,12 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
         session_dir: The session root directory.
 
     Returns:
-        ``<session_dir>/runtime/cortex/.pr_monitor_status.json``.
+        ``<session_dir>/runtime/recipe_kb/.pr_monitor_status.json``.
     """
-    return cortex_dir(session_dir) / ".pr_monitor_status.json"
+    return recipe_kb_dir(session_dir) / ".pr_monitor_status.json"
 
 
-def cortex_flusher_pid(session_dir: Path) -> Path:
+def recipe_kb_flusher_pid(session_dir: Path) -> Path:
     """Compute the path to ``.kb_flusher.pid``, the flusher daemon pid file.
 
     The one-line file is read by robustness checks to detect a dead flusher.
@@ -673,26 +682,25 @@ def cortex_flusher_pid(session_dir: Path) -> Path:
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/runtime/cortex/.kb_flusher.pid``.
+            ``<session_dir>/runtime/recipe_kb/.kb_flusher.pid``.
     """
-    return cortex_dir(session_dir) / ".kb_flusher.pid"
+    return recipe_kb_dir(session_dir) / ".kb_flusher.pid"
 
 
-def cortex_flusher_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/cortex/.kb_flusher_status.json`` — boot-time flusher
+def recipe_kb_flusher_status_json(session_dir: Path) -> Path:
+    """``<sd>/runtime/recipe_kb/.kb_flusher_status.json`` — boot-time flusher
     spawn decision; merged with the live pid check for
     kb_provenance.flusher_status.
 
-    Schema: ``{enabled, spawned, pid, cmd, cortex_kb_url, interval_sec,
-    batch_size, reason, ts}``.
+    Schema: ``{enabled, spawned, pid, interval_sec, batch_size, reason, ts}``.
 
     Args:
         session_dir: The session root directory.
 
     Returns:
-        ``<session_dir>/runtime/cortex/.kb_flusher_status.json``.
+        ``<session_dir>/runtime/recipe_kb/.kb_flusher_status.json``.
     """
-    return cortex_dir(session_dir) / ".kb_flusher_status.json"
+    return recipe_kb_dir(session_dir) / ".kb_flusher_status.json"
 
 
 def _prune_old_workdirs(root: Path, *, keep: int) -> None:
@@ -754,16 +762,16 @@ __all__ = [
     "breakdown_parts_dir",
     "competitor_target_json",
     "conversations_path",
-    "cortex_audit_jsonl",
-    "cortex_dead_letter_ndjson",
-    "cortex_dir",
-    "cortex_flushed_ndjson",
-    "cortex_flusher_pid",
-    "cortex_flusher_status_json",
-    "cortex_lessons_json",
-    "cortex_pending_ndjson",
-    "cortex_pitfalls_json",
-    "cortex_warm_json",
+    "recipe_kb_audit_jsonl",
+    "recipe_kb_dead_letter_ndjson",
+    "recipe_kb_dir",
+    "recipe_kb_flushed_ndjson",
+    "recipe_kb_flusher_pid",
+    "recipe_kb_flusher_status_json",
+    "recipe_kb_lessons_json",
+    "recipe_kb_pending_ndjson",
+    "recipe_kb_pitfalls_json",
+    "recipe_kb_warm_json",
     "decision_trace_path",
     "proposal_task_map_path",
     "forge_steps_path",

@@ -20,17 +20,8 @@ is usually a **thin delta**, not a full state dump:
     (recovered) ===` block summarising your own prior plan.
   - Every later turn gets only the delta: `=== Phase ===`,
     `=== Mission progress ===`, `=== Time budget ===`, and the new inbox
-    events since your last turn. A `=== Context (pull on demand) ===`
-    note marks these delta turns.
-
-On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
-exactly what you need** with the read-only context tools:
-`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
-`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
-`get_recent_outcomes` (and `Read` for sandboxed files). They return the
-same projections the old prompt used to push. Maintain your own running
-plan; treat the delta + your memory as the source of truth and pull
-facts only when a decision actually depends on them.
+    events since your last turn. A `=== Context (pull on demand) ===` note
+    marks these delta turns.
 
 ### Web search (upstream comparison)
 
@@ -55,6 +46,11 @@ waiting for the next tick:
   outcomes (kind / state / status / kept / gain / tput / error) plus
   review verdicts. Use this to check how your prior delegated work
   landed before deciding the next move, instead of re-emitting blindly.
+- **`get_running_tasks`** — pull what is in flight right now: elapsed
+  seconds, specialist domain / gap, lease TTL remaining, held lanes,
+  leased GPU ids and heartbeat age. `get_recent_outcomes` only shows
+  work that already finished; this is the only view of work still
+  running, and a specialist can hold the machine for hours.
 - **`run_action_now{action_name, params}`** — run a CHEAP, lane-light
   action synchronously and get its result back IN THIS TURN. Only a
   small whitelist of fast, non-GPU / non-serving actions is eligible
@@ -75,6 +71,52 @@ Periodically the Coordinator asks you for a one-turn checkpoint summary
 of your working memory; it persists that and re-seeds a fresh
 conversation from it so the context stays bounded on long runs. Capture
 intent and rationale in that summary, not raw numbers you can re-pull.
+
+### Watching a running specialist
+
+Nothing in this message reports in-flight specialists: the prompt renders
+between blocking actions, so a running specialist is exactly what you are
+waiting on and never appears here. Never read silence as "nothing is
+running". Two signals do reach you:
+
+- **`specialist_progress` inbox observations** — pushed whenever a
+  specialist rewrites its checkpoint, carrying `task_id`, `elapsed_sec`,
+  summary, proposal count, findings and `residual_questions`. Sparse (often
+  2-3 per specialist, the first lagging dispatch by minutes), so read each
+  as a sample of work that has been running unobserved.
+- **`get_running_tasks`** — the live view (see above). Call it whenever a
+  `specialist_progress` lands, before a phase change, and when a stretch of
+  turns has passed with no specialist news.
+
+Elapsed time alone decides nothing: an offline autotune legitimately runs
+for an hour, a five-minute agent can already be wedged. Judge on what you
+asked for, whether successive checkpoints advance or repeat, and what is
+queued behind the lane or GPUs it holds. Three moves:
+
+- `kill_task{task_id, scope='task', reason}` — cancel the coordinator task.
+  This does **not** terminate an already-running specialist process: its lane
+  and GPU leases release only when its worker exits or its reaper terminates
+  it. Do not use this to promptly free capacity; use it when the mandate is a
+  dead end and the remaining task budget is not worth spending.
+- `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
+  and it acts without restarting. Prefer this when the agent works well but
+  on the wrong question, or to answer its `residual_questions`.
+- `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and its
+  lane rows, in bounded steps. For live work near expiry that the TTL
+  watchdog would otherwise fail out.
+
+Doing nothing is a legitimate choice; doing nothing because nothing
+prompted you is not.
+
+On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
+exactly what you need** with the read-only context tools:
+`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
+`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
+`get_recent_outcomes`, `get_running_tasks` (and `Read` for sandboxed
+files). They return the
+same projections the old prompt used to push. Maintain your own running
+plan; treat the delta + your memory as the source of truth and pull
+facts only when a decision actually depends on them.
 
 ### Phase awareness
 
@@ -242,9 +284,11 @@ on the next tick.
   `integrate_patch`, is one route worth weighing against another config
   round. A `code_patch` KEEP resets the consecutive counter.
 * **You CANNOT** delegate kernel_agent-owned actions; mutate core state fields
-  (`current_best` / `stop_reason` / `baseline_tput` / ...); emit
-  `kill_task` (Robustness-only); read or write KB
-  directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
+  (`current_best` / `stop_reason` / `baseline_tput` / ...); read or write KB
+  directly (Critic owns it). You **CAN** emit `kill_task` with
+  `scope='task'` to reap work you dispatched (server / process kills stay
+  out — those go through Robustness `delegate(recover)`), and
+  `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
   PolicyGate allows this intent from both Robustness and Orchestration —
@@ -316,6 +360,13 @@ defaults the rest; omitting a dial is safe):
 - **`needs_gpu`**: set when the specialist needs GPU access without `bench`.
   Both `bench` and `needs_gpu` acquire `gpu_research_lane` (see Phase awareness
   — GPU specialists serialize against serving).
+
+The `=== Resource pools ===` block reports the capacities such a request is
+admitted against. A `bench` / framework-authoring specialist admits against
+`whole_machine_gpu_pool`; any other `needs_gpu` specialist admits against
+`serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
+whenever serving owns every card — in that case dispatch CPU specialists, or
+use `bench` when the work genuinely needs to measure.
 
 **Domain-anchored example:**
 ```

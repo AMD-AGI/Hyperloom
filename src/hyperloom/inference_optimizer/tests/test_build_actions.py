@@ -200,6 +200,45 @@ def test_resolve_empty_candidate_skipped():
     assert resolve_build_ref("", "https://github.com/ROCm/aiter") == ("", "", "")
 
 
+# An issue is a discussion thread, not a branch. GitHub publishes
+# refs/pull/{n}/head for a PR but nothing checkoutable for an issue, so an
+# ``issue:{n}`` string reaching ``git worktree add`` verbatim aborts the build
+# with ``fatal: invalid reference``. Observed live: an enablement specialist
+# cited upstream vllm issue 41292 as the rationale for a from-source build and
+# the build died in ~2 minutes during workspace preparation. Resolution must
+# strip the issue number to an empty ref (falling back to tag autoselect) while
+# keeping the citation as provenance.
+
+
+def test_resolve_bare_issue_ref_falls_back_to_autoselect():
+    repo, ref, pr_url = resolve_build_ref("issue:41292", "https://github.com/ROCm/aiter")
+    assert repo == "https://github.com/ROCm/aiter"
+    assert ref == "", "an issue number is not a checkoutable git ref"
+    assert pr_url == ""
+
+
+def test_resolve_plural_issues_ref_also_handled():
+    _repo, ref, _pr = resolve_build_ref("issues:41292", "https://github.com/ROCm/aiter")
+    assert ref == ""
+
+
+def test_resolve_github_issue_url_keeps_repo_and_provenance():
+    url = "https://github.com/vllm-project/vllm/issues/41292"
+    repo, ref, pr_url = resolve_build_ref(url, "https://github.com/ROCm/aiter")
+    assert repo == "https://github.com/vllm-project/vllm"
+    assert ref == ""
+    assert pr_url == url, "the citation is kept for the audit trail"
+
+
+def test_resolve_pr_still_wins_over_issue_shapes():
+    """A PR remains checkoutable; the issue branch must not shadow it."""
+    _repo, ref, _pr = resolve_build_ref(
+        "https://github.com/vllm-project/vllm/pull/33291",
+        "https://github.com/ROCm/aiter",
+    )
+    assert ref == "PR:33291"
+
+
 def test_source_pr_url_round_trip():
     a = _action(ref="PR:99", source_pr_url="https://github.com/ROCm/aiter/pull/99")
     a2 = TargetedBuildAction.from_state(a.to_state())

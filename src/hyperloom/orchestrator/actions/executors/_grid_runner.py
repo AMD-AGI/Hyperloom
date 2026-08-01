@@ -44,6 +44,7 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 from .benchmark_backend import build_benchmark_command
+from ._inferencex_patcher import ensure_benchmark_lib_eval_start_patched
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -921,6 +922,17 @@ def _run_magpie(
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+        # Baseline patches its own checkout, but explore / sweep never pass
+        # through that hook: re-assert here so a resumed session or a re-cloned
+        # checkout still emits the eval-start marker. Idempotent.
+        try:
+            ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
+        except Exception as exc:  # noqa: BLE001 — patch is best-effort
+            log.warning(
+                "_grid_runner: eval-start patch skipped for %s: %s",
+                inferencex_path,
+                exc,
+            )
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing

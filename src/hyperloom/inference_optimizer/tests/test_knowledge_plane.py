@@ -21,7 +21,6 @@ def test_plane_disabled_pr_returns_empty_mcp_url():
     )
     assert plane.pr_monitor_enabled is False
     assert plane.specialist_mcp_url() == ""
-    assert plane.cortex_enabled is False
 
 
 def test_plane_enabled_pr_returns_mcp_url():
@@ -31,40 +30,6 @@ def test_plane_enabled_pr_returns_mcp_url():
     )
     assert plane.pr_monitor_enabled is True
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
-
-
-def test_plane_cortex_enabled_when_headerless_url_set():
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=False),
-        cortex_kb_mcp_url="http://gbrain.test/mcp",
-    )
-    assert plane.cortex_enabled is True
-    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
-    assert plane.cortex_specialist_mcp_headers() == {}
-
-
-def test_plane_cortex_auth_header_enabled_by_default(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", raising=False)
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=False),
-        cortex_kb_mcp_url="http://gbrain.test/mcp",
-        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
-    )
-    assert plane.cortex_enabled is True
-    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
-    assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
-
-
-def test_plane_cortex_auth_header_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", "0")
-    plane = KnowledgePlane.from_clients(
-        pr_monitor=PRMonitorClient.from_args(enabled=False),
-        cortex_kb_mcp_url="http://gbrain.test/mcp",
-        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
-    )
-    assert plane.cortex_enabled is False
-    assert plane.cortex_specialist_mcp_url() == ""
-    assert plane.cortex_specialist_mcp_headers() == {}
 
 
 def test_plane_reset_round_caches_noop():
@@ -121,7 +86,7 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     args = _build_args(pr_monitor_enabled=False)
-    _bootstrap_knowledge_plane(args, cortex_client=None, session_dir=tmp_path)
+    _bootstrap_knowledge_plane(args, recipe_kb_client=None, session_dir=tmp_path)
     marker = pr_monitor_status_json(tmp_path)
     assert marker.exists()
     payload = json.loads(marker.read_text())
@@ -144,7 +109,7 @@ def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
         classmethod(lambda cls, **kw: _Stub(enabled=kw.get("enabled", True))),
     )
     args = _build_args(pr_monitor_enabled=False, pr_degraded_reason="ir3_auto")
-    _bootstrap_knowledge_plane(args, cortex_client=None, session_dir=tmp_path)
+    _bootstrap_knowledge_plane(args, recipe_kb_client=None, session_dir=tmp_path)
     payload = json.loads(pr_monitor_status_json(tmp_path).read_text())
     assert payload["enabled"] is False
     assert "ir3_auto" in payload.get("status_text", "")
@@ -202,14 +167,14 @@ def test_collect_kb_provenance_attributes_recipe_reads_per_source(
                     "remote": "composite",
                     "resolution": "remote",
                     "hit": True,
-                    "result": {"sources": ["gbrain", "cortex"], "best_config_source": "gbrain"},
+                    "result": {"sources": ["gbrain", "recipe_kb"], "best_config_source": "gbrain"},
                 },
                 {
                     "method": "get_recipe",
                     "remote": "composite",
                     "resolution": "remote",
                     "hit": True,
-                    "result": {"sources": ["cortex"], "best_config_source": "cortex"},
+                    "result": {"sources": ["recipe_kb"], "best_config_source": "recipe_kb"},
                 },
             ]
         )
@@ -219,8 +184,8 @@ def test_collect_kb_provenance_attributes_recipe_reads_per_source(
 
     out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
     rs = out["recipe_snapshot_reads"]
-    assert rs["by_source"] == {"gbrain": 1, "cortex": 2}
-    assert rs["best_config_by_source"] == {"gbrain": 1, "cortex": 1}
+    assert rs["by_source"] == {"gbrain": 1, "recipe_kb": 2}
+    assert rs["best_config_by_source"] == {"gbrain": 1, "recipe_kb": 1}
 
 
 def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
@@ -231,10 +196,10 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
 
     state = {
         "warm_start_recipe": {"raw": "{}", "tier": "exact", "recipe": {}},
-        "warm_start_context": {"match": {"source": "cortex"}},
+        "warm_start_context": {"match": {"source": "recipe_kb"}},
     }
     out = collect_kb_provenance(tmp_path, state=state, manifest={}, warnings=[])
-    assert out["warm_start_recipe_source"] == "cortex"
+    assert out["warm_start_recipe_source"] == "recipe_kb"
 
 
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
@@ -347,7 +312,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     )
     plane = _bootstrap_knowledge_plane(
         args,
-        cortex_client=None,
+        recipe_kb_client=None,
         session_dir=tmp_path,
     )
     assert constructed_enabled[-1] is True

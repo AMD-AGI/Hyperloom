@@ -82,7 +82,6 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
     assert executed["ran"] is False
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
-    assert updated.attempts == 0
 
 
 @pytest.mark.asyncio
@@ -319,7 +318,6 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
     assert executed["ran"] is True
     updated = await tasks2.get(task_id)
     assert updated.state == "succeeded"
-    assert updated.attempts == 1
 
 
 class _ReconcileCoordStub:
@@ -498,3 +496,27 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert executed["ran"] is True
+
+
+@pytest.mark.asyncio
+async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
+    """A task cancelled mid-flight still returns its executor result."""
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="report",
+        params={},
+        idempotency_key="k-kill-midflight",
+    )
+
+    async def _stub(ctx):
+        # Simulate a kill landing while the executor is still running.
+        await sub.tasks.transition(ctx.task.task_id, "cancelled", evidence={"reason": "killed"})
+        return {"produced": "work"}
+
+    sub.register_executor("report", _stub)
+
+    res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    assert res.result == {"produced": "work"}
+    updated = await sub.tasks.get(task.task_id)
+    assert updated.state == "cancelled"

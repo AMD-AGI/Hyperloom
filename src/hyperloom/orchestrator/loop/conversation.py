@@ -15,6 +15,9 @@ from ..trace.conversation_trace import ConversationRecord, append_conversation
 from .coordinator import (
     _format_inbox_event,
 )
+from .coordinator_helpers import _parse_iso_unix
+from ..state.task_registry import Task
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 import logging as _logging
 
 log = _logging.getLogger(__name__)
@@ -125,6 +128,7 @@ class ConversationCollaborator:
                 inbox_reader=self._context_inbox_reader,
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
+                running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
             )
             setter(provider)
@@ -139,7 +143,7 @@ class ConversationCollaborator:
                 included; defaults to ``0`` (all events).
 
         Returns:
-            A newline-joined rendering of the last 40 matching inbox events, or
+            A newline-joined rendering of all matching inbox events, or
             a placeholder string when none are available.
         """
         try:
@@ -153,7 +157,7 @@ class ConversationCollaborator:
             return "(no inbox events)"
 
         msgs = [Message.from_row(r) for r in rows]
-        lines = [_format_inbox_event(m) for m in msgs[-40:]]
+        lines = [_format_inbox_event(m) for m in msgs]
         return "\n".join(lines)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
@@ -182,11 +186,107 @@ class ConversationCollaborator:
             return "(no recent outcomes)"
 
         # Flip newest-first query to newest-last for chronological reading.
-        # Flip newest-first query to newest-last for chronological reading.
         msgs = [Message.from_row(r) for r in rows][::-1]
         lines = ["=== Recent action outcomes (newest last) ==="]
         lines.extend(_format_inbox_event(m) for m in msgs)
         return "\n".join(lines)
+
+    def _context_running_tasks_reader(self) -> str:
+        """Synchronous projection of in-flight tasks with their held resources.
+
+        Returns:
+            One line per running task carrying elapsed time, lease expiry, held
+            lanes, leased GPUs and heartbeat age, or a placeholder string.
+        """
+        try:
+            rows = self.bus.db.fetchall_sync(
+                "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
+                (),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"(running tasks unavailable: {exc!r})"
+        if not rows:
+            return "(no tasks in flight)"
+
+        lanes_by_task: dict[str, list[str]] = {}
+        # Soonest lane expiry: the first one to lapse is when reclaim starts.
+        expiry_by_task: dict[str, str] = {}
+        for r in self.bus.db.fetchall_sync("SELECT lane, task_id, expires_at FROM leases", ()):
+            tid = str(r["task_id"])
+            lanes_by_task.setdefault(tid, []).append(str(r["lane"]))
+            expires = str(r["expires_at"])
+            prev = expiry_by_task.get(tid)
+            if prev is None or expires < prev:
+                expiry_by_task[tid] = expires
+        gpus_by_task: dict[str, list[int]] = {}
+        for r in self.bus.db.fetchall_sync("SELECT gpu_id, task_id FROM gpu_leases", ()):
+            gpus_by_task.setdefault(str(r["task_id"]), []).append(int(r["gpu_id"]))
+
+        now_unix = time.time()
+        lines = ["=== Tasks in flight ==="]
+        for row in rows:
+            task = Task.from_row(row)
+            params = task.params or {}
+            started = _parse_iso_unix(task.updated_at)
+            running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
+            parts = [
+                f"  - task_id={task.task_id}",
+                f"kind={task.kind!r}",
+                f"running_sec={int(running_sec)}",
+            ]
+            domain = str(params.get("domain") or "")
+            gap = str(params.get("gap_canonical_id") or "")
+            if domain:
+                parts.append(f"domain={domain!r}")
+            if gap:
+                parts.append(f"gap={gap!r}")
+            parts.append(f"idempotency_key={task.idempotency_key!r}")
+            if task.lease_ttl_sec:
+                parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
+            expires_at = expiry_by_task.get(task.task_id, "")
+            if expires_at:
+                exp_unix = _parse_iso_unix(expires_at)
+                if exp_unix > 0:
+                    parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
+            lanes = lanes_by_task.get(task.task_id)
+            if lanes:
+                parts.append(f"lanes={sorted(lanes)}")
+            gpus = gpus_by_task.get(task.task_id)
+            if gpus:
+                parts.append(f"gpu_ids={sorted(gpus)}")
+            hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
+            if hb_age is not None:
+                parts.append(f"heartbeat_age_sec={int(hb_age)}")
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
+
+    def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
+        """Age of a specialist's freshest liveness file, mirroring the reaper.
+
+        The reap loop treats either ``heartbeat.json`` or ``process.log`` as
+        proof of life; this reports the same signal.
+
+        Args:
+            task: The running task to probe.
+            now_unix: Current wall-clock epoch seconds.
+
+        Returns:
+            Seconds since the most recent liveness write, or ``None`` when no
+            workspace file is readable.
+        """
+        if (task.kind or "").strip() != "specialist":
+            return None
+        ws = runs_dir(self.session_dir, "specialist", task.task_id)
+        newest = 0.0
+        for name in ("heartbeat.json", "process.log"):
+            try:
+                mtime = (ws / name).stat().st_mtime
+            except OSError:
+                continue
+            newest = max(newest, mtime)
+        if newest <= 0:
+            return None
+        return max(0.0, now_unix - newest)
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text.
@@ -352,6 +452,9 @@ class ConversationCollaborator:
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
+            # Capacities a needs_gpu dispatch is admitted against.
+            sections.append("=== Resource pools ===")
+            sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
             # target_gap_pct is the gain still needed for --target-gain.
             obj = getattr(self, "_current_objective", None)
@@ -370,7 +473,7 @@ class ConversationCollaborator:
                 if denial_summary:
                     sections.append(denial_summary)
 
-        # Cortex T0 warm-start snapshot + structured gaps[] ledger.
+        # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
         if agent_name == "orchestration" and push_full:
             try:
                 warm_block = self.shared_state.to_warm_start_summary()
@@ -378,7 +481,7 @@ class ConversationCollaborator:
                 log.exception("Coordinator: warm_start_summary failed")
                 warm_block = ""
             if warm_block:
-                sections.append("=== Warm start (Cortex T0) ===")
+                sections.append("=== Warm start (Recipe KB T0) ===")
                 sections.append(warm_block)
             try:
                 gaps_block = self.shared_state.to_gaps_summary()
@@ -488,11 +591,24 @@ class ConversationCollaborator:
                 "with the read-only context tools: get_shared_state, "
                 "get_gaps, get_warm_start, get_proposal_scores, "
                 "get_intervention_mix, why_denied, show_analysis_md, "
-                "get_inbox. Reason from your own running plan; do not "
-                "re-derive it from scratch."
+                "get_inbox, get_recent_outcomes, get_running_tasks. Reason "
+                "from your own running plan; do not re-derive it from scratch."
             )
 
-        # Robustness gets phase budget telemetry + specialist health for medium-severity alerts.
+        # NOTE: there is deliberately no "=== Specialist health ===" block.
+        # This prompt renders only on an agent's own turn, and a turn only
+        # comes around between blocking actions — so a running specialist is
+        # exactly what the agent is waiting on and is structurally absent from
+        # any snapshot taken here. Measured over a full 11.6h session: 33
+        # renders, 0 of them overlapped a live specialist, while specialists
+        # held 41% of the wall clock. A block that always reports "none
+        # running" is worse than no block, because it manufactures a false
+        # belief. In-flight specialists reach the agent through
+        # ``specialist_progress`` observations (pushed from the reap loop,
+        # independent of turn timing) and are verified on demand with
+        # ``get_running_tasks``.
+
+        # Robustness gets phase budget telemetry for medium-severity alerts.
         if agent_name == "robustness":
             try:
                 budget_block = self.shared_state.to_phase_budget_telemetry(
@@ -504,21 +620,6 @@ class ConversationCollaborator:
             if budget_block:
                 sections.append("=== Phase budget telemetry ===")
                 sections.append(budget_block)
-            try:
-                stale = await self._scan_stale_specialists()
-                running = await self.tasks.running()
-                specialist_running = sum(1 for t in (running or []) if (t.kind or "").strip() == "specialist")
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: specialist health scan failed")
-                stale, specialist_running = [], 0
-            stale_lines = [f"  - task_id={row['task_id']} running_sec={int(row['running_seconds'])}" for row in stale]
-            sections.append("=== Specialist health ===")
-            sections.append(
-                f"running={specialist_running} stale={len(stale)} stale_threshold_sec={int(self._specialist_stale_sec)}"
-            )
-            if stale_lines:
-                sections.append("stale specialists (consider kill_task):")
-                sections.extend(stale_lines)
 
             # Conversation no-progress circuit-breaker; Robustness is the external safety net.
             try:
@@ -548,7 +649,8 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        rendered = list(msgs[-20:])
+        # Full unread batch: events arriving in one tick must not be dropped.
+        rendered = list(msgs)
         # Durable at-least-once-until-decided delivery of proposals to the
         # Critic: the inbox tail is lossy, so re-present every still-undecided
         # proposal from the durable ``pending_proposals`` registry.

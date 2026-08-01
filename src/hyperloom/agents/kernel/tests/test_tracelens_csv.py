@@ -212,7 +212,7 @@ def test_deterministic_main_fails_before_high_idle_gate(
     trace.write_text('{"traceEvents": []}', encoding="utf-8")
     workspace = tmp_path / "workspace"
     tl_root = tmp_path / "TraceLens"
-    skill = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills" / "analysis-orchestrator.md"
+    skill = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# skill\n", encoding="utf-8")
 
@@ -1144,7 +1144,7 @@ def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
 
 # SDK runner for TraceLens analysis-orchestrator skill
 def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
-    skill = tmp_path / "analysis-orchestrator.md"
+    skill = tmp_path / "SKILL.md"
     trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
     out = tmp_path / "tracelens"
     root = tmp_path / "TraceLens-internal"
@@ -1212,9 +1212,9 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "analysis-orchestrator.md").write_text("stub")
+    (skill_dir / "SKILL.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -1911,9 +1911,9 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     # Pretend TraceLens root is present so the run reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "analysis-orchestrator.md").write_text("stub")
+    (skill_dir / "SKILL.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     capture = tmp_path / "capture_traces"
@@ -2016,9 +2016,9 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
-    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / ".cursor" / "skills"
+    skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "analysis-orchestrator.md").write_text("stub")
+    (skill_dir / "SKILL.md").write_text("stub")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     capture = tmp_path / "capture_traces"

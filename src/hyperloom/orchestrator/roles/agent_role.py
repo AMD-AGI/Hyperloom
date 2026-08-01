@@ -17,7 +17,7 @@ The four persistent agent roles and their permitted intents::
     │ name         │ backend  │ allowed intents (high level)            │
     ├──────────────┼──────────┼─────────────────────────────────────────┤
     │ orchestration│ Claude   │ propose_action / delegate / request /   │
-    │              │          │ update_state / send_message / ...       │
+    │              │          │ update_state / kill_task / ...          │
     │ kernel       │ Claude   │ response (only) / send_message / alert  │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
     │              │ no-tools │ alert                                   │
@@ -71,6 +71,8 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
         IntentType.DELEGATE,
         IntentType.UPDATE_STATE,
         IntentType.REQUEST,
+        IntentType.KILL_TASK,
+        IntentType.EXTEND_LEASE,
         IntentType.PRUNE_BRANCH,
         IntentType.ESCALATE_STRATEGY_CHANGE,
     }

@@ -140,7 +140,6 @@ def _build_backends(
     session_dir: Path,
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
-    cortex_kb_url: str | None = None,
     robustness_choice: str = "mock",
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
@@ -164,7 +163,6 @@ def _build_backends(
         critic_agent_root: Critic-agent root, required when
             ``critic_choice='agent'``.
         critic_kb_mode: Knowledge-base mode for the critic agent.
-        cortex_kb_url: Optional Cortex KB URL for the critic agent.
         robustness_choice: Robustness backend selector (``mock`` or ``agent``).
         robustness_agent_root: Robustness-agent root, required when
             ``robustness_choice='agent'``.
@@ -203,7 +201,6 @@ def _build_backends(
                 codex_model=claude_model,
                 codex_client_factory=_deepseek_openai_client_factory(),
                 kb_mode=critic_kb_mode,
-                cortex_kb_url=cortex_kb_url,
                 action_verdict_policy=_policy,
             )
         else:
@@ -214,7 +211,6 @@ def _build_backends(
                 claude_model=claude_model,
                 codex_model=codex_model,
                 kb_mode=critic_kb_mode,
-                cortex_kb_url=cortex_kb_url,
                 action_verdict_policy=_policy,
             )
     elif provider_anthropic_only:
@@ -231,7 +227,6 @@ def _build_backends(
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
-            cortex_kb_url=cortex_kb_url,
             action_verdict_policy=_load_action_verdict_policy(),
         )
 

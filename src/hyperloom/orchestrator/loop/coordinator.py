@@ -266,7 +266,9 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "throughput",
     "tput_tok_s",
 )
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+# Notes rendered per inbox line.
+_OUTCOME_NOTES_MAX: int = 3
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -346,6 +348,7 @@ def _format_inbox_event(m: "Message") -> str:
         error = payload.get("error")
         result = payload.get("result")
         parts = [head, f"kind={kind!r}", f"state={state!r}"]
+        notes: list[Any] = []
         if isinstance(result, dict):
             status = _first_present(result, _OUTCOME_STATUS_KEYS)
             gain = _first_present(result, _OUTCOME_GAIN_KEYS)
@@ -359,8 +362,18 @@ def _format_inbox_event(m: "Message") -> str:
                 parts.append(f"gain={gain}")
             if tput is not None:
                 parts.append(f"tput={tput}")
+            # Executors that never raise report the failure inside the result
+            # envelope, leaving the top-level error None.
+            if not error:
+                error = result.get("error")
+            raw_notes = result.get("notes")
+            if isinstance(raw_notes, list):
+                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
         if error:
             parts.append(f"error={str(error)[:200]!r}")
+        if notes:
+            shown = "; ".join(str(n) for n in notes)
+            parts.append(f"notes={shown[:300]!r}")
         return " ".join(parts)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
@@ -529,7 +542,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         sub_agent_runner: SubAgentRunner | None = None,
         bus_class: type[MessageBus] = MessageBus,
         model_class: str | None = None,
-        cortex_kb: RecipeKB | None = None,
+        recipe_kb: RecipeKB | None = None,
         phase_budget_pct: dict[str, float] | None = None,
         knowledge_plane: Any = None,
         proposal_scorer: Any = None,
@@ -541,7 +554,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
         # Recipe-snapshot KB dispatcher; ``None`` makes fact-write hooks no-ops.
-        self.cortex_kb: RecipeKB | None = cortex_kb
+        self.recipe_kb: RecipeKB | None = recipe_kb
         # Per-session optimization journal; lazy-instantiated on first use.
         self._journal: Journal | None = None
         # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
@@ -554,19 +567,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._proposal_scorer: Any = proposal_scorer
         # Phase budget percentages, normalised once at construction.
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
-        # Specialist stale scan threshold (seconds).
-        try:
-            self._specialist_stale_sec: float = max(
-                0.0,
-                float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC",
-                        "600",
-                    )
-                ),
-            )
-        except ValueError:
-            self._specialist_stale_sec = 600.0
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -675,20 +675,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
             _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
         )
-        _hard_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
-        )
         self._checkpoint_policy = _orch_mem.CheckpointPolicy(
             context_token_soft=int(_ctx_window * _soft_frac),
-            context_token_hard=int(_ctx_window * _hard_frac),
         )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
-        # Minimum ticks between orchestration-memory compactions, to avoid a
-        # checkpoint-every-tick loop. A near-window emergency bypasses this floor.
-        self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies; resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
@@ -832,8 +824,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
         self._ensure_phase_initialised()
-        # Cortex T0 defensive fallback for direct SDK/test callers; best-effort.
-        self._ensure_cortex_t0_anchored()
+        # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
+        self._ensure_recipe_kb_t0_anchored()
 
     @property
     def router(self) -> IntentRouter:
@@ -862,10 +854,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_review_verdict": "router",
         "_handle_single_verdict": "router",
         "_handle_delegate": "router",
-        "_handle_specialist_done": "router",
         "_handle_request": "router",
         "_handle_response": "router",
         "_handle_kill_task": "router",
+        "_handle_extend_lease": "router",
+        "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router",
         "_handle_send_message": "router",
@@ -880,7 +873,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
         # kernel -> explore -> framework (framework last: largest cluster).
         "_ensure_phase_initialised": "phase_machine",
-        "_ensure_cortex_t0_anchored": "phase_machine",
+        "_ensure_recipe_kb_t0_anchored": "phase_machine",
         "_kernel_enabled": "phase_machine",
         "_explore_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
@@ -971,9 +964,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_on_enter_explore": "phase_explore",
         "_maybe_force_stalled_domain_specialist": "phase_explore",
         "_seed_gaps_from_research_hints": "phase_explore",
-        "_scan_stale_specialists": "phase_explore",
         "_fan_out_specialist_wave": "phase_explore",
         "_maybe_auto_retry_specialist": "phase_explore",
+        "_record_specialist_retry_exhausted": "phase_explore",
         "_warm_specialist_params": "phase_explore",
         "_refresh_gaps": "phase_explore",
         "_extract_gaps_from_baseline": "phase_explore",
@@ -1039,6 +1032,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_reauthor_from_critic_feedback": "phase_framework",
         "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "phase_framework",
+        "_maybe_enqueue_enablement_baseline_revalidation": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
@@ -1065,6 +1059,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
+        "_context_running_tasks_reader": "conversation",
+        "_task_heartbeat_age_sec": "conversation",
         "_context_analysis_reader": "conversation",
         "_record_reactor_conversation": "conversation",
         "_compose_prompt": "conversation",
@@ -1099,6 +1095,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_spawn_fitting_queued": "dispatcher",
         "_run_dispatched_with_gpu_release": "dispatcher",
         "_specialist_wall_budget_sec": "dispatcher",
+        "_specialist_progress_publisher": "dispatcher",
         "_resolve_serving_tp": "dispatcher",
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
@@ -1128,7 +1125,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_build_kernel_optimizations_from_state": "writeback",
         "_collect_attempt_provenance": "writeback",
         "_build_recipe_attrs_from_state": "writeback",
-        "cortex_finalize_recipe_and_journal": "writeback",
+        "finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
         "_should_run_prelude_bootstrap": "writeback",
@@ -1287,7 +1284,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         Single-node: bare ``gpu_type`` (existing keys/data unchanged).
         Multi-node: ``gpu_type`` + ``_ws{world_size}`` so multi-node runs never
         share a recipe key with — and overwrite the ``best_config`` of — the
-        single-node recipe. MUST match ``cortex_t0.run_t0_anchor``'s derivation
+        single-node recipe. MUST match ``recipe_kb_t0.run_t0_anchor``'s derivation
         so warm-start reads and KEEP/REVERT/CLOSE writes target the same row.
 
         Returns:
@@ -1344,7 +1341,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Signal shutdown, cancel reactor tasks, finalize, and close the DB.
 
         Sets the stop event, cancels and awaits every running reactor task,
-        runs the Cortex T4 safety-net finalize hook (in case the CLOSE phase
+        runs the Recipe KB T4 safety-net finalize hook (in case the CLOSE phase
         sequencer never ran), then closes the SQLite connection. Exceptions
         raised by reactor tasks during teardown are logged, not propagated.
         """
@@ -1361,26 +1358,26 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
         # Safety net: recipe/journal finalize when CLOSE sequencer didn't run.
-        await self._cortex_t4_hook()
+        await self._recipe_kb_t4_hook()
         self.db.close()
 
-    async def _cortex_t4_hook(self) -> None:
+    async def _recipe_kb_t4_hook(self) -> None:
         """T4 — finalize recipe at session end. Safety net for crash/Ctrl-C where CLOSE sequencer didn't run; no-op when close_sequence_done."""
-        if self.cortex_kb is None:
+        if self.recipe_kb is None:
             return
         if getattr(self.shared_state, "close_sequence_done", False):
             return
-        sid = (self.shared_state.cortex_session_id or "").strip()
+        sid = (self.shared_state.recipe_kb_session_id or "").strip()
         if not sid:
             return
         try:
-            self.cortex_finalize_recipe_and_journal()
+            self.finalize_recipe_and_journal()
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("cortex T4 fact_finalize fallback failed")
+            log.exception("recipe KB T4 fact_finalize fallback failed")
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001
-            log.exception("cortex T4 SharedState.save failed")
+            log.exception("recipe KB T4 SharedState.save failed")
 
     # Statuses that mean the candidate was ADOPTED; everything else is a negative
     # signal for the ranker.

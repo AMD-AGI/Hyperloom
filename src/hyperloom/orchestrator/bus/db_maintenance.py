@@ -15,8 +15,8 @@ helpers bound them while preserving the two correctness invariants:
   ``min(min_processed_seq, max_seq - keep_recent)`` — strictly below the resume
   anchor.
 * **In-flight safety** — ``tasks`` pruning never touches ``queued`` / ``running``
-  / ``failed`` / ``needs_manual_review`` rows; only truly-done
-  (``succeeded`` / ``cancelled``) rows beyond a keep-recent count are removed.
+  / ``failed`` rows; only truly-done (``succeeded`` / ``cancelled``) rows beyond
+  a keep-recent count are removed.
 """
 
 from __future__ import annotations
@@ -153,8 +153,8 @@ async def prune_tasks(
 ) -> int:
     """Delete old done (succeeded/cancelled) tasks beyond ``keep_done``.
 
-    Never touches queued/running/failed/needs_manual_review rows. Returns the
-    number of rows deleted.
+    Never touches queued/running/failed rows. Returns the number of rows
+    deleted.
 
     Args:
         db: Open SQLite connection to prune the ``tasks`` table on.

@@ -894,6 +894,250 @@ async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
         await c.stop()
 
 
+def _eval_failed_result() -> dict:
+    return {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": "ERROR: run_eval failed with exit code 1",
+        "baseline_eval_failed": True,
+        "baseline_eval_failure_kind": "eval_runtime_failure",
+        "baseline_eval_accuracy_floor": 0.2,
+        "baseline_eval_evidence": "run_eval failed with exit code 1",
+        "baseline_eval_contract_fingerprint": "abc123",
+        "materialized_config": "/runs/baseline/materialized.yaml",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_node(
+    session_dir, monkeypatch
+):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
+        assert c.shared_state.baseline_failure_streak == 3
+        assert c.shared_state.stop_reason in ("", None)
+        assert c.shared_state.enablement_origin == "eval"
+        assert c.shared_state.enablement_pending is True
+        assert c.shared_state.enablement_accuracy_floor == 0.2
+        assert c.shared_state.enablement_probe_config_path == "/runs/baseline/materialized.yaml"
+        assert c.shared_state.enablement_eval_contract_fingerprint == "abc123"
+        assert c.shared_state.enablement_baseline_eval_kind == "eval_runtime_failure"
+        assert c.shared_state.enablement_launch_log
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(session_dir, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.3
+        # Set tracked task_id so the gate recognizes this as the revalidation task.
+        c.shared_state.enablement_revalidation_task_id = "t-reval-ok"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
+            task=_mk_task("baseline", "t-reval-ok"),
+        )
+        assert c.shared_state.baseline_tput == 1000.0
+        assert c.shared_state.enablement_succeeded is True
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_origin == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(session_dir):
+    """A baseline that is NOT the tracked revalidation task must not consume pending state."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement_revalidation_task_id = "t-reval-tracked"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
+            task=_mk_task("baseline", "t-unrelated"),
+        )
+        assert c.shared_state.baseline_tput == 1000.0
+        # Pending state must NOT be consumed by the unrelated baseline.
+        assert c.shared_state.enablement_validation_pending is True
+        assert c.shared_state.enablement_succeeded is False
+        assert c.shared_state.enablement_revalidation_task_id == "t-reval-tracked"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
+    """Tracked revalidation baseline with sub-floor accuracy should rearm, not succeed."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_origin = "eval"
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.8
+        c.shared_state.enablement_revalidation_task_id = "t-reval-subflo"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.5},
+            task=_mk_task("baseline", "t-reval-subflo"),
+        )
+        # Baseline tput anchors normally, but enablement is NOT succeeded.
+        assert c.shared_state.baseline_tput == 1000.0
+        assert c.shared_state.enablement_succeeded is False
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement_revalidation_task_id == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_revalidation_task_id = "t-reval-fail"
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+    finally:
+        await c.stop()
+
+
+def _eval_unavailable_result() -> dict:
+    """An eval-less baseline: succeeded, but measured no accuracy at all."""
+    return {
+        "status": "succeeded",
+        "baseline_eval_failed": True,
+        "baseline_eval_failure_kind": "accuracy_unavailable",
+        "baseline_eval_observed_accuracy": None,
+        "baseline_eval_accuracy_floor": 0.0,
+        "baseline_eval_evidence": (
+            "baseline accuracy did not meet floor: accuracy=None floor=0.0 task=None metric=None source=None"
+        ),
+        "baseline_eval_contract_fingerprint": "noeval-fp",
+        "materialized_config": "/runs/baseline/noeval.yaml",
+    }
+
+
+@pytest.mark.asyncio
+async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_dir, monkeypatch):
+    """An eval-less re-baseline must not overwrite a measured enablement trigger.
+
+    ``disable_run_eval`` re-baselines report ``accuracy_unavailable`` with no
+    task/metric/source. They still count as a failed round, but the stored
+    ``accuracy_below_floor`` evidence (the measurement enablement must
+    reproduce) has to survive.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement_baseline_eval_kind = "accuracy_below_floor"
+        st.enablement_observed_accuracy = 0.0
+        st.enablement_observed_task = "gsm8k"
+        st.enablement_observed_metric = "exact_match,strict-match"
+        st.enablement_baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
+        st.enablement_probe_config_path = "/runs/baseline/measured.yaml"
+        st.enablement_eval_contract_fingerprint = "measured-fp"
+
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
+        )
+
+        # The measured characterization survives...
+        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement_observed_task == "gsm8k"
+        assert st.enablement_observed_metric == "exact_match,strict-match"
+        assert "accuracy=0.0" in st.enablement_baseline_eval_evidence
+        assert st.enablement_probe_config_path == "/runs/baseline/measured.yaml"
+        assert st.enablement_eval_contract_fingerprint == "measured-fp"
+        # ...while the round still registers as an eval-rooted failure.
+        assert st.enablement_origin == "eval"
+        assert st.enablement_pending is True
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monkeypatch):
+    """The guard is one-way: a real measurement still replaces an empty trigger."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        st = c.shared_state
+        st.enablement_baseline_eval_kind = "accuracy_unavailable"
+        st.enablement_baseline_eval_evidence = "accuracy=None"
+
+        measured = _eval_unavailable_result()
+        measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
+        measured["baseline_eval_observed_accuracy"] = 0.0
+        measured["accuracy_task"] = "gsm8k"
+        measured["baseline_eval_evidence"] = "measured: accuracy=0.0 task=gsm8k"
+
+        await c._handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
+
+        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement_observed_task == "gsm8k"
+        assert "measured" in st.enablement_baseline_eval_evidence
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir, monkeypatch):
+    """Any revalidation failure (including plain boot failures) clears pending and increments stall."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_revalidation_task_id = "t-reval-boot"
+        c.shared_state.enablement_eval_contract_fingerprint = "frozen-fp"
+        c.shared_state.enablement_accuracy_floor = 0.5
+        await c._handle_unpromotable_result(
+            _mk_task("baseline", "t-reval-boot"),
+            {"status": "failed", "error_class": "oom"},
+        )
+        assert c.shared_state.enablement_validation_pending is False
+        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement_revalidation_task_id == ""
+        # Frozen trigger identity must be preserved.
+        assert c.shared_state.enablement_eval_contract_fingerprint == "frozen-fp"
+        assert c.shared_state.enablement_accuracy_floor == 0.5
+    finally:
+        await c.stop()
+
+
 @pytest.mark.asyncio
 async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -1367,9 +1611,9 @@ async def test_sub_agent_runner_swallows_tasknotfound_on_initial_transition(
     assert ran["called"] is True
     assert res.state == "succeeded"
     assert res.result == {"tput": 1.0}
-    assert any(
-        "vanished" in rec.message.lower() and "_transition_resilient" in rec.message for rec in caplog.records
-    ), "expected the disappearing-row warning to fire"
+    assert any("vanished" in rec.message.lower() for rec in caplog.records), (
+        "expected the disappearing-row warning to fire"
+    )
     db.close()
 
 

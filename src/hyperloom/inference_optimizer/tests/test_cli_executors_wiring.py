@@ -81,12 +81,6 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         def specialist_mcp_url(self) -> str:
             return "http://pr-monitor.invalid/mcp"
 
-        def cortex_specialist_mcp_url(self) -> str:
-            return "http://cortex.invalid/mcp"
-
-        def cortex_specialist_mcp_headers(self) -> dict:
-            return {"authorization": "Bearer x"}
-
     executor = _build_specialist_executor(
         _spec_args("subprocess"),
         session_dir=tmp_path,
@@ -98,10 +92,10 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
 def test_mcp_servers_from_explicit_config(tmp_path):
     cfg = tmp_path / "mcp.json"
     cfg.write_text(
-        json.dumps({"mcpServers": {"cortex_kb": {"type": "http"}, "pr_monitor": {"type": "http"}}}),
+        json.dumps({"mcpServers": {"recipe_kb": {"type": "http"}, "pr_monitor": {"type": "http"}}}),
         encoding="utf-8",
     )
-    assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"cortex_kb", "pr_monitor"}
+    assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"recipe_kb", "pr_monitor"}
 
 
 def test_mcp_servers_from_absent_config_is_not_authoritative():
