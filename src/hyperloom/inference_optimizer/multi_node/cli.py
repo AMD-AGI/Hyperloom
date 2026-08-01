@@ -44,6 +44,7 @@ from ._internal.server_args_safety import (
     validate_server_args,
 )
 from .state_paths import resolve_state_file
+from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
 
 # Default poll budget sized under the sandbox 120s ceiling.
@@ -1257,6 +1258,45 @@ def _extract_pod_json(logs: str) -> dict | None:
     return None
 
 
+def _forward_runtime_env() -> dict[str, Any] | None:
+    """Build the Ray runtime_env carrying per-round env overrides to every rank.
+
+    The RayJob path spawns one node-pinned actor per rank, so ``_subprocess_env``
+    in ``launch_multinode.py`` inherits the ray worker environment (from the pod
+    spec), not the entrypoint shell. A shell ``export`` in the entrypoint would
+    therefore reach no rank; job-level ``runtime_env.env_vars`` is the only
+    channel Ray propagates to the driver and every actor it creates.
+
+    Reads the same ``HYPERLOOM_MN_EXTRA_FWD_ENV`` control var the infera SSH
+    path consumes so both multi-node backends honour ``extra_env`` identically.
+    ``HYPERLOOM_MN_UNSET_FWD_ENV`` needs no handling here: it exists to drop
+    keys the infera path picks up by prefix from the controller environment,
+    while this path forwards only the explicit per-round overrides, and each
+    submission carries a fresh env, so a previous round's var is already gone.
+
+    Returns:
+        dict[str, Any] | None: A ``{"env_vars": {...}}`` payload, or None when
+        there is nothing to forward (keeps the submission unchanged).
+    """
+    raw = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
+        return None
+    if not isinstance(parsed, dict):
+        warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not a JSON object; skipping per-variant env forwarding")
+        return None
+
+    env_vars = filter_forward_env({str(k): str(v) for k, v in parsed.items()}, warn_on_drop=True)
+    if not env_vars:
+        return None
+    info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")
+    return {"env_vars": env_vars}
+
+
 def _submit_and_collect_pod_json(
     state: dict[str, Any],
     entrypoint: str,
@@ -1697,7 +1737,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # Phase B: launch new (skipped when resuming a RUNNING launch).
             # Driver returns once every rank spawned its launcher.
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep)
+                launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the

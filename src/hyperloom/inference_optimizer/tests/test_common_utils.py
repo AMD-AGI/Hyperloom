@@ -460,6 +460,31 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[0] == ("10.0.0.1", "--model /m")
 
 
+def test_rayjob_forward_runtime_env_carries_extra_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The RayJob launch must ship per-round env to every rank via runtime_env.
+
+    A shell export in the entrypoint reaches no rank (each rank is a Ray actor
+    inheriting the pod env), so an omitted runtime_env silently drops knobs like
+    SGLANG_USE_AITER=0 that the prompt asked for.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV", raising=False)
+    assert mn_cli._forward_runtime_env() is None
+
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"SGLANG_USE_AITER": "0", "LD_PRELOAD": "/evil.so"}),
+    )
+    payload = mn_cli._forward_runtime_env()
+    assert payload == {"env_vars": {"SGLANG_USE_AITER": "0"}}, "denied keys must not reach the pods"
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
+    assert mn_cli._forward_runtime_env() is None
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps(["not", "a", "dict"]))
+    assert mn_cli._forward_runtime_env() is None
+
+
 def _restart_args(**overrides) -> argparse.Namespace:
     defaults = dict(
         framework="",
