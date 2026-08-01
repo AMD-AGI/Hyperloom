@@ -1468,12 +1468,15 @@ class BaselineExecutor:
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run.
 
-        Only for a genuine baseline, single-node, with the flag enabled.
+        Only for a genuine baseline, single-node, with the eval lane admitted by
+        the session's enablement mode.
         """
-        from ._accuracy_gate import enablement_on_eval_fail_enabled
+        from ._accuracy_gate import eval_enablement_allowed
         from ._multi_node_env import is_multi_node
 
-        if not enablement_on_eval_fail_enabled():
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        if not eval_enablement_allowed(shared_state):
             return False
         if is_multi_node():
             return False
@@ -1501,14 +1504,14 @@ class BaselineExecutor:
             BASELINE_EVAL_FAILED_KEY,
             BASELINE_EVAL_FAILURE_KIND_KEY,
             BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
-            enablement_accuracy_floor,
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             eval_contract_fingerprint,
         )
 
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
         model = params.get("model") or params.get("resolved_model")
-        floor = enablement_accuracy_floor()
+        floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         result[BASELINE_EVAL_FAILED_KEY] = True
         result[BASELINE_EVAL_FAILURE_KIND_KEY] = kind
         result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] = observed_accuracy
@@ -1634,9 +1637,13 @@ class BaselineExecutor:
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
-        from ._accuracy_gate import accuracy_meets_floor, classify_accuracy_failure, enablement_accuracy_floor
+        from ._accuracy_gate import (
+            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            accuracy_meets_floor,
+            classify_accuracy_failure,
+        )
 
-        floor = enablement_accuracy_floor()
+        floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         if eval_enablement:
             if accuracy_meets_floor(acc, floor):
                 return  # a usable baseline accuracy at/above the floor exists

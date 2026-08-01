@@ -322,13 +322,69 @@ contains archived action names.
 
 ---
 
-## `enablement` — targeted-build & attempt-runtime summary
+## `enablement` — admission, round lifecycle, builds & attempt runtimes
 
-`EnablementBreakdown`. The enablement subsystem's observability section:
-the attempt runtimes it provisioned and the targeted builds (AITER /
-sgl-kernel / vLLM-source) it attempted. Emitted as `{}` on sessions that
-never provisioned an attempt runtime or attempted a build, so the
-dashboard hides the block. Top-level fields:
+`EnablementBreakdown`. The enablement subsystem's observability section: which
+lane was admitted, what each authoring round did, the patches and stack actions
+it landed, the attempt runtimes it provisioned, and the targeted builds (AITER /
+sgl-kernel / vLLM-source) it attempted.
+
+Emitted when the lane did something, or when it was explicitly turned off — the
+opt-out is what explains a run that failed to establish a baseline without
+anything trying to repair it. Since `all` is the default, an armed lane that was
+never needed stays hidden.
+
+Admission and round lifecycle are reported independently of the artifacts: a
+boot-origin round repaired by a plain source patch provisions no runtime and
+builds nothing, and would otherwise leave no trace at all.
+
+Admission and lifecycle (always present when the block is emitted):
+
+| Field                       | Type   | Description                                                                              |
+|-----------------------------|--------|--------------------------------------------------------------------------------------------|
+| `mode`                      | string | Admitted lane from `--enablement`: `off` / `launch` / `eval` / `all`.                        |
+| `engaged`                   | bool   | A round was dispatched, attempted, or landed a patch. `false` with a non-`off` mode means the lane was armed but never needed. |
+| `origin`                    | string | Trigger origin: `boot` (cannot launch) or `eval` (accuracy).                                 |
+| `attempts`                  | int    | Authoring rounds dispatched this session.                                                    |
+| `dispatched`                | bool   | An authoring round is in flight.                                                             |
+| `succeeded`                 | bool   | A round was KEPT. Eval-origin additionally requires the revalidation baseline to promote at or above the floor. |
+| `pending`                   | bool   | A trigger is captured but unconsumed.                                                        |
+| `validation_pending`        | bool   | An eval-origin KEEP awaits baseline revalidation.                                            |
+| `stall_streak`              | int    | Consecutive no-progress rounds toward `enablement_stalled`.                                  |
+
+Round detail (present when set):
+
+| Field                       | Type                             | Description                                                        |
+|-----------------------------|----------------------------------|------------------------------------------------------------------------|
+| `inflight_task_id`          | string                           | Specialist task id of the in-flight round.                             |
+| `last_specialist_task_id`   | string                           | Specialist task id of the most recent round.                           |
+| `dispatch_tick`             | int                              | Coordinator tick the in-flight round was dispatched on.                |
+| `revalidation_task_id`      | string                           | TaskRegistry id of the tracked revalidation task.                      |
+| `revalidation_generation`   | int                              | Revalidation window counter (idempotency).                             |
+| `launch_log_excerpt`        | string                           | Tail (2000 chars) of the boot failure text that triggered the round.    |
+| `kept_patches`              | string[]                         | Session-relative paths of patches landed by enablement.                |
+| `kept_stack_action`         | `EnablementStackActionSummary`   | The stack action behind the KEPT attempt runtime.                      |
+| `candidate_refs`            | string[]                         | Bridging candidate refs considered for rotation.                       |
+| `setup_commands`            | string[]                         | Setup commands the specialist requested.                               |
+| `localization_manifest`     | string[]                         | Files the localization pass identified.                                |
+| `build_novelty`             | string[]                         | Novelty keys of the targeted builds requested.                         |
+| `human_review_count`        | int                              | Logs parked for human review.                                          |
+| `accepted_config_path`      | string                           | Effective config from the KEPT candidate bench.                        |
+
+Eval-origin trigger (present when `origin` is `eval`):
+
+| Field                       | Type   | Description                                                                              |
+|-----------------------------|--------|--------------------------------------------------------------------------------------------|
+| `trigger_kind`              | string | `eval_runtime_failure` / `accuracy_below_floor` / `accuracy_unavailable`.                    |
+| `observed_accuracy`         | float  | Baseline accuracy observed at the trigger.                                                   |
+| `accuracy_floor`            | float  | Effective floor for the trigger and the KEEP gate.                                           |
+| `observed_task`             | string | Eval task name observed at the trigger.                                                      |
+| `observed_metric`           | string | Eval metric observed at the trigger.                                                         |
+| `eval_contract_fingerprint` | string | Fingerprint of the captured eval contract.                                                   |
+| `probe_config_path`         | string | Materialized config re-run to reproduce the contract.                                        |
+| `trigger_evidence_excerpt`  | string | Tail (2000 chars) of the captured eval-failure evidence.                                     |
+
+Stack actions, runtimes and builds:
 
 | Field                 | Type                          | Description                                                                                     |
 |-----------------------|-------------------------------|-------------------------------------------------------------------------------------------------|

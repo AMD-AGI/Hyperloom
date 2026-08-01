@@ -10,6 +10,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
+from .coordinator_helpers import approved_proposal_idempotency_key
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -20,6 +21,10 @@ from .coordinator import (
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Task states past which the same idempotency key may be reused for a retry.
+_TERMINAL_TASK_STATES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
+_MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
@@ -502,24 +507,48 @@ class ProposalsCollaborator:
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind=pending.action_name,
-            params=params,
-            idempotency_key=f"approved-{pending.proposal_msg_id}",
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-        )
-        if was_existing:
-            # Key is unique per proposal; only a resume/replay collides.
+        # Content-addressed so a batch of proposals that would launch identical
+        # work collapses to one task; a terminated twin still gets a fresh key so
+        # a legitimate retry after failure is never locked out.
+        raw_key = approved_proposal_idempotency_key(pending.action_name, params)
+        task = None
+        was_existing = False
+        for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
+            idempotency_key = raw_key if attempt == 0 else f"{raw_key}-retry{attempt}"
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind=pending.action_name,
+                params=params,
+                idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+            )
+            if not was_existing:
+                break
+            if task.state not in _TERMINAL_TASK_STATES:
+                await self._record_observation(
+                    "coordinator",
+                    "observation",
+                    {
+                        "kind": "proposal_materialize_skipped",
+                        "reason": "duplicate_proposal_content",
+                        "proposal_msg_id": pending.proposal_msg_id,
+                        "task_id": task.task_id,
+                        "task_state": task.state,
+                        "action_name": pending.action_name,
+                        "from_agent": pending.from_agent,
+                    },
+                )
+                return
+        else:
             await self._record_observation(
                 "coordinator",
                 "observation",
                 {
                     "kind": "proposal_materialize_skipped",
-                    "reason": "duplicate_idempotency_key",
+                    "reason": "idempotency_key_exhausted",
                     "proposal_msg_id": pending.proposal_msg_id,
-                    "task_id": task.task_id,
-                    "task_state": task.state,
+                    "task_id": task.task_id if task is not None else "",
+                    "task_state": task.state if task is not None else "",
                     "action_name": pending.action_name,
                     "from_agent": pending.from_agent,
                 },

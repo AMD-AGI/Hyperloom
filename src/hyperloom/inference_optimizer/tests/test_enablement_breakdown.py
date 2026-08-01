@@ -198,3 +198,71 @@ def test_collect_enablement_succeeded_flag():
         [],
     )
     assert done_out.get("succeeded") is True
+
+
+def test_collect_enablement_boot_origin_round_surfaced():
+    """A boot-origin round repaired by a source patch provisions no runtime and
+    builds nothing; it must still be visible."""
+    out = collect_enablement(
+        Path("/tmp"),
+        _state(
+            enablement_mode="launch",
+            enablement_attempts=1,
+            enablement_dispatched=True,
+            enablement_succeeded=True,
+            enablement_inflight_task_id="spec-1",
+            enablement_last_specialist_task_id="spec-1",
+            enablement_dispatch_tick=7,
+            enablement_launch_log="EngineCore failed to start.\nTraceback (most recent call last):",
+            enablement_stack_actions=[],
+            enablement_attempt_runtimes=[],
+            enablement_build_manifest=[],
+        ),
+        [],
+    )
+    assert out
+    assert out["mode"] == "launch"
+    assert out["engaged"] is True
+    assert out["origin"] == "boot"
+    assert out["attempts"] == 1
+    assert out["succeeded"] is True
+    assert out["last_specialist_task_id"] == "spec-1"
+    assert out["dispatch_tick"] == 7
+    assert "EngineCore failed to start." in out["launch_log_excerpt"]
+
+
+def test_collect_enablement_opt_out_recorded_but_armed_idle_hidden():
+    """``all`` is the default, so an armed lane that never fired is not worth a
+    block; an explicit opt-out is, since it explains why nothing self-healed."""
+    off_out = collect_enablement(Path("/tmp"), _state(enablement_mode="off"), [])
+    assert off_out["mode"] == "off"
+    assert off_out["engaged"] is False
+    assert off_out["attempts"] == 0
+    assert collect_enablement(Path("/tmp"), _state(enablement_mode="all"), []) == {}
+    # A session predating the flag loads with the SharedState default.
+    assert collect_enablement(Path("/tmp"), _state(), []) == {}
+
+
+def test_collect_enablement_kept_patches_relativized_and_log_bounded():
+    out = collect_enablement(
+        Path("/tmp/sess"),
+        _state(
+            enablement_mode="all",
+            enablement_attempts=2,
+            enablement_stall_streak=1,
+            enablement_kept_patches=["/tmp/sess/patches/001_fix.patch"],
+            enablement_kept_stack_action={"kind": "runtime_candidate", "framework": "vllm"},
+            enablement_candidate_refs=["PR:901"],
+            enablement_setup_commands=["pip install -e ."],
+            enablement_human_review_logged=["log-a", "log-b"],
+            enablement_launch_log="x" * 5000,
+        ),
+        [],
+    )
+    assert out["kept_patches"] == ["patches/001_fix.patch"]
+    assert out["kept_stack_action"]["kind"] == "runtime_candidate"
+    assert out["candidate_refs"] == ["PR:901"]
+    assert out["setup_commands"] == ["pip install -e ."]
+    assert out["human_review_count"] == 2
+    assert out["stall_streak"] == 1
+    assert len(out["launch_log_excerpt"]) == 2000

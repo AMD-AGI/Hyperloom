@@ -157,6 +157,9 @@ _PYTHON_CMD_PREFIXES: tuple[str, ...] = (
 # Server log size cap so the per-line scan stays bounded (covers the startup banner).
 _SERVER_LOG_MAX_BYTES = 256 * 1024
 
+# Tail kept for enablement trigger evidence: tracebacks put the real error last.
+_ENABLEMENT_LOG_EXCERPT_CHARS = 2000
+
 
 def _strip_log_prefix(line: str) -> str:
     """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line.
@@ -1302,6 +1305,28 @@ def _build_final_invocation(
     }
 
 
+def _as_int(value: Any, *, default: int = 0) -> int:
+    """Coerce a state counter to int, falling back to ``default``."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _stack_action_summary(action: dict[str, Any]) -> dict[str, Any]:
+    """Project a stack-action dict onto EnablementStackActionSummary."""
+    return {
+        "kind": str(action.get("kind") or ""),
+        "framework": str(action.get("framework") or ""),
+        "capability": str(action.get("capability") or ""),
+        "acquisition_method": str(action.get("acquisition_method") or ""),
+        "repo_url": str(action.get("repo_url") or ""),
+        "ref": str(action.get("ref") or ""),
+        "index_url": str(action.get("index_url") or ""),
+        "reason": str(action.get("reason") or ""),
+    }
+
+
 def _runtime_summary(runtime: dict[str, Any], *, promoted: bool) -> dict[str, Any]:
     """Project a FrameworkRuntime-shaped dict onto EnablementAttemptRuntime."""
     versions = runtime.get("installed_versions")
@@ -1341,10 +1366,18 @@ def collect_enablement(
 ) -> dict[str, Any]:
     """Collect the enablement observability section.
 
-    Reads ``enablement_*`` attempt-runtime state and
-    ``enablement_build_manifest`` / ``enablement_last_build_failure``.
-    Returns ``{}`` when nothing was ever attempted, so the dashboard hides the
-    block.
+    Covers the whole subsystem, not just the artifacts it happens to leave
+    behind: the admitted lane, the round lifecycle (dispatch / attempts / stall /
+    outcome), the boot- or eval-origin trigger, the patches and stack actions it
+    landed, the attempt runtimes it provisioned, and the targeted builds it ran.
+
+    A boot-origin round repaired by a plain source patch provisions no runtime
+    and builds nothing, so gating emission on those artifacts alone made the most
+    common kind of enablement invisible. Emission is therefore keyed on the lane
+    having done something, or on it having been explicitly turned off — with
+    ``all`` the default, "armed but never needed" is the uninteresting case and
+    stays hidden, while "opted out" explains why nothing tried to repair a run
+    that failed to establish a baseline.
     """
     stack_actions_raw = state.get("enablement_stack_actions")
     active_runtime_raw = state.get("enablement_active_runtime")
@@ -1352,58 +1385,105 @@ def collect_enablement(
     failure_kind = str(state.get("enablement_failure_kind") or "")
     build_manifest_raw = state.get("enablement_build_manifest")
     last_build_failure_raw = state.get("enablement_last_build_failure")
+    kept_patches_raw = state.get("enablement_kept_patches")
+    kept_stack_action_raw = state.get("enablement_kept_stack_action")
 
     origin = str(state.get("enablement_origin") or "")
     # eval_kind is NOT cleared on success, so it can identify an eval-origin
     # enablement even after the run succeeds and origin is reset to "".
     eval_kind = str(state.get("enablement_baseline_eval_kind") or "")
+    # Sessions predating the flag load with the SharedState default, so that is
+    # also the right value to report for them.
+    mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
+    attempts = _as_int(state.get("enablement_attempts"))
+    dispatched = bool(state.get("enablement_dispatched"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
     have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
     have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
+    have_kept_patches = isinstance(kept_patches_raw, list) and bool(kept_patches_raw)
     # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
-    if not (have_active or have_attempts or have_actions or have_build_manifest or have_last_failure or have_eval):
+    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_actions or have_eval)
+    if not (
+        engaged
+        or mode == "off"
+        or have_active
+        or have_attempts
+        or have_build_manifest
+        or have_last_failure
+    ):
         return {}
 
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {
+        "mode": mode,
+        "engaged": engaged,
+        "origin": "eval" if have_eval else "boot",
+        "attempts": attempts,
+        "dispatched": dispatched,
+        "succeeded": bool(state.get("enablement_succeeded")),
+        "pending": bool(state.get("enablement_pending")),
+        "validation_pending": bool(state.get("enablement_validation_pending")),
+        "stall_streak": _as_int(state.get("enablement_stall_streak")),
+    }
+    inflight_tid = str(state.get("enablement_inflight_task_id") or "")
+    if inflight_tid:
+        out["inflight_task_id"] = inflight_tid
+    last_spec_tid = str(state.get("enablement_last_specialist_task_id") or "")
+    if last_spec_tid:
+        out["last_specialist_task_id"] = last_spec_tid
+    dispatch_tick = _as_int(state.get("enablement_dispatch_tick"), default=-1)
+    if dispatch_tick >= 0:
+        out["dispatch_tick"] = dispatch_tick
+    reval_gen = _as_int(state.get("enablement_revalidation_generation"))
+    if reval_gen:
+        out["revalidation_generation"] = reval_gen
+    reval_tid = str(state.get("enablement_revalidation_task_id") or "")
+    if reval_tid:
+        out["revalidation_task_id"] = reval_tid
+    # The boot-origin trigger evidence: without it a launch-failure round shows
+    # no reason for having run at all.
+    launch_log = str(state.get("enablement_launch_log") or "")
+    if launch_log:
+        out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
+    if have_kept_patches:
+        out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
+        out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
+    candidate_refs = state.get("enablement_candidate_refs")
+    if isinstance(candidate_refs, list) and candidate_refs:
+        out["candidate_refs"] = [str(r) for r in candidate_refs]
+    setup_commands = state.get("enablement_setup_commands")
+    if isinstance(setup_commands, list) and setup_commands:
+        out["setup_commands"] = [str(c) for c in setup_commands]
+    localization = state.get("enablement_localization_manifest")
+    if isinstance(localization, list) and localization:
+        out["localization_manifest"] = [str(p) for p in localization]
+    build_novelty = state.get("enablement_build_novelty")
+    if isinstance(build_novelty, list) and build_novelty:
+        out["build_novelty"] = [str(k) for k in build_novelty]
+    human_review = state.get("enablement_human_review_logged")
+    if isinstance(human_review, list) and human_review:
+        out["human_review_count"] = len(human_review)
+    accepted_cfg = str(state.get("enablement_accepted_config_path") or "")
+    if accepted_cfg:
+        out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
     if have_eval:
-        out["origin"] = origin if origin else "eval"
         out["trigger_kind"] = eval_kind
         out["observed_accuracy"] = float(state.get("enablement_observed_accuracy") or 0.0)
         out["accuracy_floor"] = float(state.get("enablement_accuracy_floor") or 0.0)
         out["observed_task"] = str(state.get("enablement_observed_task") or "")
         out["observed_metric"] = str(state.get("enablement_observed_metric") or "")
         out["eval_contract_fingerprint"] = str(state.get("enablement_eval_contract_fingerprint") or "")
-        out["validation_pending"] = bool(state.get("enablement_validation_pending"))
-        out["succeeded"] = bool(state.get("enablement_succeeded"))
         probe_cfg = str(state.get("enablement_probe_config_path") or "")
         if probe_cfg:
             out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
-        accepted_cfg = str(state.get("enablement_accepted_config_path") or "")
-        if accepted_cfg:
-            out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
-        reval_tid = str(state.get("enablement_revalidation_task_id") or "")
-        if reval_tid:
-            out["revalidation_task_id"] = reval_tid
+        evidence = str(state.get("enablement_baseline_eval_evidence") or "")
+        if evidence:
+            out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_actions:
-        summaries: list[dict[str, Any]] = []
-        for a in stack_actions_raw:
-            if not isinstance(a, dict):
-                continue
-            summaries.append(
-                {
-                    "kind": str(a.get("kind") or ""),
-                    "framework": str(a.get("framework") or ""),
-                    "capability": str(a.get("capability") or ""),
-                    "acquisition_method": str(a.get("acquisition_method") or ""),
-                    "repo_url": str(a.get("repo_url") or ""),
-                    "ref": str(a.get("ref") or ""),
-                    "index_url": str(a.get("index_url") or ""),
-                    "reason": str(a.get("reason") or ""),
-                }
-            )
+        summaries = [_stack_action_summary(a) for a in stack_actions_raw if isinstance(a, dict)]
         if summaries:
             out["stack_actions"] = summaries
     active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""

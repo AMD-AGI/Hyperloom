@@ -9,6 +9,7 @@ dependency).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -343,6 +344,30 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
         value = params.get(key)
         out[key] = None if value is None else str(value)
     return out
+
+
+def approved_proposal_idempotency_key(action_name: str, params: dict[str, Any] | None) -> str:
+    """Content-addressed idempotency key for an approved proposal.
+
+    ``baseline`` keys on :func:`_baseline_params_fingerprint` so params outside
+    the eight behavior-determining fields cannot mint a distinct key for what is
+    the same run; every other action hashes the full params. Two proposals that
+    would launch the same work therefore collide and only one is queued.
+
+    Args:
+        action_name: The proposed action kind.
+        params: Materialized task params (``None`` treated as empty).
+
+    Returns:
+        The ``approved:<action>:<digest>`` key.
+    """
+    params = params or {}
+    payload: Any = _baseline_params_fingerprint(params) if action_name == "baseline" else params
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, default=str).encode(),
+        usedforsecurity=False,
+    ).hexdigest()[:16]
+    return f"approved:{action_name}:{digest}"
 
 
 def _resolve_roofline_watermark_ratio() -> float:
