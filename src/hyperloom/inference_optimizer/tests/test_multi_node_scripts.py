@@ -82,6 +82,95 @@ def _load_script_module(unique_name: str, script_name: str):
     return mod
 
 
+def test_resolve_kb_topology_carries_formation_and_backend(monkeypatch, tmp_path):
+    """tp/ep/backend are part of the KB key, so they must survive the env hop."""
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("EP", "4")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["nodes"] == 2
+    assert topo["gpus_per_node"] == 8
+    assert topo["tp"] == 8
+    assert topo["ep"] == 4
+    assert topo["backend"] == "infera"
+
+
+def _kb_env(monkeypatch, tmp_path, **env):
+    """Isolate resolve_kb_topology from the ambient env and any real state file."""
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    for key in ("INFERENCE_OPTIMIZER_NODES", "INFERENCE_OPTIMIZER_GPUS_PER_NODE", "TP", "EP", "PD_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
+    """Env is exported before T0 and stable across --resume, so it outranks state."""
+    _kb_env(monkeypatch, tmp_path, TP="8", EP="4", INFERENCE_OPTIMIZER_NODES="2")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 2, "ep": 2})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 8
+    assert topo["ep"] == 4
+
+
+def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, tmp_path):
+    """A junk TP/EP env must not shadow the persisted value it cannot replace."""
+    _kb_env(monkeypatch, tmp_path, TP="not-a-number", EP="", INFERENCE_OPTIMIZER_NODES="2")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 4, "last_restart_ep": 8})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 4
+    assert topo["ep"] == 8
+
+
+def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(monkeypatch, tmp_path):
+    """An unresolvable TP must omit the suffix, not claim the run was TP1.
+
+    ``kb_hardware_slug`` documents ``tp <= 0`` as "unspecified"; defaulting to 1
+    instead keyed such runs as a formation nobody measured.
+    """
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path, INFERENCE_OPTIMIZER_NODES="2", INFERENCE_OPTIMIZER_GPUS_PER_NODE="8")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 0
+    assert topo["ep"] == 0
+    assert "_tp" not in kb_hardware_slug("MI300X", **topo)
+
+
+def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tmp_path):
+    """The KB key must name the control plane the run actually routes to.
+
+    A hardcoded backend default let a rayjob hand-off be keyed (and routed) as
+    infera whenever the platform omitted INFERENCE_OPTIMIZER_MN_BACKEND.
+    """
+    from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_BACKEND", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://frontend:8000")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.9")
+    for var in ("SSH_KEY", "PREFILL_IPS", "DECODE_IPS", "WORKER_IPS"):
+        monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{var}", raising=False)
+
+    assert ext.build_external_state_from_env()["backend"] == "rayjob"
+    assert mne.resolve_kb_topology()["backend"] == "rayjob"
+
+
 def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
     # The pod-side copy must mirror server_args_safety: exempt the flag by name,
     # but still constrain its value. Divergence silently blocks the sandbox-side
@@ -1102,9 +1191,7 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
 
 
-def test_subcommand_state_refuses_multi_node_without_handoff(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale state file must not stand in for a cluster hand-off.
 
     The guard sits on the subcommand entry, not on the raw state read: callers

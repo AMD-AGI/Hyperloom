@@ -88,7 +88,7 @@ def is_multi_node() -> bool:
     return env_n >= 2
 
 
-def resolve_kb_topology() -> dict[str, int]:
+def resolve_kb_topology() -> dict[str, Any]:
     """Resolve ``(nodes, gpus_per_node)`` for the KB hardware topology suffix.
 
     Mirrors :func:`is_multi_node`'s source priority so the recipe KB key stays
@@ -104,6 +104,8 @@ def resolve_kb_topology() -> dict[str, int]:
         "pd_decode_nodes", "tp", "ep", "backend"}`` mapping ready to splat into
         :func:`kb_hardware_slug`. Single-node returns ``nodes=1`` so the KB key
         is left unchanged (the remaining fields are then ignored downstream).
+        ``tp`` / ``ep`` are ``0`` when neither env nor state resolved them,
+        which :func:`kb_hardware_slug` renders as an omitted suffix.
     """
     state = _read_state()
     try:
@@ -172,8 +174,11 @@ def resolve_kb_topology() -> dict[str, int]:
                 return v
         return default
 
-    tp = _int_pref_env("TP", "tp", "last_restart_tp", default=1)
-    ep = _int_pref_env("EP", "ep", "last_restart_ep", default=1)
+    # Default 0, not 1: kb_hardware_slug reads tp/ep <= 0 as "unspecified" and
+    # omits the suffix. Substituting 1 would instead assert a formation nobody
+    # measured, keying the run as TP1 whenever TP could not be resolved.
+    tp = _int_pref_env("TP", "tp", "last_restart_tp", default=0)
+    ep = _int_pref_env("EP", "ep", "last_restart_ep", default=0)
 
     # Multi-node backend (rayjob / infera): the CLI exports the resolved value;
     # state is the resume fallback; default to the CLI's own multi-node default.
@@ -187,8 +192,8 @@ def resolve_kb_topology() -> dict[str, int]:
         "pd_mode": pd_mode or "aggregated",
         "pd_prefill_nodes": pn,
         "pd_decode_nodes": dn,
-        "tp": max(1, tp),
-        "ep": max(1, ep),
+        "tp": tp,
+        "ep": ep,
         "backend": backend,
     }
 
