@@ -339,7 +339,7 @@ If the CLI is not on PATH, stop and fix installation before analysis.
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
 
-`$TRACELENS_ROOT/TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md`
+`$TRACELENS_ROOT/TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md`
 
 Step 6 and Step 7 categories must run in independent Task subagents. Each
 subagent must write findings under `system_findings/` or `category_findings/`.
