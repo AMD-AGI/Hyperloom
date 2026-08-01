@@ -97,6 +97,250 @@ def _stub_submit_environment(monkeypatch) -> None:
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
+def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    sibling = repo / "kernels" / "device.py"
+    sibling.parent.mkdir()
+    sibling.write_text("DEVICE\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add device source")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    prepared = forge_submit._prepare_worktree(
+        str(kernel),
+        str(repo),
+        output_dir,
+        "forge/test/source-remap",
+    )
+    assert prepared is not None
+    workspace, worktree_kernel, _base = prepared
+
+    sources = forge_submit._remap_implementation_sources(
+        candidate={
+            "kernel_sources": [
+                str(sibling),
+                str(kernel),
+                str(sibling),
+            ]
+        },
+        source_file=str(kernel),
+        workspace=workspace,
+        worktree_kernel=worktree_kernel,
+        kernel_repo=str(repo),
+    )
+
+    assert sources == [
+        str(Path(worktree_kernel).resolve()),
+        str((Path(workspace) / "kernels" / "device.py").resolve()),
+    ]
+    assert all(Path(path).is_file() for path in sources)
+    assert all(Path(path).is_relative_to(Path(workspace).resolve()) for path in sources)
+
+
+def test_unmappable_declared_source_fails_remapping(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    prepared = forge_submit._prepare_worktree(
+        str(kernel),
+        str(repo),
+        output_dir,
+        "forge/test/unmappable-source",
+    )
+    assert prepared is not None
+    workspace, worktree_kernel, _base = prepared
+
+    with pytest.raises(
+        forge_submit._WorktreePreparationError,
+        match="declared implementation source could not be mapped",
+    ):
+        forge_submit._remap_implementation_sources(
+            candidate={"kernel_sources": [str(tmp_path / "outside.py")]},
+            source_file=str(kernel),
+            workspace=workspace,
+            worktree_kernel=worktree_kernel,
+            kernel_repo=str(repo),
+        )
+
+
+def test_submit_fails_before_loop_when_declared_source_is_unmappable(
+    tmp_path,
+    monkeypatch,
+):
+    repo, kernel = _make_repo(tmp_path)
+    outside = tmp_path / "external.py"
+    outside.write_text("def external():\n    pass\n")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    _stub_submit_environment(monkeypatch)
+
+    def must_not_run(**_kwargs):
+        raise AssertionError("forge loop must not run with an incomplete source set")
+
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", must_not_run)
+    result = forge_submit.submit(
+        source_file=str(kernel),
+        prompt_file=prompt,
+        output_dir=tmp_path / "attempt-submit",
+        source_type="triton",
+        candidate={
+            "operation": "direct_kernel",
+            "kernel_sources": [str(kernel), str(outside)],
+            "platform": "mi355x",
+        },
+        timeout_s=10,
+        kernel_repo=str(repo),
+    )
+
+    assert result["returncode"] == 1
+    assert "declared implementation source could not be mapped" in (
+        result["stderr_tail"]
+    )
+
+
+def test_warm_start_best_is_exported_without_a_later_keep(tmp_path, monkeypatch):
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "warm-only"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+    captured = {}
+
+    def fake_loop(**kwargs):
+        workspace = Path(kwargs["workspace"])
+        kernel = Path(kwargs["worktree_kernel"])
+        kernel.write_text("WARM_START_BEST\n")
+        _git(workspace, "add", "-u")
+        _git(workspace, "commit", "-m", "validated warm start")
+        warm_commit = _git(workspace, "rev-parse", "HEAD")
+        captured["warm_commit"] = warm_commit
+        structured = {
+            "baseline_ms": 0.8,
+            "pristine_baseline_ms": 1.0,
+            "search_start_ms": 0.8,
+            "best_ms": 0.8,
+            "improved": True,
+            "improved_during_search": False,
+            "best_commit": warm_commit,
+            "kb_experience": {
+                "read": {
+                    "candidate": True,
+                    "applied": True,
+                    "validation_passed": True,
+                    "pristine_ms": 1.0,
+                    "keep_baseline_ms": 0.8,
+                    "best_commit": warm_commit,
+                }
+            },
+        }
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=0.8,
+            best_ms=0.8,
+            improved=True,
+            output="warm start applied; no later KEEP",
+            error=RuntimeError("forge-loop exited after warm-start validation"),
+            timed_out=False,
+            checkpoint=None,
+            pristine_baseline_ms=1.0,
+            search_start_ms=0.8,
+            improved_during_search=False,
+            structured_result=structured,
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    result = forge_submit.submit(
+        source_file=str(source),
+        prompt_file=prompt,
+        output_dir=output_dir,
+        test_command="python -c 'print(\"allclose: True\")'",
+        source_type="triton",
+        candidate={
+            "name": "direct_kernel",
+            "operation": "direct_kernel",
+            "device_kernel_names": ["direct_kernel"],
+            "kernel_sources": [str(source)],
+            "kernel_kind": "triton",
+            "platform": "mi355x",
+        },
+        timeout_s=10,
+        kernel_repo=str(repo),
+    )
+
+    assert result["returncode"] == 0
+    assert result["salvaged"] is True
+    assert result["best_commit"] == captured["warm_commit"]
+    assert result["kb_experience"]["read"]["applied"] is True
+    assert result["pristine_baseline_ms"] == 1.0
+    assert result["search_start_ms"] == 0.8
+    assert result["best_ms"] == 0.8
+    assert result["improved"] is True
+    assert result["improved_during_search"] is False
+    assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == (
+        "WARM_START_BEST\n"
+    )
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[micro_speedup] 1.2500x" in report
+    assert "improved_during_search=false" in report
+
+
+def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
+    tmp_path,
+    monkeypatch,
+):
+    repo, source = _make_repo(tmp_path)
+    output_dir = tmp_path / "results" / "failed-dirty"
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Optimize\n")
+
+    def fake_loop(**kwargs):
+        Path(kwargs["worktree_kernel"]).write_text("UNVALIDATED_DIRTY_EDIT\n")
+        structured = {
+            "baseline_ms": 2.0,
+            "pristine_baseline_ms": 2.0,
+            "search_start_ms": 2.0,
+            "best_ms": 1.0,
+            "improved": True,
+            "kb_experience": {"read": {"applied": False}},
+        }
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=2.0,
+            best_ms=1.0,
+            improved=True,
+            output="result sidecar was written before exit",
+            error=RuntimeError("forge-loop exited rc=7"),
+            timed_out=False,
+            checkpoint=None,
+            pristine_baseline_ms=2.0,
+            search_start_ms=2.0,
+            improved_during_search=True,
+            structured_result=structured,
+        )
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_loop)
+
+    result = forge_submit.submit(
+        source_file=str(source),
+        prompt_file=prompt,
+        output_dir=output_dir,
+        test_command="python -c 'print(\"allclose: True\")'",
+        source_type="triton",
+        candidate={
+            "operation": "direct_kernel",
+            "kernel_sources": [str(source)],
+            "platform": "mi355x",
+        },
+        timeout_s=10,
+        kernel_repo=str(repo),
+    )
+
+    assert result["returncode"] == 1
+    assert result["forge_result"]["best_ms"] == 1.0
+    assert not (output_dir / "optimization_report.md").exists()
+    assert not (output_dir / "optimized_versions").exists()
+
+
 def test_generated_drivers_stage_in_the_workspace_without_clobbering(tmp_path):
     """Both driver generators write a hidden, unique driver into the workspace.
 
@@ -316,6 +560,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         timeout_s=120,
         deadline_unix=deadline,
         experience_id="attempt-1",
+        operator_name="vllm::logical_op",
+        source_files=[str(kernel)],
+        target_functions=["kernel_impl", "device_kernel"],
+        kernel_kind="triton",
     )
 
     # The loop result is a 7-field outcome; unpacking it as a bare tuple is what
@@ -328,6 +576,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "error",
         "timed_out",
         "checkpoint",
+        "pristine_baseline_ms",
+        "search_start_ms",
+        "improved_during_search",
+        "structured_result",
     )
     assert (outcome.baseline_ms, outcome.best_ms, outcome.improved) == (2.0, 1.0, True)
     assert outcome.error is None
@@ -359,6 +611,10 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--deadline-unix": str(deadline),
         "--result-json": str(experiments.parent / "forge_cli_result.json"),
         "--program-md-file": str(program),
+        "--operator-name": "vllm::logical_op",
+        "--source-files": str(kernel),
+        "--target-functions": "kernel_impl,device_kernel",
+        "--kernel-kind": "triton",
     }
     for flag, value in expected_flags.items():
         assert flag in command, flag
@@ -374,6 +630,175 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # The subprocess wait is bounded by the absolute deadline, not by wall time
     # already spent before the loop started.
     assert 100.0 < captured["communicate_timeout"] <= 120.0
+
+
+def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    driver = workspace / "driver.py"
+    driver.write_text("pass\n")
+    direct = workspace / "direct.py"
+    direct.write_text("@triton.jit\ndef direct_kernel(x):\n    return x\n")
+    wrapper = workspace / "vllm" / "wrapper.py"
+    wrapper.parent.mkdir()
+    wrapper.write_text("def attention(x):\n    return x\n")
+    aiter_impl = workspace / "aiter" / "attention.py"
+    aiter_impl.parent.mkdir()
+    aiter_impl.write_text(
+        "@triton.jit\ndef attention_kernel(x):\n    return x\n"
+    )
+    ck_source = workspace / "aiter" / "gemm.cu"
+    ck_source.write_text('__global__ void gemm_kernel() {}\n')
+    fly_source = workspace / "flydsl" / "moe.py"
+    fly_source.parent.mkdir()
+    fly_source.write_text("@flydsl.jit\ndef moe_kernel(x):\n    return x\n")
+    commands = []
+
+    class FakeProcess:
+        pid = 43210
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            payload = {"baseline_ms": 2.0, "best_ms": 2.0, "improved": False}
+            return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__", ""
+
+    def fake_popen(command, **_kwargs):
+        commands.append(command)
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    cases = [
+        {
+            "candidate": {
+                "operation": "custom::direct",
+                "source_file": str(direct),
+            },
+            "source_type": "triton",
+            "kernel": direct,
+            "sources": [direct],
+            "expected_framework": "",
+            "expected_kind": "triton",
+            "expected_fellow": "triton-fellow",
+            "expected_symbols": ["direct_kernel"],
+        },
+        {
+            "candidate": {
+                "operation": "vllm::unified_attention",
+                "source_file": str(wrapper),
+                "kernel_sources": [str(aiter_impl)],
+                "framework": "vllm",
+            },
+            "source_type": "python",
+            "kernel": wrapper,
+            "sources": [wrapper, aiter_impl],
+            "expected_framework": "aiter",
+            "expected_kind": "",
+            "expected_fellow": "triton-fellow",
+            "expected_symbols": ["attention_kernel"],
+        },
+        {
+            "candidate": {
+                "operation": "aiter::gemm",
+                "source_file": str(ck_source),
+                "kernel_kind": "aiter_ck",
+            },
+            "source_type": "hip_cpp",
+            "kernel": ck_source,
+            "sources": [ck_source],
+            "expected_framework": "aiter",
+            "expected_kind": "aiter_ck",
+            "expected_fellow": "ck-fellow",
+            "expected_symbols": ["gemm_kernel"],
+        },
+        {
+            "candidate": {
+                "operation": "pseudo_op::moe_flydsl_stage1",
+                "source_file": str(fly_source),
+            },
+            "source_type": "flydsl",
+            "kernel": fly_source,
+            "sources": [fly_source],
+            "expected_framework": "",
+            "expected_kind": "flydsl",
+            "expected_fellow": "flydsl-fellow",
+            "expected_symbols": ["moe_kernel"],
+        },
+    ]
+
+    for index, case in enumerate(cases):
+        candidate = case["candidate"]
+        kind = forge_submit._resolve_kernel_kind(
+            case["source_type"],
+            candidate.get("kernel_kind", ""),
+        )
+        source_values = [str(path.resolve()) for path in case["sources"]]
+        symbols = forge_submit._stable_implementation_symbols(
+            candidate,
+            source_files=source_values,
+        )
+        framework = forge_submit._resolve_framework(
+            candidate,
+            str(case["kernel"]),
+        )
+        fellow = forge_submit._resolve_fellow(case["source_type"], kind)
+        assert fellow is not None
+        experiments = tmp_path / f"attempt-{index}" / "forge_experiments"
+        experiments.mkdir(parents=True)
+        forge_submit._run_loop_via_cli(
+            worktree_kernel=str(case["kernel"]),
+            driver=str(driver),
+            workspace=str(workspace),
+            shapes={},
+            snr_threshold=30.0,
+            max_iters=1,
+            max_hours=1.0,
+            branch=f"forge/test/{index}",
+            gpu_target="gfx950",
+            fellow=fellow,
+            program_md_file="",
+            invocation_spec_file="",
+            experiments_dir=experiments,
+            forge_log=tmp_path / f"forge-{index}.log",
+            timeout_s=60,
+            deadline_unix=time.time() + 60,
+            operator_name=forge_submit._logical_operator(candidate),
+            framework=framework,
+            target_functions=symbols,
+            source_files=source_values,
+            kernel_kind=kind,
+        )
+
+        command = commands[-1]
+        assert command[command.index("--operator-name") + 1] == (
+            forge_submit._logical_operator(candidate)
+        )
+        assert command[command.index("--source-files") + 1] == ",".join(
+            source_values
+        )
+        assert command[command.index("--fellow") + 1] == case["expected_fellow"]
+        assert kind == case["expected_kind"]
+        assert framework == case["expected_framework"]
+        assert symbols == case["expected_symbols"]
+        if kind:
+            assert command[command.index("--kernel-kind") + 1] == kind
+        else:
+            assert "--kernel-kind" not in command
+        if framework:
+            assert command[command.index("--framework") + 1] == framework
+        else:
+            assert "--framework" not in command
+        if symbols:
+            assert command[command.index("--target-functions") + 1] == ",".join(
+                symbols
+            )
+        else:
+            assert "--target-functions" not in command
 
 
 def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
@@ -906,13 +1331,7 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
     assert "timed out without recoverable checkpoint" in result["stderr_tail"]
     assert "best_commit" not in result
     assert not (output_dir / "optimized_versions").exists()
-
-    report = (output_dir / "optimization_report.md").read_text()
-    assert "[micro_speedup]" not in report
-    assert "[correctness] fail" in report
-    # The discarded measurements must not survive even as an informational line.
-    assert "observed timing" not in report
-    assert "3.0000" not in report
+    assert not (output_dir / "optimization_report.md").exists()
 
     # forge-loop rejects a soft budget below its own one-hour minimum, so submit
     # floors --max-hours there while still hard-killing at timeout_s.

@@ -2404,6 +2404,33 @@ def run_attempt(
         "timed_out": bool(result.get("timed_out")) if isinstance(result, dict) else False,
         "salvaged": bool(result.get("salvaged")) if isinstance(result, dict) else False,
         "best_commit": str(result.get("best_commit") or "") if isinstance(result, dict) else "",
+        "forge_result": (
+            dict(result.get("forge_result") or {})
+            if isinstance(result, dict) and isinstance(result.get("forge_result"), dict)
+            else {}
+        ),
+        "kb_experience": (
+            dict(result.get("kb_experience") or {})
+            if isinstance(result, dict) and isinstance(result.get("kb_experience"), dict)
+            else {}
+        ),
+        "pristine_baseline_ms": (
+            result.get("pristine_baseline_ms")
+            if isinstance(result, dict)
+            else None
+        ),
+        "search_start_ms": (
+            result.get("search_start_ms")
+            if isinstance(result, dict)
+            else None
+        ),
+        "best_ms": result.get("best_ms") if isinstance(result, dict) else None,
+        "improved": bool(result.get("improved")) if isinstance(result, dict) else False,
+        "improved_during_search": (
+            bool(result.get("improved_during_search"))
+            if isinstance(result, dict)
+            else False
+        ),
         "elapsed_s": elapsed,
         "prompt_path": str(prompt_file),
         "optimized_path": str(optimized_path) if optimized_path.exists() else "",
@@ -3085,16 +3112,33 @@ def build_verification(
     usable = [a for a in attempts if a.get("status") in {"completed", "partial"}]
     best = None
     best_speedup = 0.0
+    best_speedup_source = "report_scan"
     measured = False
     # Prefer the highest extracted speedup; else fall back to the first usable attempt.
     for a in usable:
         bp = a.get("backend_paths") or {}
         report = bp.get("partial_report") or bp.get("report") or ""
-        sp = _extract_speedup_from_report(report)
+        sp = None
+        try:
+            pristine_ms = float(a.get("pristine_baseline_ms"))
+            result_best_ms = float(a.get("best_ms"))
+            if (
+                a.get("improved") is True
+                and pristine_ms > 0
+                and result_best_ms > 0
+                and result_best_ms < pristine_ms
+            ):
+                sp = pristine_ms / result_best_ms
+        except (TypeError, ValueError):
+            pass
+        speedup_source = "forge_pristine_result" if sp is not None else "report_scan"
+        if sp is None:
+            sp = _extract_speedup_from_report(report)
         if sp is not None:
             measured = True
             if sp > best_speedup:
                 best_speedup = sp
+                best_speedup_source = speedup_source
                 best = a
     if best is None and usable:
         best = usable[0]
@@ -3191,7 +3235,7 @@ def build_verification(
         speedup_source = "cli_override"
     elif measured:
         micro_speedup = best_speedup
-        speedup_source = "report_scan"
+        speedup_source = best_speedup_source
     elif getattr(args, "dry_run", False):
         # Dry-run placeholder so CI can exercise KEEP/REVIEW paths.
         micro_speedup = 1.05 if best else 0.0

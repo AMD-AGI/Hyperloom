@@ -319,6 +319,31 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
     assert verification["micro_speedup"] == 1.28
 
 
+def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
+    attempt = _attempt(report)
+    attempt.update(
+        {
+            "pristine_baseline_ms": 1.0,
+            "search_start_ms": 0.8,
+            "best_ms": 0.8,
+            "improved": True,
+            "improved_during_search": False,
+        }
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 1.25
+    assert verification["micro_speedup_source"] == "forge_pristine_result"
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(

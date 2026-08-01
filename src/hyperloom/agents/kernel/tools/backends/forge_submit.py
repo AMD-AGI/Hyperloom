@@ -9,6 +9,7 @@ Emits optimized source plus an optimization_report.md artifact for integration.
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import json
 import logging
@@ -33,6 +34,7 @@ if _TOOLS_DIR_INSERTED:
     sys.path.insert(0, _TOOLS_DIR)
 from _task_group_contract import (  # noqa: E402
     forge_shapes_from_candidate,
+    logical_operator_name,
     task_group_shape_cases,
 )
 
@@ -81,6 +83,10 @@ class ForgeLoopOutcome(NamedTuple):
     error: Exception | None
     timed_out: bool
     checkpoint: dict | None
+    pristine_baseline_ms: float | None = None
+    search_start_ms: float | None = None
+    improved_during_search: bool = False
+    structured_result: dict | None = None
 
 
 class _WorktreePreparationError(RuntimeError):
@@ -148,10 +154,13 @@ def _resolve_gpu_target(candidate: dict) -> str:
     """
     env_target = (os.environ.get("GPU_TARGET") or os.environ.get("GPU_TYPE") or "").strip()
     if env_target:
-        return _PLATFORM_TO_GFX.get(env_target.lower(), env_target)
+        normalized = _normalize_gpu_target(env_target)
+        if normalized:
+            return normalized
     platform = str(candidate.get("platform") or candidate.get("arch") or "").strip().lower()
-    if platform in _PLATFORM_TO_GFX:
-        return _PLATFORM_TO_GFX[platform]
+    normalized = _normalize_gpu_target(platform)
+    if normalized:
+        return normalized
     # Probe via rocminfo as a last resort.
     try:
         proc = _run(["rocminfo"], timeout=30)
@@ -166,6 +175,18 @@ def _resolve_gpu_target(candidate: dict) -> str:
         "Cannot resolve gfx target: set GPU_TARGET/GPU_TYPE or a candidate "
         "'platform', and ensure rocminfo is available."
     )
+
+
+def _normalize_gpu_target(value: str) -> str:
+    """Return a canonical lowercase gfx architecture or an empty string."""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    mapped = _PLATFORM_TO_GFX.get(normalized)
+    if mapped:
+        return mapped
+    match = re.search(r"\bgfx\d+[a-z]*\b", normalized)
+    return match.group(0) if match else ""
 
 
 # Framework aliases -> canonical KB framework identity. MUST stay in sync with
@@ -198,9 +219,7 @@ def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
     and consumer (hyperloom) can have different workspace layouts — pinning the
     framework keeps both on the SAME kernel page. Resolution order:
 
-      1. an explicit, RECOGNIZED framework on the candidate (``framework``/
-         ``backend`` — a language like ``triton`` is ignored; ``aiter_meta`` maps
-         to ``aiter``);
+      1. an explicit, recognized ``source_framework`` on the candidate;
       2. the owning package of a KERNEL SOURCE definition file
          (``kernel_sources``) — this is where the real compute kernel lives,
          which can be aiter even when the traced entry/anchor is a vLLM/SGLang
@@ -212,36 +231,107 @@ def _resolve_framework(candidate: dict, kernel_path: str = "") -> str:
          package, not a deep subdir name;
       4. "" (defer to forge-loop).
     """
-    raw = str(
-        (candidate or {}).get("framework")
-        or (candidate or {}).get("backend")
-        or ""
-    ).strip().lower()
+    raw = str((candidate or {}).get("source_framework") or "").strip().lower()
     canon = _FRAMEWORK_ALIASES.get(raw)
     if canon:
         return canon
-    for src in (candidate or {}).get("kernel_sources") or []:
+    kernel_sources = (candidate or {}).get("kernel_sources") or []
+    if isinstance(kernel_sources, str):
+        kernel_sources = [kernel_sources]
+    for src in kernel_sources:
         framework = _framework_from_path(str(src))
+        if framework:
+            return framework
+    candidate_source = str((candidate or {}).get("source_file") or "").strip()
+    if candidate_source:
+        framework = _framework_from_path(candidate_source)
         if framework:
             return framework
     return _framework_from_path(kernel_path)
 
 
-def _op_name_for_target_functions(candidate: dict) -> str:
-    """The specific operation name to feed forge-loop as ``--target-functions``.
+def _logical_operator(candidate: dict | None) -> str:
+    """Derive the stable logical operator without conflating implementation symbols."""
+    return logical_operator_name(candidate)
 
-    This becomes the KB slug's ``op`` component when the ``--kernel`` anchor is a
-    python/dispatch wrapper with no in-file kernel definition (e.g.
-    ``attention.py``), where op would otherwise collapse to the file stem
-    (``attention``) — too generic, colliding distinct operators. Uses the traced
-    operation identity (``operation``/``name``, the same value as the invocation
-    spec's ``kernel.name``), stripped of any ``backend::`` namespace prefix.
-    Returns "" when unavailable (forge-loop then derives from source / stem).
-    """
-    raw = str((candidate or {}).get("operation") or (candidate or {}).get("name") or "").strip()
-    if "::" in raw:
-        raw = raw.rsplit("::", 1)[-1].strip()
-    return raw
+
+def _stable_implementation_symbols(
+    candidate: dict | None,
+    invocation_spec_file: str = "",
+    source_files: list[str] | None = None,
+) -> list[str]:
+    """Collect curated and source-level symbols for ``--target-functions``."""
+    candidate = candidate or {}
+    values: list[object] = []
+    for key in ("source_symbol", "target_functions"):
+        value = candidate.get(key)
+        if value:
+            values.extend(value if isinstance(value, (list, tuple)) else [value])
+    if invocation_spec_file:
+        try:
+            spec = json.loads(Path(invocation_spec_file).read_text(encoding="utf-8"))
+            implementation = spec.get("implementation") if isinstance(spec, dict) else {}
+            if isinstance(implementation, dict):
+                values.extend(implementation.get("symbols") or [])
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    for source_file in source_files or []:
+        try:
+            source_text = Path(source_file).read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            continue
+        if str(source_file).endswith((".py", ".pyi")):
+            try:
+                tree = ast.parse(source_text)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                decorators = []
+                for decorator in node.decorator_list:
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    if isinstance(target, ast.Name):
+                        decorators.append(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        decorators.append(target.attr)
+                if "jit" in decorators:
+                    values.append(node.name)
+            continue
+        values.extend(
+            match.group(1)
+            for match in re.finditer(
+                r"\b(?:__global__|__device__)\b[^;{}]*?\b"
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+                source_text,
+            )
+        )
+    symbols: list[str] = []
+    for value in values:
+        symbol = str(value or "").strip()
+        if (
+            not symbol
+            or symbol.endswith("...")
+            or any(character.isspace() for character in symbol)
+        ):
+            continue
+        if symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def _resolve_kernel_kind(source_type: str, kernel_kind: str) -> str:
+    """Use explicit kind first, then proven source classifications."""
+    explicit = str(kernel_kind or "").strip().lower().replace("-", "_")
+    if explicit:
+        return explicit
+    proven = str(source_type or "").strip().lower()
+    if proven in {"triton", "flydsl", "ck"}:
+        return proven
+    return ""
 
 
 def _fellow_for_source_type(source_type: str) -> str | None:
@@ -260,6 +350,18 @@ def _fellow_for_source_type(source_type: str) -> str | None:
     return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
 
 
+def _resolve_fellow(source_type: str, kernel_kind: str) -> str | None:
+    """Resolve the fellow deterministically from language and curated kernel kind."""
+    kind = str(kernel_kind or "").strip().lower().replace("-", "_")
+    if "flydsl" in kind:
+        return _fellow_for_source_type("flydsl")
+    if kind == "ck" or kind.endswith("_ck") or kind.startswith("ck_"):
+        return _fellow_for_source_type("ck")
+    if "triton" in kind:
+        return _fellow_for_source_type("triton")
+    return _fellow_for_source_type(source_type)
+
+
 def _git_toplevel(path: str) -> str:
     """Return the git repo root containing `path`, or '' if not a git repo."""
     try:
@@ -269,6 +371,15 @@ def _git_toplevel(path: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Return whether a resolved path is contained by a resolved root."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _default_branch(repo: str) -> str:
@@ -338,6 +449,95 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     _run(["git", "-C", str(wt), "config", "user.email", "forge-bot@local"], timeout=30)
 
     return str(wt), str(wt / rel), base_commit
+
+
+def _remap_implementation_sources(
+    *,
+    candidate: dict,
+    source_file: str,
+    workspace: str,
+    worktree_kernel: str,
+    kernel_repo: str,
+) -> list[str]:
+    """Map all editable sources into the prepared workspace and include the anchor."""
+    workspace_path = Path(workspace).resolve()
+    original_anchor = Path(source_file).expanduser().resolve()
+    mapped_anchor = Path(worktree_kernel).expanduser().resolve()
+    try:
+        anchor_relative = mapped_anchor.relative_to(workspace_path)
+    except ValueError as error:
+        raise _WorktreePreparationError(
+            f"prepared kernel escapes Forge workspace: {mapped_anchor}"
+        ) from error
+    if not mapped_anchor.is_file():
+        raise _WorktreePreparationError(
+            f"prepared kernel does not exist: {mapped_anchor}"
+        )
+
+    original_roots: list[Path] = []
+    if kernel_repo:
+        original_roots.append(Path(kernel_repo).expanduser().resolve())
+    if len(anchor_relative.parts) <= len(original_anchor.parts):
+        root = original_anchor
+        for _ in anchor_relative.parts:
+            root = root.parent
+        original_roots.append(root)
+
+    raw_kernel_sources = candidate.get("kernel_sources") or []
+    raw_sources = (
+        [raw_kernel_sources]
+        if isinstance(raw_kernel_sources, str)
+        else list(raw_kernel_sources)
+    )
+    raw_sources.append(source_file)
+    remapped: list[str] = []
+    for raw_source in raw_sources:
+        raw = str(raw_source or "").strip()
+        if not raw:
+            continue
+        original = Path(raw).expanduser()
+        if not original.is_absolute():
+            base = Path(kernel_repo).expanduser() if kernel_repo else original_anchor.parent
+            original = base / original
+        original = original.resolve()
+
+        candidates: list[Path] = []
+        try:
+            original.relative_to(workspace_path)
+            candidates.append(original)
+        except ValueError:
+            pass
+        for root in original_roots:
+            try:
+                candidates.append(workspace_path / original.relative_to(root))
+            except ValueError:
+                continue
+        if original == original_anchor:
+            candidates.insert(0, mapped_anchor)
+
+        mapped = next(
+            (
+                path.resolve()
+                for path in candidates
+                if path.is_file()
+                and _path_is_within(path.resolve(), workspace_path)
+            ),
+            None,
+        )
+        if mapped is None:
+            raise _WorktreePreparationError(
+                "declared implementation source could not be mapped into the "
+                f"prepared workspace: source={original} workspace={workspace_path}"
+            )
+        mapped_value = str(mapped)
+        if mapped_value not in remapped:
+            remapped.append(mapped_value)
+
+    anchor_value = str(mapped_anchor)
+    if anchor_value in remapped:
+        remapped.remove(anchor_value)
+    remapped.insert(0, anchor_value)
+    return remapped
 
 
 def _pkg_toplevel(source_file: str) -> str:
@@ -1550,7 +1750,15 @@ def _invocation_spec_covers_cases(
     )
 
 
-def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None, improved: bool) -> Path:
+def _write_report(
+    output_dir: Path,
+    baseline_ms: float | None,
+    best_ms: float | None,
+    improved: bool,
+    *,
+    search_start_ms: float | None = None,
+    improved_during_search: bool = False,
+) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
     Only claims a KEEP-worthy result when the loop actually kept a validated
@@ -1562,7 +1770,14 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
     if improved and baseline_ms and best_ms and best_ms > 0:
         speedup = baseline_ms / best_ms
         lines.append(f"[micro_speedup] {speedup:.4f}x")
-        lines.append(f"baseline_ms={baseline_ms:.4f} best_ms={best_ms:.4f}")
+        lines.append(
+            f"pristine_baseline_ms={baseline_ms:.4f} best_ms={best_ms:.4f}"
+        )
+        if search_start_ms:
+            lines.append(
+                f"search_start_ms={search_start_ms:.4f} "
+                f"improved_during_search={str(improved_during_search).lower()}"
+            )
         lines.append("[correctness] pass")
     else:
         lines.append("micro_speedup: N/A (no validated improvement kept)")
@@ -2268,6 +2483,95 @@ def _validated_forge_checkpoint(
     return normalized
 
 
+def _validated_warm_start_result(
+    result: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+) -> dict | None:
+    """Validate a KB-applied best when the search produced no later KEEP."""
+    if not isinstance(result, dict):
+        return None
+    kb_experience = result.get("kb_experience")
+    read = kb_experience.get("read") if isinstance(kb_experience, dict) else None
+    if not isinstance(read, dict) or read.get("applied") is not True:
+        return None
+    warm_best = result.get("warm_start")
+    if not isinstance(warm_best, dict):
+        warm_best = result.get("warm_start_best")
+    if not isinstance(warm_best, dict):
+        warm_best = {}
+    if read.get("validated") is False or read.get("validation_passed") is False:
+        return None
+    if (
+        warm_best.get("validated") is False
+        or warm_best.get("validation_passed") is False
+    ):
+        return None
+
+    best_commit = str(
+        result.get("warm_start_best_commit")
+        or warm_best.get("best_commit")
+        or warm_best.get("commit_hash")
+        or read.get("best_commit")
+        or read.get("applied_commit")
+        or read.get("commit_hash")
+        or (
+            result.get("best_commit")
+            if result.get("best_iteration") in (None, 0, "0")
+            else ""
+        )
+        or ""
+    ).strip()
+    if not best_commit or best_commit == base_commit:
+        return None
+    exists = _run(
+        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+        timeout=30,
+    )
+    if exists.returncode != 0:
+        return None
+    ancestor = _run(
+        [
+            "git",
+            "-C",
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            best_commit,
+        ],
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        return None
+    try:
+        pristine_ms = float(
+            result.get("pristine_baseline_ms")
+            or warm_best.get("pristine_baseline_ms")
+            or warm_best.get("pristine_ms")
+            or read.get("pristine_ms")
+        )
+        best_ms = float(
+            result.get("best_ms")
+            or warm_best.get("best_ms")
+            or warm_best.get("validated_best_ms")
+            or read.get("keep_baseline_ms")
+        )
+    except (TypeError, ValueError):
+        return None
+    if pristine_ms <= 0 or best_ms <= 0 or best_ms >= pristine_ms:
+        return None
+    return {
+        "best_commit": best_commit,
+        "baseline_ms": pristine_ms,
+        "best_ms": best_ms,
+        "improved": True,
+        "source": "kb_warm_start",
+        "kb_experience": kb_experience,
+    }
+
+
 def _run_loop_via_cli(
     *,
     worktree_kernel: str,
@@ -2290,7 +2594,9 @@ def _run_loop_via_cli(
     operator_name: str = "",
     experience_id: str = "",
     framework: str = "",
-    target_functions: str = "",
+    target_functions: list[str] | None = None,
+    source_files: list[str] | None = None,
+    kernel_kind: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2382,14 +2688,12 @@ def _run_loop_via_cli(
         cmd += ["--e2e-pct", str(e2e_pct)]
     if operator_name:
         cmd += ["--operator-name", operator_name]
-    # Feed the operator identity as a target function so the KB slug's ``op``
-    # component is the specific operation (e.g. ``unified_attention_with_output``)
-    # rather than the anchor file's stem (e.g. ``attention``) when the anchor is a
-    # python/dispatch wrapper with no in-file kernel definition. forge-loop uses
-    # target-functions only as the op fallback (source-derived names still win),
-    # so this is safe for self-contained kernels too.
     if target_functions:
-        cmd += ["--target-functions", target_functions]
+        cmd += ["--target-functions", ",".join(target_functions)]
+    if source_files:
+        cmd += ["--source-files", ",".join(source_files)]
+    if kernel_kind:
+        cmd += ["--kernel-kind", kernel_kind]
     # Pin the KB framework identity so producer/consumer resolve the same kernel
     # page across differing workspace layouts. Omitted when unknown, in which
     # case forge-loop infers it from the kernel path (soft, never fatal).
@@ -2439,7 +2743,9 @@ def _run_loop_via_cli(
 
     # Parse the result: prefer the JSON sidecar, else the sentinel line.
     baseline_ms = best_ms = None
+    pristine_baseline_ms = search_start_ms = None
     improved = False
+    improved_during_search = False
     parsed = None
     try:
         if result_json.exists():
@@ -2456,6 +2762,17 @@ def _run_loop_via_cli(
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
         improved = bool(parsed.get("improved"))
+        pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
+        search_start_ms = parsed.get("search_start_ms", baseline_ms)
+        improved_during_search = bool(
+            parsed.get(
+                "improved_during_search",
+                parsed.get(
+                    "incremental_improved",
+                    search_start_ms and best_ms and best_ms < search_start_ms,
+                ),
+            )
+        )
         if parsed.get("deadline_expired"):
             timed_out = True
             if loop_exc is None:
@@ -2471,6 +2788,10 @@ def _run_loop_via_cli(
         error=loop_exc,
         timed_out=timed_out,
         checkpoint=checkpoint,
+        pristine_baseline_ms=pristine_baseline_ms,
+        search_start_ms=search_start_ms,
+        improved_during_search=improved_during_search,
+        structured_result=parsed if isinstance(parsed, dict) else None,
     )
 
 
@@ -2652,7 +2973,10 @@ def submit(
     # Curated kernel_kind refines the fellow choice: an aiter CK .cu is best
     # tuned by the ck-fellow, not generic HIP; aiter_asm is a prebuilt assembly
     # core the agent cannot rewrite -> skip cleanly.
-    kernel_kind = str((candidate or {}).get("kernel_kind") or "").strip().lower()
+    kernel_kind = _resolve_kernel_kind(
+        source_type,
+        str((candidate or {}).get("kernel_kind") or ""),
+    )
     if kernel_kind == "aiter_asm":
         return _normalized(
             2,
@@ -2662,11 +2986,7 @@ def submit(
             time.time() - started,
             skipped=True,
         )
-    fellow = _fellow_for_source_type(source_type)
-    if kernel_kind == "aiter_ck" and fellow in ("hip-fellow", None):
-        ck_fellow = _fellow_for_source_type("ck")
-        if ck_fellow is not None:
-            fellow = ck_fellow
+    fellow = _resolve_fellow(source_type, kernel_kind)
     log.info(
         "forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
         source_file,
@@ -2754,6 +3074,20 @@ def submit(
         shapes = _shapes_from_candidate(candidate)
         grouped_cases = task_group_shape_cases(candidate)
         requires_multi_case_driver = len(grouped_cases) > 1
+        implementation_sources = _remap_implementation_sources(
+            candidate=candidate,
+            source_file=source_file,
+            workspace=workspace,
+            worktree_kernel=worktree_kernel,
+            kernel_repo=repo,
+        )
+        logical_operator = _logical_operator(candidate)
+        implementation_symbols = _stable_implementation_symbols(
+            candidate,
+            invocation_spec_file,
+            implementation_sources,
+        )
+        source_framework = _resolve_framework(candidate, source_file)
 
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
@@ -2927,10 +3261,12 @@ def submit(
                 started + timeout_s,
             ),
             e2e_pct=e2e_pct,
-            operator_name=str(candidate.get("name") or candidate.get("operation") or ""),
+            operator_name=logical_operator,
             experience_id=output_dir.name,
-            framework=_resolve_framework(candidate, worktree_kernel),
-            target_functions=_op_name_for_target_functions(candidate),
+            framework=source_framework,
+            target_functions=implementation_symbols,
+            source_files=implementation_sources,
+            kernel_kind=kernel_kind,
         )
         # keep/revert is decided from forge's own published best, in descending
         # order of trust:
@@ -2953,15 +3289,60 @@ def submit(
             base_commit=base_commit,
             shapes=shapes,
         )
-        recovery = published or checkpoint_recovery
-        baseline_ms = loop_outcome.baseline_ms
+        warm_start_recovery = _validated_warm_start_result(
+            loop_outcome.structured_result,
+            workspace=workspace,
+            base_commit=base_commit,
+        )
+        recovery = published or checkpoint_recovery or warm_start_recovery
+        if loop_outcome.error is not None and recovery is None:
+            failure_detail = (
+                "forge cli loop timed out without recoverable checkpoint"
+                if loop_outcome.timed_out
+                else "forge cli loop failed without validated recovery"
+            )
+            failed = _normalized(
+                1,
+                "",
+                f"{failure_detail}: {loop_outcome.error}",
+                time.time() - started,
+            )
+            failed["timed_out"] = loop_outcome.timed_out
+            failed["salvaged"] = False
+            failed["output_dir"] = str(output_dir)
+            if loop_outcome.structured_result is not None:
+                failed["forge_result"] = loop_outcome.structured_result
+                kb_experience = loop_outcome.structured_result.get("kb_experience")
+                if isinstance(kb_experience, dict):
+                    failed["kb_experience"] = kb_experience
+            return failed
+        baseline_ms = (
+            loop_outcome.pristine_baseline_ms
+            if loop_outcome.pristine_baseline_ms is not None
+            else loop_outcome.baseline_ms
+        )
+        search_start_ms = (
+            loop_outcome.search_start_ms
+            if loop_outcome.search_start_ms is not None
+            else loop_outcome.baseline_ms
+        )
         best_ms = loop_outcome.best_ms
-        improved = loop_outcome.improved
+        improved = bool(
+            baseline_ms
+            and best_ms
+            and float(best_ms) < float(baseline_ms)
+        )
+        improved_during_search = loop_outcome.improved_during_search
         best_commit = ""
         if recovery is not None:
-            baseline_ms = recovery["baseline_ms"]
+            if loop_outcome.pristine_baseline_ms is None:
+                baseline_ms = recovery["baseline_ms"]
             best_ms = recovery["best_ms"]
-            improved = True
+            improved = bool(
+                baseline_ms
+                and best_ms
+                and float(best_ms) < float(baseline_ms)
+            )
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
         if published is not None and checkpoint_recovery is not None:
@@ -2975,56 +3356,36 @@ def submit(
                     published["best_commit"][:12],
                     checkpoint_recovery["best_commit"][:12],
                 )
-        if loop_outcome.timed_out and recovery is None:
-            # A final-result sidecar is not sufficient after forced termination:
-            # only a validated commit -- published or checkpointed -- may produce
-            # a passing report.
-            baseline_ms = None
-            best_ms = None
-            improved = False
-
         changed_files: list[str] = []
-        if not loop_outcome.timed_out or recovery is not None:
-            _, changed_files = _export_best_artifacts(
-                workspace,
-                base_commit,
-                worktree_kernel,
-                source_file,
-                output_dir,
-                best_commit=best_commit,
-            )
+        _, changed_files = _export_best_artifacts(
+            workspace,
+            base_commit,
+            worktree_kernel,
+            source_file,
+            output_dir,
+            best_commit=best_commit,
+        )
         if changed_files:
             try:
                 (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
             except OSError:
                 pass
-        _write_report(output_dir, baseline_ms, best_ms, improved)
-        if loop_outcome.timed_out and recovery is None:
-            failed = _normalized(
-                1,
-                "",
-                f"forge cli loop timed out without recoverable checkpoint: "
-                f"{loop_outcome.error}",
-                time.time() - started,
-            )
-            failed["timed_out"] = True
-            failed["salvaged"] = False
-            failed["output_dir"] = str(output_dir)
-            return failed
-        if loop_outcome.error and recovery is None and baseline_ms is None:
-            # Hard failure with no measurement -> surface as forge failure.
-            return _normalized(
-                1,
-                "",
-                f"forge cli loop failed: {loop_outcome.error}",
-                time.time() - started,
-            )
+        _write_report(
+            output_dir,
+            baseline_ms,
+            best_ms,
+            improved,
+            search_start_ms=search_start_ms,
+            improved_during_search=improved_during_search,
+        )
         gbrain_active = bool(
             os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
         )
         msg = (
-            f"forge done (cli): baseline={baseline_ms} best={best_ms} "
-            f"improved={improved} fellow={fellow} gpu={gpu_target} "
+            f"forge done (cli): pristine_baseline={baseline_ms} "
+            f"search_start={search_start_ms} best={best_ms} "
+            f"improved={improved} improved_during_search={improved_during_search} "
+            f"fellow={fellow} gpu={gpu_target} "
             f"gbrain={'on' if gbrain_active else 'off'} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )
@@ -3054,6 +3415,21 @@ def submit(
         res["output_dir"] = str(output_dir)
         res["timed_out"] = loop_outcome.timed_out
         res["salvaged"] = salvaged
+        res["pristine_baseline_ms"] = baseline_ms
+        res["search_start_ms"] = search_start_ms
+        res["best_ms"] = best_ms
+        res["improved"] = improved
+        res["improved_during_search"] = improved_during_search
+        if loop_outcome.structured_result is not None:
+            res["forge_result"] = loop_outcome.structured_result
+            kb_experience = loop_outcome.structured_result.get("kb_experience")
+            if isinstance(kb_experience, dict):
+                res["kb_experience"] = kb_experience
+        res["logical_operator"] = logical_operator
+        res["source_framework"] = source_framework
+        res["implementation_sources"] = implementation_sources
+        res["kernel_kind"] = kernel_kind
+        res["target_functions"] = implementation_symbols
         if recovery is not None:
             res["best_commit"] = recovery["best_commit"]
             res["checkpoint_path"] = str(
