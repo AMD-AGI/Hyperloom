@@ -70,6 +70,49 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
     assert summary["explore"] == {"keeps": 1, "total_gain_pct": 10.0}
 
 
+def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
+    """A runnable-baseline patch is config provenance, not a Framework gain."""
+    state = {
+        "session_id": "enablement-before-warm",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 2,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "PRELUDE",
+                "baseline_enablement": True,
+                "attribution_eligible": False,
+                "variant_name": "make-model-runnable",
+                "tput": 100.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+            {
+                "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
+                "variant_name": "warm",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:20+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [None, 10.0],
+        "phase_history": [
+            {"to_phase": "PRELUDE", "ts_unix": 0.0},
+        ],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    assert attribution["gain_per_stack_entry"][1]["cum_gain_before"] == 0.0
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 0.0
+    assert attribution["source_breakdown"]["replay_warm_recipe_pct_of_total"] == 10.0
+    assert [entry["source"] for entry in result["entries"]] == ["warm_replay"]
+    assert result["entries"][0]["throughput_before"] == 100.0
+    assert result["entries"][0]["gain_pct"] == 10.0
+
+
 def test_collect_optimizations_splits_kernel_backend():
     state = {
         "session_id": "s2",

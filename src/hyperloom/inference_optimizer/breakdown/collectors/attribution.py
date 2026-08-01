@@ -61,12 +61,10 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # instead of vanishing into the non-emitted ``other`` family. The label may
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
-    # FRAMEWORK: own headline row so per-source totals reconcile against
-    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    # Framework-PR integration is emitted as ``integrate_patch`` (distinct from
-    # the legacy kernel ``integrate`` above), so credit it to ``framework``
-    # rather than letting it fall through to ``other``/``unattributed``.
-    (lambda s: s == "framework" or s.startswith("integrate_patch"), "framework"),
+    # FRAMEWORK: exact legacy action label. ``integrate_patch`` is phase-generic
+    # (FRAMEWORK_AGENT, EXPLORE, and pre-baseline enablement), so it is resolved
+    # from entry metadata by ``_entry_family`` rather than blanket-credited here.
+    (lambda s: s == "framework", "framework"),
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     (lambda s: s == "gemm_tuning", "gemm_tuning"),
@@ -92,6 +90,28 @@ def _action_family(action: str) -> str:
     for predicate, family in _ACTION_FAMILY_TABLE:
         if predicate(s):
             return family
+    return "other"
+
+
+def _entry_family(entry: dict[str, Any]) -> str:
+    """Resolve attribution family using phase/ownership metadata when needed.
+
+    ``integrate_patch`` is not intrinsically a Framework action. Framework
+    authoring owns explicitly marked or FRAMEWORK_AGENT entries; EXPLORE owns
+    its own patch applications; PRELUDE baseline-enablement entries are
+    configuration prerequisites and remain non-attributable.
+    """
+
+    action = str(entry.get("action") or "").strip().lower()
+    if not action.startswith("integrate_patch"):
+        return _action_family(action)
+    if entry.get("attribution_eligible") is False or entry.get("baseline_enablement"):
+        return "other"
+    phase = str(entry.get("source_phase") or entry.get("phase") or "").strip().upper()
+    if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"} or entry.get("framework_agent_authoring"):
+        return "framework"
+    if phase == "EXPLORE":
+        return "explore"
     return "other"
 
 
@@ -142,6 +162,15 @@ def _promote_legacy_gain_entries(
         prov = str(se.get("provenance") or "").strip()
         if prov:
             promoted["provenance"] = prov
+        for key in (
+            "source_phase",
+            "phase",
+            "framework_agent_authoring",
+            "baseline_enablement",
+            "attribution_eligible",
+        ):
+            if key in se:
+                promoted[key] = se.get(key)
         out.append(promoted)
         if cum_after is not None:
             prev_cum = cum_after
@@ -220,10 +249,12 @@ def collect_attribution(
     for e in entries:
         if not isinstance(e, dict):
             continue
+        if e.get("attribution_eligible") is False or e.get("baseline_enablement"):
+            continue
         delta = _to_float(e.get("delta_pct"))
         if delta is None:
             continue
-        fam = _action_family(str(e.get("action") or ""))
+        fam = _entry_family(e)
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
 
     # Split "kernel_agent" between backends based on adopted KEEP entries.
@@ -374,6 +405,8 @@ def _collect_phase_breakdown(
     for e in entries:
         if not isinstance(e, dict):
             continue
+        if e.get("attribution_eligible") is False or e.get("baseline_enablement"):
+            continue
         delta = _to_float(e.get("delta_pct"))
         if delta is None or delta <= 0:
             continue
@@ -399,7 +432,7 @@ def _collect_phase_breakdown(
         if phase == "framework_agent":
             phase = "framework"
         action = str(e.get("action") or "").lower()
-        fam = _action_family(action)
+        fam = _entry_family(e)
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"
