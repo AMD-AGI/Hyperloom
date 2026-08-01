@@ -1247,7 +1247,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="EXPLORE plateau: required count of *consecutive* specialist "
         "rounds with empty proposal_set before the AND condition "
-        "fires. Default 3.",
+        "fires. Default 5.",
     )
     opt.add_argument(
         "--plateau-explore-lookback",
