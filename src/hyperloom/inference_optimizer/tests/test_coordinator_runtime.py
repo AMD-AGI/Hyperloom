@@ -737,6 +737,123 @@ async def test_promote_baseline_records_success_attempt(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_promote_baseline_keeps_higher_anchor(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 1500.0,
+                "accuracy": 0.81,
+                "materialized_config": "/tmp/first.with_envs.yaml",
+                "subprocess_runtime_sec": 900.0,
+            },
+            task=_mk_task("baseline", "t-anchor-hi"),
+        )
+        await c._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 1400.0,
+                "accuracy": 0.44,
+                "materialized_config": "/tmp/second.with_envs.yaml",
+                "subprocess_runtime_sec": 100.0,
+            },
+            task=_mk_task("baseline", "t-anchor-lo"),
+        )
+        assert c.shared_state.baseline_tput == pytest.approx(1500.0)
+        assert c.shared_state.baseline_accuracy == pytest.approx(0.81)
+        assert c.shared_state.baseline_config_path == "/tmp/first.with_envs.yaml"
+        assert c.shared_state.baseline_runtime_sec == pytest.approx(900.0)
+        assert c.shared_state.current_best["tput"] == pytest.approx(1500.0)
+        last = c.shared_state.last_baseline
+        assert last["status"] == "succeeded"
+        assert last["decision"] == "no_promote"
+        assert last["extras"]["anchor_kept_tput"] == pytest.approx(1500.0)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_accepts_higher_rebaseline(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 1400.0,
+                "accuracy": 0.44,
+                "materialized_config": "/tmp/first.with_envs.yaml",
+            },
+            task=_mk_task("baseline", "t-anchor-lo"),
+        )
+        await c._promote_to_shared_state(
+            "baseline",
+            {
+                "output_throughput": 1500.0,
+                "accuracy": 0.81,
+                "materialized_config": "/tmp/second.with_envs.yaml",
+            },
+            task=_mk_task("baseline", "t-anchor-hi"),
+        )
+        assert c.shared_state.baseline_tput == pytest.approx(1500.0)
+        assert c.shared_state.baseline_accuracy == pytest.approx(0.81)
+        assert c.shared_state.baseline_config_path == "/tmp/second.with_envs.yaml"
+        assert c.shared_state.last_baseline["decision"] == "promoted"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_leaves_current_best_when_stack_non_empty(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1400.0
+        c.shared_state.optimization_stack = [{"action": "replay_warm_recipe", "tput": 7500.0}]
+        c.shared_state.current_best = {"action": "warm_replay", "tput": 7500.0}
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1500.0, "materialized_config": "/tmp/re.with_envs.yaml"},
+            task=_mk_task("baseline", "t-anchor-stack"),
+        )
+        assert c.shared_state.baseline_tput == pytest.approx(1500.0)
+        assert c.shared_state.current_best["action"] == "warm_replay"
+        assert c.shared_state.current_best["tput"] == pytest.approx(7500.0)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.baseline_tput = 1500.0
+        c.shared_state.enablement_validation_pending = True
+        c.shared_state.enablement_accuracy_floor = 0.3
+        task = Task(
+            task_id="t-reval-1",
+            kind="baseline",
+            state="queued",
+            params={"reason": "enablement_eval_revalidation"},
+            idempotency_key="idem-t-reval-1",
+        )
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 1200.0, "accuracy": 0.72},
+            task=task,
+        )
+        assert c.shared_state.baseline_tput == pytest.approx(1200.0)
+        assert c.shared_state.baseline_accuracy == pytest.approx(0.72)
+        assert c.shared_state.enablement_succeeded is True
+        assert c.shared_state.last_baseline["decision"] == "promoted"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_promote_profile_records_success_attempt(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -916,6 +1033,7 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
+        c.shared_state.enablement_mode = "eval"
         for i in range(3):
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
         assert c.shared_state.baseline_failure_streak == 3
@@ -937,8 +1055,44 @@ async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
+        c.shared_state.enablement_mode = "eval"
         for i in range(3):
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_fails_fast_without_eval_lane(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.enablement_mode = "off"
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-noev-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        # An enablement round is on record, but the lane was never admitted, so
+        # it must not hold the baseline_failed budget open.
+        c.shared_state.enablement_mode = "off"
+        c.shared_state.enablement_attempts = 2
+        c.shared_state.enablement_dispatched = True
+        for i in range(3):
+            await c._handle_unpromotable_result(
+                _mk_task("baseline", f"t-off-{i}"),
+                {"status": "failed", "error_class": "server_init_dead"},
+            )
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
         await c.stop()

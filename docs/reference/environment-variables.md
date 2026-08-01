@@ -200,17 +200,24 @@ do not publish it unchanged in support bundles.
 
 ---
 
-## Enablement accuracy trigger
+## Enablement admission
 
-When a first baseline boots and measures throughput but its accuracy eval fails
-(crashes, produces no result, or scores below the floor), enablement can repair
-the model instead of halting the run. Single-node only; multi-node keeps the
-existing behavior.
+Enablement is **not** configured through the environment. Both self-heal lanes
+are admitted by the `--enablement {off,launch,eval,all}` CLI flag, which defaults
+to `all`:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL` | `1` (on) | Route a baseline accuracy-eval failure into enablement instead of halting. Set `0`/`false`/`no`/`off` to keep the legacy salvage/stop behavior. Reader: `_accuracy_gate.enablement_on_eval_fail_enabled`. |
-| `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR` | `0.05` | Shared accuracy floor used by BOTH the baseline eval-failure trigger and the enablement KEEP gate. A collapse guard rather than a quality bar — raise it for a genuine quality gate. A score of exactly `0.0` always fails regardless of the floor (strictly positive is required); otherwise `score >= floor` passes. Accepts a finite value in `[0, 1]`; out-of-range values are ignored with a warning. Reader: `_accuracy_gate.enablement_accuracy_floor`. |
+- `launch` — a baseline that cannot boot routes into patch authoring.
+- `eval` — a baseline that boots and measures throughput but fails its accuracy
+  eval (crashes, produces no result, or scores below the floor) routes into
+  patch authoring. Single-node only; multi-node keeps the strict stop.
+- `all` (default) — both lanes.
+- `off` — neither lane engages, and a baseline that keeps failing terminates the
+  run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
+
+The accuracy floor shared by the eval trigger and the enablement KEEP gate is the
+fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.05`). It is
+a collapse guard rather than a quality bar: a score of exactly `0.0` always fails,
+otherwise `score >= floor` passes.
 
 ---
 
