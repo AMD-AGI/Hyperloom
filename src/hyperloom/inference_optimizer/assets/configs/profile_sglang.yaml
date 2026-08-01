@@ -49,6 +49,7 @@ benchmark:
     # --- Profiler: shape + callstack annotations (#126) ---
     SGLANG_PROFILE_WITH_STACK: "true"
     SGLANG_PROFILE_RECORD_SHAPE: "true"
+    SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE: "1"
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
