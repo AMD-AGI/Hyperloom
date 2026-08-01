@@ -23,7 +23,7 @@ import pathlib
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import ray
@@ -85,6 +85,9 @@ _DENIED_SERVER_FLAGS = frozenset(
     }
 )
 _DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
+# Tuning knobs exempt from the suffix rule by name only; their values stay
+# constrained by _unsafe_path_value_reason.
+_SUFFIX_EXEMPT_SERVER_FLAGS = frozenset({"--speculative-draft-model-path"})
 
 
 def _is_denied_server_flag(flag: str) -> bool:
@@ -94,17 +97,47 @@ def _is_denied_server_flag(flag: str) -> bool:
         return False
     if name in _DENIED_SERVER_FLAGS:
         return True
+    if name in _SUFFIX_EXEMPT_SERVER_FLAGS:
+        return False
     return any(name.endswith(suffix) for suffix in _DENIED_SERVER_FLAG_SUFFIXES)
 
 
+def _unsafe_path_value_reason(value: str | None) -> str:
+    """Return why an exempt flag's path value is unsafe ("" when acceptable)."""
+    val = (value or "").strip()
+    if not val:
+        return "missing value"
+    if not val.startswith("/"):
+        return "must be an absolute path, not a repo id or URI"
+    if ".." in PurePosixPath(val).parts:
+        return "must not traverse with '..'"
+    return ""
+
+
+def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
+    """Return ``(flag, value)`` pairs for both ``--flag=value`` and ``--flag value``."""
+    pairs: list[tuple[str, str | None]] = []
+    for idx, tok in enumerate(tokens):
+        if not tok.startswith("--"):
+            continue
+        if "=" in tok:
+            name, _, val = tok.partition("=")
+            pairs.append((name, val))
+            continue
+        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
+        pairs.append((tok, None if (nxt is None or nxt.startswith("--")) else nxt))
+    return pairs
+
+
 def _denied_extra_args(raw: str) -> list[str]:
-    """Return denied CLI flag tokens in a pod-side extra-args string.
+    """Return rejected CLI flags in a pod-side extra-args string.
 
     Args:
         raw: Whitespace-separated server flags.
 
     Returns:
-        list[str]: Denied flag names (empty when clean).
+        list[str]: Denied flag names, plus ``"flag: reason"`` entries for exempt
+        flags whose value is outside the allowed path shape (empty when clean).
     """
     text = (raw or "").strip()
     if not text:
@@ -114,10 +147,17 @@ def _denied_extra_args(raw: str) -> list[str]:
     except ValueError:
         return ["<unparseable>"]
     out: list[str] = []
-    for tok in tokens:
-        flag = tok.split("=", 1)[0]
-        if _is_denied_server_flag(flag) and flag not in out:
-            out.append(flag)
+    for flag, value in _flag_value_pairs(tokens):
+        if _is_denied_server_flag(flag):
+            if flag not in out:
+                out.append(flag)
+            continue
+        if flag not in _SUFFIX_EXEMPT_SERVER_FLAGS:
+            continue
+        reason = _unsafe_path_value_reason(value)
+        entry = f"{flag}: {reason}"
+        if reason and entry not in out:
+            out.append(entry)
     return out
 
 

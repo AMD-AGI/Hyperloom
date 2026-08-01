@@ -82,6 +82,19 @@ def _load_script_module(unique_name: str, script_name: str):
     return mod
 
 
+def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
+    # The pod-side copy must mirror server_args_safety: exempt the flag by name,
+    # but still constrain its value. Divergence silently blocks the sandbox-side
+    # exemption at the pod boundary.
+    mod = _load_script_module("_ln_mn_specdraft", "launch_multinode.py")
+    assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
+    assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
+    for bad in ("Qwen/draft", "hf://org/draft", "/wekafs/../etc/passwd"):
+        assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
+    assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
+    assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
+
+
 def test_kill_remote_missing_pid_dir():
     km = _load_script_module("km_test_missing", "kill_multinode.py")
     out = km._kill_remote("/no/such/dir/exists", grace_sec=1)
