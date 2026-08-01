@@ -1553,6 +1553,32 @@ def kernel_work_pending(state: Any) -> bool:
     return False
 
 
+def enablement_engaged(state: Any) -> bool:
+    """Whether an enablement round has started and is still making progress.
+
+    While engaged, repeated baseline boot failures are forward progress (each
+    round clears a deeper gap), so the ``baseline_failed`` fast-fail must stand
+    down and let the ``enablement_stalled`` cap terminate instead. Always false
+    when the session did not admit either enablement lane.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``enablement_mode`` and the
+            ``enablement_*`` progress fields.
+
+    Returns:
+        bool: ``True`` when an enablement round is stacked, dispatched or tried.
+    """
+    from ..actions.executors._accuracy_gate import ENABLEMENT_MODE_OFF, resolve_enablement_mode
+
+    if resolve_enablement_mode(state) == ENABLEMENT_MODE_OFF:
+        return False
+    return bool(
+        (getattr(state, "enablement_kept_patches", None) or [])
+        or getattr(state, "enablement_dispatched", False)
+        or int(getattr(state, "enablement_attempts", 0) or 0) > 0
+    )
+
+
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``).
 
@@ -1596,12 +1622,7 @@ def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
         engaged, else ``None``.
     """
     streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    enablement_engaged = bool(
-        (getattr(state, "enablement_kept_patches", None) or [])
-        or getattr(state, "enablement_dispatched", False)
-        or int(getattr(state, "enablement_attempts", 0) or 0) > 0
-    )
-    if streak >= 3 and not enablement_engaged:
+    if streak >= 3 and not enablement_engaged(state):
         return "prelude_baseline_failed", {"baseline_failure_streak": streak}
     return None
 

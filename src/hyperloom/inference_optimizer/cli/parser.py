@@ -647,6 +647,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Default: framework phase enabled.",
     )
     opt.add_argument(
+        "--enablement",
+        dest="enablement",
+        choices=["off", "launch", "eval", "all"],
+        default="off",
+        help="Admit the enablement self-heal lanes, which author framework "
+        "patches when the baseline cannot be established. 'launch' handles a "
+        "baseline that fails to boot; 'eval' handles one that boots but misses "
+        "the accuracy floor; 'all' handles both. Default 'off': a baseline that "
+        "keeps failing terminates the run with stop_reason='baseline_failed' "
+        "instead of opening an authoring loop. Enable it when you expect the "
+        "model/framework combination to need patching before it can serve.",
+    )
+    opt.add_argument(
         "--no-framework-local-explore",
         dest="no_framework_local_explore",
         action="store_true",

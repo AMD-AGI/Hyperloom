@@ -20,26 +20,36 @@ import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool, env_float
 
 
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
-# Enablement-on-eval-fail switch and shared accuracy floor. The floor is used by
-# BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two
-# never diverge.
+# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the
+# enablement KEEP gate so the two never diverge.
 #
-# The default is non-zero because the floor is the ONLY correctness authority on
-# the enablement KEEP path. At 0.0 the gate degenerates to ``accuracy > 0``, which
+# It is non-zero because the floor is the ONLY correctness authority on the
+# enablement KEEP path. At 0.0 the gate degenerates to ``accuracy > 0``, which
 # admits a model that is answering essentially nothing: a real run KEPT a
 # candidate scoring gsm8k=0.00076 (0.08% of a 0.906 baseline) as "correct".
 # 0.05 is a floor of last resort -- it rejects the collapsed-output regime
-# without judging genuine quality, which belongs to the operator override below.
-ENABLEMENT_ON_EVAL_FAIL_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL"
-ENABLEMENT_ACCURACY_FLOOR_ENV = "INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR"
+# without judging genuine quality.
 DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.05
+
+# Enablement admission, selected by the ``--enablement`` CLI flag. ``launch``
+# covers the boot-failure self-heal lane, ``eval`` the accuracy-failure lane.
+# Default ``off`` means neither lane engages and a broken baseline fast-fails.
+ENABLEMENT_MODE_OFF = "off"
+ENABLEMENT_MODE_LAUNCH = "launch"
+ENABLEMENT_MODE_EVAL = "eval"
+ENABLEMENT_MODE_ALL = "all"
+ENABLEMENT_MODES: tuple[str, ...] = (
+    ENABLEMENT_MODE_OFF,
+    ENABLEMENT_MODE_LAUNCH,
+    ENABLEMENT_MODE_EVAL,
+    ENABLEMENT_MODE_ALL,
+)
 
 # Result-dict keys stamped by the baseline executor on an eval-rooted failure and
 # read by writeback promotion/persistence.
@@ -104,30 +114,27 @@ def require_framework_accuracy_default() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
-def enablement_on_eval_fail_enabled() -> bool:
-    """Whether a baseline eval failure routes into enablement (default on)."""
-    return env_bool(ENABLEMENT_ON_EVAL_FAIL_ENV, True)
+def resolve_enablement_mode(shared_state: Any) -> str:
+    """Read the session's enablement mode, defaulting to ``off``.
 
+    Args:
+        shared_state: The live SharedState (``None`` in some executor contexts).
 
-def enablement_accuracy_floor() -> float:
-    """Shared accuracy floor for the eval trigger and the enablement KEEP gate.
-
-    Reads the env override, accepting only finite values in ``[0, 1]``; anything
-    else is logged and falls back to the default.
+    Returns:
+        One of :data:`ENABLEMENT_MODES`; unknown values collapse to ``off``.
     """
-    raw = os.environ.get(ENABLEMENT_ACCURACY_FLOOR_ENV)
-    if raw is None or not raw.strip():
-        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-    val = env_float(ENABLEMENT_ACCURACY_FLOOR_ENV, DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
-    if not math.isfinite(val) or val < 0.0 or val > 1.0:
-        log.warning(
-            "%s=%r is not a finite value in [0,1]; using default %.3f",
-            ENABLEMENT_ACCURACY_FLOOR_ENV,
-            raw,
-            DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
-        )
-        return DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-    return val
+    mode = str(getattr(shared_state, "enablement_mode", "") or "").strip().lower()
+    return mode if mode in ENABLEMENT_MODES else ENABLEMENT_MODE_OFF
+
+
+def launch_enablement_allowed(shared_state: Any) -> bool:
+    """Whether a baseline that cannot launch may route into enablement."""
+    return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_LAUNCH, ENABLEMENT_MODE_ALL)
+
+
+def eval_enablement_allowed(shared_state: Any) -> bool:
+    """Whether a baseline accuracy-eval failure may route into enablement."""
+    return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
 def _finite_score(score: Any) -> float | None:
@@ -575,6 +582,11 @@ __all__ = [
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
     "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "ENABLEMENT_MODES",
+    "ENABLEMENT_MODE_ALL",
+    "ENABLEMENT_MODE_EVAL",
+    "ENABLEMENT_MODE_LAUNCH",
+    "ENABLEMENT_MODE_OFF",
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_RUNTIME_FAILURE",
@@ -583,11 +595,12 @@ __all__ = [
     "accuracy_meets_floor",
     "accuracy_passed",
     "classify_accuracy_failure",
-    "enablement_accuracy_floor",
-    "enablement_on_eval_fail_enabled",
     "eval_contract_fingerprint",
+    "eval_enablement_allowed",
     "is_high_accuracy_risk",
+    "launch_enablement_allowed",
     "parse_eval_results",
     "request_baseline_accuracy_stop",
+    "resolve_enablement_mode",
     "require_framework_accuracy_default",
 ]

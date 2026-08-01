@@ -637,11 +637,9 @@ class WritebackCollaborator:
             # ``baseline_failed`` fast-fail must NOT fire here; the
             # ``enablement_stalled`` cap is the correct fast-fail instead.
             # ``fast_exit_arg_error`` stays gated on its own streak regardless.
-            enablement_engaged = bool(
-                (getattr(self.shared_state, "enablement_kept_patches", None) or [])
-                or getattr(self.shared_state, "enablement_dispatched", False)
-                or int(getattr(self.shared_state, "enablement_attempts", 0) or 0) > 0
-            )
+            from ..phases.machine_state import enablement_engaged as _enablement_engaged  # noqa: PLC0415
+
+            enablement_engaged = _enablement_engaged(self.shared_state)
             eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
             # Revalidation task failed for any reason (boot/OOM/timeout/eval): clear
             # pending state, preserve the frozen trigger identity, increment stall.
@@ -676,12 +674,17 @@ class WritebackCollaborator:
                     not bool(self.shared_state.stop_reason),
                 )
                 any_changed = True
+            from ..actions.executors._accuracy_gate import eval_enablement_allowed  # noqa: PLC0415
             from ..actions.executors._multi_node_env import is_multi_node  # noqa: PLC0415
 
             # Single-node eval-pending failure: throughput measured fine and the
             # eval is expected to re-run under enablement, so do not spend the
-            # baseline_failed budget yet. Multi-node keeps the strict backstop.
-            eval_pending_suppress = eval_failed and not is_multi_node()
+            # baseline_failed budget yet. Multi-node keeps the strict backstop,
+            # and so does a session that never admitted the eval lane — nothing
+            # would re-run the eval, so holding the budget just stalls the run.
+            eval_pending_suppress = (
+                eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
+            )
             if eval_failed:
                 self._persist_eval_failure(result_payload)
             if err_class == "fast_exit_arg_error":

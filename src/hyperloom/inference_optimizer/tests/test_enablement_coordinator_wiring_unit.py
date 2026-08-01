@@ -218,6 +218,8 @@ def _enqueue_self(**state_kw):
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         gpu_type=state_kw.get("gpu_type", "mi300x"),
+        # Admission is exercised separately; these cases target the dispatch machinery.
+        enablement_mode=state_kw.get("enablement_mode", "all"),
         enablement_dispatched=state_kw.get("enablement_dispatched", False),
         enablement_succeeded=state_kw.get("enablement_succeeded", False),
         enablement_attempts=state_kw.get("enablement_attempts", 0),
@@ -304,6 +306,31 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     assert len(fake.tasks.created) == 1
     assert fake.tasks.created[0]["params"]["enablement"] is True
     assert fake.tasks.created[0]["params"]["enablement_attempt"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,origin,dispatched",
+    [
+        ("off", "", False),
+        ("off", "eval", False),
+        ("launch", "", True),
+        ("launch", "eval", False),
+        ("eval", "", False),
+        ("eval", "eval", True),
+        ("all", "", True),
+        ("all", "eval", True),
+    ],
+)
+async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, origin, dispatched):
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(enablement_mode=mode, enablement_origin=origin)
+    tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    assert bool(tid) is dispatched
+    assert fake.shared_state.enablement_dispatched is dispatched
 
 
 @pytest.mark.asyncio

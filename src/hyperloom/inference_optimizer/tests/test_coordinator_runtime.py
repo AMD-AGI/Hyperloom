@@ -1033,6 +1033,7 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
+        c.shared_state.enablement_mode = "eval"
         for i in range(3):
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
         assert c.shared_state.baseline_failure_streak == 3
@@ -1054,8 +1055,43 @@ async def test_handle_unpromotable_baseline_eval_pending_multi_node_still_stops(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
+        c.shared_state.enablement_mode = "eval"
         for i in range(3):
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-mn-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_eval_fails_fast_without_eval_lane(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        assert c.shared_state.enablement_mode == "off"
+        for i in range(3):
+            await c._handle_unpromotable_result(_mk_task("baseline", f"t-noev-{i}"), _eval_failed_result())
+        assert c.shared_state.stop_reason == "baseline_failed"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(session_dir, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        # An enablement round is on record, but the lane was never admitted, so
+        # it must not hold the baseline_failed budget open.
+        c.shared_state.enablement_attempts = 2
+        c.shared_state.enablement_dispatched = True
+        for i in range(3):
+            await c._handle_unpromotable_result(
+                _mk_task("baseline", f"t-off-{i}"),
+                {"status": "failed", "error_class": "server_init_dead"},
+            )
         assert c.shared_state.stop_reason == "baseline_failed"
     finally:
         await c.stop()

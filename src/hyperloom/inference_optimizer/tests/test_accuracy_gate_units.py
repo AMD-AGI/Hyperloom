@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,18 +116,6 @@ class TestAccuracyPassed:
 
 
 class TestEnablementReaders:
-    def test_on_eval_fail_default_on(self, monkeypatch):
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", raising=False)
-        assert ag.enablement_on_eval_fail_enabled() is True
-
-    def test_on_eval_fail_disabled(self, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "off")
-        assert ag.enablement_on_eval_fail_enabled() is False
-
-    def test_floor_default(self, monkeypatch):
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", raising=False)
-        assert ag.enablement_accuracy_floor() == ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-
     def test_floor_default_rejects_a_collapsed_model(self):
         """The default must be strong enough to be the only correctness authority.
 
@@ -136,14 +125,29 @@ class TestEnablementReaders:
         assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
         assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
-    def test_floor_valid(self, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", "0.7")
-        assert ag.enablement_accuracy_floor() == pytest.approx(0.7)
+    def test_mode_defaults_to_off(self):
+        assert ag.resolve_enablement_mode(None) == ag.ENABLEMENT_MODE_OFF
+        assert ag.resolve_enablement_mode(SimpleNamespace()) == ag.ENABLEMENT_MODE_OFF
 
-    @pytest.mark.parametrize("bad", ["1.5", "-0.1", "nonsense", "nan", "inf"])
-    def test_floor_invalid_or_out_of_range_falls_back(self, monkeypatch, bad):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", bad)
-        assert ag.enablement_accuracy_floor() == ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    def test_unknown_mode_collapses_to_off(self):
+        state = SimpleNamespace(enablement_mode="sometimes")
+        assert ag.resolve_enablement_mode(state) == ag.ENABLEMENT_MODE_OFF
+        assert ag.launch_enablement_allowed(state) is False
+        assert ag.eval_enablement_allowed(state) is False
+
+    @pytest.mark.parametrize(
+        "mode,launch,eval_",
+        [
+            ("off", False, False),
+            ("launch", True, False),
+            ("eval", False, True),
+            ("all", True, True),
+        ],
+    )
+    def test_mode_admits_the_matching_lane(self, mode, launch, eval_):
+        state = SimpleNamespace(enablement_mode=mode)
+        assert ag.launch_enablement_allowed(state) is launch
+        assert ag.eval_enablement_allowed(state) is eval_
 
 
 class TestAccuracyValidator:

@@ -25,11 +25,11 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import (
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
     accuracy_meets_floor,
     accuracy_passed,
     classify_accuracy_failure,
-    enablement_accuracy_floor,
     parse_eval_results,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
@@ -2395,7 +2395,7 @@ class IntegratePatchExecutor:
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
-        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else enablement_accuracy_floor()
+        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         eval_origin = str(params.get("enablement_origin") or "") == "eval"
         accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
         correctness_ok: bool | None

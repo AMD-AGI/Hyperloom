@@ -27,11 +27,19 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
-@pytest.fixture(autouse=True)
-def _legacy_salvage_default(monkeypatch):
-    """Exercise the legacy salvage/stop path by default; eval-origin enablement
-    routing is opted into per-test."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "0")
+class _StopRecorder:
+    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
+
+    def __init__(self, enablement_mode: str = "off") -> None:
+        self.stop_reason = ""
+        self.baseline_accuracy = 0.0
+        self.enablement_mode = enablement_mode
+        # Mirrors the SharedState default so ctx-backed runs keep the cold+hot pair.
+        self.baseline_double_run = True
+
+    def set_stop_reason(self, value, **_kwargs):
+        self.stop_reason = value
+        return value
 
 
 def _write_yaml(path: Path) -> None:
@@ -81,9 +89,9 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
     return ws
 
 
-def _make_ctx(params: dict) -> SimpleNamespace:
+def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
-    return SimpleNamespace(task=task, extra={})
+    return SimpleNamespace(task=task, extra={"shared_state": _StopRecorder(enablement_mode)})
 
 
 def _run(coro):
@@ -240,7 +248,6 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
 def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     """flag on + single-node: an eval crash is stamped as an eval-failure
     contract with no RUN_EVAL=false salvage retry."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -264,7 +271,8 @@ def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
             "timeout_sec": 10,
             "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
-        }
+        },
+        enablement_mode="eval",
     )
     ctx.task.kind = "baseline"
     with patch(
@@ -519,18 +527,6 @@ def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
     assert state.stop_reason == ""
 
 
-class _StopRecorder:
-    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
-
-    def __init__(self) -> None:
-        self.stop_reason = ""
-        self.baseline_accuracy = 0.0
-
-    def set_stop_reason(self, value, **_kwargs):
-        self.stop_reason = value
-        return value
-
-
 def _stop_ctx(framework: str, recorder, params: dict | None = None) -> SimpleNamespace:
     task = SimpleNamespace(
         task_id="t-bl",
@@ -764,16 +760,13 @@ def _write_minimal_route_yaml(tmp_path: Path, framework: str = "sglang") -> Path
     return p
 
 
-def _route(monkeypatch, framework, result, *, floor=None, nodes=None, tmp_path=None):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
-    if floor is not None:
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR", str(floor))
+def _route(monkeypatch, framework, result, *, nodes=None, tmp_path=None):
     if nodes is not None:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", str(nodes))
     if tmp_path is not None and "materialized_config" not in result:
         result["materialized_config"] = str(_write_minimal_route_yaml(tmp_path, framework))
     executor = BaselineExecutor()
-    rec = _StopRecorder()
+    rec = _StopRecorder("eval")
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
     return rec.stop_reason
 
@@ -800,18 +793,23 @@ def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
 
 
-def test_eval_enablement_positive_below_configured_floor(monkeypatch):
-    result = {"status": "succeeded", "accuracy": 0.2, "run_eval_disabled": False}
-    reason = _route(monkeypatch, "sglang", result, floor=0.5)
+def test_eval_enablement_positive_below_floor(monkeypatch):
+    observed = DEFAULT_ENABLEMENT_ACCURACY_FLOOR / 2
+    result = {"status": "succeeded", "accuracy": observed, "run_eval_disabled": False}
+    reason = _route(monkeypatch, "sglang", result)
     assert reason == ""
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_BELOW_FLOOR
-    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.2
-    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == 0.5
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == observed
+    assert result[BASELINE_EVAL_ACCURACY_FLOOR_KEY] == DEFAULT_ENABLEMENT_ACCURACY_FLOOR
 
 
 def test_eval_enablement_accuracy_at_floor_passes(monkeypatch):
-    result = {"status": "succeeded", "accuracy": 0.5, "run_eval_disabled": False}
-    reason = _route(monkeypatch, "sglang", result, floor=0.5)
+    result = {
+        "status": "succeeded",
+        "accuracy": DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+        "run_eval_disabled": False,
+    }
+    reason = _route(monkeypatch, "sglang", result)
     assert reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
 
@@ -840,8 +838,7 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     """Synthetic kernel-lane re-baselines are neither routed nor stopped."""
     result = {"status": "succeeded", "run_eval_disabled": True}
     executor = BaselineExecutor()
-    rec = _StopRecorder()
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL", "1")
+    rec = _StopRecorder("eval")
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     executor._maybe_stop_on_missing_baseline_accuracy(
         _stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result
