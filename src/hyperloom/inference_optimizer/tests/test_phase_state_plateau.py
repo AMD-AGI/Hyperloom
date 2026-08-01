@@ -647,6 +647,34 @@ def test_compute_next_phase_advances_on_plateau():
     assert triggered is True
 
 
+def test_compute_next_phase_honors_explore_plateau_overrides():
+    """CLI plateau overrides control the actual phase transition."""
+    state = SimpleNamespace(
+        phase="EXPLORE",
+        phase_started_unix=0.0,
+        max_minutes=0,
+        phase_budget_pct={},
+        explore_search={"winners_history": [{"gain_pct": 0.1}]},
+        specialist_rounds=[
+            {"proposals_total": 0, "proposals_kept": 0},
+            {"proposals_total": 0, "proposals_kept": 0},
+            {"proposals_total": 0, "proposals_kept": 0},
+        ],
+        params_no_promote_streak=0,
+        backends_search={},
+        optimization_stack=[],
+        pending_escalate_hint="",
+        stop_reason="",
+        plateau_overrides={"explore_empty_streak": 3},
+    )
+
+    target, reason, evidence = compute_next_phase(state, kernel_enabled=True)
+
+    assert target == "KERNEL_AGENT"
+    assert reason == "explore_no_more_leverage"
+    assert evidence["empty_streak_threshold"] == 3
+
+
 def test_collect_phase_breakdown_buckets_by_phase():
     from hyperloom.inference_optimizer.breakdown.collectors import collect_attribution
 

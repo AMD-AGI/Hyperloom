@@ -804,7 +804,10 @@ class ExplorePhase(PhaseHandler):
         if needs_gpu:
             lanes = list(dict.fromkeys((*lanes, "gpu_research_lane")))
             try:
-                ttl = self._gpu_lease_ttl_sec(int(ttl or 0))
+                ttl = self._gpu_lease_ttl_sec(
+                    int(ttl or 0),
+                    params=retry_params,
+                )
             except Exception:  # noqa: BLE001
                 log.exception("specialist auto-retry: gpu_research_lane TTL re-source failed; using registry default")
 

@@ -33,6 +33,7 @@ from hyperloom.common.env_safety import (
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
@@ -933,6 +934,18 @@ def _run_magpie(
                 inferencex_path,
                 exc,
             )
+    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
+    # aiperf right before Magpie runs it, via the shared helper (also used by the
+    # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
+    # helper keeps the agentx package import lazy for the OFF path, A2). A failed
+    # preflight becomes a structured nonzero rc so the grid records a failed
+    # benchmark instead of crashing.
+    from ._workload_envs import prepare_agentx_runtime
+
+    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
+    if _agx_err:
+        log.error("%s; failing this benchmark", _agx_err)
+        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
@@ -1727,6 +1740,29 @@ async def run_grid(
                     error_class="server_init_dead",
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
+                )
+            )
+            await _pulse_after_variant(i)
+            if not keep_going_on_failure:
+                break
+            continue
+
+        # AgentX preflight failed at the execution boundary (aiperf missing or
+        # not weka-trace capable) before any benchmark launched. Fail this
+        # variant with a dedicated error_class so the operator sees the guidance;
+        # the grid is not crashed.
+        if rc == AGENTX_PREFLIGHT_RETURNCODE:
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="failed",
+                    returncode=rc,
+                    runtime_sec=round(max(0.0, time.time() - variant_started_unix), 2),
+                    error=(stderr or stdout or "AgentX preflight failed")[-2000:],
+                    error_class="agentx_preflight",
+                    note=variant.note,
                 )
             )
             await _pulse_after_variant(i)

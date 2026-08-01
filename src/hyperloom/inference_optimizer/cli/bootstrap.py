@@ -277,6 +277,8 @@ def _seed_shared_state(
         framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
         # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
+        # Enablement self-heal lanes; --enablement off opts out.
+        enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         explore_enabled=not bool(getattr(args, "no_explore", False)),
         # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(

@@ -120,9 +120,15 @@ The LLM doesn't own a separate framework role in the current runtime.
 
 ### Enablement escalation ladder
 
-When a `(model, backend)` combination cannot launch — or it launches but fails
-its accuracy eval (`accuracy_below_floor` / `eval_runtime_failure`) — enablement
-repairs it along two axes. **Diagnosis (once):** work out which capability layer is
+Enablement admission is controlled by `--enablement {off,launch,eval,all}`,
+defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
+accuracy-failure lane, `all` both. With `off`, neither engages and a baseline
+that keeps failing terminates the run with `stop_reason='baseline_failed'`
+rather than opening an authoring loop.
+
+When the admitted lane fires — a `(model, backend)` combination cannot launch, or
+it launches but fails its accuracy eval (`accuracy_below_floor` /
+`eval_runtime_failure`) — enablement repairs it along two axes. **Diagnosis (once):** work out which capability layer is
 missing — read the failure signature, the model's `config.json` architecture,
 the framework's supported-architecture registry and installed version, and
 upstream (whether the capability already exists and in which version/PR). That

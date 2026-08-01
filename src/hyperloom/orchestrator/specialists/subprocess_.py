@@ -206,8 +206,13 @@ class SpecialistSubprocessConfig:
     """How often the reaper polls done.json / process exit / heartbeat."""
 
     heartbeat_stale_seconds: float = 300.0
-    """If the agent stops writing heartbeat.json for this long, treat
-    it as stale and kill the subprocess (matches Arbor's 5-min cap)."""
+    """Liveness window for heartbeat.json or process.log activity.
+
+    A process that never creates either file is reaped after this window.
+    After either file has appeared, its mtime can refresh the liveness clock
+    for one window before the subsequent stale window expires, yielding about
+    two windows of silence before reap.
+    """
 
 
 # Result

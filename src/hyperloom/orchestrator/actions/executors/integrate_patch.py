@@ -25,11 +25,11 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import (
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
     accuracy_meets_floor,
     accuracy_passed,
     classify_accuracy_failure,
-    enablement_accuracy_floor,
     parse_eval_results,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
@@ -2395,7 +2395,7 @@ class IntegratePatchExecutor:
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
-        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else enablement_accuracy_floor()
+        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
         eval_origin = str(params.get("enablement_origin") or "") == "eval"
         accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
         correctness_ok: bool | None
@@ -3447,12 +3447,24 @@ class IntegratePatchExecutor:
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
             variant.runtime_override = dict(_rt_rb)
+        # A confirmation rebench must remain a stability check, not become a
+        # stricter second discovery gate as the per-cycle KEEP threshold decays.
+        # An explicit lower per-task floor remains valid, but it cannot exceed
+        # half of the threshold that admitted this patch.
+        keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        requested_stable_threshold_pct = float(
+            params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)
+        )
+        stable_threshold_pct = min(
+            requested_stable_threshold_pct,
+            max(0.0, keep_threshold_pct / 2.0),
+        )
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,
             variant=variant,
             base_tput=base_tput,
-            stable_threshold_pct=float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)),
+            stable_threshold_pct=stable_threshold_pct,
             output_slot=output_root / "stack_rebench",
             variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             model_path=resolved_model or None,

@@ -1069,7 +1069,7 @@ class FrameworkPhase(PhaseHandler):
         if self._coerce_needs_gpu(params.get("needs_gpu")):
             lanes.append("gpu_research_lane")
             try:
-                ttl = self._gpu_lease_ttl_sec(ttl)
+                ttl = self._gpu_lease_ttl_sec(ttl, params=params)
             except Exception:  # noqa: BLE001 — fall back to the base TTL
                 log.exception(
                     "framework GPU: gpu_research_lane TTL re-source failed; using base TTL",
@@ -1501,6 +1501,8 @@ class FrameworkPhase(PhaseHandler):
         Retries until the combo runs correctly or the run wall-clock deadline
         passes (no attempt-count cap). Guards:
 
+        * ``enablement_mode`` — the lane matching the trigger origin must be
+          admitted by ``--enablement``; otherwise no round is ever opened.
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
         * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
           genuine-baseline revalidation; authoring is paused until it resolves.
@@ -1516,7 +1518,13 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).
         """
+        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
+
         state = self.shared_state
+        origin = str(getattr(state, "enablement_origin", "") or "")
+        admitted = eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
+        if not admitted:
+            return ""
         if bool(getattr(state, "enablement_succeeded", False)):
             return ""
         if bool(getattr(state, "enablement_validation_pending", False)):
