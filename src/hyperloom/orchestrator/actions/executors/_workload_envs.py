@@ -30,6 +30,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
+    filter_benchmark_env_mapping,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -1041,6 +1042,15 @@ def materialize_config_with_envs(
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
             envs[str(key)] = str(extra_envs[key])
+    filtered_envs = filter_benchmark_env_mapping(envs)
+    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    if dropped_credentials:
+        log.warning(
+            "Dropping control-plane credentials from benchmark envs: %s",
+            ", ".join(dropped_credentials),
+        )
+        envs.clear()
+        envs.update(filtered_envs)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

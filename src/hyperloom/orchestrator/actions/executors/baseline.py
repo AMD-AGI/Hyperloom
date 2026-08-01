@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -2402,7 +2402,7 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_child_process_env(os.environ.copy())
+        env = scrub_benchmark_process_env(os.environ.copy())
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -2690,7 +2690,7 @@ class BaselineExecutor:
             # Magpie never created a benchmark_* workspace, so the wrapper never
             # wrote server.log. Persist captured stderr/stdout so the failure
             # survives the NFS clone and S3 archive.
-            captured = (proc_stderr or "") + (proc_stdout or "")
+            captured = redact_secret_values((proc_stderr or "") + (proc_stdout or ""))
             stderr_log_path: str | None = None
             if captured.strip():
                 try:
@@ -2711,7 +2711,9 @@ class BaselineExecutor:
                     "status": "failed",
                     "error_class": "cuda_graph_capture_failed",
                     "returncode": proc_returncode,
-                    "error": server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:],
+                    "error": redact_secret_values(
+                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
+                    ),
                     **failure_extras,
                 }
             if server_init_dead:
@@ -2719,11 +2721,11 @@ class BaselineExecutor:
                     "status": "failed",
                     "error_class": "server_init_dead",
                     "returncode": proc_returncode,
-                    "error": server_init_dead_error,
+                    "error": redact_secret_values(server_init_dead_error),
                     **failure_extras,
                 }
             if proc_returncode != 0:
-                tail = (proc_stderr or proc_stdout or "")[-2000:]
+                tail = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
                 err_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
@@ -2786,6 +2788,7 @@ class BaselineExecutor:
             else:
                 error_class = "invalid_measurement"
                 error = "benchmark report did not contain positive throughput and completed requests"
+            error = redact_secret_values(error)
             return {
                 "status": "failed",
                 "error_class": error_class,

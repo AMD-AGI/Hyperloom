@@ -394,6 +394,27 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
     assert attempt["stderr_log_path"] == "/runs/baseline/t-oom/baseline_stderr.log"
 
 
+def test_record_action_attempt_redacts_secrets_from_persisted_errors():
+    s = SharedState()
+    secret = "ak-sensitive-value"
+    s.record_action_attempt(
+        action="baseline",
+        task_id="t-secret",
+        status="failed",
+        decision="no_promote",
+        result={
+            "error_class": "subprocess_nonzero",
+            "error": f"SAFE_API_KEY={secret} Authorization: Bearer {secret}",
+        },
+    )
+
+    attempt = s.baseline_attempts[-1]
+    assert secret not in attempt["error_excerpt"]
+    assert secret not in attempt["stderr_tail"]
+    assert "[REDACTED]" in attempt["error_excerpt"]
+    assert "[REDACTED]" in attempt["stderr_tail"]
+
+
 def test_attempts_history_caps_at_default():
     s = SharedState()
     for i in range(_DEFAULT_ATTEMPTS_HISTORY + 5):

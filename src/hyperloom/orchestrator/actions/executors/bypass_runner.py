@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import scrub_benchmark_process_env
 
 from . import bypass_analysis
 from . import bypass_engine
@@ -834,7 +834,7 @@ def _server_env(
     bench_envs: dict | None = None,
 ) -> dict[str, str]:
     """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
-    env = scrub_child_process_env(os.environ.copy())
+    env = scrub_benchmark_process_env(os.environ.copy())
     # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
     # (reconciled against TP). Inject it so the server binds the same cards
     # Magpie would; missing on single-GPU pods (harmless).
@@ -895,7 +895,13 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
 def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str) -> int:
     """Run a client/eval subprocess, appending logs; return its exit code."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=scrub_benchmark_process_env(os.environ.copy()),
+        )
     except subprocess.TimeoutExpired:
         _append_log(workspace, tag, "", f"{tag} timed out after {timeout_s}s")
         return 124
