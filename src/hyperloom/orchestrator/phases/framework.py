@@ -1069,7 +1069,7 @@ class FrameworkPhase(PhaseHandler):
         if self._coerce_needs_gpu(params.get("needs_gpu")):
             lanes.append("gpu_research_lane")
             try:
-                ttl = self._gpu_lease_ttl_sec(ttl)
+                ttl = self._gpu_lease_ttl_sec(ttl, params=params)
             except Exception:  # noqa: BLE001 — fall back to the base TTL
                 log.exception(
                     "framework GPU: gpu_research_lane TTL re-source failed; using base TTL",

@@ -373,7 +373,7 @@ DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING: float = 3.0
 DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
 # FRAMEWORK plateau/force-exit knobs: plateau when each LOOKBACK batch < KEEP_GAIN_PCT; force-exit when remaining < RATIO * max_hours.
-DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
+DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 5
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 import os as _os_fw_ratio  # noqa: E402
 
@@ -1653,6 +1653,9 @@ def exit_normal_explore(
     *,
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
+    plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+    plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+    plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     force_exit_hours_remaining: float = DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
     force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -1668,6 +1671,11 @@ def exit_normal_explore(
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
+        plateau_lookback: Number of EXPLORE KEEP results to inspect.
+        plateau_keep_gain_threshold_pct: Cumulative KEEP-gain threshold below
+            which the plateau gain arm is active.
+        plateau_empty_streak_threshold: Consecutive empty specialist rounds
+            required for the plateau streak arm.
         force_exit_hours_remaining (float): Session-hours-remaining force-exit
             threshold.
         force_exit_budget_pct (float): Phase-budget-fraction force-exit
@@ -1703,7 +1711,12 @@ def exit_normal_explore(
         }
     # A detected EXPLORE plateau is not terminal: switch lever (→ KERNEL_AGENT)
     # and flag that the next macro-cycle should steer off the bottleneck.
-    plateaued, plateau_ev = compute_plateau_explore(state)
+    plateaued, plateau_ev = compute_plateau_explore(
+        state,
+        lookback=plateau_lookback,
+        keep_gain_threshold_pct=plateau_keep_gain_threshold_pct,
+        empty_streak_threshold=plateau_empty_streak_threshold,
+    )
     if plateaued:
         return "explore_no_more_leverage", {
             "evidence": "plateau_explore",
@@ -2215,6 +2228,24 @@ def compute_next_phase(
             state,
             budget_pct=budget_pct,
             now_unix=now_unix,
+            plateau_lookback=int(
+                overrides.get(
+                    "explore_lookback",
+                    DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+                )
+            ),
+            plateau_keep_gain_threshold_pct=float(
+                overrides.get(
+                    "explore_keep_gain_pct",
+                    DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+                )
+            ),
+            plateau_empty_streak_threshold=int(
+                overrides.get(
+                    "explore_empty_streak",
+                    DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+                )
+            ),
             force_exit_hours_remaining=float(
                 overrides.get(
                     "force_exit_hours_remaining",

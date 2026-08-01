@@ -454,7 +454,10 @@ class IntentRouter:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:
                         # Shared with the GPU-pool lease so the two TTLs never drift.
-                        ttl = self._coord._gpu_lease_ttl_sec(int(ttl or 0))
+                        ttl = self._coord._gpu_lease_ttl_sec(
+                            int(ttl or 0),
+                            params=params,
+                        )
                     except Exception:  # noqa: BLE001 — fall back to registry ttl
                         log.exception(
                             "WS2: failed to re-source gpu_research_lane TTL; using registry default",
