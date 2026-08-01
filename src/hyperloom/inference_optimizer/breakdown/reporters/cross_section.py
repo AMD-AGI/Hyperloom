@@ -72,10 +72,9 @@ def _gain_attribution_lines(
 ) -> tuple[list[str], str]:
     """Compute per-source gain attribution + the method used.
 
-    Priority: validated ``source_breakdown`` split. When that is absent we do
-    NOT reverse-infer a KEEP from ``final.action_path`` / ``optimization_stack``
-    (those can be seeded, not real this-session KEEPs); the gain is reported as
-    ``unattributed`` with stack entries listed for reference only.
+    Priority: canonical ``optimizations.summary_by_source``. Legacy
+    ``attribution.source_breakdown`` remains a read-only fallback for archived
+    breakdowns supplied directly to the reporter.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
@@ -84,6 +83,33 @@ def _gain_attribution_lines(
         A tuple of the human-readable attribution lines and a label
         describing the method used to derive them.
     """
+    optimizations = breakdown.get("optimizations") or {}
+    summary = optimizations.get("summary_by_source") or {}
+    validation = optimizations.get("validation") or {}
+    canonical_sources = {
+        source: to_float(bucket.get("total_gain_pct"))
+        for source, bucket in summary.items()
+        if isinstance(bucket, dict)
+    }
+    canonical_nonzero = {
+        source: gain
+        for source, gain in canonical_sources.items()
+        if gain and gain != 0
+    }
+    canonical_total = sum(canonical_nonzero.values())
+    if canonical_nonzero and canonical_total:
+        lines = [
+            f"{source}: {gain:.2f}% of total "
+            f"(={(gain / canonical_total * 100):.0f}% share of "
+            f"{canonical_total:.2f}%)"
+            for source, gain in sorted(
+                canonical_nonzero.items(),
+                key=lambda item: -item[1],
+            )
+        ]
+        method = validation.get("method")
+        return lines, str(method) if isinstance(method, str) and method else "missing"
+
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
     total = to_float(sb.get("validated_total_pct"))
@@ -187,8 +213,12 @@ def _data_quality_flags(
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    if (breakdown.get("attribution") or {}).get("notes"):
-        for n in breakdown["attribution"]["notes"]:
+    optimizations = breakdown.get("optimizations") or {}
+    validation = optimizations.get("validation") or {}
+    attribution = breakdown.get("attribution") or {}
+    notes = validation.get("notes") or attribution.get("notes") or []
+    if notes:
+        for n in notes:
             _push(f"[attribution] {n}")
     cap = breakdown.get("capability_summary") or {}
     val = cap.get("validate_stack") or {}

@@ -35,6 +35,7 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     sweep as _r_sweep,
     critic_robustness as _r_critic_robustness,
     attribution as _r_attribution,
+    optimizations as _r_optimizations,
     source_files as _r_source_files,
     data_provenance as _r_data_provenance,
 )
@@ -43,7 +44,7 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
 # Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload", ["session", "workload"]),
-    ("Performance Results", ["baseline", "final", "roofline", "attribution"]),
+    ("Performance Results", ["baseline", "final", "roofline", "optimizations"]),
     ("Capability Search", ["capability_summary", "param_search", "decision_journal", "sweep"]),
     (
         "Kernel Optimization",
@@ -51,8 +52,6 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
             "kernel_lifecycle",
             "kernel_profiling",
             "kernel_decision_path",
-            "geak_invocations",
-            "forge_invocations",
             "critic_robustness",
         ],
     ),
@@ -81,6 +80,7 @@ __all__ = [
     "_r_sweep",
     "_r_critic_robustness",
     "_r_attribution",
+    "_r_optimizations",
     "_r_source_files",
     "_r_data_provenance",
 ]

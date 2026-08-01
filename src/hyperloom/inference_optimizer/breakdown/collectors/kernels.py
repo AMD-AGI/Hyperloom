@@ -1205,6 +1205,12 @@ def _normalize_optimization_stack_entry(
         out["provenance"] = str(raw.get("provenance") or "")
     if "task_id" in raw:
         out["task_id"] = str(raw.get("task_id") or "")
+    if "source_phase" in raw:
+        out["source_phase"] = str(raw.get("source_phase") or "")
+    if "operation_kind" in raw:
+        out["operation_kind"] = str(raw.get("operation_kind") or "")
+    if "scope" in raw:
+        out["scope"] = str(raw.get("scope") or "")
     return out
 
 
@@ -1295,6 +1301,16 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             "decision": str(raw.get("decision") or ""),
             "source": str(raw.get("source") or ""),
             "ts": str(raw.get("ts") or ""),
+            "duration_sec": next(
+                (
+                    _to_float(raw.get(field))
+                    for field in ("duration_sec", "elapsed_sec", "elapsed")
+                    if _to_float(raw.get(field)) is not None
+                ),
+                None,
+            ),
+            "error_class": str(raw.get("error_class") or ""),
+            "error": str(raw.get("error") or raw.get("reason") or ""),
             "precision": str(raw.get("precision") or precision),
             "framework": str(raw.get("framework") or framework),
             "gpu_type": str(raw.get("gpu_type") or gpu_type),
@@ -1324,6 +1340,10 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
             run["tuners_skipped"] = raw["tuners_skipped"]
         if isinstance(raw.get("summary"), dict):
             run["summary"] = raw["summary"]
+        if isinstance(raw.get("parameters"), dict):
+            run["parameters"] = raw["parameters"]
+        if isinstance(raw.get("candidates"), list):
+            run["candidates"] = raw["candidates"]
         if isinstance(raw.get("shapes"), list):
             run["shapes"] = raw["shapes"]
         runs.append(run)

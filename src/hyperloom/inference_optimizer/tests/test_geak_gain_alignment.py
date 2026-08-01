@@ -18,10 +18,12 @@ consistent with GEAK's own e2e speedup:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_helpers import (
@@ -240,6 +242,43 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
         "alignment_metrics": {"cold_geak_speedup": 1.088, "final_basis": "cold"},
     }
+    journey_path = tmp_path / "kernel_journey.json"
+    journey_path.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "candidate-kernel",
+                        "e2e": {
+                            "integrated": True,
+                            "e2e_gain_pct": 1.686,
+                            "validated": True,
+                            "decision": "KEEP",
+                        },
+                    },
+                    {
+                        "kernel_id": "already-reverted",
+                        "e2e": {
+                            "integrated": False,
+                            "e2e_gain_pct": -1.0,
+                            "validated": False,
+                            "decision": "REVERT",
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.geak_result["kernel_journey_path"] = str(journey_path)
+    coord._record_geak_kernel_journey(coord.shared_state.geak_result)
+    provisional_rows = {
+        row["kernel_id"]: row
+        for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    }
+    provisional = provisional_rows["candidate-kernel"]["e2e"]
+    assert provisional["decision"] == "KEEP"
+    assert provisional["validated"] is True
 
     async def _fake_sweep(**_kwargs):
         return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
@@ -256,6 +295,35 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
+    rejected = assemble_parts(tmp_path)
+    rejected_rows = {
+        row["kernel_id"]: row for row in rejected["kernel_journey"]["kernels"]
+    }
+    e2e = rejected_rows["candidate-kernel"]["e2e"]
+    assert e2e["decision"] == "REVERT"
+    assert e2e["validated"] is False
+    assert e2e["integrated"] is False
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == pytest.approx(1.686)
+    assert e2e["revalidation_measured_tput"] == pytest.approx(measured)
+    assert e2e["revalidation_current_best_tput"] == pytest.approx(current_best)
+    assert e2e["rejection_reason"] == "rebench_did_not_beat_current_best"
+    untouched = rejected_rows["already-reverted"]["e2e"]
+    assert untouched["decision"] == "REVERT"
+    assert untouched["e2e_gain_pct"] == pytest.approx(-1.0)
+    assert "rejection_reason" not in untouched
+
+    coord.phase_kernel._reject_geak_kernel_journey(
+        coord.shared_state.geak_result,
+        measured_tput=measured,
+        current_best_tput=current_best,
+        provenance="geak_same_harness_geak",
+    )
+    repeated = assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    assert len(repeated) == 2
+    adoption = rejected["adoptions"][0]
+    assert adoption["decision"] == "REVERT"
+    assert adoption["validated"] is False
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─

@@ -510,17 +510,18 @@ def test_parse_isl_osl() -> None:
     assert _parse_isl_osl("") == (1024, 1024)
 
 
-def test_schema_has_geak_contract() -> None:
-    # The wire schema must declare the top-level ``geak`` section the exporter emits.
+def test_schema_has_optimizations_contract() -> None:
+    # V5 exposes adopted GEAK results through the canonical optimizations section.
     from hyperloom.inference_optimizer.breakdown import schema
 
-    assert hasattr(schema, "Geak")
-    assert "geak" in schema.SessionBreakdown.__annotations__
+    assert hasattr(schema, "Optimizations")
+    assert "optimizations" in schema.SessionBreakdown.__annotations__
     # ``from __future__ import annotations`` stores the type as a string ref.
-    assert "Geak" in str(schema.SessionBreakdown.__annotations__["geak"])
+    assert "Optimizations" in str(schema.SessionBreakdown.__annotations__["optimizations"])
+    assert "geak" not in schema.SessionBreakdown.__annotations__
     # A few representative fields must be part of the declared shape.
-    for field in ("engaged", "status", "error_class", "throughput_speedup", "accepted_kernels"):
-        assert field in schema.Geak.__annotations__
+    for field in ("entries", "backend_attempts", "summary_by_source", "validation"):
+        assert field in schema.Optimizations.__annotations__
 
 
 @pytest.mark.asyncio
