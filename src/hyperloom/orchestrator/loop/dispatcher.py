@@ -393,9 +393,10 @@ class DispatcherCollaborator:
                 params = task.params or {}
                 needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 # Explicit wall-clock budget (lane-tiered base × macro_cycle,
-                # capped at 4h).
+                # with a benchmark-profile floor and capped by session time).
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
                     needs_gpu=needs_gpu,
+                    params=params,
                 )
                 extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
                 if needs_gpu:
@@ -469,7 +470,10 @@ class DispatcherCollaborator:
                     # TTL re-sourced to the wall budget. Iron law:
                     # kill <= gpu_lease TTL <= gpu_research_lane TTL. Both TTLs
                     # come from ``_gpu_lease_ttl_sec`` so they never drift apart.
-                    gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
+                    gpu_ttl_sec = self._gpu_lease_ttl_sec(
+                        int(task.lease_ttl_sec or 0),
+                        params=params,
+                    )
                     # §3.2: under single-node Ray the physical GPU mutex is Ray's
                     # ``num_gpus``, not this SQLite pool. Admit by a count-based
                     # pending limit so multiple specialists can queue on one
@@ -676,13 +680,23 @@ class DispatcherCollaborator:
 
         return _publish
 
-    def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
+    def _specialist_wall_budget_sec(
+        self,
+        *,
+        needs_gpu: bool,
+        params: dict[str, Any] | None = None,
+    ) -> float:
         """Compute the explicit wall-clock budget for a specialist task.
 
         The budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
-        macro-cycle count and hard-capped at 4h::
+        macro-cycle count and hard-capped at 4h. Bench-capable patch specialists
+        are floored at the rebench helper's timeout plus a 10-minute startup
+        allowance. Any finite session budget remains an upper bound::
 
-            budget_min = min(base × (macro_cycle + 1), 240)
+            budget_sec = min(base × (macro_cycle + 1), 240 min)
+            if profile.bench:
+                budget_sec = max(budget_sec, rebench_timeout + 10 min)
+            budget_sec = min(budget_sec, session_remaining)
 
         ``macro_cycle`` grows whenever a new macro-cycle opens, including short
         bounded runs. As cycles progress, specialists get more room to complete
@@ -691,6 +705,8 @@ class DispatcherCollaborator:
         Args:
             needs_gpu: Whether the specialist holds a GPU lease (selects the
                 60min GPU lane base vs the 10min cpu base).
+            params: Specialist dispatch parameters, used to identify
+                bench-capable patch specialists.
 
         Returns:
             float: The wall-clock budget in seconds.
@@ -698,7 +714,17 @@ class DispatcherCollaborator:
         base_min = 60.0 if needs_gpu else 10.0
         macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
-        return budget_min * 60.0
+        budget_sec = budget_min * 60.0
+        from ..specialists.profile import resolve_specialist_profile
+        from ..specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+
+        profile = resolve_specialist_profile(params or {})
+        if profile.reserves_benchmark_lane:
+            budget_sec = max(budget_sec, float(DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60))
+        session_remaining_min = self.shared_state.remaining_minutes()
+        if session_remaining_min is not None:
+            budget_sec = min(budget_sec, session_remaining_min * 60.0)
+        return max(0.0, budget_sec)
 
     def _resolve_serving_tp(self) -> int:
         """Resolve the live serving process's TP size (cards it holds).
@@ -720,7 +746,12 @@ class DispatcherCollaborator:
         except ValueError:
             return 0
 
-    def _gpu_lease_ttl_sec(self, floor_ttl_sec: int = 0) -> int:
+    def _gpu_lease_ttl_sec(
+        self,
+        floor_ttl_sec: int = 0,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
 
         The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
@@ -732,13 +763,21 @@ class DispatcherCollaborator:
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
                 ``lease_ttl_sec``) the computed TTL is raised to.
+            params: Specialist dispatch parameters used to derive the same
+                profile-aware wall budget as the subprocess reaper.
 
         Returns:
             int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
         """
         return max(
             int(floor_ttl_sec or 0),
-            int(self._specialist_wall_budget_sec(needs_gpu=True) * (1.0 + GPU_LEASE_TTL_GRACE)),
+            int(
+                self._specialist_wall_budget_sec(
+                    needs_gpu=True,
+                    params=params,
+                )
+                * (1.0 + GPU_LEASE_TTL_GRACE)
+            ),
         )
 
     async def _reap_dispatched_task(
