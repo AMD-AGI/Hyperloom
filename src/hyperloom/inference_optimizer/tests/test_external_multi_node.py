@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import sys
 import time
@@ -431,20 +432,92 @@ def test_bookkeeping_is_dropped_when_the_cluster_was_replaced(
     assert state["prefill_pod_ips"] == ["10.0.1.1"]
 
 
-def test_unset_nodes_falls_back_to_the_handed_over_pod_count(
+def test_unset_nodes_stays_single_pod_and_says_so(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A subcommand that did not inherit NODES must not degrade to one pod.
+    """An unstated count is reported, never inferred.
 
-    ``hyperloom-mn restart-server`` invoked on its own got ``nodes=1`` and took
-    the single-pod path, which starts one detached server per pod instead of one
-    cluster across them. Nothing states an intent here, so the two GPU pod IPs
-    the platform handed over are the only evidence of the cluster's shape.
+    ``nodes`` is passed verbatim to the framework as ``--nnodes``, which then
+    waits for exactly that many ranks, so guessing high hangs the launch instead
+    of degrading it. Guessing low only takes the single-pod path, which is
+    recoverable once it is visible -- so the run stays at 1 and names the pods it
+    saw, rather than inventing a size the caller never stated.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
-    assert ext.build_external_state_from_env()["nodes"] == 2
+    with caplog.at_level(logging.WARNING):
+        assert ext.build_external_state_from_env()["nodes"] == 1
+
+    assert "carries 2 GPU pod IPs" in caplog.text
+    assert "--nodes 2" in caplog.text
+
+
+def test_a_single_pod_handoff_without_nodes_warns_about_nothing(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One pod and one node agree, so there is nothing to report."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_WORKER_IPS", "10.0.1.1")
+
+    with caplog.at_level(logging.WARNING):
+        assert ext.build_external_state_from_env()["nodes"] == 1
+
+    assert "GPU pod IPs" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("pd_mode", "env", "expected"),
+    [
+        # On contract: the unused list is empty either way.
+        ("disaggregated", {"HYPERLOOM_MN_EXT_PREFILL_IPS": "a,b", "HYPERLOOM_MN_EXT_DECODE_IPS": "c,d"}, 4),
+        ("aggregated", {"HYPERLOOM_MN_EXT_WORKER_IPS": "a,b,c,d"}, 4),
+        # Off contract: the worker list repeats the PD pods. Summing all three
+        # reported eight pods for a cluster of four.
+        (
+            "disaggregated",
+            {
+                "HYPERLOOM_MN_EXT_PREFILL_IPS": "a,b",
+                "HYPERLOOM_MN_EXT_DECODE_IPS": "c,d",
+                "HYPERLOOM_MN_EXT_WORKER_IPS": "a,b,c,d",
+            },
+            4,
+        ),
+        # A role listing the same pod twice is still one pod.
+        ("aggregated", {"HYPERLOOM_MN_EXT_WORKER_IPS": "a,a,b"}, 2),
+    ],
+)
+def test_pod_count_follows_the_mode_that_will_use_the_pods(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pd_mode: str,
+    env: dict[str, str],
+    expected: int,
+) -> None:
+    """The three IP lists are alternatives, and the mode picks between them.
+
+    ``gpu_ssh_targets_from_state`` selects prefill+decode or worker by mode, and
+    SKILL.md documents the same split, so a count that adds all three describes
+    a cluster nobody has.
+    """
+    for role in ("PREFILL", "DECODE", "WORKER"):
+        monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
+    monkeypatch.setenv("PD_MODE", pd_mode)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    # A deliberately wrong stated count, so the reported one lands in the log.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "99")
+
+    with caplog.at_level(logging.WARNING):
+        ext.build_external_state_from_env()
+
+    assert f"disagrees with the {expected} GPU pod IPs" in caplog.text
 
 
 def test_stated_single_node_survives_a_multi_pod_handoff(
@@ -463,16 +536,25 @@ def test_stated_single_node_survives_a_multi_pod_handoff(
     assert ext.build_external_state_from_env()["nodes"] == 1
 
 
-def test_rayjob_handoff_without_pod_ips_keeps_the_stated_node_count(
+def test_a_rayjob_handoff_takes_its_node_count_only_from_the_flag(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rayjob hand-off carries no pod IPs, so there is nothing to cross-check."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    """A rayjob hand-off names its cluster by head IP and never by pod, so its
+    size can only come from the caller.
+
+    Nothing in ``HYPERLOOM_MN_EXT_HEAD_IP`` says how large the cluster is -- it
+    is a Service address -- which is why inferring a count from the hand-off
+    could never have helped this backend.
+    """
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
 
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "4")
+    assert ext.build_external_state_from_env()["nodes"] == 4
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES")
     assert ext.build_external_state_from_env()["nodes"] == 1
 
 

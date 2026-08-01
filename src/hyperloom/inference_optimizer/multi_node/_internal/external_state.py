@@ -72,26 +72,51 @@ def _handoff_backend(*, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
     return _DEFAULT_MN_BACKEND
 
 
-def _handoff_nodes(pod_ip_count: int) -> int:
-    """Resolve the run's node count, deriving one only when nobody stated any.
+def _handoff_pod_count(pd_mode: str, *, prefill: list[str], decode: list[str], worker: list[str]) -> int:
+    """How many GPU pods this hand-off actually puts to work.
 
-    A stated ``$INFERENCE_OPTIMIZER_NODES`` is honoured verbatim, and a
-    disagreement with the hand-off is only reported. This asymmetry is
-    deliberate: ``is_multi_node()`` consults this value before it consults the
-    environment, so inferring a larger count from the handed-over shape would
-    drag a single-node run onto the multi-node path in any sandbox that exports
-    pod IPs, which is the one property the hand-off must not disturb.
-
-    An unset variable is the opposite case, since nothing is being overridden. A
-    standalone ``hyperloom-mn`` subcommand that did not inherit it used to fall
-    back to 1 and silently take the single-pod path -- which starts one detached
-    server per pod rather than one cluster across them -- so there the handed-over
-    pod count is the only statement of intent available and it wins.
+    The three IP lists are alternatives, not parts of a whole: PD serves from
+    prefill plus decode, aggregated serves from worker, and
+    ``infera_support.gpu_ssh_targets_from_state`` picks between them the same
+    way. Summing all three would double-count a platform that populates the
+    worker list as the union as well -- reporting eight pods for a cluster of
+    four -- so the mode chooses, and repeated IPs collapse.
 
     Args:
-        pod_ip_count: How many GPU pod IPs the hand-off carries. Zero for a
-            rayjob hand-off, which describes its cluster by head IP alone and so
-            offers nothing to cross-check.
+        pd_mode: ``"disaggregated"`` or anything else.
+        prefill: ``HYPERLOOM_MN_EXT_PREFILL_IPS`` entries.
+        decode: ``HYPERLOOM_MN_EXT_DECODE_IPS`` entries.
+        worker: ``HYPERLOOM_MN_EXT_WORKER_IPS`` entries.
+
+    Returns:
+        int: Distinct GPU pod count, 0 when the hand-off names no pods.
+    """
+    used = prefill + decode if pd_mode == "disaggregated" else worker
+    return len(set(used))
+
+
+def _handoff_nodes(pod_ip_count: int) -> int:
+    """Resolve the run's node count from the only source allowed to state it.
+
+    This value is not merely routing. ``cmd_restart_server`` passes it verbatim
+    as ``--nnodes``, and the framework then waits for exactly that many ranks to
+    join the collective, so a wrong count does not slow a run down -- it hangs
+    it. Nothing here guesses, therefore: ``$INFERENCE_OPTIMIZER_NODES`` decides,
+    and the hand-off's shape is only ever reported.
+
+    That leaves two ways to be wrong, and they are not symmetric. Reading too
+    high is unrecoverable: ``is_multi_node()`` consults this before the
+    environment, so it would pull a single-node run onto the multi-node path in
+    any sandbox that exports pod IPs for an unrelated cluster, and the launch
+    would then wait on ranks that do not exist. Reading too low costs a
+    diagnosable mistake -- the single-pod path starts one detached server rather
+    than one cluster -- so an unstated count stays at 1 and says so.
+
+    Args:
+        pod_ip_count: How many GPU pod IPs this hand-off carries, counted the
+            way the run will actually use them. Zero for a rayjob hand-off,
+            which names its cluster by head IP alone and so says nothing about
+            its size; used only to make the log lines specific.
 
     Returns:
         int: The node count to record in the synthesized state.
@@ -102,21 +127,28 @@ def _handoff_nodes(pod_ip_count: int) -> int:
             stated = int(raw)
         except ValueError:
             log.warning(
-                "external mode: INFERENCE_OPTIMIZER_NODES=%r is not an integer; "
-                "falling back to the %d GPU pod IPs handed over",
+                "external mode: INFERENCE_OPTIMIZER_NODES=%r is not an integer; treating the run "
+                "as single-pod. Pass --nodes to state the cluster's size.",
                 raw,
-                pod_ip_count,
             )
         else:
             if pod_ip_count and stated != pod_ip_count:
                 log.warning(
-                    "external mode: INFERENCE_OPTIMIZER_NODES=%d disagrees with the %d GPU "
-                    "pod IPs handed over; honouring the stated value",
+                    "external mode: INFERENCE_OPTIMIZER_NODES=%d disagrees with the %d GPU pod IPs "
+                    "handed over; honouring the stated value",
                     stated,
                     pod_ip_count,
                 )
             return max(1, stated)
-    return max(1, pod_ip_count)
+    elif pod_ip_count > 1:
+        log.warning(
+            "external mode: the hand-off carries %d GPU pod IPs but INFERENCE_OPTIMIZER_NODES is "
+            "unset, so this run takes the single-pod path and will start one detached server "
+            "instead of one cluster. Pass --nodes %d.",
+            pod_ip_count,
+            pod_ip_count,
+        )
+    return 1
 
 
 def external_service_url() -> str:
@@ -201,7 +233,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         has_pod_ips=bool(prefill or decode or worker),
         head_ip=head_ip,
     )
-    nodes = _handoff_nodes(len(prefill) + len(decode) + len(worker))
+    nodes = _handoff_nodes(_handoff_pod_count(pd_mode, prefill=prefill, decode=decode, worker=worker))
     ray_address = f"{head_ip}:6379" if head_ip else ""
     ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
 
