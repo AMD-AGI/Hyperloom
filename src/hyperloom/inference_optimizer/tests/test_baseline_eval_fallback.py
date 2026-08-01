@@ -350,7 +350,7 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    state = SharedState()
+    state = SharedState(enablement_mode="off")
     ctx = _make_baseline_ctx(
         {
             "output_dir": str(tmp_path / "ws"),
@@ -394,7 +394,7 @@ def test_baseline_operator_disabled_eval_still_stops(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    state = SharedState()
+    state = SharedState(enablement_mode="off")
     ctx = _make_baseline_ctx(
         {
             "output_dir": str(tmp_path / "ws"),
@@ -450,7 +450,7 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    state = SharedState()
+    state = SharedState(enablement_mode="off")
     ctx = _make_baseline_ctx(
         {
             "output_dir": str(tmp_path / "ws"),

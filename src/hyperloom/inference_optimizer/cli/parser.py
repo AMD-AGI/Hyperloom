@@ -650,14 +650,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--enablement",
         dest="enablement",
         choices=["off", "launch", "eval", "all"],
-        default="off",
+        default="all",
         help="Admit the enablement self-heal lanes, which author framework "
         "patches when the baseline cannot be established. 'launch' handles a "
         "baseline that fails to boot; 'eval' handles one that boots but misses "
-        "the accuracy floor; 'all' handles both. Default 'off': a baseline that "
-        "keeps failing terminates the run with stop_reason='baseline_failed' "
-        "instead of opening an authoring loop. Enable it when you expect the "
-        "model/framework combination to need patching before it can serve.",
+        "the accuracy floor; 'all' (default) handles both. Set 'off' to skip "
+        "self-heal entirely: a baseline that keeps failing then terminates the "
+        "run with stop_reason='baseline_failed' instead of opening an authoring "
+        "loop, which is what you want for a quick triage run or when the model "
+        "is already known to serve.",
     )
     opt.add_argument(
         "--no-framework-local-explore",

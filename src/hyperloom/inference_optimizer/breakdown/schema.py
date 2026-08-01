@@ -2109,13 +2109,14 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
 class EnablementBreakdown(TypedDict, total=False):
     """Enablement subsystem observability section.
 
-    Empty {} only on sessions where enablement was neither admitted nor engaged,
-    so the dashboard hides the block. A boot-origin round repaired by a plain
-    source patch provisions no runtime and builds nothing, so admission and round
-    lifecycle are reported independently of those artifacts.
+    Emitted when the lane did something or was explicitly turned off; ``all`` is
+    the default, so an armed lane that was never needed stays hidden. A
+    boot-origin round repaired by a plain source patch provisions no runtime and
+    builds nothing, so admission and round lifecycle are reported independently
+    of those artifacts.
 
     Attributes:
-        mode: Admitted lane from ``--enablement``: off / launch / eval / all.
+        mode: Admitted lane from ``--enablement``: launch / eval / all / off.
         engaged: True once a round was dispatched, attempted, or landed a patch.
         origin: Trigger origin: "boot" (cannot launch) or "eval" (accuracy).
         attempts: Number of authoring rounds dispatched this session.

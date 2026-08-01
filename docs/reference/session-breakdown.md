@@ -329,11 +329,14 @@ lane was admitted, what each authoring round did, the patches and stack actions
 it landed, the attempt runtimes it provisioned, and the targeted builds (AITER /
 sgl-kernel / vLLM-source) it attempted.
 
-Emitted as `{}` only when enablement was neither admitted nor engaged, so the
-dashboard hides the block on sessions that do not use it. Admission and round
-lifecycle are reported independently of the artifacts: a boot-origin round
-repaired by a plain source patch provisions no runtime and builds nothing, and
-would otherwise leave no trace at all.
+Emitted when the lane did something, or when it was explicitly turned off — the
+opt-out is what explains a run that failed to establish a baseline without
+anything trying to repair it. Since `all` is the default, an armed lane that was
+never needed stays hidden.
+
+Admission and round lifecycle are reported independently of the artifacts: a
+boot-origin round repaired by a plain source patch provisions no runtime and
+builds nothing, and would otherwise leave no trace at all.
 
 Admission and lifecycle (always present when the block is emitted):
 

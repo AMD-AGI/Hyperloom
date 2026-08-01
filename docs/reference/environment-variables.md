@@ -204,16 +204,15 @@ do not publish it unchanged in support bundles.
 
 Enablement is **not** configured through the environment. Both self-heal lanes
 are admitted by the `--enablement {off,launch,eval,all}` CLI flag, which defaults
-to `off`:
+to `all`:
 
 - `launch` — a baseline that cannot boot routes into patch authoring.
 - `eval` — a baseline that boots and measures throughput but fails its accuracy
   eval (crashes, produces no result, or scores below the floor) routes into
   patch authoring. Single-node only; multi-node keeps the strict stop.
-- `all` — both lanes.
-
-With `off` (the default), neither lane engages and a baseline that keeps failing
-terminates the run with `stop_reason='baseline_failed'`.
+- `all` (default) — both lanes.
+- `off` — neither lane engages, and a baseline that keeps failing terminates the
+  run with `stop_reason='baseline_failed'` instead of opening an authoring loop.
 
 The accuracy floor shared by the eval trigger and the enablement KEEP gate is the
 fixed constant `_accuracy_gate.DEFAULT_ENABLEMENT_ACCURACY_FLOOR` (`0.05`). It is

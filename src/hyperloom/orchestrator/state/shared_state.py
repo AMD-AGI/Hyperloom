@@ -408,9 +408,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     #   attempt; cleared when the attempt REVERTs.
     # ``enablement_attempts``: number of dispatches (candidate rotation / idempotency).
     # ``enablement_succeeded``: terminal KEEP guard.
-    # Admission for both enablement lanes, from ``--enablement``: ``off`` (a
-    # broken baseline fast-fails), ``launch``, ``eval`` or ``all``.
-    enablement_mode: str = "off"
+    # Admission for both enablement lanes, from ``--enablement``: ``launch``,
+    # ``eval``, ``all`` (default) or ``off`` — with ``off`` a broken baseline
+    # fast-fails instead of opening an authoring loop.
+    enablement_mode: str = "all"
     enablement_launch_log: str = ""
     enablement_dispatched: bool = False
     enablement_attempts: int = 0

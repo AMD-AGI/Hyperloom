@@ -231,13 +231,16 @@ def test_collect_enablement_boot_origin_round_surfaced():
     assert "EngineCore failed to start." in out["launch_log_excerpt"]
 
 
-def test_collect_enablement_admitted_but_never_engaged():
-    """An armed lane that never fired is distinguishable from a disabled one."""
-    out = collect_enablement(Path("/tmp"), _state(enablement_mode="all"), [])
-    assert out["mode"] == "all"
-    assert out["engaged"] is False
-    assert out["attempts"] == 0
-    assert collect_enablement(Path("/tmp"), _state(enablement_mode="off"), []) == {}
+def test_collect_enablement_opt_out_recorded_but_armed_idle_hidden():
+    """``all`` is the default, so an armed lane that never fired is not worth a
+    block; an explicit opt-out is, since it explains why nothing self-healed."""
+    off_out = collect_enablement(Path("/tmp"), _state(enablement_mode="off"), [])
+    assert off_out["mode"] == "off"
+    assert off_out["engaged"] is False
+    assert off_out["attempts"] == 0
+    assert collect_enablement(Path("/tmp"), _state(enablement_mode="all"), []) == {}
+    # A session predating the flag loads with the SharedState default.
+    assert collect_enablement(Path("/tmp"), _state(), []) == {}
 
 
 def test_collect_enablement_kept_patches_relativized_and_log_bounded():

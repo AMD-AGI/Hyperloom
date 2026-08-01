@@ -120,10 +120,11 @@ The LLM doesn't own a separate framework role in the current runtime.
 
 ### Enablement escalation ladder
 
-Enablement is opt-in through `--enablement {off,launch,eval,all}` and is `off` by
-default: without it, a baseline that keeps failing terminates the run with
-`stop_reason='baseline_failed'` rather than opening an authoring loop. `launch`
-admits the boot-failure lane, `eval` the accuracy-failure lane, `all` both.
+Enablement admission is controlled by `--enablement {off,launch,eval,all}`,
+defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
+accuracy-failure lane, `all` both. With `off`, neither engages and a baseline
+that keeps failing terminates the run with `stop_reason='baseline_failed'`
+rather than opening an authoring loop.
 
 When the admitted lane fires — a `(model, backend)` combination cannot launch, or
 it launches but fails its accuracy eval (`accuracy_below_floor` /

@@ -1374,10 +1374,10 @@ def collect_enablement(
     A boot-origin round repaired by a plain source patch provisions no runtime
     and builds nothing, so gating emission on those artifacts alone made the most
     common kind of enablement invisible. Emission is therefore keyed on the lane
-    being admitted or engaged.
-
-    Returns ``{}`` only when enablement was never admitted and never ran, so the
-    dashboard hides the block on sessions that do not use it.
+    having done something, or on it having been explicitly turned off — with
+    ``all`` the default, "armed but never needed" is the uninteresting case and
+    stays hidden, while "opted out" explains why nothing tried to repair a run
+    that failed to establish a baseline.
     """
     stack_actions_raw = state.get("enablement_stack_actions")
     active_runtime_raw = state.get("enablement_active_runtime")
@@ -1392,7 +1392,9 @@ def collect_enablement(
     # eval_kind is NOT cleared on success, so it can identify an eval-origin
     # enablement even after the run succeeds and origin is reset to "".
     eval_kind = str(state.get("enablement_baseline_eval_kind") or "")
-    mode = str(state.get("enablement_mode") or "off").strip().lower() or "off"
+    # Sessions predating the flag load with the SharedState default, so that is
+    # also the right value to report for them.
+    mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
     attempts = _as_int(state.get("enablement_attempts"))
     dispatched = bool(state.get("enablement_dispatched"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
@@ -1406,7 +1408,7 @@ def collect_enablement(
     engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_actions or have_eval)
     if not (
         engaged
-        or mode != "off"
+        or mode == "off"
         or have_active
         or have_attempts
         or have_build_manifest

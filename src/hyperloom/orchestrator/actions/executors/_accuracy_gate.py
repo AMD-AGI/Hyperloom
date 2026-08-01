@@ -115,13 +115,17 @@ def require_framework_accuracy_default() -> bool:
 
 
 def resolve_enablement_mode(shared_state: Any) -> str:
-    """Read the session's enablement mode, defaulting to ``off``.
+    """Read the session's enablement mode.
+
+    Falls back to ``off`` rather than to the SharedState default: a caller that
+    cannot produce the field has not told us the operator opted in, and denying
+    an authoring round is the recoverable direction.
 
     Args:
         shared_state: The live SharedState (``None`` in some executor contexts).
 
     Returns:
-        One of :data:`ENABLEMENT_MODES`; unknown values collapse to ``off``.
+        One of :data:`ENABLEMENT_MODES`; missing or unknown values yield ``off``.
     """
     mode = str(getattr(shared_state, "enablement_mode", "") or "").strip().lower()
     return mode if mode in ENABLEMENT_MODES else ENABLEMENT_MODE_OFF

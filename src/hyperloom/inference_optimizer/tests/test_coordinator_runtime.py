@@ -1069,7 +1069,7 @@ async def test_handle_unpromotable_baseline_eval_fails_fast_without_eval_lane(se
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        assert c.shared_state.enablement_mode == "off"
+        c.shared_state.enablement_mode = "off"
         for i in range(3):
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-noev-{i}"), _eval_failed_result())
         assert c.shared_state.stop_reason == "baseline_failed"
@@ -1085,6 +1085,7 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
     try:
         # An enablement round is on record, but the lane was never admitted, so
         # it must not hold the baseline_failed budget open.
+        c.shared_state.enablement_mode = "off"
         c.shared_state.enablement_attempts = 2
         c.shared_state.enablement_dispatched = True
         for i in range(3):

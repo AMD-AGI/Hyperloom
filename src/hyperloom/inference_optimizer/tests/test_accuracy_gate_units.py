@@ -125,7 +125,8 @@ class TestEnablementReaders:
         assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
         assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 
-    def test_mode_defaults_to_off(self):
+    def test_missing_mode_is_fail_closed(self):
+        """A caller that cannot supply the field has not opted in."""
         assert ag.resolve_enablement_mode(None) == ag.ENABLEMENT_MODE_OFF
         assert ag.resolve_enablement_mode(SimpleNamespace()) == ag.ENABLEMENT_MODE_OFF
 
