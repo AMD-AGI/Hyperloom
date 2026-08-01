@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -534,8 +535,12 @@ def _fake_serving_httpx(
     completion_status: int = 200,
     completion_tokens: int = 8,
     seen: list[str] | None = None,
+    budgets: list[float] | None = None,
+    delay_s: float = 0.0,
 ) -> types.SimpleNamespace:
     """Stand-in httpx routing by URL across the three serving checks."""
+    if budgets is None:
+        budgets = []
 
     class _Resp:
         def __init__(self, status: int, payload: dict | None = None) -> None:
@@ -555,18 +560,24 @@ def _fake_serving_httpx(
         def __exit__(self, *_exc: object) -> bool:
             return False
 
-        def get(self, url: str) -> _Resp:
+        def get(self, url: str, timeout: float | None = None) -> _Resp:
             if seen is not None:
                 seen.append(url)
+            if timeout is not None:
+                budgets.append(timeout)
+            if delay_s:
+                time.sleep(delay_s)
             if url.endswith("/health"):
                 return _Resp(503 if url[: -len("/health")] in down_legs else health)
             if url.endswith("/v1/models"):
                 return _Resp(200, {"data": [{"id": m} for m in models]})
             raise AssertionError(f"unexpected GET {url}")
 
-        def post(self, url: str, json: dict | None = None) -> _Resp:
+        def post(self, url: str, json: dict | None = None, timeout: float | None = None) -> _Resp:
             if seen is not None:
                 seen.append(url)
+            if timeout is not None:
+                budgets.append(timeout)
             return _Resp(completion_status, {"usage": {"completion_tokens": completion_tokens}})
 
     return types.SimpleNamespace(Client=_Client)
@@ -628,6 +639,36 @@ def test_pd_disaggregated_rejects_a_single_dead_leg(monkeypatch: pytest.MonkeyPa
     )
 
     assert serving_probe.cluster_is_serving(_PD_STATE, pd_mode="disaggregated", timeout_s=5) is False
+
+
+def test_serving_probe_budget_is_shared_by_every_request_it_makes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget is for the probe, not for each call inside it.
+
+    PD asks up to four times over: both legs, /v1/models, then a completion. A
+    per-request timeout would let a slow cluster spend several multiples of the
+    stated budget while the caller believes it bounded the wait.
+    """
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    budgets: list[float] = []
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx(budgets=budgets, delay_s=0.05))
+
+    assert serving_probe.cluster_is_serving(_PD_STATE, pd_mode="disaggregated", timeout_s=2) is True
+    assert len(budgets) == 4
+    assert budgets == sorted(budgets, reverse=True), "each call must inherit what the last one left"
+    assert budgets[0] <= 2
+
+
+def test_serving_probe_stops_once_its_budget_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spent budget ends the probe instead of starting another request."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    seen: list[str] = []
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx(seen=seen, delay_s=0.05))
+
+    # Enough for the first leg, nothing left for the second.
+    assert serving_probe.cluster_is_serving(_PD_STATE, pd_mode="disaggregated", timeout_s=0.04) is False
+    assert seen == ["http://10.0.1.1:30000/health"]
 
 
 def test_unresolvable_endpoints_short_circuit_without_asking(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -774,6 +815,46 @@ def test_ranks_alive_requires_every_recorded_process(
     args = argparse.Namespace(poll_interval=1, poll_timeout=5)
 
     assert mncli._ranks_alive({}, "/tmp/multi_node_pids", args) is expected
+
+
+def test_ranks_alive_polls_on_its_own_budget_not_the_http_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Ray fan-out is not an HTTP call and cannot share its budget.
+
+    The liveness probe submits a job that must be scheduled, start an
+    interpreter, run ray.init and place one actor per node before it answers.
+    Handing it the serving probe's seconds-scale budget timed it out every time,
+    and because a failed probe reads as "not resumable", the cluster it was
+    supposed to protect got relaunched anyway.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    budgets: list[int] = []
+
+    class _FakeRay:
+        def get_job(self, _sub: str) -> dict[str, str]:
+            return {"status": "SUCCEEDED"}
+
+        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
+            return "probe-1"
+
+        def get_job_logs(self, _sub: str) -> str:
+            return json.dumps({"total": 2, "alive": 2, "dead": 0})
+
+    @contextlib.contextmanager
+    def _fake_client(_state: object):
+        yield _FakeRay()
+
+    def _record_poll(**kwargs: object) -> dict[str, str]:
+        budgets.append(int(kwargs["timeout_s"]))  # type: ignore[arg-type]
+        return {"status": "SUCCEEDED"}
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
+    monkeypatch.setattr(mncli, "_build_multinode_probe_entrypoint", lambda *_a, **_k: "probe-ep")
+    monkeypatch.setattr(mncli, "_short_poll", _record_poll)
+
+    assert mncli._ranks_alive({}, "/tmp/pids", argparse.Namespace(poll_interval=1, poll_timeout=5)) is True
+    assert budgets == [mncli._resume_liveness_timeout_s()]
+    assert budgets[0] > mncli._resume_probe_timeout_s()
 
 
 def test_ranks_alive_treats_an_unreachable_cluster_as_not_resumable(monkeypatch: pytest.MonkeyPatch) -> None:

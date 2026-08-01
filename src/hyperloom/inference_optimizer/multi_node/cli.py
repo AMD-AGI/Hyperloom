@@ -92,10 +92,22 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
 _TERMINAL_FAIL_STATUSES = {"FAILED", "STOPPED"}
 _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 
-# Budget for the single /health probe that gates a resume. Short by design: it
-# is deciding an optimization, not waiting for readiness.
+# Overall budget for the HTTP serving probe, spanning every request it makes:
+# one /health per leg, /v1/models, then a /v1/completions that has to generate
+# real tokens. Short, because it decides an optimization rather than waiting for
+# readiness, but not per-request-short -- token generation on a loaded server is
+# the slow step, and undershooting it just spends the liveness fan-out instead.
 _RESUME_PROBE_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S"
-_DEFAULT_RESUME_PROBE_TIMEOUT_S = 10
+_DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
+
+# Budget for the rank-liveness fan-out, which is a Ray job rather than an HTTP
+# call: submission, scheduling, interpreter start, ray.init and one actor per
+# node all land inside it, so it belongs to a different order of magnitude than
+# the serving probe. Must clear probe_multinode.py's own per-actor wait. Only
+# spent when the cluster is not already serving, and only to avoid relaunching
+# over a multi-minute boot, so a slow answer here is still the cheap outcome.
+_RESUME_LIVENESS_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S"
+_DEFAULT_RESUME_LIVENESS_TIMEOUT_S = 240
 
 
 def _normalize_extra_args(s: str | None) -> str:
@@ -1630,7 +1642,7 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
 
 
 def _resume_probe_timeout_s() -> int:
-    """Whole-request budget for the resume health probe.
+    """Overall budget for the HTTP serving probe, across all of its requests.
 
     Returns:
         int: Seconds, from ``$HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S`` or the default.
@@ -1639,6 +1651,18 @@ def _resume_probe_timeout_s() -> int:
         return max(1, int(os.environ.get(_RESUME_PROBE_TIMEOUT_ENV, "") or _DEFAULT_RESUME_PROBE_TIMEOUT_S))
     except ValueError:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
+
+
+def _resume_liveness_timeout_s() -> int:
+    """Budget for the rank-liveness Ray job, from submission to summary.
+
+    Returns:
+        int: Seconds, from ``$HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S`` or the default.
+    """
+    try:
+        return max(1, int(os.environ.get(_RESUME_LIVENESS_TIMEOUT_ENV, "") or _DEFAULT_RESUME_LIVENESS_TIMEOUT_S))
+    except ValueError:
+        return _DEFAULT_RESUME_LIVENESS_TIMEOUT_S
 
 
 def _build_multinode_probe_entrypoint(pid_dir: str) -> str:
@@ -1699,7 +1723,7 @@ def _ranks_alive(state: dict[str, Any], pid_dir: str, args: argparse.Namespace) 
                 is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
                 is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
                 interval_s=args.poll_interval,
-                timeout_s=_resume_probe_timeout_s(),
+                timeout_s=_resume_liveness_timeout_s(),
             )
             summary = _extract_launcher_summary(ray.get_job_logs(sub))
     except Exception as exc:  # noqa: BLE001

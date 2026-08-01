@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from .external_state import reachable_service_url
@@ -114,7 +115,10 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
     Args:
         state: Multi-node state naming the frontend and, for PD, both legs.
         pd_mode: ``"disaggregated"`` or anything else.
-        timeout_s: Per-request budget.
+        timeout_s: Budget for the whole probe, not per request. Each call gets
+            what is left of it, so a slow leg cannot hand the next check a fresh
+            budget. httpx applies a timeout per phase rather than per call, so a
+            single request can still overrun by one connect phase.
 
     Returns:
         bool: True only when every check passes on this attempt.
@@ -129,15 +133,31 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
         log.info("serving probe: httpx unavailable")
         return False
 
+    deadline = time.monotonic() + timeout_s
+
+    def _left() -> float:
+        """Seconds still available to the probe.
+
+        Returns:
+            float: Remaining budget; <= 0 once it is spent.
+        """
+        return deadline - time.monotonic()
+
     try:
-        with httpx.Client(timeout=timeout_s) as client:
+        with httpx.Client() as client:
             for leg in legs:
-                resp = client.get(leg.rstrip("/") + "/health")
+                if _left() <= 0:
+                    log.info("serving probe: %ds budget spent before %s answered", timeout_s, leg.rstrip("/"))
+                    return False
+                resp = client.get(leg.rstrip("/") + "/health", timeout=_left())
                 if resp.status_code != 200:
                     log.info("serving probe: %s/health returned %s", leg.rstrip("/"), resp.status_code)
                     return False
 
-            models = client.get(front.rstrip("/") + "/v1/models")
+            if _left() <= 0:
+                log.info("serving probe: %ds budget spent before /v1/models answered", timeout_s)
+                return False
+            models = client.get(front.rstrip("/") + "/v1/models", timeout=_left())
             if models.status_code != 200:
                 log.info("serving probe: /v1/models returned %s", models.status_code)
                 return False
@@ -154,6 +174,9 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
             # ignore_eos plus several tokens forces the request through the
             # decode leg; prefill alone can answer the first token.
             wanted = _int_env(_PROBE_TOKENS_ENV, _DEFAULT_PROBE_TOKENS)
+            if _left() <= 0:
+                log.info("serving probe: %ds budget spent before /v1/completions was attempted", timeout_s)
+                return False
             completion = client.post(
                 front.rstrip("/") + "/v1/completions",
                 json={
@@ -164,6 +187,7 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
                     "ignore_eos": True,
                     "stream": False,
                 },
+                timeout=_left(),
             )
             if completion.status_code != 200:
                 log.info("serving probe: /v1/completions returned %s", completion.status_code)
