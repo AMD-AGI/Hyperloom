@@ -2308,34 +2308,54 @@ class WritebackCollaborator:
         audit_extras: dict[str, Any] = {}
         tput = result.get("output_throughput")
         warmup_anchor = result.get("warmup_round_tput")
+        tracked_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
+        task_params = (getattr(task, "params", None) or {}) if task is not None else {}
+        is_revalidation = bool(
+            task_params.get("reason") == "enablement_eval_revalidation"
+            or (tracked_tid and tracked_tid == promoting_tid)
+        )
+        # The anchor is the best measurement of the unmodified stack. A later,
+        # lower re-baseline must not replace it, or downstream gains end up
+        # measured against a different reference than the one they claim. A
+        # revalidation is exempt: the enablement patch changed the stack, so the
+        # prior anchor no longer describes anything reproducible.
+        prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        anchor_accepted = bool(
+            isinstance(tput, (int, float))
+            and tput > 0
+            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation)
+        )
         if isinstance(tput, (int, float)) and tput > 0:
-            # Baseline's conclusion contract is the hot measure round; the
-            # discarded cold round is kept only as an audit field so gain math
-            # never mixes cold-before with hot-after.
-            if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                self.shared_state.baseline_tput = float(tput)
-                self.shared_state.baseline_cold_tput = float(warmup_anchor)
-                self.shared_state.baseline_hot_tput = float(tput)
-                log.info(
-                    "baseline anchor: using hot measure tput %.1f as "
-                    "baseline_tput (discarded cold warmup %.1f kept as "
-                    "baseline_cold_tput)",
-                    float(tput),
-                    float(warmup_anchor),
-                )
+            if anchor_accepted:
+                # Baseline's conclusion contract is the hot measure round; the
+                # discarded cold round is kept only as an audit field so gain math
+                # never mixes cold-before with hot-after.
+                if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
+                    self.shared_state.baseline_tput = float(tput)
+                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
+                    self.shared_state.baseline_hot_tput = float(tput)
+                    log.info(
+                        "baseline anchor: using hot measure tput %.1f as "
+                        "baseline_tput (discarded cold warmup %.1f kept as "
+                        "baseline_cold_tput)",
+                        float(tput),
+                        float(warmup_anchor),
+                    )
+                else:
+                    self.shared_state.baseline_tput = float(tput)
             else:
-                self.shared_state.baseline_tput = float(tput)
+                log.info(
+                    "baseline anchor: keeping %.1f; re-baseline measured %.1f "
+                    "(task=%s)",
+                    prior_anchor,
+                    float(tput),
+                    promoting_tid,
+                )
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
             # A genuine baseline may revalidate an eval-origin enablement.
             if bool(getattr(self.shared_state, "enablement_validation_pending", False)):
-                tracked_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
-                promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
-                task_params = getattr(task, "params", None) or {} if task is not None else {}
-                is_revalidation = (
-                    task_params.get("reason") == "enablement_eval_revalidation"
-                    or (tracked_tid and tracked_tid == promoting_tid)
-                )
                 if is_revalidation:
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
@@ -2383,70 +2403,85 @@ class WritebackCollaborator:
                 self.shared_state.enablement_origin = ""
                 self.shared_state.enablement_pending = False
             changed = True
-        acc = result.get("accuracy")
-        if isinstance(acc, (int, float)):
-            self.shared_state.baseline_accuracy = float(acc)
-            changed = True
-        # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
-        materialized = result.get("materialized_config")
-        if isinstance(materialized, str) and materialized:
-            self.shared_state.baseline_config_path = materialized
-            changed = True
-            # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
-            try:
-                parsed = _parse_baseline_workload_extra(materialized)
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception(
-                    "baseline workload extra parsing failed for %s",
-                    materialized,
-                )
-                parsed = {}
-            if parsed:
-                self.shared_state.baseline_workload_extra = parsed
-        # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
-        runtime_sec_raw = result.get("subprocess_runtime_sec")
-        if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
-            self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
-            changed = True
-        # Promote the warm measure-round wall-clock as the anchor for the
-        # explore decision-round overtime kill (present only on the
-        # double-run baseline path; else explore uses the cold anchor).
-        warm_runtime_raw = result.get("measure_round_runtime_sec")
-        if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
-            self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
-            changed = True
-        elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
-            self.shared_state.baseline_warm_runtime_sec = 0.0
-            changed = True
+        # Accuracy / config / wall-clock describe the anchor run, so they only
+        # move when the anchor itself moves; otherwise the recorded reference
+        # tput and the config it was measured with drift apart.
+        if anchor_accepted:
+            acc = result.get("accuracy")
+            if isinstance(acc, (int, float)):
+                self.shared_state.baseline_accuracy = float(acc)
+                changed = True
+            # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
+            materialized = result.get("materialized_config")
+            if isinstance(materialized, str) and materialized:
+                self.shared_state.baseline_config_path = materialized
+                changed = True
+                # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
+                try:
+                    parsed = _parse_baseline_workload_extra(materialized)
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "baseline workload extra parsing failed for %s",
+                        materialized,
+                    )
+                    parsed = {}
+                if parsed:
+                    self.shared_state.baseline_workload_extra = parsed
+            # Promote baseline wall-clock so ExploreExecutor derives the overtime kill deadline.
+            runtime_sec_raw = result.get("subprocess_runtime_sec")
+            if isinstance(runtime_sec_raw, (int, float)) and runtime_sec_raw > 0:
+                self.shared_state.baseline_runtime_sec = float(runtime_sec_raw)
+                changed = True
+            # Promote the warm measure-round wall-clock as the anchor for the
+            # explore decision-round overtime kill (present only on the
+            # double-run baseline path; else explore uses the cold anchor).
+            warm_runtime_raw = result.get("measure_round_runtime_sec")
+            if isinstance(warm_runtime_raw, (int, float)) and warm_runtime_raw > 0:
+                self.shared_state.baseline_warm_runtime_sec = float(warm_runtime_raw)
+                changed = True
+            elif float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0) != 0.0:
+                self.shared_state.baseline_warm_runtime_sec = 0.0
+                changed = True
         # current_best.tput follows the same hot baseline contract so the
-        # gain numerator and denominator stay aligned.
-        anchor_tput = float(self.shared_state.baseline_tput or 0.0)
-        self.shared_state.current_best = {
-            "action": "baseline",
-            "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
-            "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
-            "cold_tput": (
-                float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
-            ),
-            "ttft_mean_ms": result.get("ttft_mean_ms"),
-            "e2el_mean_ms": result.get("e2el_mean_ms"),
-            "tpot_mean_ms": result.get("tpot_mean_ms"),
-            "workspace": result.get("workspace"),
-        }
-        changed = True
-        audit_decision = "promoted" if isinstance(tput, (int, float)) and tput > 0 else "discarded"
-        _task_params = task.params if task is not None else {}
+        # gain numerator and denominator stay aligned. Once the stack carries a
+        # validated layer, current_best belongs to the stack top and a baseline
+        # must not reset it back to the bare reference config.
+        if anchor_accepted and not (getattr(self.shared_state, "optimization_stack", None) or []):
+            anchor_tput = float(self.shared_state.baseline_tput or 0.0)
+            self.shared_state.current_best = {
+                "action": "baseline",
+                "tput": (
+                    anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)
+                ),
+                "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
+                "cold_tput": (
+                    float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
+                ),
+                "ttft_mean_ms": result.get("ttft_mean_ms"),
+                "e2el_mean_ms": result.get("e2el_mean_ms"),
+                "tpot_mean_ms": result.get("tpot_mean_ms"),
+                "workspace": result.get("workspace"),
+            }
+            changed = True
+        if anchor_accepted:
+            audit_decision = "promoted"
+        elif isinstance(tput, (int, float)) and tput > 0:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "materialized_config": result.get("materialized_config"),
             "accuracy": result.get("accuracy"),
             "baseline_tput": (float(tput) if isinstance(tput, (int, float)) else None),
             # Stamp canonical params fingerprint for the self-loop denial helper.
-            "fingerprint": _baseline_params_fingerprint(_task_params),
+            "fingerprint": _baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
-            "is_revalidation": bool(_task_params.get("reason") == "enablement_eval_revalidation"),
+            "is_revalidation": bool(task_params.get("reason") == "enablement_eval_revalidation"),
             "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
             "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
+        if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
+            audit_extras["anchor_kept_tput"] = prior_anchor
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
@@ -2460,7 +2495,9 @@ class WritebackCollaborator:
                     exc,
                 )
         # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
-        if self._should_run_prelude_bootstrap(tput):
+        # Only the run that first establishes the anchor bootstraps; a later
+        # re-baseline must not re-fire replay / scout / recon.
+        if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):
             # History injection (fires regardless of --no-warm-replay).
             try:
                 self._inject_warm_recipe_history_into_ledger()
