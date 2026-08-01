@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -39,6 +40,27 @@ log = logging.getLogger(__name__)
 ENV_DIR = "HYPERLOOM_DELTA_FILTER_DIR"
 ENV_THRESHOLD = "HYPERLOOM_DELTA_FILTER_THRESHOLD"
 DEFAULT_THRESHOLD = 0.030
+
+# LLM backend. The ranker returns an ordering rather than per-candidate scores,
+# so it prunes by keeping a fraction of the list instead of by thresholding.
+ENV_LLM_URL = "HYPERLOOM_DELTA_FILTER_LLM_URL"
+ENV_LLM_MODEL = "HYPERLOOM_DELTA_FILTER_LLM_MODEL"
+ENV_LLM_LORA = "HYPERLOOM_DELTA_FILTER_LLM_LORA"
+ENV_LLM_VERSION = "HYPERLOOM_DELTA_FILTER_LLM_VERSION"
+ENV_KEEP_FRACTION = "HYPERLOOM_DELTA_FILTER_KEEP_FRACTION"
+# Measured over 200 held-out identities on the served adapter: keeping half the
+# list drops 48.4% of candidates while 98.4% of the best available gain survives
+# and the single best candidate is lost for 2.5%. Keeping three quarters loses it
+# for 1.5% but only drops 22.6%.
+DEFAULT_KEEP_FRACTION = 0.5
+LLM_TIMEOUT_S = 60
+
+RANKER_SYSTEM = (
+    "You tune SGLang inference servers. Given a model and a list of candidate "
+    "configuration changes, order the candidates from most to least likely to "
+    "improve throughput on that model. Reply with the candidate numbers only, "
+    "best first, comma separated."
+)
 
 FLAG_RE = re.compile(r"--[a-z0-9][a-z0-9-]*")
 NUM_RE = re.compile(r"--[a-z0-9-]+\s+(\d+(?:\.\d+)?)")
@@ -135,6 +157,106 @@ def _delta_features(args: str, envs: dict[str, str] | None) -> dict:
     return feats
 
 
+def _describe_identity(model_path: str, ident: dict) -> str:
+    """Render the identity as the prose the ranker was fine-tuned on.
+
+    Must match build_sft_dataset.describe_identity: the model was trained on this
+    exact phrasing, and a paraphrase is a distribution shift for no benefit.
+    """
+    bits = []
+    if ident.get("architectures"):
+        bits.append("architecture %s" % ident["architectures"])
+    if ident.get("param_b"):
+        bits.append("%.1fB parameters" % float(ident["param_b"]))
+    if ident.get("is_moe"):
+        n = ident.get("num_experts")
+        bits.append("mixture of experts%s" % (" (%s experts)" % n if n else ""))
+    else:
+        bits.append("dense")
+    if ident.get("hidden_size") and ident.get("num_hidden_layers"):
+        bits.append("%s hidden x %s layers" % (ident["hidden_size"], ident["num_hidden_layers"]))
+    if ident.get("gqa_ratio"):
+        bits.append("GQA ratio %s" % ident["gqa_ratio"])
+    for key, label in (("precision", "precision"), ("hardware", "GPU"),
+                       ("framework_version", "sglang")):
+        if ident.get(key):
+            bits.append("%s %s" % (label, ident[key]))
+    return ", ".join(bits)
+
+
+def _keep_fraction() -> float:
+    """Share of the candidate list the LLM backend keeps."""
+    raw = os.environ.get(ENV_KEEP_FRACTION, "").strip()
+    if not raw:
+        return DEFAULT_KEEP_FRACTION
+    try:
+        v = float(raw)
+    except ValueError:
+        log.warning("delta_filter: %s=%r is not a number; using %.2f",
+                    ENV_KEEP_FRACTION, raw, DEFAULT_KEEP_FRACTION)
+        return DEFAULT_KEEP_FRACTION
+    return min(max(v, 0.0), 1.0)
+
+
+def _rank_with_llm(variants: list, identity_text: str) -> list[int] | None:
+    """Ask the served ranker for an ordering. None on any failure."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = os.environ.get(ENV_LLM_URL, "").strip().rstrip("/")
+    listing = "\n".join("%d. %s" % (i + 1, _delta_text(v)) for i, v in enumerate(variants))
+    payload = {
+        "model": os.environ.get(ENV_LLM_MODEL, "").strip() or "default",
+        "messages": [
+            {"role": "system", "content": RANKER_SYSTEM},
+            {"role": "user", "content": "Model: %s\n\nCandidates:\n%s"
+                                        % (identity_text, listing)},
+        ],
+        "max_tokens": 96,
+        "temperature": 0,
+    }
+    lora = os.environ.get(ENV_LLM_LORA, "").strip()
+    if lora:
+        payload["lora_path"] = lora
+
+    req = urllib.request.Request(
+        "%s/v1/chat/completions" % url,
+        data=_json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
+            body = _json.load(resp)
+        text = (body["choices"][0]["message"].get("content") or "")
+    except Exception as exc:  # noqa: BLE001 -- a ranking call must never break EXPLORE
+        log.warning("delta_filter: ranker call failed (%s: %s); not filtering",
+                    type(exc).__name__, exc)
+        return None
+
+    n = len(variants)
+    order: list[int] = []
+    for tok in re.findall(r"\d+", text):
+        i = int(tok) - 1
+        if 0 <= i < n and i not in order:
+            order.append(i)
+    if not order:
+        log.warning("delta_filter: ranker reply had no usable candidate numbers: %r",
+                    text[:120])
+        return None
+    # Whatever the reply omitted keeps its original relative position, after
+    # everything it did rank.
+    return order + [i for i in range(n) if i not in order]
+
+
+def _delta_text(v) -> str:
+    """The candidate as the ranker saw it during training: args, then envs."""
+    args = (getattr(v, "extra_server_args", "") or "").strip()
+    envs = getattr(v, "extra_envs", None) or {}
+    if not envs:
+        return args
+    return "%s | env: %s" % (args, " ".join("%s=%s" % (k, envs[k]) for k in sorted(envs)))
+
+
 def filter_variants(
     variants: list,
     *,
@@ -161,7 +283,8 @@ def filter_variants(
     """
     info: dict[str, Any] = {"applied": False, "reason": "", "dropped": []}
     model_dir = os.environ.get(ENV_DIR, "").strip()
-    if not model_dir:
+    llm_url = os.environ.get(ENV_LLM_URL, "").strip()
+    if not model_dir and not llm_url:
         info["reason"] = "disabled"
         return variants, info
     if (framework or "").strip().lower() != "sglang":
@@ -170,6 +293,38 @@ def filter_variants(
     if not variants:
         info["reason"] = "empty_input"
         return variants, info
+
+    if llm_url:
+        # The LLM backend takes precedence when both are configured, and carries
+        # the same version guard: it was fine-tuned on one sglang version's
+        # corpus, and preferences invert across a version bump.
+        trained_for = os.environ.get(ENV_LLM_VERSION, "").strip()
+        running = str(framework_version or "").strip()
+        if trained_for and running and trained_for != running:
+            log.warning("delta_filter: ranker is for %s %s but this run is %s; "
+                        "not filtering", framework, trained_for, running)
+            info["reason"] = "version_mismatch"
+            return variants, info
+        ident = _identity_features(model_path, precision, hardware, framework, running)
+        order = _rank_with_llm(variants, _describe_identity(model_path, ident))
+        if order is None:
+            info["reason"] = "llm_unavailable"
+            return variants, info
+        frac = _keep_fraction()
+        # At least one survivor: an empty grid turns a slow search into no search.
+        k = max(1, min(len(variants), math.ceil(len(variants) * frac)))
+        kept_idx = set(order[:k])
+        kept = [v for i, v in enumerate(variants) if i in kept_idx]
+        dropped = [(getattr(v, "name", "?"), order.index(i))
+                   for i, v in enumerate(variants) if i not in kept_idx]
+        info.update(applied=True, reason="ok_llm", backend="llm",
+                    keep_fraction=frac, kept=len(kept), total=len(variants),
+                    dropped=dropped, ranker_version=trained_for or None)
+        if dropped:
+            log.info("delta_filter(llm): kept %d/%d (fraction %.2f); dropped %s",
+                     len(kept), len(variants), frac,
+                     ", ".join("%s@rank%d" % kv for kv in dropped[:6]))
+        return kept, info
 
     try:
         import lightgbm as lgb

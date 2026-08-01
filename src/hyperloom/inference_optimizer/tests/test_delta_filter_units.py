@@ -126,6 +126,64 @@ def test_empty_input_is_returned_unchanged(monkeypatch, tmp_path, ctx):
     assert info["reason"] == "empty_input"
 
 
+class TestLLMBackend:
+    """The served-ranker path, which prunes by keeping a fraction of the order."""
+
+    @staticmethod
+    def _reply(order: str):
+        """Patch the ranker call to return a fixed ordering."""
+        return lambda variants, identity_text: (
+            [int(t) - 1 for t in order.split(",")] if order else None)
+
+    def test_keeps_the_top_fraction(self, monkeypatch, grid, ctx):
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.3")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
+        kept, info = df.filter_variants(grid, **ctx)
+        assert info["reason"] == "ok_llm"
+        # ceil(3 * 0.3) == 1, and the reply ranked candidate 3 first.
+        assert [v.name for v in kept] == ["both"]
+
+    def test_survivors_keep_their_original_order(self, monkeypatch, grid, ctx):
+        """The ranking selects; it does not reorder what the caller then measures."""
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.6")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
+        kept, _ = df.filter_variants(grid, **ctx)
+        # ceil(3 * 0.6) == 2: candidates 3 and 1 survive, and they come back in
+        # grid order rather than rank order.
+        assert [v.name for v in kept] == ["kv", "both"]
+
+    def test_version_mismatch_disables_the_llm_path(self, monkeypatch, grid, ctx):
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_LLM_VERSION, "0.5.11")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
+        kept, info = df.filter_variants(grid, **ctx)
+        assert kept == grid
+        assert info["reason"] == "version_mismatch"
+
+    def test_unreachable_ranker_keeps_everything(self, monkeypatch, grid, ctx):
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply(""))
+        kept, info = df.filter_variants(grid, **ctx)
+        assert kept == grid
+        assert info["reason"] == "llm_unavailable"
+
+    def test_never_empties_the_grid(self, monkeypatch, grid, ctx):
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.0")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,3,1"))
+        kept, _ = df.filter_variants(grid, **ctx)
+        assert len(kept) == 1
+
+    def test_delta_text_matches_the_training_rendering(self):
+        """A paraphrase is a distribution shift; the ranker saw this exact form."""
+        v = _variant("x", "--kv-cache-dtype fp8_e4m3", {"SGLANG_USE_AITER": "1"})
+        assert df._delta_text(v) == \
+            "--kv-cache-dtype fp8_e4m3 | env: SGLANG_USE_AITER=1"
+        assert df._delta_text(_variant("y", "--page-size 16")) == "--page-size 16"
+
+
 def test_delta_features_capture_flags_and_envs():
     feats = df._delta_features("--kv-cache-dtype fp8_e4m3 --page-size 16",
                                {"SGLANG_USE_AITER": "1"})
