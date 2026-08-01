@@ -518,12 +518,32 @@ def test_launch_entrypoint_quotes_state_derived_paths(monkeypatch: pytest.Monkey
     assert "--log-dir '/tmp/my logs'" in entrypoint
 
 
-def _fake_httpx(status_code: int = 200, raises: Exception | None = None) -> types.SimpleNamespace:
-    """Stand-in httpx exposing just the Client/get/status_code the probe uses."""
+_AGGREGATED_STATE = {"service_url": "http://frontend:8000"}
+_PD_STATE = {
+    "service_url": "http://frontend:8000",
+    "pd_prefill_url": "http://10.0.1.1:30000",
+    "pd_decode_url": "http://10.0.1.2:30001",
+}
+
+
+def _fake_serving_httpx(
+    *,
+    health: int = 200,
+    down_legs: tuple[str, ...] = (),
+    models: tuple[str, ...] = ("model-a",),
+    completion_status: int = 200,
+    completion_tokens: int = 8,
+    seen: list[str] | None = None,
+) -> types.SimpleNamespace:
+    """Stand-in httpx routing by URL across the three serving checks."""
 
     class _Resp:
-        def __init__(self) -> None:
-            self.status_code = status_code
+        def __init__(self, status: int, payload: dict | None = None) -> None:
+            self.status_code = status
+            self._payload = payload or {}
+
+        def json(self) -> dict:
+            return self._payload
 
     class _Client:
         def __init__(self, timeout: object = None) -> None:
@@ -535,151 +555,121 @@ def _fake_httpx(status_code: int = 200, raises: Exception | None = None) -> type
         def __exit__(self, *_exc: object) -> bool:
             return False
 
-        def get(self, _url: str) -> _Resp:
-            if raises is not None:
-                raise raises
-            return _Resp()
+        def get(self, url: str) -> _Resp:
+            if seen is not None:
+                seen.append(url)
+            if url.endswith("/health"):
+                return _Resp(503 if url[: -len("/health")] in down_legs else health)
+            if url.endswith("/v1/models"):
+                return _Resp(200, {"data": [{"id": m} for m in models]})
+            raise AssertionError(f"unexpected GET {url}")
+
+        def post(self, url: str, json: dict | None = None) -> _Resp:
+            if seen is not None:
+                seen.append(url)
+            return _Resp(completion_status, {"usage": {"completion_tokens": completion_tokens}})
 
     return types.SimpleNamespace(Client=_Client)
 
 
-@pytest.mark.parametrize(
-    ("status_code", "raises", "expected"),
-    [
-        (200, None, True),
-        (503, None, False),
-        (200, ConnectionError("connection refused"), False),
-    ],
-)
-def test_served_endpoint_probe_accepts_only_a_prompt_200(
-    monkeypatch: pytest.MonkeyPatch,
-    status_code: int,
-    raises: Exception | None,
-    expected: bool,
-) -> None:
-    """Anything short of a 200 must cost a relaunch, never a resume."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
+def test_cluster_is_serving_accepts_a_cluster_that_generates_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one answer that lets a resume skip a relaunch outright."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
-    monkeypatch.setitem(sys.modules, "httpx", _fake_httpx(status_code, raises))
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx())
 
-    assert mncli._served_endpoint_answers({"service_url": "http://frontend:8000"}, 5) is expected
-
-
-def test_served_endpoint_probe_without_a_service_url_is_not_evidence() -> None:
-    """No endpoint to ask means no grounds to skip a relaunch."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    assert mncli._served_endpoint_answers({}, 5) is False
+    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is True
 
 
 @pytest.mark.parametrize(
-    ("pd_mode", "no_wait_health", "expected"),
+    ("failure", "reason"),
     [
-        ("aggregated", False, True),
-        # The launcher returns before the ranks are serving in both of these, so
-        # a terminal-OK driver says nothing about a server.
-        ("disaggregated", False, False),
-        ("aggregated", True, False),
+        ({"health": 503}, "the group is not up"),
+        ({"models": ()}, "the workers died during the weight load, so nothing registered"),
+        ({"completion_status": 503}, "registered but refusing traffic"),
+        # The case a status-only check calls healthy: a broken PD KV handoff
+        # answers 200 with an empty completion.
+        ({"completion_tokens": 0}, "200 with no tokens generated"),
     ],
 )
-def test_launch_verified_health_tracks_what_the_launcher_actually_waited_for(
-    pd_mode: str,
-    no_wait_health: bool,
-    expected: bool,
-) -> None:
-    """Only a launch that waited for rank 0 makes SUCCEEDED mean anything."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    args = argparse.Namespace(pd_mode=pd_mode, no_wait_health=no_wait_health)
-
-    assert mncli._launch_verified_health(args) is expected
-
-
-def test_resume_does_not_probe_when_the_launch_never_waited_for_health(
-    _external_env: Path,
+def test_cluster_is_serving_rejects_each_way_a_cluster_can_look_up_but_not_serve(
     monkeypatch: pytest.MonkeyPatch,
+    failure: dict,
+    reason: str,
 ) -> None:
-    """A cold start in progress must not be torn down by the resume probe.
+    """Each check exists because it catches what the previous one misses."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
-    ``launch_multinode.py`` returns early without probing under
-    ``--no-wait-health`` and under PD disaggregation, so its job reaches
-    SUCCEEDED within seconds of spawning the ranks -- while the weight load, and
-    in the PD case the router submission, are still ahead. Probing there reports
-    the cold start rather than a dead cluster, and relaunching on that answer
-    restarted a 20-30 minute MoE boot from zero on every poll-timeout retry,
-    which never converges when the boot outlasts the poll budget.
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx(**failure))
+
+    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is False, reason
+
+
+def test_pd_disaggregated_health_checks_both_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frontend answers while a leg is still loading, so ask the legs."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    seen: list[str] = []
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx(seen=seen))
+
+    assert serving_probe.cluster_is_serving(_PD_STATE, pd_mode="disaggregated", timeout_s=5) is True
+    assert "http://10.0.1.1:30000/health" in seen
+    assert "http://10.0.1.2:30001/health" in seen
+
+
+def test_pd_disaggregated_rejects_a_single_dead_leg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prefill that serves cannot stand in for a decode leg that does not."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        _fake_serving_httpx(down_legs=("http://10.0.1.2:30001",)),
+    )
+
+    assert serving_probe.cluster_is_serving(_PD_STATE, pd_mode="disaggregated", timeout_s=5) is False
+
+
+def test_unresolvable_endpoints_short_circuit_without_asking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not knowing where to look is not evidence, and must cost no request.
+
+    A PD state with no recorded leg URLs cannot be verified. Returning False is
+    only half of it: issuing a request to a nonsense URL would spend the whole
+    probe budget on a connection that was never going to resolve.
     """
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
-    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
-    monkeypatch.setenv("PD_MODE", "aggregated")
-    _write_disk_state(
-        backend="rayjob",
-        head_pod_ip="10.0.2.1",
-        last_restart_model="/models/test",
-        last_restart_tp=8,
-        last_restart_ep=1,
-        last_restart_pd_mode="aggregated",
-        last_restart_extra_args="",
-    )
+    seen: list[str] = []
+    monkeypatch.setitem(sys.modules, "httpx", _fake_serving_httpx(seen=seen))
 
-    killed: list[str] = []
-    probed: list[str] = []
-
-    class _FakeRay:
-        def get_job(self, _sub: str) -> dict[str, str]:
-            return {"status": "SUCCEEDED"}
-
-        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
-            return "launch-2"
-
-    @contextlib.contextmanager
-    def _fake_client(_state: object):
-        yield _FakeRay()
-
-    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
-    monkeypatch.setattr(mncli, "_build_multinode_kill_entrypoint", lambda *_a, **_k: "kill-ep")
-    monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
-    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
-    monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
-    # A dead endpoint: the pre-fix code would have relaunched on this answer.
-    monkeypatch.setattr(mncli, "_served_endpoint_answers", lambda *_a, **_k: probed.append("probe") or False)
-
-    args = argparse.Namespace(
-        framework="sglang",
-        model="/models/test",
-        tp=8,
-        ep=1,
-        pd_mode="aggregated",
-        extra_args="",
-        pid_file=None,
-        log_file=None,
-        poll_interval=1,
-        poll_timeout=5,
-        print_logs=False,
-        no_wait_health=True,
-    )
-
-    assert mncli.cmd_restart_server(args) == 0
-    assert probed == [], "must not consult a probe whose answer cannot distinguish booting from dead"
-    assert killed == [], "must not tear down a cold start that is still in progress"
+    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="disaggregated", timeout_s=5) is False
+    assert serving_probe.cluster_is_serving({}, pd_mode="aggregated", timeout_s=5) is False
+    assert seen == []
 
 
-@pytest.mark.parametrize(("endpoint_answers", "expect_relaunch"), [(True, False), (False, True)])
-def test_resume_relaunches_unless_the_served_endpoint_answers(
+@pytest.mark.parametrize(
+    ("serving", "ranks_alive", "expect_relaunch"),
+    [
+        (True, False, False),
+        # Not serving yet but every rank is there: a cold start in progress.
+        (False, True, False),
+        (False, False, True),
+    ],
+)
+def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
-    endpoint_answers: bool,
+    serving: bool,
+    ranks_alive: bool,
     expect_relaunch: bool,
 ) -> None:
-    """A finished launch driver is not evidence that a server is up.
+    """A finished launch driver is not evidence either way, so ask two questions.
 
     The driver reports SUCCEEDED once the ranks are spawned and stays there
-    whether the detached servers then live or die, so resuming on that status
-    alone returned 0 with nothing serving whenever the cluster had since crashed,
-    been evicted, or been killed out of band. The status now only selects which
-    question to ask; the served endpoint answers it.
+    whether the detached servers then live or die. Resuming on that alone
+    returned 0 with nothing serving after a crash; relaunching on a failed
+    serving probe alone tore down cold starts, because "not serving" and "dead"
+    look identical from outside. Only the rank PIDs separate them.
     """
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
@@ -698,6 +688,7 @@ def test_resume_relaunches_unless_the_served_endpoint_answers(
 
     submitted: list[str] = []
     killed: list[str] = []
+    liveness_asked: list[str] = []
 
     class _FakeRay:
         def get_job(self, _sub: str) -> dict[str, str]:
@@ -716,7 +707,12 @@ def test_resume_relaunches_unless_the_served_endpoint_answers(
     monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
     monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
     monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
-    monkeypatch.setattr(mncli, "_served_endpoint_answers", lambda *_a, **_k: endpoint_answers)
+    monkeypatch.setattr(mncli, "cluster_is_serving", lambda *_a, **_k: serving)
+    monkeypatch.setattr(
+        mncli,
+        "_ranks_alive",
+        lambda *_a, **_k: liveness_asked.append("probe") or ranks_alive,
+    )
 
     args = argparse.Namespace(
         framework="sglang",
@@ -730,14 +726,68 @@ def test_resume_relaunches_unless_the_served_endpoint_answers(
         poll_interval=1,
         poll_timeout=5,
         print_logs=False,
-        # This launch waits for rank 0, so a terminal-OK driver is a claim the
-        # probe is entitled to check.
-        no_wait_health=False,
     )
 
     assert mncli.cmd_restart_server(args) == 0
     assert bool(killed) is expect_relaunch
     assert bool(submitted) is expect_relaunch
+    # A serving cluster settles it, so the fan-out is only paid for when needed.
+    assert liveness_asked == ([] if serving else ["probe"])
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        ({"total": 4, "alive": 4, "dead": 0}, True),
+        ({"total": 4, "alive": 3, "dead": 1}, False),
+        # No PID files anywhere: nothing was ever launched, or the dir is gone.
+        ({"total": 0, "alive": 0, "dead": 0}, False),
+        ({}, False),
+    ],
+)
+def test_ranks_alive_requires_every_recorded_process(
+    monkeypatch: pytest.MonkeyPatch,
+    summary: dict,
+    expected: bool,
+) -> None:
+    """Fail-safe: anything but a full house of live ranks means relaunch."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    class _FakeRay:
+        def get_job(self, _sub: str) -> dict[str, str]:
+            return {"status": "SUCCEEDED"}
+
+        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
+            return "probe-1"
+
+        def get_job_logs(self, _sub: str) -> str:
+            return json.dumps(summary)
+
+    @contextlib.contextmanager
+    def _fake_client(_state: object):
+        yield _FakeRay()
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
+    monkeypatch.setattr(mncli, "_build_multinode_probe_entrypoint", lambda *_a, **_k: "probe-ep")
+    monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
+
+    args = argparse.Namespace(poll_interval=1, poll_timeout=5)
+
+    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", args) is expected
+
+
+def test_ranks_alive_treats_an_unreachable_cluster_as_not_resumable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unanswered probe is not permission to resume."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    @contextlib.contextmanager
+    def _exploding_client(_state: object):
+        raise RuntimeError("dashboard unreachable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _exploding_client)
+
+    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", argparse.Namespace(poll_interval=1, poll_timeout=5)) is False
 
 
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(

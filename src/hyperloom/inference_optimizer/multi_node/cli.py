@@ -45,7 +45,8 @@ from ._internal.server_args_safety import (
 )
 from .state_paths import resolve_state_file
 from ._internal.env_safety import filter_forward_env
-from ._internal.external_state import external_service_url, load_multi_node_state, reachable_service_url
+from ._internal.external_state import external_service_url, load_multi_node_state
+from ._internal.serving_probe import cluster_is_serving
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -1640,74 +1641,81 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
-def _launch_verified_health(args: argparse.Namespace) -> bool:
-    """Whether a SUCCEEDED launch driver had to see a healthy rank 0 to exit.
-
-    ``launch_multinode.py`` returns 0 early, without probing anything, in two
-    cases: ``--no-wait-health``, and PD disaggregation, where the router owns the
-    serving port and the caller polls it separately. The driver then finishes
-    within seconds of spawning the ranks -- long before the weight load, and in
-    the PD case before the router has even been submitted.
-
-    That distinction decides whether a failed ``/health`` means anything. When
-    the driver did wait, SUCCEEDED means the server was up once, so silence now
-    is news: it died. When the driver did not wait, silence is the expected
-    state of a cold start, indistinguishable from a dead cluster, and acting on
-    it would tear down the very boot the retry meant to resume.
+def _build_multinode_probe_entrypoint(pid_dir: str) -> str:
+    """Compose the Ray Dashboard entrypoint that reports per-rank liveness.
 
     Args:
-        args: Parsed ``restart-server`` arguments.
+        pid_dir (str): Directory of per-rank PID files.
 
     Returns:
-        bool: True when a terminal-OK launch implies a server answered once.
+        str: The composed Ray Dashboard entrypoint shell command.
     """
-    if getattr(args, "no_wait_health", False):
-        return False
-    return (getattr(args, "pd_mode", "") or "aggregated").lower() != "disaggregated"
+    py = _read_pod_script("probe_multinode.py")
+    return (
+        f"{_MN_ENTRYPOINT_PREAMBLE}"
+        f"cat > \"$WORK_DIR/probe_multinode.py\" <<'__MN_PROBE_PY_EOF__'\n"
+        f"{py}__MN_PROBE_PY_EOF__\n"
+        f'python3 "$WORK_DIR/probe_multinode.py" '
+        f"--pid-dir {shlex.quote(str(pid_dir))}"
+    )
 
 
-def _served_endpoint_answers(state: dict[str, Any], timeout_s: int) -> bool:
-    """Whether the cluster's frontend answers ``/health`` right now.
+def _ranks_alive(state: dict[str, Any], pid_dir: str, args: argparse.Namespace) -> bool:
+    """Whether every rank the last launch recorded still has a live process.
 
-    This is the evidence a resume needs and the launch job's status cannot give.
-    That job is the fan-out driver: it reports SUCCEEDED once the ranks are
-    spawned and stays there whether the detached servers then live or die, so it
-    survives a crash, an eviction, or an out-of-band kill untouched. For rayjob
-    the served endpoint is the server itself, whose ``/health`` only returns 200
-    after the weight load finishes -- which is why the post-launch wait already
-    gates on exactly this signal.
+    The signal that separates a cold start from a dead cluster, and the only one
+    that can: a server still loading weights serves nothing yet but its process
+    is there, while a crashed or evicted one is gone. This is the rayjob
+    counterpart of infera's per-pod ``kill -0`` on the recorded PID.
 
-    One short attempt by design, not a readiness wait: resuming is an
-    optimization, so anything short of a prompt 200 -- timeout, refusal, no
-    httpx -- should just cost a full KILL+LAUNCH.
-
-    Two things it does not establish. That the answering server runs the config
-    being asked for: only ``prev_match`` speaks to that, and only about what was
-    last launched from here. And, on a PD-disaggregated cluster, that both legs
-    live -- the frontend can answer while one is down, which the orchestrator's
-    per-worker wait catches after the resume.
+    Fail-safe in both directions. An unreachable node, an unparseable summary,
+    or a cluster reporting no server PIDs at all all answer False, so the caller
+    relaunches rather than resuming onto something it could not confirm.
 
     Args:
-        state: Multi-node state naming the service URL.
-        timeout_s: Whole-request budget for the probe.
+        state: Multi-node state (names the Ray dashboard).
+        pid_dir: Directory the last launch wrote per-rank PID files into.
+        args: Parsed ``restart-server`` arguments, for the poll knobs.
 
     Returns:
-        bool: True only on a 200 from ``/health``.
+        bool: True only when at least one server PID was found and none is dead.
     """
-    url = reachable_service_url(state)
-    if not url:
-        return False
     try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
-        info("resume probe: httpx unavailable; falling back to KILL+LAUNCH")
-        return False
-    try:
-        with httpx.Client(timeout=timeout_s) as client:
-            return client.get(url.rstrip("/") + "/health").status_code == 200
+        with _ray_dashboard_client(state) as ray:
+            sub = ray.submit_job(_build_multinode_probe_entrypoint(pid_dir))
+
+            def _fetch():
+                """Fetch the probe job status for the poll loop.
+
+                Returns:
+                    tuple[dict, str]: The job dict and a short status message.
+                """
+                job = ray.get_job(sub)
+                return job, f"probe status={job.get('status', '?')}"
+
+            _short_poll(
+                label=f"rank-liveness probe {sub}",
+                fetch=_fetch,
+                is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+                is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+                interval_s=args.poll_interval,
+                timeout_s=_resume_probe_timeout_s(),
+            )
+            summary = _extract_launcher_summary(ray.get_job_logs(sub))
     except Exception as exc:  # noqa: BLE001
-        info(f"resume probe: {url}/health unreachable ({exc!r}); falling back to KILL+LAUNCH")
+        info(f"rank-liveness probe failed ({exc!r}); treating the cluster as not resumable")
         return False
+
+    total = int(summary.get("total") or 0)
+    dead = int(summary.get("dead") or 0)
+    if total <= 0:
+        info("rank-liveness probe: no server PIDs recorded on any node")
+        return False
+    if dead:
+        info(f"rank-liveness probe: {dead}/{total} recorded server processes are gone")
+        return False
+    info(f"rank-liveness probe: all {total} recorded server processes are alive")
+    return True
 
 
 def cmd_restart_server(args: argparse.Namespace) -> int:
@@ -1805,33 +1813,31 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     f"— skipping KILL+LAUNCH, just polling"
                 )
                 launch_sub = prev_sub
-            elif _prev_status in _TERMINAL_OK_STATUSES and not _launch_verified_health(args):
-                # The driver exits before the servers are up in these modes, so
-                # a probe here could only report the cold start still running
-                # and would relaunch over it. Resume and let the orchestrator's
-                # post-launch /health wait be the one that fails, at the cost of
-                # a wait budget rather than a restart from zero.
-                info(
-                    f"resume: prior launch_sub={prev_sub} SUCCEEDED; skipping KILL+LAUNCH without a probe "
-                    f"(this launch does not wait for /health, so an unanswered endpoint would not mean the "
-                    f"cluster is down)"
-                )
-                launch_sub = prev_sub
             elif _prev_status in _TERMINAL_OK_STATUSES:
                 # A finished driver says a launch happened, never that a server
-                # is still up, so ask the server itself before skipping a
-                # relaunch.
-                _probe_budget = _resume_probe_timeout_s()
-                if _served_endpoint_answers(state, _probe_budget):
+                # is still up. Two questions answer that, in this order because
+                # the cheap one also ends the call: is the cluster serving, and
+                # if not, is it still coming up or actually gone?
+                if cluster_is_serving(
+                    state,
+                    pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
+                    timeout_s=_resume_probe_timeout_s(),
+                ):
                     info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and the served endpoint "
-                        f"answers /health; skipping KILL+LAUNCH"
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated "
+                        f"tokens; skipping KILL+LAUNCH"
+                    )
+                    launch_sub = prev_sub
+                elif _ranks_alive(state, pid_dir, args):
+                    info(
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and every rank is alive but not "
+                        f"serving yet; skipping KILL+LAUNCH and waiting on the boot in progress"
                     )
                     launch_sub = prev_sub
                 else:
                     info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the served endpoint "
-                        f"did not answer /health within {_probe_budget}s; doing a full KILL+LAUNCH"
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster neither serves "
+                        f"nor holds live ranks; doing a full KILL+LAUNCH"
                     )
 
         kill_sub = ""

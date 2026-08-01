@@ -869,10 +869,8 @@ async def trigger_infera_engine_profile(
 def _probe_generated_tokens(data: object) -> int:
     """Best-effort count of tokens a /v1/completions probe actually generated.
 
-    Prefers ``usage.completion_tokens``; falls back to a non-empty
-    ``choices[0].text`` (counts as 1). Returns 0 when nothing was generated —
-    e.g. a broken PD KV handoff returns HTTP 200 with an empty completion, so a
-    status-only probe would wrongly declare the decode leg ready.
+    Shared with the resume-time serving probe so the wait and the decision that
+    precedes it cannot drift on what counts as a served token.
 
     Args:
         data: Parsed JSON body of a /v1/completions response.
@@ -880,20 +878,9 @@ def _probe_generated_tokens(data: object) -> int:
     Returns:
         int: Generated token count (0 when none / unparseable).
     """
-    if not isinstance(data, dict):
-        return 0
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        try:
-            ct = int(usage.get("completion_tokens") or 0)
-        except (TypeError, ValueError):
-            ct = 0
-        if ct > 0:
-            return ct
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        return 1 if str(choices[0].get("text") or "").strip() else 0
-    return 0
+    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
+
+    return generated_tokens(data)
 
 
 def _models_empty_too_long(
