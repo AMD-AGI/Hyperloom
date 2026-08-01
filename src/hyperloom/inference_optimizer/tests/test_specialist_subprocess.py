@@ -1055,6 +1055,105 @@ def test_kill_on_ray_lease_process_delegates_to_actor():
     assert handle.poll() == 0
 
 
+@pytest.mark.parametrize("raw", ["not-a-number", ""])
+def test_ray_specialist_pending_deadline_invalid_env_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+):
+    """A malformed scheduling-timeout override cannot make dispatch crash."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", raw)
+    assert subprocess_._ray_specialist_pending_deadline_sec() == 300.0
+
+
+def test_ray_lease_process_dead_actor_without_exit_code_is_latched():
+    """An unreachable Ray actor is a terminal failure, not an endless poll."""
+    from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+
+    class _DeadLease:
+        def is_alive(self):
+            return False
+
+        def exit_code(self):
+            return None
+
+    handle = _RayLeaseProcess(_DeadLease(), pid=1234)
+    assert handle.poll() == _RAY_ACTOR_DIED_RC
+    # The terminal value is latched; a second poll does not query the lease.
+    handle._lease = None
+    assert handle.poll() == _RAY_ACTOR_DIED_RC
+
+
+def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_path: Path):
+    """Optional CLI wiring is composed once and must survive as valid argv."""
+    workspace = tmp_path / "workspace"
+    worktree = workspace / "worktree"
+    framework = tmp_path / "framework"
+    for path in (workspace, worktree, framework):
+        path.mkdir(parents=True, exist_ok=True)
+    prompt = workspace / "prompt.md"
+    prompt.write_text("prompt", encoding="utf-8")
+
+    cfg = SpecialistSubprocessConfig(
+        model="claude-test",
+        mcp_config_path="/tmp/mcp.json",
+        framework_source_roots=(str(framework), str(framework)),
+        extra_claude_args=("--debug",),
+        leaf_agents_json='{"researcher": {"description": "test"}}',
+    )
+    cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
+        prompt_file=prompt,
+        workspace=workspace,
+        worktree=worktree,
+        allowed_tools=("Read", "Task", "emit_intent"),
+    )
+
+    assert cmd[cmd.index("--model") + 1] == "claude-test"
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Task"
+    assert "emit_intent" not in cmd
+    assert cmd[cmd.index("--agents") + 1] == cfg.leaf_agents_json
+    assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/mcp.json"
+    assert cmd[-1] == "--debug"
+    add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
+    # Worktree first, workspace second, then each distinct framework root.
+    assert add_dirs == [str(worktree), str(workspace), str(framework)]
+
+
+@pytest.mark.asyncio
+async def test_partial_progress_skips_invalid_payload_and_swallow_callback_error(tmp_path: Path):
+    """Malformed checkpoints and telemetry failures never terminate a run."""
+    disp = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig())
+    invalid = tmp_path / "invalid.partial.json"
+    invalid.write_text("not json", encoding="utf-8")
+
+    async def _must_not_run(*_args):
+        raise AssertionError("invalid payload must not reach the callback")
+
+    assert (
+        await disp._publish_partial_progress(
+            partial_files=(invalid,),
+            since_mtime=0.0,
+            elapsed=1.0,
+            progress_cb=_must_not_run,
+        )
+        == 0.0
+    )
+
+    valid = tmp_path / "valid.partial.json"
+    valid.write_text('{"summary": "still working"}', encoding="utf-8")
+
+    async def _callback_fails(*_args):
+        raise RuntimeError("telemetry sink unavailable")
+
+    newest = await disp._publish_partial_progress(
+        partial_files=(valid,),
+        since_mtime=0.0,
+        elapsed=2.0,
+        progress_cb=_callback_fails,
+    )
+    assert newest == valid.stat().st_mtime
+
+
 @pytest.mark.asyncio
 async def test_partial_checkpoint_published_while_alive(
     tmp_path: Path,
