@@ -725,11 +725,17 @@ def _check_gpu_visibility() -> None:
     pods and the benchmark drives the frontend over HTTP, so this
     orchestrator-only sandbox legitimately has no local GPUs. Probing rocm-smi
     here would emit a misleading "0 GPUs; benchmark will fail" warning.
+
+    The node count is part of that test, not just the hand-off URL. The platform
+    exports one env block for single- and multi-node runs alike, so a stray
+    ``HYPERLOOM_MN_EXT_SERVICE_URL`` must not silently disarm this check on a
+    single-node run that really does need local GPUs.
     """
     # External multi-node: GPUs are on remote pods, not this sandbox.
     from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
 
-    if external_service_url():
+    if is_multi_node() and external_service_url():
         print("Preflight: external multi-node mode; skipping local GPU visibility check (GPUs are on remote pods)")
         return
     try:
