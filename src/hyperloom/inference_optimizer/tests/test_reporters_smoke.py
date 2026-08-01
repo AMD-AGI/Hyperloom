@@ -359,6 +359,43 @@ def test_attribution_method_renders_from_field() -> None:
     assert not any("single-source" in fact and "single_source" not in fact for fact in sec.key_facts), sec.key_facts
 
 
+def test_v5_attribution_method_and_notes_render_from_validation() -> None:
+    bd = _fixture_breakdown()
+    bd.pop("attribution", None)
+    bd["optimizations"] = {
+        "entries": [
+            {
+                "id": "opt-1",
+                "source": "explore",
+                "gain_pct": 10.99,
+                "validated": True,
+            }
+        ],
+        "summary_by_source": {
+            "explore": {"keeps": 1, "total_gain_pct": 10.99},
+        },
+        "validation": {
+            "method": "reconstructed",
+            "validated_total_gain_pct": 10.99,
+            "notes": ["gain ledger reconstructed from throughput"],
+        },
+    }
+
+    r = render_session_report(bd)
+
+    assert r.global_facts.attribution_method == "reconstructed"
+    assert any(
+        "gain ledger reconstructed from throughput" in flag
+        for flag in r.global_facts.data_quality_flags
+    )
+    sec = next(s for s in r.sections if s.section_id == "attribution")
+    assert any("reconstructed" in fact for fact in sec.key_facts)
+    assert any(
+        "gain ledger reconstructed from throughput" in fact
+        for fact in sec.key_facts
+    )
+
+
 def test_invocation_section_renders_when_present() -> None:
     """Baseline/final renderers surface an ``### Invocation`` block; secret-shaped envs are filtered out."""
     bd = _fixture_breakdown()

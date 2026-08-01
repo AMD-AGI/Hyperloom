@@ -25,8 +25,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         RenderedSection: The rendered section, marked skipped when there is no
             per-source split to show.
     """
-    a = breakdown.get("attribution") or {}
-    sb = a.get("source_breakdown") or {}
+    optimizations = breakdown.get("optimizations") or {}
+    validation = optimizations.get("validation") or {}
+    a = validation or breakdown.get("attribution") or {}
     notes = a.get("notes") or []
     # Render ``attribution.method`` verbatim; never substitute a different label.
     method_raw = a.get("method")
@@ -36,15 +37,48 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     else:
         method_display = method
 
-    total_v = sb.get("validated_total_pct")
-    rows = [
-        ["explore", sb.get("explore_pct_of_total"), sb.get("explore_share_pct")],
-        ["replay_warm_recipe", sb.get("replay_warm_recipe_pct_of_total"), sb.get("replay_warm_recipe_share_pct")],
-        ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
-        ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
-        ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],
-        ["geak", sb.get("geak_pct_of_total"), sb.get("geak_share_pct")],
-    ]
+    if validation:
+        total_v = validation.get("validated_total_gain_pct")
+        summary = optimizations.get("summary_by_source") or {}
+        canonical_rows = [
+            [source, bucket.get("total_gain_pct")]
+            for source, bucket in summary.items()
+            if isinstance(bucket, dict)
+        ]
+        share_total = total_v
+        if not isinstance(share_total, (int, float)) or not share_total:
+            share_total = sum(
+                float(gain)
+                for _source, gain in canonical_rows
+                if isinstance(gain, (int, float))
+            )
+        rows = [
+            [
+                source,
+                gain,
+                (
+                    float(gain) / float(share_total) * 100.0
+                    if isinstance(gain, (int, float)) and share_total
+                    else None
+                ),
+            ]
+            for source, gain in canonical_rows
+        ]
+    else:
+        sb = a.get("source_breakdown") or {}
+        total_v = sb.get("validated_total_pct")
+        rows = [
+            ["explore", sb.get("explore_pct_of_total"), sb.get("explore_share_pct")],
+            [
+                "replay_warm_recipe",
+                sb.get("replay_warm_recipe_pct_of_total"),
+                sb.get("replay_warm_recipe_share_pct"),
+            ],
+            ["backends", sb.get("backends_pct_of_total"), sb.get("backends_share_pct")],
+            ["params", sb.get("params_pct_of_total"), sb.get("params_share_pct")],
+            ["sweep", sb.get("sweep_pct_of_total"), sb.get("sweep_share_pct")],
+            ["geak", sb.get("geak_pct_of_total"), sb.get("geak_share_pct")],
+        ]
 
     facts: list[str] = []
     if total_v is not None:

@@ -2918,9 +2918,11 @@ def record_kernel_e2e(
     validation_tier: str = "",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record the end-to-end integrate outcome for one kernel (stage 4).
+    """Record the latest end-to-end integrate outcome for one kernel (stage 4).
 
-    Idempotent per ``kernel_id``. ``e2e_gain_pct`` is the validated end-to-end
+    Idempotent per ``kernel_id`` using overwrite-on-rewrite semantics: a later
+    final-validation verdict replaces the provisional candidate verdict rather
+    than appending a duplicate. ``e2e_gain_pct`` is the validated end-to-end
     gain at integrate (negative => regressed and reverted).
 
     Args:

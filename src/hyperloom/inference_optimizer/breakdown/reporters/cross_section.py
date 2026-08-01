@@ -85,6 +85,7 @@ def _gain_attribution_lines(
     """
     optimizations = breakdown.get("optimizations") or {}
     summary = optimizations.get("summary_by_source") or {}
+    validation = optimizations.get("validation") or {}
     canonical_sources = {
         source: to_float(bucket.get("total_gain_pct"))
         for source, bucket in summary.items()
@@ -106,7 +107,8 @@ def _gain_attribution_lines(
                 key=lambda item: -item[1],
             )
         ]
-        return lines, "canonical optimizations"
+        method = validation.get("method")
+        return lines, str(method) if isinstance(method, str) and method else "missing"
 
     attribution = breakdown.get("attribution") or {}
     sb = attribution.get("source_breakdown") or {}
@@ -211,8 +213,12 @@ def _data_quality_flags(
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    if (breakdown.get("attribution") or {}).get("notes"):
-        for n in breakdown["attribution"]["notes"]:
+    optimizations = breakdown.get("optimizations") or {}
+    validation = optimizations.get("validation") or {}
+    attribution = breakdown.get("attribution") or {}
+    notes = validation.get("notes") or attribution.get("notes") or []
+    if notes:
+        for n in notes:
             _push(f"[attribution] {n}")
     cap = breakdown.get("capability_summary") or {}
     val = cap.get("validate_stack") or {}

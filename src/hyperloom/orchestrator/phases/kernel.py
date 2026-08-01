@@ -1392,6 +1392,9 @@ class KernelPhase(PhaseHandler):
             e2e = kernel.get("e2e")
             if not kernel_id or not isinstance(e2e, dict):
                 continue
+            decision = str(e2e.get("decision") or "").upper()
+            if decision not in {"KEEP", "ADOPTED"}:
+                continue
             evidence = dict(e2e)
             evidence.update(
                 {

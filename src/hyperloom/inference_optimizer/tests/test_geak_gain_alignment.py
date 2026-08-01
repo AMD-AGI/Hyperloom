@@ -255,7 +255,16 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
                             "validated": True,
                             "decision": "KEEP",
                         },
-                    }
+                    },
+                    {
+                        "kernel_id": "already-reverted",
+                        "e2e": {
+                            "integrated": False,
+                            "e2e_gain_pct": -1.0,
+                            "validated": False,
+                            "decision": "REVERT",
+                        },
+                    },
                 ]
             }
         ),
@@ -263,7 +272,11 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     )
     coord.shared_state.geak_result["kernel_journey_path"] = str(journey_path)
     coord._record_geak_kernel_journey(coord.shared_state.geak_result)
-    provisional = assemble_parts(tmp_path)["kernel_journey"]["kernels"][0]["e2e"]
+    provisional_rows = {
+        row["kernel_id"]: row
+        for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    }
+    provisional = provisional_rows["candidate-kernel"]["e2e"]
     assert provisional["decision"] == "KEEP"
     assert provisional["validated"] is True
 
@@ -283,7 +296,10 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert not ss.geak_pending
     rejected = assemble_parts(tmp_path)
-    e2e = rejected["kernel_journey"]["kernels"][0]["e2e"]
+    rejected_rows = {
+        row["kernel_id"]: row for row in rejected["kernel_journey"]["kernels"]
+    }
+    e2e = rejected_rows["candidate-kernel"]["e2e"]
     assert e2e["decision"] == "REVERT"
     assert e2e["validated"] is False
     assert e2e["integrated"] is False
@@ -292,6 +308,19 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert e2e["revalidation_measured_tput"] == pytest.approx(measured)
     assert e2e["revalidation_current_best_tput"] == pytest.approx(current_best)
     assert e2e["rejection_reason"] == "rebench_did_not_beat_current_best"
+    untouched = rejected_rows["already-reverted"]["e2e"]
+    assert untouched["decision"] == "REVERT"
+    assert untouched["e2e_gain_pct"] == pytest.approx(-1.0)
+    assert "rejection_reason" not in untouched
+
+    coord.phase_kernel._reject_geak_kernel_journey(
+        coord.shared_state.geak_result,
+        measured_tput=measured,
+        current_best_tput=current_best,
+        provenance="geak_same_harness_geak",
+    )
+    repeated = assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    assert len(repeated) == 2
     adoption = rejected["adoptions"][0]
     assert adoption["decision"] == "REVERT"
     assert adoption["validated"] is False
