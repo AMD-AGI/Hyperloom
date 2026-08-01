@@ -210,10 +210,14 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
             "(infera) to tune. Continuing in benchmark-only mode.",
             file=sys.stderr,
         )
-    _prepare_adopted_cluster(args, str(ext_state["backend"]))
+    _prepare_adopted_cluster(
+        args,
+        str(ext_state["backend"]),
+        head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
 
 
-def _prepare_adopted_cluster(args: argparse.Namespace, backend: str) -> None:
+def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
     """Make an adopted cluster usable by this session.
 
     Adopting only records where the cluster is. These steps are what the run
@@ -222,9 +226,12 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str) -> None:
 
     * rayjob: the BYOI bootstrap renders ``/etc/profile.d/hyperloom-env.sh`` in
       the head pod, which every later Ray Dashboard REST job sources to find the
-      framework venv. It is submitted unconditionally rather than tracked in the
-      state file: the synthesized state carries no submission id, and
-      ``bootstrap.sh`` already self-skips on its pod-side marker.
+      framework venv. It is submitted rather than tracked in the state file: the
+      synthesized state carries no submission id, and ``bootstrap.sh`` already
+      self-skips on its pod-side marker. Skipped without a head IP: that is the
+      documented benchmark-only hand-off, where there is no head pod to address
+      and no later dashboard job to prepare, and ``cmd_bootstrap`` would abort
+      the whole run on the ``head_pod_ip`` it requires.
     * infera: GEAK is installed on the GPU pods over SSH so the kernel agent
       finds it on PATH. Best-effort, and the helper no-ops for other backends.
     * both: kernel patches applied earlier in this session are replayed, so a
@@ -233,6 +240,7 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str) -> None:
     Args:
         args: Parsed CLI namespace (reads ``nodes`` and ``no_kernel``).
         backend: The resolved multi-node backend.
+        head_ip: The handed-over Ray head IP; empty means benchmark-only.
 
     Raises:
         SystemExit: With the bootstrap return code when the head pod fails it.
@@ -240,18 +248,25 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str) -> None:
     from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
 
     if backend == "rayjob":
-        ns_boot = argparse.Namespace(
-            script=None,
-            force=False,
-            print_logs=False,
-            poll_interval=6,
-            # Adoption runs in-process, so it is not bound by the foreground/MCP
-            # 120s ceiling; a slow head pod should not abort the run.
-            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
-        )
-        rc_boot = cmd_bootstrap(ns_boot)
-        if rc_boot != 0:
-            sys.exit(rc_boot)
+        if not head_ip:
+            print(
+                "multi-node: no HYPERLOOM_MN_EXT_HEAD_IP -- skipping the head-pod bootstrap "
+                "(benchmark-only hand-off has no head pod to prepare).",
+                file=sys.stderr,
+            )
+        else:
+            ns_boot = argparse.Namespace(
+                script=None,
+                force=False,
+                print_logs=False,
+                poll_interval=6,
+                # Adoption runs in-process, so it is not bound by the foreground/MCP
+                # 120s ceiling; a slow head pod should not abort the run.
+                poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+            )
+            rc_boot = cmd_bootstrap(ns_boot)
+            if rc_boot != 0:
+                sys.exit(rc_boot)
 
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
