@@ -455,7 +455,9 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated" or state.get("pd_mode") == "disaggregated"
         else "aggregated"
     )
-    kv = getattr(args, "pd_transfer_backend", "") or state.get("kv_transfer_backend") or ""
+    # Empty is a valid answer: it leaves the flag off so sglang picks its own
+    # default, which is the backend preferred on this fabric anyway.
+    kv = getattr(args, "pd_transfer_backend", "") or ""
     poll_timeout = _mn_cli._poll_timeout_from_args(args)
     print_logs = getattr(args, "print_logs", False)
     rc_total = 0

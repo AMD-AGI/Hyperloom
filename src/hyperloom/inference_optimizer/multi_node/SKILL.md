@@ -169,11 +169,17 @@ pod env — nothing in the pods reads them, and they shadow real pod values):
 
 ### KV transfer backend (PD)
 
-`--pd-transfer-backend` selects the PD KV plane (`restart-server` also reads
-`state.kv_transfer_backend`). **Prefer `mooncake` for sglang** on the RoCE/bnxt
-fabric: it auto-detects the RDMA device and is the sglang default. `nixl`
-returns HTTP 200 but 0 output tokens (decode KV handoff via UCX/nixl fails);
-`mori` is an alternative but not the sglang default here.
+`--pd-transfer-backend` selects the PD KV plane, on `optimize` or directly on
+`restart-server`; `optimize` mirrors it to `$PD_TRANSFER_BACKEND`, which later
+rounds fall back on. There is no state-file source: the cluster is handed over
+rather than created here, so nothing records a backend on your behalf.
+
+Leaving it unset is fine, and usually right. The flag is then simply not passed
+and sglang applies its own default, which on the RoCE/bnxt fabric is `mooncake`
+-- the one to **prefer** here, since it auto-detects the RDMA device. Set the
+flag only to move off that: `nixl` returns HTTP 200 but 0 output tokens (decode
+KV handoff via UCX/nixl fails), and `mori` is an alternative but not the sglang
+default here.
 
 ### Poll budget (MoE JIT cold-start)
 
