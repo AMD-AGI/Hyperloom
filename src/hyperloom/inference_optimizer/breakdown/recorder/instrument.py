@@ -2918,9 +2918,11 @@ def record_kernel_e2e(
     validation_tier: str = "",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record the end-to-end integrate outcome for one kernel (stage 4).
+    """Record the latest end-to-end integrate outcome for one kernel (stage 4).
 
-    Idempotent per ``kernel_id``. ``e2e_gain_pct`` is the validated end-to-end
+    Idempotent per ``kernel_id`` using overwrite-on-rewrite semantics: a later
+    final-validation verdict replaces the provisional candidate verdict rather
+    than appending a duplicate. ``e2e_gain_pct`` is the validated end-to-end
     gain at integrate (negative => regressed and reverted).
 
     Args:
@@ -2941,6 +2943,7 @@ def record_kernel_e2e(
     if not session_dir or not kernel_id:
         return
     try:
+        evidence = dict(result or {})
         payload = {
             "kernel_id": str(kernel_id),
             "integrated": bool(integrated),
@@ -2952,6 +2955,15 @@ def record_kernel_e2e(
             "extra_server_args": str(extra_server_args or ""),
             "ts": _now_iso_safe(),
         }
+        for field in (
+            "self_reported_e2e_gain_pct",
+            "revalidation_measured_tput",
+            "revalidation_current_best_tput",
+            "revalidation_provenance",
+            "rejection_reason",
+        ):
+            if evidence.get(field) is not None:
+                payload[field] = evidence[field]
         if validation_tier:
             payload["validation_tier"] = validation_tier
         _recorder(session_dir, producer).record_item(
@@ -2959,7 +2971,6 @@ def record_kernel_e2e(
             payload,
             key=str(kernel_id),
         )
-        evidence = dict(result or {})
         if str(route_strategy or "") == "legacy_only":
             return
         if str(route_strategy or "") == "geak_internal":

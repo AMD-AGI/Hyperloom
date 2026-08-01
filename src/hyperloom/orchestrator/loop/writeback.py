@@ -277,6 +277,7 @@ class WritebackCollaborator:
                         break
         entry = {
             "action": "integrate",
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
             "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
             "task_group_key": result.get("task_group_key"),
@@ -2080,6 +2081,7 @@ class WritebackCollaborator:
             if key not in existing:
                 stack_entry: dict[str, Any] = {
                     "action": task_kind,
+                    "source_phase": str(getattr(self.shared_state, "phase", "") or ""),
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,

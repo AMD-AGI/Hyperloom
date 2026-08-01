@@ -1135,6 +1135,39 @@ class KernelPhase(PhaseHandler):
                 measured,
                 float(cb_tput),
             )
+            self._reject_geak_kernel_journey(
+                result,
+                measured_tput=measured,
+                current_best_tput=float(cb_tput),
+                provenance=provenance,
+            )
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                rejected_result = dict(result)
+                rejected_result["final_validation"] = {
+                    "decision": "REJECTED",
+                    "reason": "rebench_did_not_beat_current_best",
+                    "measured_tput": measured,
+                    "current_best_tput": float(cb_tput),
+                }
+                instrument.record_geak_operation(
+                    self.session_dir,
+                    stage="final_validation_failed",
+                    macro_cycle=int(
+                        getattr(self.shared_state, "macro_cycle", 0) or 0
+                    ),
+                    result=rejected_result,
+                    status="failed",
+                    validated=False,
+                    measured_tput=measured,
+                    validation_source=provenance,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug(
+                    "geak v4 final validation rejection recording failed",
+                    exc_info=True,
+                )
             self.shared_state.geak_pending = {}
             self.shared_state.resume_pending_revalidation = False
             return
@@ -1174,6 +1207,7 @@ class KernelPhase(PhaseHandler):
         if not self._geak_win_already_recorded():
             entry = {
                 "action": "geak_e2e",
+                "source_phase": "KERNEL_AGENT",
                 "variant_name": "geak_e2e",
                 "tput": measured,
                 "candidate_extra_server_args": accepted_flags,
@@ -1322,6 +1356,77 @@ class KernelPhase(PhaseHandler):
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+    def _reject_geak_kernel_journey(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        current_best_tput: float,
+        provenance: str,
+    ) -> None:
+        """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
+
+        if not isinstance(result, dict):
+            return
+        kj_path = str(result.get("kernel_journey_path") or "")
+        if not kj_path:
+            eval_dir = str(result.get("eval_dir") or "")
+            if eval_dir:
+                kj_path = str(Path(eval_dir) / "kernel_journey.json")
+        if not kj_path or not Path(kj_path).is_file():
+            return
+        try:
+            journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(journey, dict):
+            return
+
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        for kernel in journey.get("kernels") or []:
+            if not isinstance(kernel, dict):
+                continue
+            kernel_id = str(kernel.get("kernel_id") or "")
+            e2e = kernel.get("e2e")
+            if not kernel_id or not isinstance(e2e, dict):
+                continue
+            decision = str(e2e.get("decision") or "").upper()
+            if decision not in {"KEEP", "ADOPTED"}:
+                continue
+            evidence = dict(e2e)
+            evidence.update(
+                {
+                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
+                    "revalidation_measured_tput": measured_tput,
+                    "revalidation_current_best_tput": current_best_tput,
+                    "revalidation_provenance": provenance,
+                    "rejection_reason": "rebench_did_not_beat_current_best",
+                }
+            )
+            try:
+                instrument.record_kernel_e2e(
+                    self.session_dir,
+                    kernel_id=kernel_id,
+                    integrated=False,
+                    e2e_gain_pct=None,
+                    validated=False,
+                    decision="REVERT",
+                    patch_path=e2e.get("patch_path"),
+                    target_file=e2e.get("target_file"),
+                    extra_server_args=str(
+                        e2e.get("extra_server_args") or ""
+                    ),
+                    result=evidence,
+                    route_strategy="legacy_only",
+                )
+            except Exception:  # noqa: BLE001
+                log.debug(
+                    "geak kernel_journey rejection replay failed for %s",
+                    kernel_id,
+                    exc_info=True,
+                )
 
     def _merge_gemm_candidate_with_runtime(
         self, env_var: str, candidate_csv_path: str
@@ -1879,6 +1984,7 @@ class KernelPhase(PhaseHandler):
 
         entry = {
             "action": "gemm_tuning",
+            "source_phase": "KERNEL_AGENT",
             "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
@@ -2118,6 +2224,7 @@ class KernelPhase(PhaseHandler):
 
                 entry = {
                     "action": "gemm_tuning",
+                    "source_phase": "KERNEL_AGENT",
                     "variant_name": f"forge_{tuner_name}",
                     "tuned_file": (
                         env.get(cand["env_var"])
@@ -2465,6 +2572,7 @@ class KernelPhase(PhaseHandler):
         extra_args = str(integrate_result.get("extra_server_args") or "")
         entry = {
             "action": "fusion",
+            "source_phase": "KERNEL_AGENT",
             "variant_name": "forge_fusion",
             "backend": "forge",
             "engine": "forge_fusion",

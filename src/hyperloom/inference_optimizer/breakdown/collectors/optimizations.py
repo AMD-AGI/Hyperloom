@@ -1,0 +1,1095 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Canonical optimization projection for ``session_breakdown.json``.
+
+The historical breakdown contract exposes successful optimizations through
+several parallel sections (``optimization_stack``, attribution, Explore,
+GEAK, and Forge).  This module projects those records into one stable,
+phase-aware read model while leaving the historical sections available as
+audit and compatibility data.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+
+OPTIMIZATIONS_SCHEMA_VERSION = 2
+
+_SOURCES = (
+    "warm_replay",
+    "explore",
+    "framework_agent",
+    "kernel_agent",
+    "unattributed",
+)
+
+_NON_OPTIMIZATION_ACTIONS = {
+    "baseline",
+    "profile",
+    "roofline",
+    "sweep",
+    "conc_sweep",
+    "validate",
+    "validate_stack",
+    "target_analysis",
+    "trace_analyze",
+}
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_ts(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _normalized_phase(value: Any) -> str:
+    phase = str(value or "").strip().upper()
+    return {
+        "FRAMEWORK": "framework_agent",
+        "FRAMEWORK_AGENT": "framework_agent",
+        "EXPLORE": "explore",
+        "KERNEL": "kernel_agent",
+        "KERNEL_AGENT": "kernel_agent",
+    }.get(phase, "")
+
+
+def _phase_timeline(state: dict[str, Any]) -> list[tuple[float, str]]:
+    timeline: list[tuple[float, str]] = []
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return timeline
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        phase = _normalized_phase(row.get("to_phase"))
+        ts = _parse_ts(row.get("ts_unix"))
+        if ts is None:
+            ts = _parse_ts(row.get("ts"))
+        if phase and ts is not None:
+            timeline.append((ts, phase))
+    timeline.sort(key=lambda item: item[0])
+    return timeline
+
+
+def _phase_at(ts: float | None, timeline: list[tuple[float, str]]) -> str:
+    if ts is None:
+        return ""
+    current = ""
+    for boundary, phase in timeline:
+        if boundary > ts:
+            break
+        current = phase
+    return current
+
+
+def _kernel_backend(
+    raw: dict[str, Any],
+    *,
+    kernel_id: str,
+    geak_invocations: list[dict[str, Any]],
+    forge_invocations: list[dict[str, Any]],
+) -> str | None:
+    values = (
+        raw.get("backend"),
+        raw.get("engine"),
+        raw.get("source"),
+        raw.get("action"),
+    )
+    joined = " ".join(str(value or "").lower() for value in values)
+    if "forge" in joined:
+        return "forge"
+    if "geak" in joined:
+        return "geak"
+
+    if kernel_id:
+        for backend, invocations in (
+            ("forge", forge_invocations),
+            ("geak", geak_invocations),
+        ):
+            if any(
+                str(inv.get("kernel_id") or "") == kernel_id
+                and str(inv.get("decision") or "").upper() == "KEEP"
+                for inv in invocations
+                if isinstance(inv, dict)
+            ):
+                return backend
+    return None
+
+
+def _resolve_source(
+    raw: dict[str, Any],
+    gain: dict[str, Any],
+    *,
+    timeline: list[tuple[float, str]],
+) -> tuple[str, str]:
+    action = str(raw.get("action") or gain.get("action") or "").strip().lower()
+    if action in {"replay_warm_recipe", "warm_replay"} or "warm_replay" in action:
+        return "warm_replay", "action_family"
+
+    kernel_markers = (
+        raw.get("kernel_id"),
+        raw.get("backend"),
+        raw.get("engine"),
+        raw.get("tuned_file"),
+        raw.get("final_overlay"),
+    )
+    if (
+        any(value not in (None, "", [], {}) for value in kernel_markers)
+        or action in {"geak_e2e", "gemm_tuning", "fusion", "integrate"}
+        or action.startswith("kernel_opt")
+    ):
+        return "kernel_agent", "action_family"
+
+    explicit = _normalized_phase(
+        raw.get("source_phase")
+        or gain.get("source_phase")
+        or raw.get("phase")
+        or gain.get("phase")
+    )
+    if explicit:
+        return explicit, "recorded"
+
+    ts = _parse_ts(gain.get("ts_unix"))
+    if ts is None:
+        ts = _parse_ts(gain.get("ts") or raw.get("ts"))
+    inferred = _phase_at(ts, timeline)
+    if inferred:
+        return inferred, "phase_history_ts"
+
+    if action in {"explore", "backends", "params"}:
+        return "explore", "action_family"
+    if action == "framework_agent":
+        return "framework_agent", "action_family"
+    return "unattributed", "unknown"
+
+
+def _optimization_kind(
+    raw: dict[str, Any],
+    *,
+    source: str,
+) -> str:
+    action = str(raw.get("action") or "").strip().lower()
+    operation_kind = str(raw.get("operation_kind") or "").strip().lower()
+    if source == "warm_replay":
+        return "serving_config"
+    if source == "kernel_agent":
+        if action == "gemm_tuning":
+            return "gemm_tuning"
+        if action == "fusion":
+            return "kernel_fusion"
+        return "kernel_patch"
+    if source == "framework_agent":
+        patch_evidence = (
+            raw.get("patch_path"),
+            raw.get("target_file"),
+            raw.get("source_snapshot"),
+            raw.get("framework_root"),
+            raw.get("base_sha"),
+        )
+        return (
+            "framework_patch"
+            if any(value not in (None, "") for value in patch_evidence)
+            else "serving_config"
+        )
+    if source == "explore":
+        return operation_kind if operation_kind in {"backend", "param", "env"} else "serving_config"
+    return operation_kind or "unknown"
+
+
+def _artifacts(raw: dict[str, Any]) -> list[dict[str, str]]:
+    fields = (
+        ("patch", "patch_path"),
+        ("target_file", "target_file"),
+        ("tuned_file", "tuned_file"),
+        ("report", "final_report_path"),
+        ("report", "report_path"),
+        ("overlay", "final_overlay"),
+    )
+    out = [
+        {"kind": str(item.get("kind") or ""), "path": str(item.get("path") or "")}
+        for item in raw.get("artifacts") or []
+        if isinstance(item, dict) and item.get("path")
+    ]
+    seen: set[tuple[str, str]] = set()
+    seen.update((item["kind"], item["path"]) for item in out)
+    for kind, field in fields:
+        path = str(raw.get(field) or "").strip()
+        key = (kind, path)
+        if not path or key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": kind, "path": path})
+    return out
+
+
+def _execution_mode(raw: dict[str, Any], backend: str | None) -> str | None:
+    explicit = str(raw.get("execution_mode") or "").strip()
+    if explicit in {"whole_pipeline", "per_kernel"}:
+        return explicit
+    action = str(raw.get("action") or "").strip().lower()
+    if action == "geak_e2e":
+        return "whole_pipeline"
+    if action in {"gemm_tuning", "fusion", "integrate"} or action.startswith("kernel_opt"):
+        return "per_kernel"
+    if backend == "forge":
+        return "per_kernel"
+    if backend == "geak":
+        return "whole_pipeline"
+    return None
+
+
+def _empty_summary() -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        source: {"keeps": 0, "total_gain_pct": 0.0}
+        for source in _SOURCES
+    }
+    summary["kernel_agent"]["by_backend"] = {
+        "geak": {"keeps": 0, "total_gain_pct": 0.0},
+        "forge": {"keeps": 0, "total_gain_pct": 0.0},
+        "unattributed": {"keeps": 0, "total_gain_pct": 0.0},
+    }
+    return summary
+
+
+def _collect_backend_attempts(
+    session_id: str,
+    geak_invocations: list[dict[str, Any]],
+    forge_invocations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize every backend invocation into one chronological attempt list."""
+
+    attempts: list[dict[str, Any]] = []
+    for default_backend, invocations in (
+        ("geak", geak_invocations),
+        ("forge", forge_invocations),
+    ):
+        for raw in invocations:
+            if not isinstance(raw, dict):
+                continue
+            duration = next(
+                (
+                    _to_float(raw.get(field))
+                    for field in (
+                        "duration_sec",
+                        "elapsed_sec",
+                        "elapsed_time_sec",
+                        "elapsed",
+                    )
+                    if _to_float(raw.get(field)) is not None
+                ),
+                None,
+            )
+            attempts.append(
+                {
+                    "attempt_id": str(raw.get("attempt_id") or ""),
+                    "run_id": str(raw.get("run_id") or ""),
+                    "kernel_id": str(raw.get("kernel_id") or ""),
+                    "backend": str(raw.get("backend") or default_backend),
+                    "decision": str(raw.get("decision") or "").upper(),
+                    "ts": str(raw.get("ts") or ""),
+                    "duration_sec": duration,
+                    "micro_speedup": _to_float(raw.get("micro_speedup")),
+                    "compile_passed": raw.get("compile_passed"),
+                    "correctness_passed": raw.get("correctness_passed"),
+                    "error_class": (
+                        str(raw.get("error_class")) if raw.get("error_class") else None
+                    ),
+                    "error": str(raw.get("error")) if raw.get("error") else None,
+                    "result_path": (
+                        str(raw.get("result_path")) if raw.get("result_path") else None
+                    ),
+                    "verification_path": (
+                        str(raw.get("verification_path"))
+                        if raw.get("verification_path")
+                        else None
+                    ),
+                }
+            )
+
+    attempts.sort(
+        key=lambda row: (
+            str(row.get("kernel_id") or ""),
+            _parse_ts(row.get("ts")) if _parse_ts(row.get("ts")) is not None else float("inf"),
+            str(row.get("backend") or ""),
+            str(row.get("attempt_id") or ""),
+        )
+    )
+    sequence_by_kernel: dict[str, int] = {}
+    for attempt in attempts:
+        kernel_id = str(attempt.get("kernel_id") or "")
+        sequence_by_kernel[kernel_id] = sequence_by_kernel.get(kernel_id, 0) + 1
+        attempt["sequence"] = sequence_by_kernel[kernel_id]
+        if not attempt.get("attempt_id"):
+            attempt["attempt_id"] = (
+                f"{session_id}:kernel-attempt:"
+                f"{kernel_id or 'unknown'}:{attempt.get('backend') or 'unknown'}:"
+                f"{attempt['sequence']}"
+            )
+    return attempts
+
+
+def _adopted_attempt_id(
+    raw: dict[str, Any],
+    *,
+    kernel_id: str,
+    backend: str | None,
+    backend_attempts: list[dict[str, Any]],
+    warnings: list[str],
+) -> str | None:
+    explicit = str(
+        raw.get("adopted_attempt_id")
+        or raw.get("best_attempt_id")
+        or raw.get("attempt_id")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    matches = [
+        str(attempt.get("attempt_id") or "")
+        for attempt in backend_attempts
+        if str(attempt.get("kernel_id") or "") == kernel_id
+        and str(attempt.get("backend") or "") == str(backend or "")
+        and str(attempt.get("decision") or "").upper() == "KEEP"
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        warnings.append(
+            "optimizations: multiple KEEP attempts match "
+            f"kernel={kernel_id!r} backend={backend!r}; "
+            "adopted_attempt_id requires explicit producer evidence"
+        )
+    return None
+
+
+def _empty_kind_summary() -> dict[str, Any]:
+    return {"keeps": 0, "total_gain_pct": 0.0}
+
+
+def _validation_summary(
+    state: dict[str, Any],
+    attribution: dict[str, Any],
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_breakdown = attribution.get("source_breakdown")
+    if not isinstance(source_breakdown, dict):
+        source_breakdown = {}
+    validated_total = _to_float(source_breakdown.get("validated_total_pct"))
+    if validated_total is None:
+        validated_total = _to_float(state.get("cumulative_gain_validated"))
+    attributed_total = sum(
+        _to_float(entry.get("gain_pct")) or 0.0
+        for entry in entries
+        if entry.get("validated") is True
+    )
+    phase_breakdown = attribution.get("phase_breakdown")
+    if not isinstance(phase_breakdown, dict):
+        phase_breakdown = {}
+    explore = phase_breakdown.get("explore")
+    domain_attribution = (
+        dict(explore.get("by_domain") or {})
+        if isinstance(explore, dict) and isinstance(explore.get("by_domain"), dict)
+        else {}
+    )
+    notes = attribution.get("notes")
+    canonical_source_breakdown = {
+        "sweep_gain_pct": round(
+            _to_float(source_breakdown.get("sweep_pct_of_total")) or 0.0,
+            6,
+        ),
+        "params_gain_pct": round(
+            _to_float(source_breakdown.get("params_pct_of_total")) or 0.0,
+            6,
+        ),
+        "backends_gain_pct": round(
+            _to_float(source_breakdown.get("backends_pct_of_total")) or 0.0,
+            6,
+        ),
+        "gemm_tuning_gain_pct": round(
+            _to_float(source_breakdown.get("gemm_tuning_pct_of_total")) or 0.0,
+            6,
+        ),
+    }
+    try:
+        validated_at_stack_len = int(
+            state.get("cumulative_gain_validated_stack_len") or 0
+        )
+    except (TypeError, ValueError):
+        validated_at_stack_len = 0
+    return {
+        "method": str(attribution.get("method") or "missing"),
+        "validated_at_stack_len": validated_at_stack_len,
+        "validated_total_gain_pct": (
+            round(validated_total, 6) if validated_total is not None else None
+        ),
+        "attributed_total_gain_pct": round(attributed_total, 6),
+        "attribution_gap_pct": (
+            round(validated_total - attributed_total, 6)
+            if validated_total is not None
+            else None
+        ),
+        "notes": [str(note) for note in notes] if isinstance(notes, list) else [],
+        "source_breakdown": canonical_source_breakdown,
+        "phase_breakdown": phase_breakdown,
+        "domain_attribution": domain_attribution,
+    }
+
+
+def collect_optimizations(
+    state: dict[str, Any],
+    attribution: dict[str, Any],
+    geak_invocations: list[dict[str, Any]],
+    forge_invocations: list[dict[str, Any]],
+    warnings: list[str],
+    gemm_tuning: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the single canonical optimization read model.
+
+    Only records in ``state.optimization_stack`` are projected: attempts,
+    REVERTs, and ``no_promote`` events remain in the action timeline.  The
+    legacy sections are intentionally not mutated.
+    """
+
+    raw_stack = state.get("optimization_stack") or []
+    if not isinstance(raw_stack, list):
+        warnings.append("optimizations: state.optimization_stack is not a list")
+        raw_stack = []
+    gain_rows = attribution.get("gain_per_stack_entry") or []
+    if not isinstance(gain_rows, list):
+        gain_rows = []
+    state_gain_rows = state.get("gain_per_stack_entry")
+    if not isinstance(state_gain_rows, list):
+        state_gain_rows = []
+    if gain_rows and len(gain_rows) != len(raw_stack):
+        warnings.append(
+            "optimizations: gain_per_stack_entry length does not match "
+            "optimization_stack; missing rows use throughput fallback"
+        )
+    try:
+        validated_len = int(state.get("cumulative_gain_validated_stack_len") or 0)
+    except (TypeError, ValueError):
+        validated_len = 0
+
+    baseline_tput = _to_float(state.get("baseline_tput"))
+    session_id = str(state.get("session_id") or "session")
+    timeline = _phase_timeline(state)
+    backend_attempts = _collect_backend_attempts(
+        session_id,
+        geak_invocations,
+        forge_invocations,
+    )
+    entries: list[dict[str, Any]] = []
+    previous_tput = baseline_tput
+
+    for stack_index, raw_value in enumerate(raw_stack):
+        if not isinstance(raw_value, dict):
+            warnings.append(f"optimizations: stack entry {stack_index} is not an object")
+            continue
+        raw = dict(raw_value)
+        if str(raw.get("action") or "").strip().lower() in _NON_OPTIMIZATION_ACTIONS:
+            anchor_tput = _to_float(raw.get("tput"))
+            if anchor_tput is not None:
+                previous_tput = anchor_tput
+            continue
+        gain = (
+            dict(gain_rows[stack_index])
+            if stack_index < len(gain_rows) and isinstance(gain_rows[stack_index], dict)
+            else {}
+        )
+        source, source_method = _resolve_source(raw, gain, timeline=timeline)
+        kernel_id = str(raw.get("kernel_id") or raw.get("action_kernel_id") or "").strip()
+        backend = (
+            _kernel_backend(
+                raw,
+                kernel_id=kernel_id,
+                geak_invocations=geak_invocations,
+                forge_invocations=forge_invocations,
+            )
+            if source == "kernel_agent"
+            else None
+        )
+        throughput_after = _to_float(raw.get("tput"))
+        throughput_before = previous_tput
+        delta = _to_float(gain.get("delta_pct"))
+        cumulative = _to_float(gain.get("cum_gain_after"))
+        original_gain = (
+            state_gain_rows[stack_index]
+            if stack_index < len(state_gain_rows)
+            else None
+        )
+        if isinstance(original_gain, dict) and _to_float(
+            original_gain.get("delta_pct")
+        ) is not None:
+            gain_method = "ledger"
+        elif isinstance(original_gain, (int, float)):
+            gain_method = "legacy_ledger_derived"
+        elif delta is not None:
+            gain_method = "reconstructed"
+        else:
+            gain_method = "missing"
+        if delta is None and throughput_before and throughput_after is not None:
+            delta = (throughput_after / throughput_before - 1.0) * 100.0
+            gain_method = "throughput_derived"
+        if cumulative is None and baseline_tput and throughput_after is not None:
+            cumulative = (throughput_after / baseline_tput - 1.0) * 100.0
+
+        name = str(
+            raw.get("name")
+            or raw.get("variant_name")
+            or kernel_id
+            or _optimization_kind(raw, source=source)
+        )
+        entry = {
+            "id": f"{session_id}:optimization:{stack_index}",
+            "stack_index": stack_index,
+            "source": source,
+            "source_method": source_method,
+            "optimization_kind": _optimization_kind(raw, source=source),
+            "name": name,
+            "backend": backend,
+            "execution_mode": _execution_mode(raw, backend),
+            "kernel_id": kernel_id or None,
+            "adopted_attempt_id": _adopted_attempt_id(
+                raw,
+                kernel_id=kernel_id,
+                backend=backend,
+                backend_attempts=backend_attempts,
+                warnings=warnings,
+            ),
+            "action": str(raw.get("action") or ""),
+            "variant_name": str(raw.get("variant_name") or ""),
+            "fingerprint": str(raw.get("fingerprint") or ""),
+            "scope": str(raw.get("scope") or ""),
+            "source_phase": str(
+                raw.get("source_phase")
+                or gain.get("source_phase")
+                or raw.get("phase")
+                or gain.get("phase")
+                or ""
+            ),
+            "gain_method": gain_method,
+            "accepted_heads": (
+                list(raw.get("accepted_heads") or [])
+                if isinstance(raw.get("accepted_heads"), list)
+                else []
+            ),
+            "extra_server_args_is_invariant": (
+                raw.get("extra_server_args_is_invariant")
+                if isinstance(raw.get("extra_server_args_is_invariant"), bool)
+                else None
+            ),
+            "candidate_flags": (
+                raw.get("candidate_flags")
+                if raw.get("candidate_flags") is not None
+                else raw.get("flags")
+                if raw.get("flags") is not None
+                else str(raw.get("candidate_extra_server_args") or "")
+            ),
+            "gain_pct": round(delta, 6) if delta is not None else None,
+            "cumulative_gain_pct": (
+                round(cumulative, 6) if cumulative is not None else None
+            ),
+            "throughput_before": throughput_before,
+            "throughput_after": throughput_after,
+            "validated": stack_index < validated_len,
+            "task_id": str(raw.get("task_id") or gain.get("task_id") or ""),
+            "ts": str(gain.get("ts") or raw.get("ts") or ""),
+            "provenance": str(raw.get("provenance") or ""),
+            "configuration": {
+                "extra_server_args": str(
+                    raw.get("extra_server_args")
+                    or raw.get("candidate_extra_server_args")
+                    or gain.get("extra_server_args")
+                    or ""
+                ),
+                "extra_envs": dict(raw.get("extra_envs") or {}),
+            },
+            "artifacts": _artifacts(raw),
+        }
+        entries.append(entry)
+        if throughput_after is not None:
+            previous_tput = throughput_after
+
+    summary = _empty_summary()
+    summary_by_kind: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not entry["validated"]:
+            continue
+        source = str(entry["source"])
+        bucket = summary[source]
+        bucket["keeps"] += 1
+        gain = _to_float(entry.get("gain_pct")) or 0.0
+        bucket["total_gain_pct"] += gain
+        if source == "kernel_agent":
+            backend = str(entry.get("backend") or "unattributed")
+            if backend not in bucket["by_backend"]:
+                backend = "unattributed"
+            bucket["by_backend"][backend]["keeps"] += 1
+            bucket["by_backend"][backend]["total_gain_pct"] += gain
+        kind = str(entry.get("optimization_kind") or "unknown")
+        kind_bucket = summary_by_kind.setdefault(kind, _empty_kind_summary())
+        kind_bucket["keeps"] += 1
+        kind_bucket["total_gain_pct"] += gain
+        if source == "kernel_agent":
+            by_backend = kind_bucket.setdefault(
+                "by_backend",
+                {
+                    "geak": _empty_kind_summary(),
+                    "forge": _empty_kind_summary(),
+                    "unattributed": _empty_kind_summary(),
+                },
+            )
+            backend = str(entry.get("backend") or "unattributed")
+            if backend not in by_backend:
+                backend = "unattributed"
+            by_backend[backend]["keeps"] += 1
+            by_backend[backend]["total_gain_pct"] += gain
+
+    for bucket in summary.values():
+        bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]), 6)
+        for backend_bucket in bucket.get("by_backend", {}).values():
+            backend_bucket["total_gain_pct"] = round(
+                float(backend_bucket["total_gain_pct"]),
+                6,
+            )
+    for bucket in summary_by_kind.values():
+        bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]), 6)
+        for backend_bucket in bucket.get("by_backend", {}).values():
+            backend_bucket["total_gain_pct"] = round(
+                float(backend_bucket["total_gain_pct"]),
+                6,
+            )
+
+    gemm_tuning_runs = []
+    if isinstance(gemm_tuning, dict) and isinstance(gemm_tuning.get("runs"), list):
+        gemm_tuning_runs = [
+            dict(run) for run in gemm_tuning["runs"] if isinstance(run, dict)
+        ]
+
+    return {
+        "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
+        "entries": entries,
+        "backend_attempts": backend_attempts,
+        "summary_by_source": summary,
+        "summary_by_kind": summary_by_kind,
+        "validation": _validation_summary(state, attribution, entries),
+        "gemm_tuning_runs": gemm_tuning_runs,
+    }
+
+
+def _duration_between(started_at: Any, ended_at: Any) -> float | None:
+    started = _parse_ts(started_at)
+    ended = _parse_ts(ended_at)
+    if started is None or ended is None or ended < started:
+        return None
+    return round(ended - started, 6)
+
+
+def _collect_v4_backend_invocations(
+    operations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    validated_operation_ids = {
+        str(adoption.get("operation_id") or "")
+        for adoption in adoptions
+        if isinstance(adoption, dict)
+        and adoption.get("validated") is True
+        and str(adoption.get("decision") or "").upper()
+        in {"KEEP", "ADOPT", "ADOPTED"}
+    }
+    micro_speedup_by_attempt = {
+        str((measurement.get("dimensions") or {}).get("attempt_id") or ""): _to_float(
+            measurement.get("value")
+        )
+        for measurement in measurements
+        if isinstance(measurement, dict)
+        and str(measurement.get("name") or "") == "micro_speedup"
+        and isinstance(measurement.get("dimensions"), dict)
+        and (measurement.get("dimensions") or {}).get("attempt_id")
+    }
+    geak: list[dict[str, Any]] = []
+    forge: list[dict[str, Any]] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        operation_id = str(operation.get("operation_id") or "")
+        subject = (
+            operation.get("subject")
+            if isinstance(operation.get("subject"), dict)
+            else {}
+        )
+        kernel_id = str(subject.get("name") or operation.get("name") or "")
+        outputs = (
+            operation.get("outputs")
+            if isinstance(operation.get("outputs"), dict)
+            else {}
+        )
+        verification = (
+            outputs.get("verification")
+            if isinstance(outputs.get("verification"), dict)
+            else {}
+        )
+        proposal = (
+            outputs.get("proposal")
+            if isinstance(outputs.get("proposal"), dict)
+            else {}
+        )
+        best_attempt_id = str(verification.get("best_attempt_id") or "")
+        operation_decision = str(
+            outputs.get("decision")
+            or proposal.get("decision")
+            or ""
+        ).upper()
+        for index, attempt_value in enumerate(operation.get("attempts") or []):
+            if not isinstance(attempt_value, dict):
+                continue
+            attempt = dict(attempt_value)
+            attempt_outputs = (
+                attempt.get("outputs")
+                if isinstance(attempt.get("outputs"), dict)
+                else {}
+            )
+            attempt_id = str(attempt.get("attempt_id") or "")
+            backend = str(
+                attempt.get("backend")
+                or attempt_outputs.get("backend")
+                or operation.get("strategy")
+                or ""
+            ).lower()
+            if "geak" in backend:
+                backend = "geak"
+                lane = geak
+            elif "forge" in backend:
+                backend = "forge"
+                lane = forge
+            else:
+                continue
+            status = str(attempt.get("status") or "").upper()
+            decision = str(attempt_outputs.get("decision") or "").upper()
+            if not decision and operation_id in validated_operation_ids:
+                if not best_attempt_id or attempt_id == best_attempt_id:
+                    decision = "KEEP"
+            if not decision and status in {"FAILED", "ERROR", "CANCELLED"}:
+                decision = "FAILED"
+            error = attempt.get("error")
+            error_class = None
+            error_message = None
+            if isinstance(error, dict):
+                error_class = str(
+                    error.get("class")
+                    or error.get("error_class")
+                    or error.get("type")
+                    or ""
+                ) or None
+                error_message = str(
+                    error.get("message") or error.get("error") or ""
+                ) or None
+            elif error:
+                error_message = str(error)
+            lane.append(
+                {
+                    "attempt_id": attempt_id,
+                    "run_id": operation_id,
+                    "kernel_id": kernel_id,
+                    "backend": backend,
+                    "decision": decision or operation_decision,
+                    "ts": str(
+                        attempt.get("started_at")
+                        or operation.get("started_at")
+                        or ""
+                    ),
+                    "sequence": attempt.get("sequence") or index + 1,
+                    "duration_sec": _duration_between(
+                        attempt.get("started_at"),
+                        attempt.get("ended_at"),
+                    ),
+                    "micro_speedup": _to_float(
+                        attempt_outputs.get("micro_speedup")
+                        or attempt_outputs.get("speedup")
+                    )
+                    or micro_speedup_by_attempt.get(attempt_id),
+                    "compile_passed": attempt_outputs.get("compile_passed"),
+                    "correctness_passed": attempt_outputs.get(
+                        "correctness_passed"
+                    ),
+                    "error_class": error_class,
+                    "error": error_message,
+                }
+            )
+    return geak, forge
+
+
+def _collect_v4_gemm_tuning_runs(
+    operations: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    adoption_by_operation = {
+        str(adoption.get("operation_id") or ""): adoption
+        for adoption in adoptions
+        if isinstance(adoption, dict) and adoption.get("operation_id")
+    }
+    runs: list[dict[str, Any]] = []
+    for operation in operations:
+        if not isinstance(operation, dict) or operation.get("kind") != "gemm_tuning":
+            continue
+        extensions = (
+            operation.get("extensions")
+            if isinstance(operation.get("extensions"), dict)
+            else {}
+        )
+        gemm_extension = (
+            extensions.get("gemm")
+            if isinstance(extensions.get("gemm"), dict)
+            else {}
+        )
+        result = (
+            dict(gemm_extension.get("result"))
+            if isinstance(gemm_extension.get("result"), dict)
+            else {}
+        )
+        outputs = (
+            operation.get("outputs")
+            if isinstance(operation.get("outputs"), dict)
+            else {}
+        )
+        adoption = adoption_by_operation.get(
+            str(operation.get("operation_id") or ""),
+            {},
+        )
+        result.setdefault(
+            "engine",
+            outputs.get("engine") or operation.get("strategy") or "",
+        )
+        result.setdefault("status", operation.get("status") or "")
+        result.setdefault("decision", outputs.get("decision") or "")
+        result.setdefault("source", operation.get("producer") or "")
+        result.setdefault(
+            "ts",
+            operation.get("ended_at") or operation.get("started_at") or "",
+        )
+        result.setdefault(
+            "duration_sec",
+            _duration_between(
+                operation.get("started_at"),
+                operation.get("ended_at"),
+            ),
+        )
+        result.setdefault(
+            "adopted",
+            adoption.get("validated") is True
+            and str(adoption.get("decision") or "").upper()
+            in {"KEEP", "ADOPT", "ADOPTED"},
+        )
+        if result.get("gain_pct") is None:
+            result["gain_pct"] = _to_float(adoption.get("gain_pct"))
+        if "candidates" not in result:
+            result["candidates"] = [
+                dict(attempt.get("outputs") or {})
+                for attempt in operation.get("attempts") or []
+                if isinstance(attempt, dict)
+            ]
+        runs.append(result)
+    return runs
+
+
+def collect_v4_optimizations(
+    run: dict[str, Any],
+    operations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Project canonical v4 adoption streams through the same read model.
+
+    V4 never reads business-state files, so a small synthetic stack is built
+    exclusively from recorder operations, validated adoptions, measurements,
+    and artifact references before delegating to :func:`collect_optimizations`.
+    """
+
+    operation_by_id = {
+        str(operation.get("operation_id") or ""): operation
+        for operation in operations
+        if isinstance(operation, dict) and operation.get("operation_id")
+    }
+    measurement_by_id = {
+        str(measurement.get("measurement_id") or ""): measurement
+        for measurement in measurements
+        if isinstance(measurement, dict) and measurement.get("measurement_id")
+    }
+    artifact_by_id = {
+        str(artifact.get("artifact_id") or ""): artifact
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("artifact_id")
+    }
+
+    stack: list[dict[str, Any]] = []
+    gains: list[dict[str, Any]] = []
+    cumulative = 0.0
+    for adoption in adoptions:
+        if not isinstance(adoption, dict):
+            continue
+        decision = str(adoption.get("decision") or "").upper()
+        if decision not in {"KEEP", "ADOPT", "ADOPTED"}:
+            continue
+        if adoption.get("validated") is not True:
+            continue
+        operation_id = str(adoption.get("operation_id") or "")
+        operation = operation_by_id.get(operation_id, {})
+        strategy = str(operation.get("strategy") or "")
+        subject = adoption.get("subject") if isinstance(adoption.get("subject"), dict) else {}
+        if not subject:
+            subject = operation.get("subject") if isinstance(operation.get("subject"), dict) else {}
+        kernel_id = str(subject.get("name") or "") if "kernel" in str(subject.get("kind") or "").lower() else ""
+        artifact_rows = [
+            artifact_by_id[artifact_id]
+            for artifact_id in adoption.get("artifact_ids") or []
+            if artifact_id in artifact_by_id
+        ]
+        raw: dict[str, Any] = {
+            "action": str(operation.get("kind") or adoption.get("kind") or ""),
+            "variant_name": str(
+                operation.get("name")
+                or subject.get("name")
+                or adoption.get("adoption_id")
+                or ""
+            ),
+            "name": str(
+                operation.get("name")
+                or subject.get("name")
+                or adoption.get("kind")
+                or ""
+            ),
+            "task_id": operation_id,
+            "source_phase": str(operation.get("phase") or ""),
+            "backend": strategy,
+            "execution_mode": (
+                "whole_pipeline"
+                if strategy == "geak"
+                else "per_kernel"
+                if "forge" in strategy
+                else None
+            ),
+            "kernel_id": kernel_id,
+            "operation_kind": str(operation.get("kind") or adoption.get("kind") or ""),
+            "extra_server_args": str((adoption.get("configuration") or {}).get("extra_server_args") or ""),
+            "extra_envs": dict((adoption.get("configuration") or {}).get("extra_envs") or {}),
+            "ts": str(adoption.get("adopted_at") or operation.get("ended_at") or ""),
+            "provenance": str(adoption.get("producer") or operation.get("producer") or ""),
+        }
+        for artifact in artifact_rows:
+            kind = str(artifact.get("kind") or "").lower()
+            path = str(artifact.get("path") or artifact.get("uri") or "")
+            if not path:
+                continue
+            if "patch" in kind:
+                raw.setdefault("patch_path", path)
+            elif "tuned" in kind:
+                raw.setdefault("tuned_file", path)
+            elif "target" in kind or "source" in kind:
+                raw.setdefault("target_file", path)
+            elif "overlay" in kind:
+                raw.setdefault("final_overlay", path)
+            else:
+                raw.setdefault("report_path", path)
+        raw["artifacts"] = [
+            {
+                "kind": str(artifact.get("kind") or ""),
+                "path": str(artifact.get("path") or artifact.get("uri") or ""),
+            }
+            for artifact in artifact_rows
+            if artifact.get("path") or artifact.get("uri")
+        ]
+
+        throughput_after = None
+        throughput_before = None
+        for measurement_id in adoption.get("measurement_ids") or []:
+            measurement = measurement_by_id.get(str(measurement_id), {})
+            name = str(measurement.get("name") or "").lower()
+            value = _to_float(measurement.get("value"))
+            if value is None:
+                continue
+            if name in {"throughput_after", "final_throughput", "output_throughput"}:
+                throughput_after = value
+            elif name in {"throughput_before", "baseline_throughput"}:
+                throughput_before = value
+        if throughput_after is not None:
+            raw["tput"] = throughput_after
+
+        delta = _to_float(adoption.get("gain_pct"))
+        cumulative += delta or 0.0
+        gain_row: dict[str, Any] = {
+            "action": raw["action"],
+            "variant_name": raw["variant_name"],
+            "delta_pct": delta,
+            "cum_gain_after": cumulative,
+            "ts": raw["ts"],
+            "task_id": operation_id,
+            "source_phase": raw["source_phase"],
+        }
+        if throughput_before is not None:
+            gain_row["throughput_before"] = throughput_before
+        stack.append(raw)
+        gains.append(gain_row)
+
+    baseline_tput = next(
+        (
+            _to_float(gain.get("throughput_before"))
+            for gain in gains
+            if _to_float(gain.get("throughput_before")) is not None
+        ),
+        None,
+    )
+    synthetic_state = {
+        "session_id": str(run.get("session_id") or run.get("claw_session_id") or "session"),
+        "baseline_tput": baseline_tput,
+        "optimization_stack": stack,
+        "gain_per_stack_entry": gains,
+        "cumulative_gain_validated": cumulative,
+        "cumulative_gain_validated_stack_len": len(stack),
+        "phase_history": [],
+    }
+    geak_invocations, forge_invocations = _collect_v4_backend_invocations(
+        operations,
+        measurements,
+        adoptions,
+    )
+    synthetic_attribution = {
+        "gain_per_stack_entry": gains,
+        "method": "validated" if gains else "missing",
+        "source_breakdown": {
+            "validated_total_pct": cumulative,
+        },
+        "phase_breakdown": {},
+        "notes": [
+            "Attribution synthesized from validated V4 adoption streams."
+        ],
+    }
+    return collect_optimizations(
+        synthetic_state,
+        synthetic_attribution,
+        geak_invocations,
+        forge_invocations,
+        warnings,
+        gemm_tuning={
+            "runs": _collect_v4_gemm_tuning_runs(operations, adoptions),
+        },
+    )
+

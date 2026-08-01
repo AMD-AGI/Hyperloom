@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-#: breakdown schema version. Emitted on the legacy fallback path (no recorder fragments).
-SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
+#: Historical collector-only schema retained for archived-reader identification.
+SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
 #: breakdown schema version stamped when the file was assembled from the
 #: author-time recorder fragments. Same wire shape as v2 plus recorder-only
@@ -26,6 +26,13 @@ SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 #: exclusively from recorder SDK fragments and never reconstructed from session
 #: business files.
 SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
+
+#: Unified optimization schema. This is a breaking wire-shape cutover: adopted
+#: optimizations are emitted only through ``optimizations``.
+SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
+
+#: Current breakdown schema version.
+SCHEMA_VERSION = SCHEMA_VERSION_V5
 
 
 # Session metadata
@@ -796,6 +803,11 @@ class KernelE2E(TypedDict, total=False):
     patch_path: str | None
     target_file: str | None
     extra_server_args: str
+    self_reported_e2e_gain_pct: float | None
+    revalidation_measured_tput: float
+    revalidation_current_best_tput: float
+    revalidation_provenance: str
+    rejection_reason: str
     ts: str
 
 
@@ -1371,6 +1383,14 @@ class WarmReplayOutcome(TypedDict, total=False):
     throughput_after: float
     warm_recipe_tier: str
     warm_recipe_conf: float
+    config_source: str
+    config_donor_tier: str
+    donor_canonical_id: str
+    donor_model: str
+    donor_session_id: str
+    donor_family_tags: list[str]
+    donor_gain_pct: float
+    donor_breakdown_link: str
     replay_task_id: str
     error_class: str
     reason: str
@@ -1602,10 +1622,134 @@ class OptimizationStackEntry(TypedDict, total=False):
     fingerprint: str
     provenance: str
     task_id: str
+    source_phase: str
     # filter label for the kind of optimization (backend / param / env on
     # explore KEEPs); specialist dial.
     operation_kind: str
     scope: str
+    accepted_heads: list[Any]
+    extra_server_args_is_invariant: bool
+    candidate_flags: Any
+
+
+# Canonical optimizations — single downstream read model
+OptimizationSource = Literal[
+    "warm_replay",
+    "explore",
+    "framework_agent",
+    "kernel_agent",
+    "unattributed",
+]
+OptimizationSourceMethod = Literal[
+    "recorded",
+    "phase_history_ts",
+    "action_family",
+    "unknown",
+]
+KernelOptimizationBackend = Literal["geak", "forge"]
+KernelExecutionMode = Literal["whole_pipeline", "per_kernel"]
+
+
+class OptimizationArtifact(TypedDict, total=False):
+    """One artifact attached to a canonical optimization entry."""
+
+    kind: str
+    path: str
+
+
+class OptimizationConfiguration(TypedDict, total=False):
+    """Effective serving configuration carried by one optimization."""
+
+    extra_server_args: str
+    extra_envs: dict[str, str]
+
+
+class OptimizationEntry(TypedDict, total=False):
+    """One adopted optimization, independent of its internal action name."""
+
+    id: str
+    stack_index: int
+    source: OptimizationSource
+    source_method: OptimizationSourceMethod
+    optimization_kind: str
+    name: str
+    backend: KernelOptimizationBackend | None
+    execution_mode: KernelExecutionMode | None
+    kernel_id: str | None
+    adopted_attempt_id: str | None
+    action: str
+    variant_name: str
+    fingerprint: str
+    scope: str
+    source_phase: str
+    gain_method: str
+    accepted_heads: list[Any]
+    extra_server_args_is_invariant: bool | None
+    candidate_flags: Any
+    gain_pct: float | None
+    cumulative_gain_pct: float | None
+    throughput_before: float | None
+    throughput_after: float | None
+    validated: bool
+    task_id: str
+    ts: str
+    provenance: str
+    configuration: OptimizationConfiguration
+    artifacts: list[OptimizationArtifact]
+
+
+class OptimizationSourceSummary(TypedDict, total=False):
+    """Validated KEEP count and gain for one canonical source."""
+
+    keeps: int
+    total_gain_pct: float
+    by_backend: dict[str, "OptimizationSourceSummary"]
+
+
+class OptimizationBackendAttempt(TypedDict, total=False):
+    """One ordered backend attempt, including non-adopted outcomes."""
+
+    attempt_id: str
+    run_id: str
+    kernel_id: str
+    backend: str
+    decision: str
+    sequence: int
+    ts: str
+    duration_sec: float | None
+    micro_speedup: float | None
+    compile_passed: bool | None
+    correctness_passed: bool | None
+    error_class: str | None
+    error: str | None
+    result_path: str | None
+    verification_path: str | None
+
+
+class OptimizationValidation(TypedDict, total=False):
+    """Attribution trust, reconciliation, and diagnostic metadata."""
+
+    method: str
+    validated_at_stack_len: int
+    validated_total_gain_pct: float | None
+    attributed_total_gain_pct: float
+    attribution_gap_pct: float | None
+    notes: list[str]
+    source_breakdown: dict[str, float]
+    phase_breakdown: dict[str, Any]
+    domain_attribution: dict[str, Any]
+
+
+class Optimizations(TypedDict, total=False):
+    """Canonical downstream optimization API."""
+
+    schema_version: int
+    entries: list[OptimizationEntry]
+    backend_attempts: list[OptimizationBackendAttempt]
+    summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
+    summary_by_kind: dict[str, OptimizationSourceSummary]
+    validation: OptimizationValidation
+    gemm_tuning_runs: list["GemmTuningRun"]
 
 
 # GEMM tuning — fixed FP8 block-scale GEMM tuning stage that runs at KERNEL
@@ -1654,6 +1798,9 @@ class GemmTuningRun(TypedDict, total=False):
     decision: str
     source: str
     ts: str
+    duration_sec: float | None
+    error_class: str
+    error: str
     precision: str
     framework: str
     gpu_type: str
@@ -1671,6 +1818,8 @@ class GemmTuningRun(TypedDict, total=False):
     workspace: str
     adopted: bool
     summary: dict[str, Any]
+    parameters: dict[str, Any]
+    candidates: list[dict[str, Any]]
     shapes: list[dict[str, Any]]
 
 
@@ -2436,6 +2585,7 @@ class SessionBreakdownV4(TypedDict, total=False):
     operations: list[Operation]
     measurements: list[Measurement]
     adoptions: list[Adoption]
+    optimizations: Optimizations
     outcome: dict[str, Any]
     artifacts: list[ArtifactRef]
     trace: dict[str, Any]
@@ -2468,20 +2618,17 @@ class SessionBreakdown(TypedDict, total=False):
         phase_segments (list[PhaseSegment]): Phase-boundary view (M2).
         action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
-        geak_invocations (list[Invocation]): GEAK backend invocations.
-        forge_invocations (list[Invocation]): Forge backend invocations.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
         explore_search (ParamSearch): Merged explore-search ledger.
         sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
-        attribution (Attribution): Gain attribution across stack/source/phase.
+        optimizations (Optimizations): Canonical adopted-optimization read
+            model spanning Warm Replay, Explore, Framework Agent, and Kernel
+            Agent.
         kb_provenance (KBProvenance): Recipe KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
-        optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
-        gemm_tuning (GemmTuning): Fixed FP8 GEMM-tuning stage, engine-tagged
-            (geak today, forge later); empty {} on non-fp8/sglang or old sessions.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
@@ -2508,24 +2655,17 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
-    geak_invocations: list[Invocation]
-    forge_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
-    # GEAK e2e KERNEL-phase section; ``{}`` on native sessions.
-    geak: Geak
     critic_robustness: CriticRobustness
     telemetry: Telemetry
-    attribution: Attribution
+    # Single downstream read model for every formally adopted optimization.
+    optimizations: Optimizations
     kb_provenance: KBProvenance  # Recipe KB audit
     specialist_runs: list[SpecialistRound]
-    # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
-    optimization_stack: list["OptimizationStackEntry"]
-    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry), engine-tagged; {} when absent.
-    gemm_tuning: GemmTuning
     # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
     # Kernel-agent attempt outcome summary; empty → dashboard hides Block 1.
@@ -2555,8 +2695,10 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
+    "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V4",
+    "SCHEMA_VERSION_V5",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -2597,6 +2739,15 @@ __all__ = [
     "OperationGate",
     "OperationRelation",
     "OperationSubstep",
+    "OptimizationArtifact",
+    "OptimizationBackendAttempt",
+    "OptimizationConfiguration",
+    "OptimizationEntry",
+    "Optimizations",
+    "OptimizationSource",
+    "OptimizationSourceMethod",
+    "OptimizationSourceSummary",
+    "OptimizationValidation",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
@@ -2609,6 +2760,8 @@ __all__ = [
     "KernelLifecycle",
     "KernelMetadata",
     "KernelOptimizationSummary",
+    "KernelExecutionMode",
+    "KernelOptimizationBackend",
     "OptimizedKernel",
     "ParamSearch",
     "ParamSearchEntry",

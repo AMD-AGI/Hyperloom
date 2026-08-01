@@ -30,27 +30,18 @@ This page describes the contract from a consumer's perspective.
 
 ## Versioning
 
-The top-level `schema_version` field is a stable string. The producer
-emits one of two version strings depending on the aggregation path:
+The top-level `schema_version` field is a stable string. New exports use the
+unified optimization wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v2"     // legacy collector-only fallback
-"schema_version": "hyperloom.session_breakdown.v3.0"   // when author-time recorder fragments are present
+"schema_version": "hyperloom.session_breakdown.v5.0"
 ```
 
-When the session has author-time recorder fragments (the "new way"
-write-side spool), the exporter aggregates from them and stamps
-`v3.0`; sessions without fragments (historical runs, recorder-disabled
-runs) fall back to the legacy collectors and keep the `v2` stamp. Both
-strings can therefore appear in production today.
-
-`v3.0` is the same additive wire shape as `v2` — the recorder path
-captures facts the collectors can miss (pre-dispatch / infra failures,
-pruned robustness signals) but adds no breaking field changes. A reader
-written for `v2` parses a `v3.0` file unchanged by ignoring unknown keys.
-`v2` is itself additive over `v1`: it only adds sections (for example,
-`specialist_runs`, `action_timeline`, `kernel_optimization_summary`,
-`conc_sweep_summary`).
+V5 is a breaking cutover for optimization results: consumers read only
+`optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
+Forge invocation, and GEMM-tuning result projections are no longer emitted.
+Archived V2/V3/V4 documents require a downstream migration before V5 readers
+consume them.
 
 Compatibility rules:
 
@@ -82,7 +73,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v2",
+  "schema_version": "hyperloom.session_breakdown.v5.0",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -92,14 +83,12 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "final":              { /* §6  Final state — SaFE contract core */ },
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
   "capability_summary": { /* §8  Capability cards */ },
-  "geak_invocations":   [ /* §9  Invocation[] */ ],
-  "forge_invocations":  [ /* §10 Invocation[] */ ],
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
-  "attribution":        { /* §16 Gain attribution per stack entry */ },
+  "optimizations":      { /* canonical adopted-optimization API */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
@@ -112,8 +101,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "perfskills":                  { /* perf-skill telemetry */ },
   "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
-  "optimization_stack":          { /* accepted KEEP stack */ },
-  "gemm_tuning":                 { /* FP8 GEMM tuning results */ },
   "kernel_roofline":             { /* kernel roofline snapshot */ },
   "kernel_optimization_summary": { /* kernel-opt rollup */ },
   "conc_sweep_summary":          { /* post-run concurrency sweep */ },
@@ -137,6 +124,129 @@ ended early (`baseline_failed`, `time_exhausted` before kernel-opt
 started, …).
 
 ---
+
+## `optimizations` — canonical adopted optimizations
+
+`optimizations` is the only section downstream dashboards need to read for
+formally adopted optimization results. It normalizes Warm Replay, Explore,
+Framework Agent, and Kernel Agent KEEPs without exposing internal action names
+such as `integrate_patch`.
+
+```text
+optimizations
+├── schema_version
+├── entries[]
+│   ├── id
+│   ├── stack_index
+│   ├── source
+│   ├── source_method
+│   ├── optimization_kind
+│   ├── name
+│   ├── backend
+│   ├── execution_mode
+│   ├── kernel_id
+│   ├── adopted_attempt_id
+│   ├── action
+│   ├── variant_name
+│   ├── fingerprint
+│   ├── scope
+│   ├── source_phase
+│   ├── gain_method
+│   ├── accepted_heads
+│   ├── extra_server_args_is_invariant
+│   ├── candidate_flags
+│   ├── gain_pct
+│   ├── cumulative_gain_pct
+│   ├── throughput_before
+│   ├── throughput_after
+│   ├── validated
+│   ├── task_id
+│   ├── ts
+│   ├── provenance
+│   ├── configuration
+│   └── artifacts[]
+├── backend_attempts[]
+│   ├── attempt_id
+│   ├── kernel_id
+│   ├── backend
+│   ├── decision
+│   ├── sequence
+│   ├── duration_sec
+│   ├── error_class
+│   └── error
+├── summary_by_source
+    ├── warm_replay
+    ├── explore
+    ├── framework_agent
+    ├── kernel_agent
+    │   └── by_backend
+    │       ├── geak
+    │       ├── forge
+    │       └── unattributed
+    └── unattributed
+├── summary_by_kind
+├── validation
+│   ├── method
+│   ├── validated_at_stack_len
+│   ├── validated_total_gain_pct
+│   ├── attributed_total_gain_pct
+│   ├── attribution_gap_pct
+│   ├── notes
+│   ├── source_breakdown
+│   ├── phase_breakdown
+│   └── domain_attribution
+└── gemm_tuning_runs[]
+```
+
+`source` is one of `warm_replay`, `explore`, `framework_agent`,
+`kernel_agent`, or `unattributed`. Kernel entries additionally identify
+`backend=geak|forge` and `execution_mode=whole_pipeline|per_kernel`.
+Only validated entries contribute to `summary_by_source` and
+`summary_by_kind`. The former answers which agent or phase produced the
+gain; the latter groups the same entries by `optimization_kind`. These
+summaries are alternate views of the same gains and must not be added
+together.
+
+`backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
+including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
+within each kernel. Adopted kernel entries link back through
+`adopted_attempt_id`. Missing producer attempt IDs receive a stable
+session/kernel/backend/sequence ID. When multiple KEEP attempts match the
+same entry and the producer did not identify the adopted one, the link stays
+`null` and a warning is emitted rather than guessing.
+
+GEAK's candidate-time `kernel_journey.e2e` values are provisional until the
+orchestrator rebench completes. If the measured candidate does not beat
+`current_best`, the journey row is rewritten with `validated=false`,
+`decision=REVERT`, and `integrated=false`. The original claimed gain remains
+available only as `self_reported_e2e_gain_pct`, alongside the measured and
+comparison throughput used by the rejection.
+
+`validation` carries the attribution lineage and reconciliation diagnostics
+previously available only through the legacy attribution projection.
+`validation.source_breakdown` retains non-entry gain categories such as
+Sweep, params, and backend exploration without treating `sweep`,
+`conc_sweep`, or `validate_stack` as adopted optimizations.
+`gemm_tuning_runs` retains the complete tuning run records; the corresponding
+adopted gain remains represented exactly once by a `gemm_tuning` entry.
+
+`gain_method` is `ledger`, `legacy_ledger_derived`, `reconstructed`,
+`throughput_derived`, or `missing`; `source_phase` and
+`validated_at_stack_len` preserve the evidence needed to audit historical
+source, validation, and gain inference. V4 conversion reconstructs backend
+attempts and GEMM runs from canonical operation streams when that evidence is
+present, and marks validation as synthesized from validated adoptions.
+
+The historical `optimization_stack`, attribution, GEAK invocation, Forge
+invocation, and GEMM-tuning result projections are not emitted in the new wire
+shape. Their required downstream evidence is instead normalized into the
+canonical fields above.
+
+When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
+preserves the available `donor_canonical_id`, `donor_model`,
+`donor_session_id`, `donor_family_tags`, `donor_gain_pct`, and
+`donor_breakdown_link`. Fields absent from the source recipe remain absent
+rather than being inferred.
 
 ## `session` — `SessionMeta`
 
@@ -238,14 +348,6 @@ One card per live capability (`geak`, `forge`, `explore`, `sweep`,
 `best_gain_pct`, `reason`. Legacy `backends`, `params`, and
 `validate_stack` rows can appear when archived sessions are rebuilt.
 Drives the per-session UI cards in Primus-Claw.
-
----
-
-## `geak_invocations` / `forge_invocations` — `Invocation[]`
-
-Same `Invocation` shape across both lists; `backend` distinguishes
-(`geak` / `forge`). One entry per attempt-on-a-kernel. The `decision` enum is
-`KEEP` / `PARTIAL` / `REVERT` / `FAILED`.
 
 ---
 
@@ -468,7 +570,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v2",
+  "schema_version": "hyperloom.session_breakdown.v5.0",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 

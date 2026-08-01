@@ -22,7 +22,7 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z
 
 from . import collectors
-from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4
+from .schema import SCHEMA_VERSION_V5
 from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -220,8 +220,9 @@ def build(
     # the source of truth for their section; when absent the collectors are used
     # as fallback.
     assembled = _load_assembled(sd, warnings)
-    # v3.0 when any recorder fragments are present; else the collector-only v2.
-    schema_version = SCHEMA_VERSION_V3 if assembled else SCHEMA_VERSION
+    # V5 is the hard-cutover wire shape regardless of whether recorder
+    # fragments or collector fallbacks supplied the underlying evidence.
+    schema_version = SCHEMA_VERSION_V5
 
     def _pick(section: str, collector_value: Any) -> Any:
         """Fragment value if recorded and non-empty, else the collector value.
@@ -343,16 +344,6 @@ def build(
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
     sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
-    # GEAK e2e KERNEL-phase section. Empty {} on native sessions.
-    geak = _pick(
-        "geak",
-        _safe_collect(
-            "geak",
-            lambda: collectors.collect_geak(sd, state, warnings),
-            warnings,
-            default={},
-        ),
-    )
     critic_robustness = _pick(
         "critic_robustness",
         _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
@@ -370,6 +361,36 @@ def build(
             forge_invocations,
         ),
         warnings,
+    )
+    gemm_tuning = _safe_collect(
+        "gemm_tuning",
+        lambda: collectors.collect_gemm_tuning(state),
+        warnings,
+        default={},
+    )
+    # Canonical optimization read model.  This is the single downstream entry
+    # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
+    # changes; the historical sections below remain compatibility/audit data.
+    optimizations = _safe_collect(
+        "optimizations",
+        lambda: collectors.collect_optimizations(
+            state,
+            attribution,
+            geak_invocations,
+            forge_invocations,
+            warnings,
+            gemm_tuning=gemm_tuning,
+        ),
+        warnings,
+        default={
+            "schema_version": 2,
+            "entries": [],
+            "backend_attempts": [],
+            "summary_by_source": {},
+            "summary_by_kind": {},
+            "validation": {},
+            "gemm_tuning_runs": [],
+        },
     )
     kb_provenance = _pick(
         "kb_provenance",
@@ -398,16 +419,6 @@ def build(
             warnings,
             default=[],
         ),
-    )
-    # Raw ``state.optimization_stack[]`` passthrough.
-    optimization_stack = _pick(
-        "optimization_stack",
-        _safe_collect("optimization_stack", lambda: collectors.collect_optimization_stack(state), warnings, default=[]),
-    )
-    # Fixed FP8 GEMM-tuning stage, engine-tagged; empty {} on non-fp8/sglang.
-    gemm_tuning = _pick(
-        "gemm_tuning",
-        _safe_collect("gemm_tuning", lambda: collectors.collect_gemm_tuning(state), warnings, default={}),
     )
     # Hot-kernel roofline table from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline = _pick(
@@ -540,27 +551,18 @@ def build(
         # v1-reader alias mirroring the flat per-action timeline.
         "action_timeline": phase_timeline,
         "capability_summary": capability_summary,
-        "geak_invocations": geak_invocations,
-        "forge_invocations": forge_invocations,
         "kernel_lifecycle": kernel_lifecycle,
         "param_search": explore_search,
         # v2-native name for the merged ledger; mirrors ``param_search``.
         "explore_search": explore_search,
         "sweep": sweep,
-        # GEAK e2e KERNEL section; empty {} → hidden on native sessions.
-        "geak": geak,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
-        "attribution": attribution,
+        # Canonical downstream optimization API.
+        "optimizations": optimizations,
         # Recipe KB integration audit.
         "kb_provenance": kb_provenance,
         "specialist_runs": specialist_runs,
-        # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
-        "optimization_stack": optimization_stack,
-        # Fixed FP8 GEMM-tuning stage (KERNEL entry), engine-tagged. Gain
-        # mirrored here; ``attribution`` stays authoritative. Empty {} on
-        # non-fp8/sglang.
-        "gemm_tuning": gemm_tuning,
         # Hot-kernel roofline table; empty → hidden.
         "kernel_roofline": kernel_roofline,
         # Kernel-agent attempt outcome summary; empty → hides Block 1.
@@ -1729,6 +1731,27 @@ def build_v4_live(session_dir: Path | str) -> dict[str, Any]:
     artifacts = _rows("artifacts")
     trace_events = _rows("trace_events")
     integrity = _v4_integrity(assembled, warnings)
+    optimizations = _safe_collect(
+        "optimizations",
+        lambda: collectors.collect_v4_optimizations(
+            run,
+            operations,
+            measurements,
+            adoptions,
+            artifacts,
+            warnings,
+        ),
+        warnings,
+        default={
+            "schema_version": 2,
+            "entries": [],
+            "backend_attempts": [],
+            "summary_by_source": {},
+            "summary_by_kind": {},
+            "validation": {},
+            "gemm_tuning_runs": [],
+        },
+    )
     compat = _v4_compat_projection(
         run=run,
         workload=workload,
@@ -1743,8 +1766,21 @@ def build_v4_live(session_dir: Path | str) -> dict[str, Any]:
         outcome=outcome,
         integrity=integrity,
     )
+    compat["optimizations"] = optimizations
+    # Hard cutover: these legacy optimization projections are used only while
+    # constructing ``optimizations`` and are no longer part of the public SBD
+    # wire shape. Canonical operations/adoptions remain available for audit.
+    for legacy_field in (
+        "optimization_stack",
+        "attribution",
+        "geak",
+        "geak_invocations",
+        "forge_invocations",
+        "gemm_tuning",
+    ):
+        compat.pop(legacy_field, None)
     breakdown: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION_V4,
+        "schema_version": SCHEMA_VERSION_V5,
         "exported_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "exporter_version": EXPORTER_VERSION,
         "run": run,
@@ -1756,6 +1792,7 @@ def build_v4_live(session_dir: Path | str) -> dict[str, Any]:
         "operations": operations,
         "measurements": measurements,
         "adoptions": adoptions,
+        "optimizations": optimizations,
         "outcome": outcome,
         "artifacts": artifacts,
         "trace": {"events": trace_events},

@@ -458,7 +458,19 @@ def _build_warm_start_context(
                 expected_gain = 0.0
             if expected_gain <= 0:
                 expected_gain = _max_session_gain(donor)
-            ctx["recommended_replay"] = {
+            donor_session: Mapping[str, Any] | None = None
+            donor_session_gain = float("-inf")
+            for session in donor.get("sessions") or []:
+                if not isinstance(session, Mapping):
+                    continue
+                try:
+                    session_gain = float(session.get("gain_pct") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if session_gain > donor_session_gain:
+                    donor_session = session
+                    donor_session_gain = session_gain
+            recommended_replay: dict[str, Any] = {
                 "extra_server_args": args,
                 "extra_envs": envs,
                 "expected_gain_pct": expected_gain,
@@ -467,6 +479,35 @@ def _build_warm_start_context(
                 "config_tier": config_donor_tier or "self",
                 "config_confidence": float(config_donor_confidence or confidence),
             }
+            donor_canonical_id = str(donor.get("canonical_id") or "")
+            donor_model = str(donor.get("model") or "")
+            family_tags = donor.get("family_tags") or donor.get("model_architectures")
+            breakdown_link = str(donor.get("breakdown_link") or "")
+            if donor_session is not None:
+                breakdown_link = str(
+                    donor_session.get("breakdown_link")
+                    or donor_session.get("session_breakdown_url")
+                    or breakdown_link
+                )
+            recommended_replay.update(
+                {
+                    "donor_canonical_id": donor_canonical_id,
+                    "donor_model": donor_model,
+                    "donor_session_id": (
+                        str(donor_session.get("session_id") or "")
+                        if donor_session is not None
+                        else ""
+                    ),
+                    "donor_family_tags": (
+                        [str(tag) for tag in family_tags]
+                        if isinstance(family_tags, (list, tuple, set))
+                        else []
+                    ),
+                    "donor_gain_pct": expected_gain,
+                    "donor_breakdown_link": breakdown_link,
+                }
+            )
+            ctx["recommended_replay"] = recommended_replay
     # Extract replayable code patches from prs_tested (positive + negative).
     _extract_patches_from_prs_tested(ctx, recipe, model_architectures)
     # KG enhancement (best-effort, degradable).
