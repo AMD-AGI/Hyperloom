@@ -408,7 +408,6 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
             "MODEL_CLASS",
             "PRECISION",
             "USER_DATA_PATH",
-            "SAFE_WORKSPACE",
             "BENCHMARK_BASE_URL",
             "SKIP_VARIANTS",
             "RUN_EVAL",

@@ -20,11 +20,10 @@ import json
 import os
 import shlex
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
-from .._internal import ssh_client, infera_support
+from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args

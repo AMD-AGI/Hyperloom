@@ -13,6 +13,12 @@ from .ssh_client import DEFAULT_SSH_PORT
 
 log = logging.getLogger(__name__)
 
+# Prefix shared by every session-bookkeeping key the CLI checkpoints
+# (``last_restart_*``, ``last_kill_*``, ``last_server_*``). Matched by prefix
+# rather than an explicit allowlist so a newly checkpointed field is carried
+# across a hand-off reload without having to be registered here.
+_SESSION_KEY_PREFIX = "last_"
+
 
 def external_service_url() -> str:
     """Return the handed-over cluster's benchmark URL, or empty when there is none.
@@ -95,7 +101,6 @@ def build_external_state_from_env() -> dict[str, Any]:
     head_ip = os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip()
     ray_address = f"{head_ip}:6379" if head_ip else ""
     ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
-    workspace = os.environ.get("SAFE_WORKSPACE", "").strip()
 
     pn = _int_env("PD_PREFILL_NODES", 0) or len(prefill)
     dn = _int_env("PD_DECODE_NODES", 0) or len(decode)
@@ -124,8 +129,6 @@ def build_external_state_from_env() -> dict[str, Any]:
         state["ray_address"] = ray_address
     if ray_dash_token:
         state["ray_dashboard_token"] = ray_dash_token
-    if workspace:
-        state["workspace"] = workspace
     if pd_mode == "disaggregated" and (pn > 0 or dn > 0):
         state["pd_prefill_nodes"] = pn
         state["pd_decode_nodes"] = dn
@@ -201,6 +204,15 @@ def load_multi_node_state() -> dict[str, Any]:
     shadow the updated pod IPs / service URL of the cluster actually handed
     over (e.g. a manual ``restart-server`` without re-running ``optimize``).
 
+    Env ownership stops at those connection/topology fields. The ``last_*``
+    bookkeeping that ``restart-server`` checkpoints (submission ids, served
+    config, pid/log dirs) is carried over from an on-disk state that describes
+    the same hand-off: env synthesis never produces it, so dropping it would
+    leave it written every round and read never, costing the resume fast path a
+    full cold start on each retry. Carrying a stale entry is safe because both
+    backends re-verify liveness (RayJob probes the submission, infera SSHes the
+    pods) before skipping a relaunch.
+
     Returns:
         dict[str, Any]: The effective multi-node state for this process.
     """
@@ -219,6 +231,10 @@ def load_multi_node_state() -> dict[str, Any]:
                     path,
                     disk.get("backend"),
                 )
+            elif disk:
+                for key, value in disk.items():
+                    if key.startswith(_SESSION_KEY_PREFIX) and key not in ext_state:
+                        ext_state[key] = value
             return ext_state
 
     try:
