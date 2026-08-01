@@ -550,5 +550,4 @@ class ClosePhase(PhaseHandler):
             "succeeded",
             "failed",
             "cancelled",
-            "needs_manual_review",
         }

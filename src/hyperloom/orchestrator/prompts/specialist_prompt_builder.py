@@ -49,13 +49,6 @@ BASH_KILL_SAFETY_PREAMBLE = (
 )
 
 
-# Soft cap on ``proposal_set`` size; re-exported so the prompt-side cap and the
-# runner-side hard truncate stay aligned.
-from hyperloom.orchestrator.policy.gate import (
-    DEFAULT_SPECIALIST_MAX_PROPOSALS,
-)
-
-
 # Per-domain focus templates: each injects a "Domain focus" block into
 # Section 1; a missing key falls back to the generic body.
 
@@ -692,8 +685,6 @@ class SpecialistPromptInputs:
     task_id: str
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
-    # Soft cap on ``proposal_set`` size (rendered into Sections 1 + 8).
-    max_proposals: int = DEFAULT_SPECIALIST_MAX_PROPOSALS
 
     # ``tp`` defaults to 0 (sentinel for "unspecified"), not 1, so
     # comm_specialist doesn't veto its own TP proposals.
@@ -823,7 +814,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
         "scored over quantity: cap your final ``proposal_set`` at the",
-        f"**top-{inp.max_proposals}** ranked picks (see Section 8).",
+        "**top-6** ranked picks (see Section 8).",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -929,9 +920,8 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         "- Write and run arbitrary scripts — autotune harnesses, "
         + "microbenchmarks, profilers (rocprof / torch.profiler / your own "
         + "breakdown).",
-        "- Start / restart a real server on your own cards (any port that is "
-        + "NOT the production serving port 8888) and benchmark it however you "
-        + "see fit.",
+        "- Start / restart a real server on your own cards and benchmark it "
+        + "however you see fit.",
         "- Profile freely to get a fresh trace after a change — don't rely only "
         + "on the static roofline snapshot you were handed.",
         "- Tune the framework's config-file levers (e.g. MoE/GEMM/attention "
@@ -942,9 +932,8 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         + "not a requirement.",
         "",
         "Optional helper: a ``rebench`` convenience reuses the real Magpie "
-        + "serving + benchmark path on your leased cards + a non-8888 port, so "
-        + "you can get numbers directly comparable to the ``integrate_patch`` "
-        + "gate in one call:",
+        + "serving + benchmark path on your leased cards, so you can get numbers "
+        + "directly comparable to the ``integrate_patch`` gate in one call:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
         "        --config <magpie.yaml> --output ./scratch/rebench " + "[--extra-args '<server args>']",
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
@@ -1748,6 +1737,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "for that file and treats its appearance as the run's exit",
         "signal. After writing it, stop — do not call any further tools.",
         "",
+        "**Messages from the Orchestrator (check this as you work):** read",
+        f"``{workspace}/inbox.json`` whenever you finish a step. It is a JSON",
+        "list of ``{from, ts, body}`` entries, absent until the Orchestrator",
+        "sends one. It is how the Orchestrator answers a question you raised",
+        "or redirects you mid-run — if it tells you the mandate changed,",
+        "follow it rather than finishing the original plan. Never write to",
+        "this file.",
+        "",
         "**Incremental checkpoint (do this throughout the run):** every time",
         "you reach a new finding or finish a candidate, rewrite your",
         "best-so-far payload to",
@@ -1757,7 +1754,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "partial uses the **same payload schema** as the final file but does",
         "**NOT** end the run — keep working. There is a wall-clock budget; if",
         "you are stopped before finishing, whatever is in the partial is",
-        "preserved as your result, so keep it current. Write the final",
+        "preserved as your result, so keep it current. The Orchestrator also",
+        "reads each rewrite while you are still running — it is how you report",
+        "direction and raise ``residual_questions`` early enough to get an",
+        "answer back through ``inbox.json``. Write the final",
         "``specialist_done.json`` (which ends the run) only once, as your",
         "absolute last action.",
         "",
@@ -1823,12 +1823,11 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "coupling across several proposals."
         ),
         (
-            f"- ``proposal_set`` MUST contain AT MOST **{inp.max_proposals}** "
-            "entries. You are a curator, not a brainstormer: rank candidates "
-            "by expected gain x your confidence, drop everything that "
-            "contradicts ``kb_subgraph`` / ``pr_evidence`` already in "
-            f"your prompt, and only emit the surviving top {inp.max_proposals}. "
-            "Fewer is better than padding."
+            "- ``proposal_set`` MUST contain AT MOST **6** entries. You are a "
+            "curator, not a brainstormer: rank candidates by expected gain x "
+            "your confidence, drop everything that contradicts ``kb_subgraph`` "
+            "/ ``pr_evidence`` already in your prompt, and only emit the "
+            "surviving top 6. Fewer is better than padding."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -1892,12 +1891,11 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         gpu_rule = [
             f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
             "   those cards do whatever you want: edit code, build, start/stop",
-            "   your own servers (on any port that is NOT 8888), profile,",
-            "   autotune, install tuned artifacts, run real benchmark loops.",
-            "   The ONE thing you must NOT do: touch the production serving",
-            "   process, its cards, or port 8888 — co-residing on them would",
-            "   corrupt both your measurement and production. Manage only",
-            "   processes YOU started, by their own PID/PGID.",
+            "   your own servers, profile, autotune, install tuned artifacts,",
+            "   and run real benchmark loops. The ONE thing you must NOT do:",
+            "   touch the production serving process or its cards — co-residing",
+            "   on them would corrupt both your measurement and production.",
+            "   Manage only processes YOU started, by their own PID/PGID.",
         ]
     else:
         gpu_rule = [
@@ -1908,7 +1906,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   try and optionally author patches.",
         ]
     return [
-        "## 9. IRON RULES (Inv-5.1 / Inv-5.2 / Inv-5.3)",
+        "## 9. IRON RULES (Inv-5.1 / Inv-5.3)",
         "",
         *gpu_rule,
         "2. **You MAY** produce changes for integration, but stage them ONLY",
@@ -1934,8 +1932,8 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   read context is pre-warmed into Section 4 of this prompt; the",
         "   specialist subprocess has no live KB connection.",
         "4. **NEVER** emit any intent other than ``specialist_done``,",
-        "   ``send_message`` (heartbeat), or ``alert``. Any other intent",
-        "   type triggers PolicyGate R3 ``specialist_done_source``.",
+        "   ``send_message`` (heartbeat), or ``alert``. Other intent types",
+        "   are dropped and recorded as a tool violation.",
         "5. You **MUST** finish within ``max_turns`` LLM turns and end with",
         "   a single ``specialist_done`` exit signal (intent OR",
         "   ``specialist_done.json`` file write per Section 8). Sub-agent",

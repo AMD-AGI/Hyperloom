@@ -688,8 +688,8 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     assert create_calls[0]["params"]["grid"] == grid
 
 
-# 7. Specialist prompt — max_proposals self-curation contract (Section 1 + 8)
-def _build_specialist_prompt_text(max_proposals: int) -> str:
+# 7. Specialist prompt — proposal self-curation contract (Section 1 + 8)
+def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
     from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
         SpecialistPromptInputs,
@@ -700,40 +700,17 @@ def _build_specialist_prompt_text(max_proposals: int) -> str:
         task_id="t-test",
         domain=get_domain("serving_specialist"),
         max_turns=12,
-        max_proposals=max_proposals,
         gap_canonical_id="gap-x",
     )
     system_prompt, user_prompt = build_specialist_prompts(inputs)
     return system_prompt + "\n" + user_prompt
 
 
-def test_default_specialist_max_proposals_is_twelve():
-    """Single-source-of-truth: policy.py owns the self-curation target (=12) and the builder re-exports it."""
-    from hyperloom.orchestrator.policy.gate import (
-        DEFAULT_SPECIALIST_MAX_PROPOSALS,
-    )
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        DEFAULT_SPECIALIST_MAX_PROPOSALS as PROMPT_DEFAULT,
-    )
-
-    assert DEFAULT_SPECIALIST_MAX_PROPOSALS == 12
-    assert PROMPT_DEFAULT == 12
-
-
-def test_specialist_prompt_renders_max_proposals_5():
-    """Caller can shrink the prompt-side self-curation target."""
-    text = _build_specialist_prompt_text(max_proposals=5)
-    assert "AT MOST **5** entries" in text
-    assert "top-5" in text
-    # Critic-feedback warning present so the specialist knows marginal candidates cost.
+def test_specialist_prompt_renders_top_6_target():
+    text = _build_specialist_prompt_text()
+    assert "AT MOST **6** entries" in text
+    assert "top-6" in text
     assert "reviews each surviving variant" in text
-
-
-def test_specialist_prompt_renders_default_top_12_target():
-    text = _build_specialist_prompt_text(max_proposals=12)
-    assert "AT MOST **12** entries" in text
-    assert "top-12" in text
-    assert "AT MOST **5** entries" not in text
 
 
 # critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)

@@ -26,9 +26,8 @@ DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
 DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
 # Context-token guardrail (usage = input + cache_read + cache_creation tokens).
-# Soft trigger compacts proactively; hard fraction is the overflow backstop.
+# Soft trigger compacts proactively.
 DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
-DEFAULT_CONTEXT_TOKEN_HARD_FRACTION: float = 0.85
 # Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
@@ -69,9 +68,8 @@ class CheckpointPolicy:
     every_ticks: int = DEFAULT_CHECKPOINT_EVERY_TICKS
     every_minutes: float = DEFAULT_CHECKPOINT_EVERY_MINUTES
     char_budget: int = DEFAULT_CHECKPOINT_CHAR_BUDGET
-    # Context-token soft/hard budgets (absolute token counts; 0 disables).
+    # Context-token soft budget (absolute token count; 0 disables).
     context_token_soft: int = 0
-    context_token_hard: int = 0
     # Always checkpoint on a phase boundary.
     on_phase_boundary: bool = True
 
@@ -109,20 +107,6 @@ class CheckpointPolicy:
         if self.char_budget > 0 and chars_since_last >= self.char_budget:
             return True
         return False
-
-    def is_hard_compaction(self, context_tokens_now: int) -> bool:
-        """True when context is near the window and a compaction MUST happen now.
-
-        The hard path compacts even when the LLM summary is degenerate (using the
-        deterministic fallback), so the conversation never overflows.
-
-        Args:
-            context_tokens_now: Current context size in tokens.
-
-        Returns:
-            ``True`` when the hard budget is set and reached.
-        """
-        return self.context_token_hard > 0 and context_tokens_now >= self.context_token_hard
 
 
 # Max byte length for next_cycle_directive before truncation.
@@ -247,37 +231,6 @@ def is_degenerate_checkpoint(parsed: dict[str, Any]) -> bool:
     has_plan = bool(str(parsed.get("current_plan") or "").strip())
     has_lists = any(parsed.get(k) for k in _MEMORY_LIST_KEYS)
     return not (has_plan or has_lists)
-
-
-def deterministic_memory_fallback(state: Any) -> dict[str, Any]:
-    """Synthesise a minimal working-memory record from authoritative SharedState facts.
-
-    Used by the hard context-token guardrail when the LLM checkpoint reply
-    is degenerate but the conversation must still be compacted to avoid window
-    overflow. Pure read of ``state``; never raises on missing attributes.
-
-    Args:
-        state: The live ``SharedState`` (duck-typed; only attribute reads).
-
-    Returns:
-        A parsed-reply-shaped dict suitable for :func:`build_memory_record`.
-    """
-    cb = getattr(state, "current_best", {}) or {}
-    stack = getattr(state, "optimization_stack", []) or []
-    try:
-        gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        gain = 0.0
-    phase = str(getattr(state, "phase", "") or "")
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    plan = f"[auto] phase={phase} cycle={cycle} best_tput={cb.get('tput')} validated_gain={gain:.2f}%"
-    return {
-        "current_plan": plan,
-        "hypotheses": [],
-        "tried_and_why": [f"stack has {len(stack)} accepted change(s)"],
-        "pending": ["recover plan from SharedState facts (LLM summary was degenerate)"],
-        "learnings": [],
-    }
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -459,7 +412,6 @@ __all__ = [
     "DEFAULT_CHECKPOINT_CHAR_BUDGET",
     "DEFAULT_CHECKPOINT_EVERY_MINUTES",
     "DEFAULT_CHECKPOINT_EVERY_TICKS",
-    "DEFAULT_CONTEXT_TOKEN_HARD_FRACTION",
     "DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION",
     "DEFAULT_MODEL_CONTEXT_WINDOW",
     "MODEL_CONTEXT_WINDOWS",
@@ -468,7 +420,6 @@ __all__ = [
     "_sanitize_cycle_directive",
     "build_memory_record",
     "context_window_for_model",
-    "deterministic_memory_fallback",
     "is_degenerate_checkpoint",
     "parse_checkpoint_reply",
     "render_memory_for_seed",

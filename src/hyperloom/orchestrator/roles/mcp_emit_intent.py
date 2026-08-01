@@ -48,6 +48,7 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 "review_verdict:{target_proposal_msg_id,verdict ∈ "
                 "approve|reject|redirect|advise|needs_review}, "
                 "kill_task:{task_id,reason}, "
+                "extend_lease:{task_id,extra_sec,reason}, "
                 "prune_branch:{family,reason}, escalate_strategy_change:"
                 "{reason,next_action_hint}, update_state:{changes}, "
                 "alert:{severity,summary}."

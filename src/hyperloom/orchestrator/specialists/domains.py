@@ -4,14 +4,15 @@
 """Specialist sub-agent domain catalogue.
 
 LLM sub-agent form factor parameterized by a ``domain`` — a stable
-id used by PolicyGate R2. A runtime constant, not per-domain yaml.
+id used across dispatch and prompt assembly. A runtime constant, not
+per-domain yaml.
 
 Field reference:
 
 * ``key`` — canonical id used in ``delegate{params.domain}``.
 * ``layer`` — short human label (analysis layer covered).
 * ``kb_anchor`` — knowledge-domain label for prompt grouping.
-* ``available_in`` — ``"M5"`` / ``"M6"``; PolicyGate R2 accepts both.
+* ``available_in`` — ``"M5"`` / ``"M6"``; both are dispatchable.
 
 All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
 the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
@@ -63,7 +64,7 @@ PR_QUERY_REPOS: tuple[str, ...] = (
 )
 
 
-# Canonical catalogue; PolicyGate R2's `specialist_unknown_domain` rule reads this set.
+# Canonical catalogue of knowledge-domain anchors.
 SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
     SpecialistDomain(
         key="serving_specialist",
@@ -271,8 +272,8 @@ def _tag_to_kb_anchor(tag: str) -> str:
     (``serving_specialist`` …) and the ``kb_anchor`` the PolicyGate whitelist
     validates against (``framework`` …). A tag naming a domain **key** is
     translated to that domain's anchor; a tag that is already a valid anchor is
-    kept as-is; anything else is returned verbatim so a genuinely unknown tag
-    still surfaces as ``specialist_unknown_domain``.
+    kept as-is; anything else is returned verbatim rather than invented into
+    an anchor, so an unresolvable tag stays visible downstream.
 
     Args:
         tag: A single (already-stripped, non-empty) dispatch tag.
@@ -293,8 +294,7 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     Reads ``params.tags`` (each element is translated key→``kb_anchor`` via
     :func:`_tag_to_kb_anchor`); falls back to the ``params.domain`` alias
     (same translation) when absent. Order-preserving dedup; empty entries
-    dropped. Genuinely unknown tags pass through untranslated so PolicyGate's
-    ``specialist_unknown_domain`` still rejects them.
+    dropped. Genuinely unknown tags pass through untranslated.
 
     Args:
         params: The dispatch payload (reads ``tags`` then ``domain``).
@@ -353,7 +353,8 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 # real stop is the wall-clock budget.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
-# Hard cap (PolicyGate R2 ``specialist_max_turns_excess`` enforces this).
+# Hard cap; PolicyGate denies a dispatch above it because the in-process
+# backend's turn loop has no wall-clock bound.
 SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 

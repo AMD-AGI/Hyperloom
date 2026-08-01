@@ -86,6 +86,50 @@ def test_load_model_arch_stale_mismatch_returns_empty(tmp_path: Path):
     assert _load_model_arch(tmp_path, "DeepSeek-R1-0528") == {}
 
 
+# 1a. $HYPERLOOM_MODEL_ARCH_FILE pre-seed: the session dir is created and read
+# in the same CLI process, so a launcher can only get a profile in by seeding
+# it before launch.
+def test_load_model_arch_preseed_env_loads_and_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    src = tmp_path / "preseed.json"
+    src.write_text(json.dumps(_VALID_ARCH), encoding="utf-8")
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MODEL_ARCH_FILE", str(src))
+
+    out = _load_model_arch(session, "DeepSeek-R1-0528")
+
+    assert out == _VALID_ARCH
+    # Copied into the session for provenance.
+    assert json.loads((session / "model_arch.json").read_text(encoding="utf-8")) == _VALID_ARCH
+
+
+def test_load_model_arch_in_session_file_wins_over_preseed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    src = tmp_path / "preseed.json"
+    src.write_text(json.dumps({**_VALID_ARCH, "source": "preseed"}), encoding="utf-8")
+    session = tmp_path / "session"
+    session.mkdir()
+    _write(session, {**_VALID_ARCH, "source": "in_session"})
+    monkeypatch.setenv("HYPERLOOM_MODEL_ARCH_FILE", str(src))
+
+    assert _load_model_arch(session, "DeepSeek-R1-0528")["source"] == "in_session"
+
+
+def test_load_model_arch_preseed_unreadable_returns_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HYPERLOOM_MODEL_ARCH_FILE", str(tmp_path / "missing.json"))
+    assert _load_model_arch(tmp_path / "session", "DeepSeek-R1-0528") == {}
+
+
+def test_load_model_arch_preseed_still_stale_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Pre-seeding does not bypass the stale-model guard."""
+    src = tmp_path / "preseed.json"
+    src.write_text(json.dumps({**_VALID_ARCH, "model_name": "Llama-3.1-8B"}), encoding="utf-8")
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MODEL_ARCH_FILE", str(src))
+
+    assert _load_model_arch(session, "DeepSeek-R1-0528") == {}
+
+
 # 1b. HF hub cache path: launched --model is a snapshots/<hash> dir whose
 # basename is a commit hash, but the declared clean model_name must still match.
 _HF_SNAPSHOT = (

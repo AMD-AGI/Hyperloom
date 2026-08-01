@@ -400,13 +400,18 @@ Steps for the launching agent:
    lightweight classify from the model's local `config.json` (decoder
    type, attention variant, expert counts, MTP, SWA window) and set
    `"source": "config_classify"`.
-3. **Write the convention file** — once `session_dir` exists, write the
-   profile to exactly `<session_dir>/model_arch.json`: the file named
-   `model_arch.json` in the current session directory. Do not write it to
-   `$USER_DATA_PATH/model_arch.json`; that path is shared by concurrent
-   sessions and can be overwritten by another launch. Include `model_name`
-   (required for the stale-file guard). Set it to the **clean model name**
-   (e.g. `Qwen2.5-7B-Instruct`);
+3. **Write the profile BEFORE launch and point `$HYPERLOOM_MODEL_ARCH_FILE`
+   at it.** The CLI creates `session_dir` and reads the profile in the *same
+   process*, so a file written to `<session_dir>/model_arch.json` after the
+   session dir appears always loses the race — the run seeds
+   `state.model_arch={}` and the profile never reaches any prompt. Write the
+   JSON to a launcher-owned path instead and export
+   `HYPERLOOM_MODEL_ARCH_FILE=<that path>` in the shell that spawns
+   `optimize`; the CLI copies it into `<session_dir>/model_arch.json` for
+   provenance. Use a **session-unique** filename — `$USER_DATA_PATH` is shared
+   by concurrent sessions on WekaFS, so a fixed name races other launches.
+   Include `model_name` (required for the stale-file guard). Set it to the
+   **clean model name** (e.g. `Qwen2.5-7B-Instruct`);
    the guard normalizes launch forms — flat dirs, HF repo ids, and HF hub
    cache `models--org--repo/snapshots/<hash>` paths — so do NOT use the
    snapshot commit hash. All other fields are optional; renderers drop

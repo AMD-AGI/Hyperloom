@@ -215,6 +215,13 @@ def test_gpu_autonomy_block_and_auto_retry():
     assert "On-GPU autonomy" in sys_p
     assert "specialists.rebench" in sys_p
     assert "Auto-retry notice" in sys_p
+    assert "port 8888" not in sys_p
+
+
+def test_no_gpu_iron_rule_retains_serving_port_boundary():
+    inp = _rich_inputs(allocated_gpu_ids=())
+    sys_p, _ = build_specialist_prompts(inp)
+    assert "port 8888" in sys_p
 
 
 def test_render_measured_impact_variants():

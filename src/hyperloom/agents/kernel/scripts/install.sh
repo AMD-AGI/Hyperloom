@@ -223,6 +223,19 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 DOTENV="${REPO_ROOT}/.env"
+
+# Vars whose already-resolved value must survive the `. $REPO_ROOT/.env` below.
+# The dotenv is a *credentials* fallback, but it is a full env file: sourcing it
+# under `set -a` re-imports every path var it happens to carry. A stale entry —
+# or one written by a DIFFERENT checkout / workspace sharing this .env — then
+# silently overwrites what the caller resolved, and the run installs against one
+# workspace while writing its env file into another (#Hyperloom-2 / atom mixup).
+# Only non-empty pre-source values are restored, so the dotenv still fills gaps.
+_DOTENV_PROTECTED_VARS='REPO_ROOT KERNEL_AGENT_ROOT HYPERLOOM_KERNEL_AGENT_ROOT
+USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
+MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
+GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
+
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
    || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${DEEPSEEK_API_KEY:-}" ] \
    || [ -z "${DEEPSEEK_BASE_URL:-}" ]; then
@@ -232,6 +245,9 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
     _snap_deepseek_key="${DEEPSEEK_API_KEY-}"
     _snap_deepseek_url="${DEEPSEEK_BASE_URL-}"
+    for _v in $_DOTENV_PROTECTED_VARS; do
+      eval "_snap_prot_${_v}=\"\${${_v}-}\""
+    done
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
@@ -241,6 +257,18 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
     [ -n "$_snap_deepseek_key" ] && export DEEPSEEK_API_KEY="$_snap_deepseek_key"
     [ -n "$_snap_deepseek_url" ] && export DEEPSEEK_BASE_URL="$_snap_deepseek_url"
+    for _v in $_DOTENV_PROTECTED_VARS; do
+      eval "_snap_val=\"\${_snap_prot_${_v}-}\""
+      if [ -n "${_snap_val}" ]; then
+        eval "_cur_val=\"\${${_v}-}\""
+        if [ "${_cur_val}" != "${_snap_val}" ]; then
+          echo "[kernel-agent] .env would have overridden ${_v}=${_snap_val} with ${_cur_val}; keeping the caller's value" >&2
+        fi
+        eval "export ${_v}=\"\${_snap_prot_${_v}}\""
+      fi
+      unset "_snap_prot_${_v}"
+    done
+    unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
     unset _snap_deepseek_key _snap_deepseek_url
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"

@@ -333,7 +333,6 @@ async def test_task_registry_legal_transitions(db):
     t = await tr.create(kind="bench_runner", params={}, idempotency_key="kT1")
     t2 = await tr.transition(t.task_id, "running")
     assert t2.state == "running"
-    assert t2.attempts == 1
     t3 = await tr.transition(t.task_id, "succeeded", evidence={"tput": 1840})
     assert t3.state == "succeeded"
 

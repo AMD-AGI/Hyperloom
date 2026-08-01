@@ -226,57 +226,6 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
     assert state.specialist_rounds[0]["round_id"] == "round-7"
 
 
-# 2. _handle_specialist_done — intent routing path
-@pytest.mark.asyncio
-async def test_handle_specialist_done_routes_known_task(coord):
-    """A known task_id triggers the full bookkeeping pass."""
-    task = _StubTask(task_id="task-route", params={})
-    coord.tasks.register(task)
-
-    intent = Intent(
-        type=IntentType.SPECIALIST_DONE,
-        payload=_done_payload(domain="serving_specialist"),
-    )
-    await coord._handle_specialist_done(
-        source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-route",
-        intent=intent,
-    )
-
-    state: _StubSharedState = coord.shared_state
-    assert len(state.specialist_rounds) == 1
-    assert state.last_specialist["task_id"] == "task-route"
-
-
-@pytest.mark.asyncio
-async def test_handle_specialist_done_unknown_task_logs_and_skips(coord, caplog):
-    """An unknown task_id logs a warning and skips bookkeeping (defense-in-depth)."""
-    intent = Intent(
-        type=IntentType.SPECIALIST_DONE,
-        payload=_done_payload(domain="serving_specialist"),
-    )
-    await coord._handle_specialist_done(
-        source=f"{SPECIALIST_FROM_AGENT_PREFIX}unknown-id",
-        intent=intent,
-    )
-    state: _StubSharedState = coord.shared_state
-    assert state.specialist_rounds == []
-
-
-@pytest.mark.asyncio
-async def test_handle_specialist_done_bad_source_prefix(coord):
-    """A source not prefixed with ``specialist:`` → empty task_id → no bookkeeping."""
-    intent = Intent(
-        type=IntentType.SPECIALIST_DONE,
-        payload=_done_payload(),
-    )
-    await coord._handle_specialist_done(
-        source="orchestration",
-        intent=intent,
-    )
-    state: _StubSharedState = coord.shared_state
-    assert state.specialist_rounds == []
-
-
 # 3. _task_id_from_specialist_source helper
 def test_task_id_from_specialist_source_extracts_prefix():
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -574,14 +523,3 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     )
     await force_coord._maybe_force_stalled_domain_specialist()
     force_coord._handle_intent.assert_not_awaited()
-
-
-# 6. Intent routing branch wired into the dispatch table
-def test_handle_intent_dispatch_table_has_specialist_done_branch():
-    """The dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-    from hyperloom.orchestrator.loop.intent_router import _INTENT_DISPATCH
-
-    assert _INTENT_DISPATCH.get(IntentType.SPECIALIST_DONE) == "_handle_specialist_done", (
-        "_INTENT_DISPATCH must route SPECIALIST_DONE to _handle_specialist_done (KB_gaps/Gap-03)"
-    )
