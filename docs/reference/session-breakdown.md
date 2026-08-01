@@ -215,6 +215,13 @@ session/kernel/backend/sequence ID. When multiple KEEP attempts match the
 same entry and the producer did not identify the adopted one, the link stays
 `null` and a warning is emitted rather than guessing.
 
+GEAK's candidate-time `kernel_journey.e2e` values are provisional until the
+orchestrator rebench completes. If the measured candidate does not beat
+`current_best`, the journey row is rewritten with `validated=false`,
+`decision=REVERT`, and `integrated=false`. The original claimed gain remains
+available only as `self_reported_e2e_gain_pct`, alongside the measured and
+comparison throughput used by the rejection.
+
 `validation` carries the attribution lineage and reconciliation diagnostics
 previously available only through the legacy attribution projection.
 `validation.source_breakdown` retains non-entry gain categories such as

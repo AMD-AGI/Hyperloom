@@ -803,6 +803,11 @@ class KernelE2E(TypedDict, total=False):
     patch_path: str | None
     target_file: str | None
     extra_server_args: str
+    self_reported_e2e_gain_pct: float | None
+    revalidation_measured_tput: float
+    revalidation_current_best_tput: float
+    revalidation_provenance: str
+    rejection_reason: str
     ts: str
 
 
