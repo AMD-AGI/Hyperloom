@@ -1810,6 +1810,40 @@ async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> No
     await coord._materialize_approved_proposal(pending)
 
 
+@pytest.mark.asyncio
+async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
+    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
+    await coord._materialize_approved_proposal(
+        _pending("baseline", {"params": {"tag": "x"}}, msg_id="prop-b1"),
+    )
+    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+    assert len(queued) == 1
+    tail = await coord.bus.tail(topic="observation", n=20)
+    assert any(m.payload.get("reason") == "duplicate_proposal_content" for m in tail)
+
+
+@pytest.mark.asyncio
+async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
+    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
+    await coord._materialize_approved_proposal(
+        _pending("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}}, msg_id="prop-e1"),
+    )
+    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+    assert len(queued) == 2
+
+
+@pytest.mark.asyncio
+async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
+    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
+    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
+    await coord.tasks.transition(first.task_id, "running")
+    await coord.tasks.transition(first.task_id, "failed")
+    await coord._materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
+    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+    assert len(queued) == 1
+    assert queued[0].task_id != first.task_id
+
+
 # -- _handle_delegate branches ----------------------------------------------
 def _delegate(action_name: str, key: str, params=None) -> Intent:
     payload = {"action_name": action_name, "params": params or {}, "idempotency_key": key}
