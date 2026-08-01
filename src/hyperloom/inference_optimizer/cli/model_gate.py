@@ -311,6 +311,37 @@ _SUPPORTED_QUANT_METHODS = frozenset(
 _MLX_QUANT_MODES = frozenset({"affine", "mlx"})
 
 
+def _read_preseeded_model_arch(arch_path: Path) -> str | None:
+    """Return the pre-seeded ``$HYPERLOOM_MODEL_ARCH_FILE`` text, or ``None``.
+
+    Copies the source into ``arch_path`` so the session keeps its own copy of
+    the profile the run was seeded with. A failed copy is not fatal — the text
+    is still returned and the profile still reaches the prompts.
+
+    Args:
+        arch_path (Path): The in-session ``model_arch.json`` destination.
+
+    Returns:
+        str | None: The profile JSON text, or ``None`` when the env is unset or
+            the file is unreadable.
+    """
+    src = (os.environ.get("HYPERLOOM_MODEL_ARCH_FILE") or "").strip()
+    if not src:
+        return None
+    try:
+        text = Path(src).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        logging.warning("model_arch_preseed_unreadable: %s (%s)", src, exc)
+        return None
+    try:
+        arch_path.parent.mkdir(parents=True, exist_ok=True)
+        arch_path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        logging.warning("model_arch_preseed_copy_failed: %s -> %s (%s)", src, arch_path, exc)
+    logging.info("model_arch_preseeded_from: %s", src)
+    return text
+
+
 def _load_model_arch(
     workspace_root: Path,
     model_name: str,
@@ -324,6 +355,13 @@ def _load_model_arch(
     normalize flat dirs, bare names, HF repo ids, and HF hub cache
     ``models--org--repo/snapshots/<hash>`` paths so a declared clean name still
     matches a commit-hash launch basename.
+
+    The session dir is created and seeded in the same CLI process, so a
+    launcher following SKILL Step 1.5 ("write it once ``session_dir`` exists")
+    can never win that race. ``$HYPERLOOM_MODEL_ARCH_FILE`` is the pre-launch
+    escape hatch: point it at a profile written *before* launch and it is used
+    when the in-session file is absent, then copied into the session dir so the
+    run keeps its own provenance copy.
 
     Args:
         workspace_root (Path): Directory containing ``model_arch.json``.
@@ -341,7 +379,9 @@ def _load_model_arch(
     try:
         raw = arch_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        raw = _read_preseeded_model_arch(arch_path)
+        if raw is None:
+            return {}
     except OSError as exc:
         logging.warning("model_arch_unreadable: %s (%s)", arch_path, exc)
         return {}

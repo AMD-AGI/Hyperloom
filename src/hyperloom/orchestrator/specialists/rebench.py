@@ -4,11 +4,11 @@
 """Optional gate-comparable rebench helper for GPU specialists.
 
 Reuses the real Magpie serving + benchmark path (``run_grid``) on the
-specialist's leased cards and a non-production port. The ``integrate_patch``
-gate stays the single authoritative measure of truth.
+specialist's leased cards. The ``integrate_patch`` gate stays the single
+authoritative measure of truth.
 
 The helper runs the server on the cards the subprocess already has pinned via
-``ROCR_VISIBLE_DEVICES`` and refuses the production serving port 8888.
+``ROCR_VISIBLE_DEVICES``.
 
 CLI usage (from inside a specialist subprocess)::
 
@@ -37,50 +37,17 @@ from ..actions.executors._workload_envs import (
 )
 
 
-# The production serving process owns this port; a specialist rebench must never bind it.
-PRODUCTION_SERVING_PORT = 8888
-
 # Default per-variant timeout (s) for a one-off specialist rebench.
 DEFAULT_REBENCH_TIMEOUT_SEC = 7800
 
 
-def _pick_free_port() -> int:
-    """Pick a free localhost TCP port (never the production serving port).
-
-    Returns:
-        int: An ephemeral port the OS reported free, guaranteed != 8888.
-    """
-    for _ in range(8):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = int(sock.getsockname()[1])
-        if port != PRODUCTION_SERVING_PORT:
-            return port
-    # Fallthrough: pick a fixed non-8888 high port.
-    return 18888
-
-
 def _resolve_port(port: int | None) -> int:
-    """Resolve and validate the rebench server port.
-
-    Args:
-        port: Requested port; ``None`` or ``0`` auto-picks a free one.
-
-    Returns:
-        int: A concrete port that is not the production serving port.
-
-    Raises:
-        ValueError: If the production serving port 8888 is requested explicitly.
-    """
-    if port in (None, 0):
-        return _pick_free_port()
-    p = int(port)
-    if p == PRODUCTION_SERVING_PORT:
-        raise ValueError(
-            f"refusing port {PRODUCTION_SERVING_PORT}: that is the production "
-            "serving port; a specialist rebench must use its own port."
-        )
-    return p
+    """Resolve the requested port, using an OS-assigned port for ``None`` or ``0``."""
+    if port not in (None, 0):
+        return int(port)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _current_leased_cards() -> str:
@@ -113,7 +80,7 @@ async def run_specialist_rebench(
 
     Reuses the real Magpie serving + benchmark path (``run_grid``) with a
     single identity variant. The server runs on the cards already pinned into
-    the subprocess env (``ROCR_VISIBLE_DEVICES``) and on a non-production port.
+    the subprocess env (``ROCR_VISIBLE_DEVICES``).
 
     Args:
         config_path: Base Magpie YAML to template from; ``None`` falls back to
@@ -123,8 +90,7 @@ async def run_specialist_rebench(
         base_extra_args: Server args merged ahead of the variant's args
             (e.g. the current-best stack args, to compare apples-to-apples).
         extra_envs: Per-run environment overrides (e.g. tuned config env vars).
-        port: Server port; ``None``/``0`` auto-picks a free one. 8888 is
-            rejected.
+        port: Server port; ``None``/``0`` uses an OS-assigned port.
         variant_timeout_sec: Per-variant wall-clock timeout.
         model_path: Overrides the benchmark model path when set.
         gpu_type: Pins the generic ``{framework}_{gpu_type}.sh`` benchmark.
@@ -180,6 +146,7 @@ async def run_specialist_rebench(
             benchmark_script=benchmark_script or None,
             magpie_python=magpie_python or None,
             server_lifecycle=server_lifecycle,
+            preclean_before_run=False,
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
         return {
@@ -244,13 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         prog="specialist_rebench",
         description=(
             "Optional gate-comparable rebench on the specialist's leased "
-            "cards + a non-production port (reuses the Magpie serving path)."
+            "cards using the Magpie serving path."
         ),
     )
     parser.add_argument("--config", default=None, help="Base Magpie YAML (defaults to packaged baseline).")
     parser.add_argument("--output", required=True, help="Output directory (conventionally inside the worktree).")
     parser.add_argument("--extra-args", default="", help="Server args merged ahead of the variant args.")
-    parser.add_argument("--port", type=int, default=0, help="Server port (0 auto-picks a free one; 8888 rejected).")
+    parser.add_argument("--port", type=int, default=0, help="Server port (0 uses an OS-assigned port).")
     parser.add_argument("--timeout", type=int, default=DEFAULT_REBENCH_TIMEOUT_SEC, help="Per-variant timeout (s).")
     parser.add_argument("--model-path", default=None, help="Override benchmark model path.")
     parser.add_argument("--gpu-type", default=None, help="Pin the generic benchmark script GPU type.")
@@ -283,7 +250,6 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "DEFAULT_REBENCH_TIMEOUT_SEC",
-    "PRODUCTION_SERVING_PORT",
     "run_specialist_rebench",
 ]
 

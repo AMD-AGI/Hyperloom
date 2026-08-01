@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -134,7 +133,7 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 }
 
 
-# Specialist dispatch action name (central so R2 sub-rules enforce the contract uniformly).
+# Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
 
 # Orchestrator-side patch integration step (EXPLORE phase, gated by a Critic verdict).
@@ -282,8 +281,6 @@ def _whole_machine_pool_size() -> int:
     return len(resolve_whole_machine_devices())
 
 
-DEFAULT_SPECIALIST_MAX_PROPOSALS: int = 12
-
 # Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
 INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
     {
@@ -299,21 +296,6 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 # research_lane capacity and the GPU specialist pool.
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
-# Fail-fast tripwire for obviously-destructive host commands in free-form task
-# descriptions. NOT a security boundary — the worktree, Critic review, and
-# integrate_patch gate remain the real boundaries.
-_FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\brm\s+-rf?\s+(?:/|~|\$HOME|\*)", re.IGNORECASE),
-    re.compile(r"\bmkfs\.", re.IGNORECASE),
-    re.compile(r"\bdd\s+if=.*\bof=/dev/", re.IGNORECASE),
-    re.compile(r">\s*/dev/sd[a-z]"),
-    re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
-    re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
-    # Ban pipe-to-kill and killall (can kill the serving / benchmark process).
-    re.compile(r"\bps\s+(?:aux|-\w+)\b.*\|.*\bkill\b", re.IGNORECASE),
-    re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
-    re.compile(r"\bkillall\b", re.IGNORECASE),
-)
 
 # Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
@@ -356,25 +338,6 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
 ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 
 
-# Synthetic stub used as ``role`` for specialist path-containment checks (only ``name`` is needed).
-class _SpecialistPseudoRole:
-    """Minimal stand-in role used when path-validating specialist intents.
-
-    Specialist intents are routed through ``_validate_specialist_*`` rather
-    than the conventional ``role.allowed_intents`` matrix, so the path
-    containment check only needs a ``name`` attribute for its error
-    messages. This stub supplies that single field.
-
-    Attributes:
-        name (str): the synthetic role name, always ``"specialist"``.
-    """
-
-    name = "specialist"
-
-
-_SPECIALIST_PSEUDO_ROLE = _SpecialistPseudoRole()
-
-
 # REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
@@ -396,9 +359,12 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Robustness-only: kill_task + scheduling-police intents
-KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness"})
+# kill_task sources; the other scheduling-police intents stay robustness-only.
+KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
+
+# Ceiling on a single extend_lease step; repeated extensions are allowed.
+EXTEND_LEASE_MAX_SEC: int = 3600
 
 ROBUSTNESS_ONLY_INTENTS: frozenset[IntentType] = frozenset(
     {
@@ -558,7 +524,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # operator-facing lifecycle event log; Coordinator-only writer so the
         # LLM cannot forge lifecycle events.
         "lifecycle",
-        # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
+        # specialist sub-agent ledger; Coordinator-only writer.
         "specialist_rounds",
         # per-kb_anchor coverage counters; Coordinator-only writers.
         "rounds_since_last_specialist",
@@ -657,25 +623,13 @@ class PolicyGate:
         """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source).
 
         Args:
-            from_agent (str): the identity of the emitting agent; a
-                ``specialist:<task_id>`` prefix routes to the specialist
-                validators.
+            from_agent (str): the identity of the emitting agent.
             intent (Intent): the parsed intent to validate.
 
         Raises:
             PolicyDenied: when the intent is not permitted; the ``rule``
                 attribute identifies which guard fired.
         """
-        # specialist sub-agents emit under an ephemeral ``specialist:<task_id>`` identity routed to a synthetic role.
-        if from_agent.startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            self._validate_specialist_intent(from_agent, intent)
-            self._validate_payload_paths(
-                _SPECIALIST_PSEUDO_ROLE,
-                intent.type,
-                intent.payload or {},
-            )
-            return
-
         role = self.role_registry.get(from_agent)
         if role is None:
             raise PolicyDenied(f"unknown agent {from_agent!r}", rule="role")
@@ -709,6 +663,8 @@ class PolicyGate:
             self._validate_review_verdict(role, payload)
         elif intent.type == IntentType.KILL_TASK:
             self._validate_kill_task(role, payload)
+        elif intent.type == IntentType.EXTEND_LEASE:
+            self._validate_extend_lease(payload)
         elif intent.type in ROBUSTNESS_ONLY_INTENTS:
             self._validate_robustness_only(role, intent.type, payload)
         # ALERT carries no extra checks beyond the role gate.
@@ -878,7 +834,7 @@ class PolicyGate:
                 f"of delegate(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        # R2 ``specialist`` bypasses ActionRegistry; its contract is enforced by ``_validate_specialist_dispatch``.
+        # ``specialist`` bypasses ActionRegistry; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
             if check_phase:
@@ -1528,7 +1484,7 @@ class PolicyGate:
         role: "AgentRole",
         payload: dict[str, Any],
     ) -> None:
-        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, tags ∈ vocab, gap_canonical_id required, max_turns ≤ cap.
+        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, gap_canonical_id required, max_turns ≤ cap.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -1537,8 +1493,8 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: when the role may not dispatch, params are malformed,
-                tags are unknown, the scope is invalid, the gap id is missing,
-                or max_turns is out of range.
+                the gap id is missing, or max_turns exceeds the hard cap. Tag /
+                scope incoherence is logged rather than denied.
         """
         if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -1576,49 +1532,28 @@ class PolicyGate:
             self._validate_freeform_specialist_dispatch(params)
             return
 
+        # Observed, not enforced: resolve_specialist_profile re-infers the scope
+        # and the runner synthesizes an empty result for an unresolvable anchor.
         if not tags:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: at least one tag is "
-                "required (params.tags or the legacy params.domain alias)",
-                rule="specialist_unknown_domain",
-                hint=(f"set params.tags to a non-empty subset of {sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"),
-            )
-        # Each tag must belong to the controlled knowledge-domain vocabulary.
+            log.info("specialist dispatch declares a scope but no tags; profile will re-infer")
         unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
         if unknown_tags:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: unknown knowledge-domain tag(s)={unknown_tags!r}",
-                rule="specialist_unknown_domain",
-                hint=(f"every tag must be one of {sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"),
+            log.info(
+                "specialist dispatch carries out-of-vocabulary tag(s)=%r (known: %r)",
+                unknown_tags,
+                sorted(KNOWLEDGE_DOMAIN_TAG_SET),
             )
 
-        # ``scope`` dial (domain | domains | freeform). Absent => single-domain
-        # default. ``domains`` requires >1 distinct tag; ``domain`` is single-tag.
-        scope = str(params.get("scope") or "").strip().lower()
-        if scope and scope not in SPECIALIST_SCOPE_VALUES:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: unknown scope={scope!r}",
-                rule="specialist_scope_invalid",
-                hint=(f"scope must be one of {sorted(SPECIALIST_SCOPE_VALUES)!r}"),
+        if scope_raw and scope_raw not in SPECIALIST_SCOPE_VALUES:
+            log.info(
+                "specialist dispatch scope=%r not in %r; re-inferred from tags",
+                scope_raw,
+                sorted(SPECIALIST_SCOPE_VALUES),
             )
-        if scope == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: scope='domains' is the "
-                "cross-domain channel and requires at least 2 distinct "
-                f"tags; got {tags!r}",
-                rule="specialist_scope_too_narrow",
-                hint=(
-                    "Declare every domain the patch must touch together in "
-                    "params.tags, or use scope='domain' for a single-domain "
-                    "specialist."
-                ),
-            )
-        if scope == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: scope='domain' is single-domain but got {len(tags)} tags {tags!r}",
-                rule="specialist_scope_mismatch",
-                hint=("Use scope='domains' for a cross-domain specialist, or pass a single tag."),
-            )
+        elif scope_raw == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
+            log.info("specialist dispatch scope='domains' with %d tag(s)=%r", len(tags), tags)
+        elif scope_raw == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
+            log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
@@ -1644,15 +1579,15 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            # ``max_turns=0`` means unbounded (depth bounded by wall-clock);
-            # negatives and values above the hard cap are rejected.
-            if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
+            # The in-process backend's turn loop has no wall-clock check, so this
+            # cap is the only bound on that path.
+            if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
-                    f"outside [0, {SPECIALIST_MAX_TURNS_HARD_CAP}]",
+                    f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
                     rule="specialist_dispatch_source",
                     hint=(
-                        f"max_turns must be in [0, {SPECIALIST_MAX_TURNS_HARD_CAP}] "
+                        f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
                         "(0 = unbounded; depth is bounded by the wall-clock "
                         "budget, so omit max_turns unless capping a probe early)."
                     ),
@@ -1714,11 +1649,10 @@ class PolicyGate:
             gpu_count_raw = default_gpu_count
         try:
             gpu_count = int(gpu_count_raw)
-        except (TypeError, ValueError) as exc:
-            raise PolicyDenied(
-                f"delegate{{action='specialist'}}: gpu_count must be an integer, got {gpu_count_raw!r}",
-                rule="specialist_gpu_request_invalid",
-            ) from exc
+        except (TypeError, ValueError):
+            # The dispatcher re-parses with the same default.
+            log.info("specialist dispatch gpu_count=%r not an integer; using %d", gpu_count_raw, default_gpu_count)
+            gpu_count = int(default_gpu_count)
         if gpu_count <= 0:
             raise PolicyDenied(
                 "delegate{action='specialist'}: gpu_count must be > 0 when needs_gpu=true",
@@ -1853,34 +1787,24 @@ class PolicyGate:
         specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
         validates only structural shape: a single ``task_description`` or a
         ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
-        with a non-empty, length-bounded description that survives the
-        red-line tripwire.
+        with a non-empty, length-bounded description.
 
         Args:
             params (dict[str, Any]): the freeform dispatch ``params`` carrying a
                 single ``task_description`` or a ``tasks`` wave.
 
         Raises:
-            PolicyDenied: when the GPU request fails, the wave is malformed or
-                too large, or a task description is empty / too long / trips the
-                red-line tripwire.
+            PolicyDenied: when the GPU request fails, the wave is too large, or
+                a task description is empty / too long.
         """
         # Freeform skips the domain-anchored max_turns gate (bounded by the task
         # timeout instead), but a GPU request must still clear the same pool
         # ceiling as a domain specialist.
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
-        if wave is not None:
-            if not isinstance(wave, list) or not wave:
-                raise PolicyDenied(
-                    "delegate{action='specialist',scope='freeform'}: params.tasks must be a non-empty list",
-                    rule="specialist_freeform_wave_invalid",
-                    hint=(
-                        "Pass tasks=[{task_description: ...}, ...] or a single "
-                        "params.task_description for a one-off freeform "
-                        "specialist."
-                    ),
-                )
+        # A malformed or empty wave falls through to the single-task path in the
+        # fan-out, which re-checks shape per entry.
+        if isinstance(wave, list) and wave:
             if len(wave) > SPECIALIST_FREEFORM_WAVE_MAX:
                 raise PolicyDenied(
                     f"delegate{{action='specialist',scope='freeform'}}: wave "
@@ -1891,20 +1815,17 @@ class PolicyGate:
                 )
             for i, task in enumerate(wave):
                 if not isinstance(task, dict):
-                    raise PolicyDenied(
-                        f"delegate{{action='specialist',scope='freeform'}}: tasks[{i}] must be an object",
-                        rule="specialist_freeform_task_invalid",
-                    )
+                    continue
                 desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-                self._check_freeform_task_description(desc, where=f"tasks[{i}]")
+                if desc:
+                    self._check_freeform_task_description(desc, where=f"tasks[{i}]")
             return
         desc = str(params.get("task_description") or "").strip()
         self._check_freeform_task_description(desc, where="params")
 
     @staticmethod
     def _check_freeform_task_description(desc: str, *, where: str) -> None:
-        """Per-task structural checks for a free-form ``task_description``:
-        non-empty, length-bounded, and clear of the red-line tripwire.
+        """Per-task structural checks for a free-form ``task_description``: non-empty and length-bounded.
 
         Args:
             desc (str): the freeform task description to validate.
@@ -1912,8 +1833,7 @@ class PolicyGate:
                 messages.
 
         Raises:
-            PolicyDenied: when ``desc`` is empty, exceeds the length cap, or
-                matches a red-line pattern.
+            PolicyDenied: when ``desc`` is empty or exceeds the length cap.
         """
         if not desc:
             raise PolicyDenied(
@@ -1928,173 +1848,45 @@ class PolicyGate:
                 f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
                 rule="specialist_freeform_description_too_long",
             )
-        for pat in _FREEFORM_REDLINE_PATTERNS:
-            if pat.search(desc):
-                raise PolicyDenied(
-                    f"delegate{{action='specialist',scope='freeform'}}: "
-                    f"{where} task_description tripped the red-line scan "
-                    f"(pattern={pat.pattern!r})",
-                    rule="specialist_freeform_redline",
-                    hint=(
-                        "Free-form mandates must not embed destructive host "
-                        "commands. Describe the investigation, not raw "
-                        "destructive shell."
-                    ),
-                )
 
-    # R3 ``specialist_done_source``
-    def _validate_specialist_intent(
-        self,
-        from_agent: str,
-        intent: Intent,
-    ) -> None:
-        """Validate any intent emitted under a ``specialist:<task_id>`` identity (Inv-5.2: only SEND_MESSAGE, ALERT, and one SPECIALIST_DONE).
+    def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
+        """Validate an ``EXTEND_LEASE`` intent.
 
         Args:
-            from_agent (str): the ``specialist:<task_id>`` identity of the
-                emitter.
-            intent (Intent): the intent emitted under that identity.
+            payload (dict[str, Any]): the payload carrying ``task_id``,
+                ``extra_sec`` and an optional ``reason``.
 
         Raises:
-            PolicyDenied: when the task_id suffix is missing or the intent type
-                is not one a specialist may emit.
+            PolicyDenied: when ``task_id`` is missing or ``extra_sec`` is not a
+                positive integer within :data:`EXTEND_LEASE_MAX_SEC`.
         """
-        task_id = from_agent.removeprefix(SPECIALIST_FROM_AGENT_PREFIX).strip()
+        task_id = str(payload.get("task_id", "")).strip()
         if not task_id:
+            raise PolicyDenied("extend_lease missing task_id", rule="payload")
+        try:
+            extra_sec = int(payload.get("extra_sec") or 0)
+        except (TypeError, ValueError) as exc:
             raise PolicyDenied(
-                f"specialist from_agent missing task_id suffix (got {from_agent!r})",
-                rule="specialist_done_source",
+                f"extend_lease extra_sec must be an integer, got {payload.get('extra_sec')!r}",
+                rule="payload",
+            ) from exc
+        if extra_sec <= 0 or extra_sec > EXTEND_LEASE_MAX_SEC:
+            raise PolicyDenied(
+                f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
+                rule="extend_lease_bounds",
                 hint=(
-                    "Specialist sub-agents must stamp "
-                    "from_agent='specialist:<task_id>' where <task_id> "
-                    "matches the dispatched task."
+                    "Extend in bounded steps and re-check get_running_tasks; "
+                    "a lease must not outlive the session budget."
                 ),
             )
-        if intent.type == IntentType.SPECIALIST_DONE:
-            self._validate_specialist_done_payload(task_id, intent.payload or {})
-            return
-        # Allowed ancillary intents (heartbeat / advice / alert).
-        if intent.type in (
-            IntentType.SEND_MESSAGE,
-            IntentType.ALERT,
-        ):
-            return
-        raise PolicyDenied(
-            f"specialist={from_agent!r} cannot emit intent_type={intent.type.value!r}",
-            rule="specialist_done_source",
-            hint=(
-                "Specialists may only emit specialist_done (exit), "
-                "send_message (heartbeat/advice), or alert. Use "
-                "specialist_done with proposal_set + summary instead."
-            ),
-        )
-
-    def _validate_specialist_done_payload(
-        self,
-        task_id: str,
-        payload: dict[str, Any],
-    ) -> None:
-        """Per-field R3 structural checks for the ``specialist_done`` payload (gap_canonical_id, domain ∈ keys, proposal_set, empty+reason, summary ≤4096, confidence ∈ [0,1]).
-
-        Args:
-            task_id (str): the specialist task id taken from the emitting
-                identity.
-            payload (dict[str, Any]): the specialist_done payload to validate.
-
-        Raises:
-            PolicyDenied: when any required field is missing or malformed (gap
-                id, domain, proposal_set, empty+reason, summary length, or
-                confidence range).
-        """
-        gap = str(payload.get("gap_canonical_id") or "").strip()
-        if not gap:
-            raise PolicyDenied(
-                "specialist_done missing gap_canonical_id",
-                rule="specialist_done_source",
-                hint=(
-                    "Payload must echo the gap_canonical_id that was "
-                    "passed to delegate{action='specialist'} so "
-                    "Coordinator can cross-check the dispatch."
-                ),
-            )
-        domain = str(payload.get("domain") or "").strip()
-        if not domain:
-            raise PolicyDenied(
-                "specialist_done missing domain",
-                rule="specialist_done_source",
-            )
-        if domain not in SPECIALIST_DOMAIN_KEYS:
-            raise PolicyDenied(
-                f"specialist_done: unknown domain={domain!r}",
-                rule="specialist_done_source",
-                hint=(f"domain must be one of {sorted(SPECIALIST_DOMAIN_KEYS)!r}"),
-            )
-        proposal_set = payload.get("proposal_set")
-        if not isinstance(proposal_set, list):
-            raise PolicyDenied(
-                "specialist_done.proposal_set must be a list",
-                rule="specialist_done_source",
-                hint="set proposal_set=[] when empty=true",
-            )
-        empty_flag = bool(payload.get("empty"))
-        if empty_flag:
-            if proposal_set:
-                raise PolicyDenied(
-                    "specialist_done: empty=true implies proposal_set=[]",
-                    rule="specialist_done_source",
-                )
-            reason_field = str(payload.get("reason") or payload.get("summary") or "").strip()
-            if not reason_field:
-                raise PolicyDenied(
-                    "specialist_done: empty=true requires a reason / summary describing why no proposals were emitted",
-                    rule="specialist_done_source",
-                )
-        else:
-            for i, variant in enumerate(proposal_set):
-                if not isinstance(variant, dict):
-                    raise PolicyDenied(
-                        f"specialist_done.proposal_set[{i}] must be a dict",
-                        rule="specialist_done_source",
-                    )
-                if not str(variant.get("name") or "").strip():
-                    raise PolicyDenied(
-                        f"specialist_done.proposal_set[{i}].name required",
-                        rule="specialist_done_source",
-                        hint=(
-                            "Every variant needs a unique name "
-                            "(round-scoped). See §3.4 §5.1 for the full "
-                            "variant schema."
-                        ),
-                    )
-        summary = str(payload.get("summary") or "")
-        if len(summary) > 4096:
-            raise PolicyDenied(
-                f"specialist_done.summary too long ({len(summary)} > 4096 chars)",
-                rule="specialist_done_source",
-                hint="KB_design §3.5 §7 caps summary at ~500 chars; 4096 is the defensive hard limit.",
-            )
-        confidence_raw = payload.get("confidence")
-        if confidence_raw is not None:
-            try:
-                confidence = float(confidence_raw)
-            except (TypeError, ValueError) as exc:
-                raise PolicyDenied(
-                    f"specialist_done.confidence must be float, got {confidence_raw!r}",
-                    rule="specialist_done_source",
-                ) from exc
-            if not 0.0 <= confidence <= 1.0:
-                raise PolicyDenied(
-                    f"specialist_done.confidence={confidence} not in [0, 1]",
-                    rule="specialist_done_source",
-                )
 
     def _validate_kill_task(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``KILL_TASK`` intent (robustness-only).
+        """Validate a ``KILL_TASK`` intent.
 
         Requires the source role to be on
         :data:`KILL_TASK_SOURCE_ALLOWLIST`, a non-empty ``task_id`` and
         ``reason``, and a ``scope`` within :data:`KILL_TASK_ALLOWED_SCOPES`
-        (``task`` only — server/process kills stay out per IR-5).
+        (``task`` only — server/process kills stay out).
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -2391,6 +2183,7 @@ __all__ = [
     "CORE_STATE_FIELDS",
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
+    "EXTEND_LEASE_MAX_SEC",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",

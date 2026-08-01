@@ -23,10 +23,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
+from .coordinator_helpers import (
+    _parse_iso_unix,
+    coerce_needs_gpu,
+    format_exc_brief,
+    serialize_verdict_advisory,
+)
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
-from ..policy.gate import PolicyDenied
-from ..state.task_registry import Task
+from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
+from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
@@ -39,8 +46,6 @@ log = __import__("logging").getLogger(__name__)
 # IntentType -> the ``Coordinator`` handler method it dispatches to. Replaces the
 # former 12-branch if/elif in :meth:`IntentRouter._handle_intent`; an unknown
 # type falls through to the observation fallback (see the ``else`` branch there).
-# ``SPECIALIST_DONE`` is a terminal specialist intent (R3 already validated); its
-# handler only bookkeeps (defense-in-depth).
 _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.PROPOSE_ACTION: "_handle_propose_action",
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
@@ -48,12 +53,12 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.REQUEST: "_handle_request",
     IntentType.RESPONSE: "_handle_response",
     IntentType.KILL_TASK: "_handle_kill_task",
+    IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
     IntentType.SEND_MESSAGE: "_handle_send_message",
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
-    IntentType.SPECIALIST_DONE: "_handle_specialist_done",
 }
 
 
@@ -427,7 +432,6 @@ class IntentRouter:
             "succeeded",
             "failed",
             "cancelled",
-            "needs_manual_review",
         }
         task = None
         was_existing = False
@@ -505,41 +509,6 @@ class IntentRouter:
                 "event",
                 {"kind": "task_queued", "task_id": task.task_id, "source": source, "action": action_name},
             )
-        )
-
-    async def _handle_specialist_done(
-        self,
-        source: str,
-        intent: Intent,
-    ) -> None:
-        """Handle a ``specialist_done`` intent (source ``specialist:<task_id>`` per Inv-5.3 / R3); bookkeeping in _record_specialist_result.
-
-        Args:
-            source: The emitting agent, expected as ``specialist:<task_id>``.
-            intent: The SPECIALIST_DONE intent carrying the done payload.
-        """
-        payload = dict(intent.payload or {})
-        task_id = self._task_id_from_specialist_source(source)
-        task: Task | None = None
-        if task_id:
-            try:
-                task = await self.tasks.get(task_id)
-            except Exception:  # noqa: BLE001 — TaskNotFound and friends
-                task = None
-        if task is None:
-            # PolicyGate R3 should have caught this; log defensively but don't crash.
-            log.warning(
-                "specialist_done from source=%r references unknown "
-                "task_id=%r; skipping bookkeeping (R3 should have "
-                "denied; defense in depth)",
-                source,
-                task_id,
-            )
-            return
-        await self._record_specialist_result(
-            task=task,
-            done_payload=payload,
-            source=source,
         )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
@@ -836,6 +805,91 @@ class IntentRouter:
             )
         )
 
+    async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
+        """Grant a running task more lease time.
+
+        Refreshes the task's ``lease_ttl_sec``, its lane rows, its GPU rows and
+        the live subprocess wall-clock deadline together, preserving
+        ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
+
+        ``lease_ttl_sec`` is a *cumulative* budget measured from ``updated_at``
+        (when the task entered ``running``), but lane / GPU rows expire at
+        ``now + ttl``. Feeding the cumulative TTL straight into them would hand
+        back the already-elapsed time, so the refresh uses the remaining budget.
+
+        Args:
+            source (str): The agent requesting the extension.
+            intent (Intent): The EXTEND_LEASE intent; ``payload`` carries
+                ``task_id``, ``extra_sec`` and an optional ``reason``.
+        """
+        task_id = str(intent.payload.get("task_id") or "").strip()
+        extra_sec = int(intent.payload.get("extra_sec") or 0)
+        try:
+            new_ttl = await self.tasks.extend_lease(task_id, extra_sec)
+        except (TaskNotFound, IllegalTransition) as exc:
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "extend_lease_rejected",
+                    "task_id": task_id,
+                    "source": source,
+                    "error": repr(exc)[:200],
+                },
+            )
+            return
+        # Remaining budget = cumulative TTL minus the time already spent running.
+        running_sec = 0.0
+        try:
+            task = await self.tasks.get(task_id)
+            started = _parse_iso_unix(task.updated_at)
+            if started > 0:
+                running_sec = max(0.0, time.time() - started)
+        except Exception:  # noqa: BLE001 — fall back to the full TTL
+            log.exception("extend_lease: could not read running age for task=%s", task_id)
+        # A late extension can arrive after the cumulative task TTL expired but
+        # before the worker/reaper acted on it. It must still buy the full newly
+        # granted increment rather than refreshing leases for only one second.
+        remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
+        lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
+        gpu_error = ""
+        try:
+            gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
+        except Exception as exc:  # noqa: BLE001 — lane extension already landed
+            log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
+            gpus = 0
+            gpu_error = repr(exc)[:200]
+        # Push the live subprocess's hard wall-clock kill deadline out too, so
+        # the extension actually buys the specialist more time to run.
+        wall_budget_error = ""
+        try:
+            from ..specialists.subprocess_ import grant_wall_budget_extension
+
+            grant_wall_budget_extension(task_id, extra_sec)
+        except Exception as exc:  # noqa: BLE001 — lease rows already moved
+            log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
+            wall_budget_error = repr(exc)[:200]
+        # A swallowed GPU or wall-budget failure would leave the lane extended
+        # while the GPU reaper or subprocess wall-clock cap can still interrupt
+        # the work — report the partial extension as degraded.
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "extend_lease_degraded" if gpu_error or wall_budget_error else "extend_lease",
+                "task_id": task_id,
+                "source": source,
+                "extra_sec": extra_sec,
+                "lease_ttl_sec": new_ttl,
+                "lease_expires_in_sec": remaining_sec,
+                "lanes": lanes,
+                "gpu_rows": gpus,
+                **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
+                **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
+                "reason": str(intent.payload.get("reason") or "")[:200],
+            },
+        )
+
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.
 
@@ -945,8 +999,9 @@ class IntentRouter:
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
         """Publish a free-form message onto the bus.
 
-        Soft-degrades an unknown topic to ``observation`` and
-        routes to the requested recipient (defaulting to broadcast).
+        Soft-degrades an unknown topic to ``observation`` and routes to the
+        requested recipient (defaulting to broadcast). A ``specialist:<id>``
+        recipient additionally gets the message in its workspace inbox.
 
         Args:
             source (str): The sending agent.
@@ -969,6 +1024,47 @@ class IntentRouter:
                 {k: v for k, v in intent.payload.items() if k != "to"},
             )
         )
+        if str(to_agent).startswith(SPECIALIST_FROM_AGENT_PREFIX):
+            self._deliver_specialist_inbox(source, str(to_agent), intent.payload)
+
+    def _deliver_specialist_inbox(self, source: str, to_agent: str, payload: dict[str, Any]) -> None:
+        """Append a message to a running specialist's workspace inbox.
+
+        A specialist reads ``inbox.json`` between turns; the reaper ignores the
+        file, so this steers a live run without ending it.
+
+        Args:
+            source (str): The sending agent.
+            to_agent (str): Recipient of the form ``specialist:<task_id>``.
+            payload (dict[str, Any]): The send_message payload.
+        """
+        task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
+        if not task_id:
+            return
+        try:
+            workspace = runs_dir(self.session_dir, "specialist", task_id)
+            workspace.mkdir(parents=True, exist_ok=True)
+            # The prompt advertises the worktree when one exists; match it.
+            worktree = workspace / "worktree"
+            inbox = (worktree if worktree.is_dir() else workspace) / "inbox.json"
+            existing: list[Any] = []
+            if inbox.exists():
+                loaded = json.loads(inbox.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    existing = loaded
+            existing.append(
+                {
+                    "from": source,
+                    "ts": now_iso(),
+                    "body": {k: v for k, v in payload.items() if k not in ("to", "topic")},
+                }
+            )
+            # Keep the last 32 so the file stays prompt-sized.
+            tmp = inbox.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
+            tmp.replace(inbox)
+        except Exception:  # noqa: BLE001 — steering is best-effort
+            log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
         """Broadcast an alert message, prioritized by severity.

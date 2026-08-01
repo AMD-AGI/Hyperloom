@@ -94,14 +94,13 @@ _DDL = [
         kind             TEXT NOT NULL,
         state            TEXT NOT NULL CHECK (state IN
                            ('queued','running','succeeded','failed',
-                            'cancelled','needs_manual_review')),
+                            'cancelled')),
         params           TEXT NOT NULL,
         idempotency_key  TEXT NOT NULL UNIQUE,
         requires_lanes   TEXT NOT NULL DEFAULT '[]',
         allowed_tools    TEXT NOT NULL DEFAULT '[]',
         side_effects     TEXT NOT NULL DEFAULT '[]',
         lease_ttl_sec    INTEGER NOT NULL DEFAULT 0,
-        attempts         INTEGER NOT NULL DEFAULT 0,
         history          TEXT NOT NULL DEFAULT '[]',
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL

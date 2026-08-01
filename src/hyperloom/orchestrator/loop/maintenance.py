@@ -194,46 +194,16 @@ class MaintenanceCollaborator:
         tracker = self._checkpoint_tracker
         ticks_since = max(0, tick - tracker.last_tick)
         minutes_since = max(0.0, now_min - tracker.last_minute_mark)
-        # Hard context-token guardrail: near the window we MUST compact even when
-        # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
-        hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
-        # Anti-thrash floor for the TOKEN-budget triggers only: require a minimum
-        # tick gap between compactions so a re-seeded conversation doesn't
-        # re-trip the budget every tick. Cadence triggers are unaffected; a true
-        # near-window emergency (>= 98%) always bypasses the floor.
-        suppress_token_trigger = False
-        if not force and ticks_since < max(1, int(getattr(self, "_checkpoint_min_tick_gap", 2) or 2)):
-            ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
-            ctx_token_soft = int(getattr(self._checkpoint_policy, "context_token_soft", 0) or 0)
-            ctx_now = int(tracker.context_tokens_now)
-            token_due = (ctx_token_hard > 0 and ctx_now >= ctx_token_hard) or (
-                ctx_token_soft > 0 and ctx_now >= ctx_token_soft
-            )
-            emergency_ceiling = (
-                int(ctx_token_hard / max(0.01, _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION) * 0.98)
-                if ctx_token_hard > 0
-                else 0
-            )
-            in_emergency = emergency_ceiling > 0 and ctx_now >= emergency_ceiling
-            suppress_token_trigger = token_due and not in_emergency
-            if suppress_token_trigger:
-                # Suppress the token-driven hard flag so the freshly-seeded
-                # conversation can persist; fall through to the cadence check.
-                hard = False
-        # Authoritative growth signal is the context-token water level; the char
-        # count is a fallback for backends that don't report token usage.
+        # Growth signal is the context-token water level; char count is the
+        # fallback for backends that don't report token usage.
         if (
             not force
-            and not hard
             and not self._checkpoint_policy.should_checkpoint(
                 ticks_since_last=ticks_since,
                 minutes_since_last=minutes_since,
                 chars_since_last=tracker.chars_since_last,
                 phase_changed=phase_changed,
-                # During the anti-thrash window, zero out the token level so the
-                # soft-token trigger can't re-fire the compaction we just
-                # suppressed; cadence triggers still evaluate normally.
-                context_tokens_now=0 if suppress_token_trigger else tracker.context_tokens_now,
+                context_tokens_now=tracker.context_tokens_now,
             )
         ):
             return False
@@ -252,10 +222,9 @@ class MaintenanceCollaborator:
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
             degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
             cur_phase = str(getattr(self.shared_state, "phase", "") or "")
-            # Path 1 — degenerate reply, NOT near the window: skip compaction,
-            # preserve the live conversation + prior memory, but reset the
-            # tracker to avoid a checkpoint storm.
-            if degenerate and not hard:
+            # Degenerate reply: skip compaction, preserve the live conversation +
+            # prior memory, but reset the tracker to avoid a checkpoint storm.
+            if degenerate:
                 self._coord._consec_degenerate_ckpt += 1
                 tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
                 await self._record_observation(
@@ -283,11 +252,7 @@ class MaintenanceCollaborator:
                         },
                     )
                 return False
-            # Path 2 — degenerate but near the window: compact anyway using a
-            # deterministic fallback synthesised from authoritative state.
-            if degenerate and hard:
-                parsed = _orch_mem.deterministic_memory_fallback(self.shared_state)
-            # Path 3 (and post-fallback): a usable summary — compact for real.
+            # Usable summary — compact for real.
             self._coord._consec_degenerate_ckpt = 0
             seq = 0
             try:
@@ -331,7 +296,6 @@ class MaintenanceCollaborator:
                     "seq": seq,
                     "checkpoint_count": record.get("checkpoint_count", 0),
                     "phase_changed": bool(phase_changed),
-                    "hard_compaction": bool(hard),
                     "context_tokens": int(tracker.context_tokens_now),
                 },
             )

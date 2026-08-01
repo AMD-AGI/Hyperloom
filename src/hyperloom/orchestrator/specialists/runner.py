@@ -47,7 +47,6 @@ from .subprocess_ import (
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
-from ..policy.gate import DEFAULT_SPECIALIST_MAX_PROPOSALS
 from .profile import SpecialistProfile, resolve_specialist_profile
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
@@ -240,7 +239,7 @@ class SpecialistRunResult:
     task_id: str
     domain: str
     gap_canonical_id: str
-    status: str  # "succeeded" / "stale" / "empty_synthesised" / "tool_violation"
+    status: str  # "succeeded" / "partial" / "stale" / "empty_synthesised" / "tool_violation"
     specialist_done: dict[str, Any]
     turns_used: int = 0
     workspace: str = ""
@@ -286,8 +285,10 @@ def classify_specialist_failure(
     type + retry-eligibility flag.
 
     ``status == 'stale'`` marks a subprocess that died with a ``backend_error``
-    (timeout / stale-heartbeat / crash); ``empty_synthesised`` means it exited
-    cleanly without a usable ``specialist_done``.
+    (timeout / stale-heartbeat / crash) and left nothing usable behind;
+    ``partial`` means it died the same way but a checkpoint was salvaged, so the
+    failure is reported without discarding the work; ``empty_synthesised`` means
+    it exited cleanly without a usable ``specialist_done``.
 
     Args:
         runner_status: The :class:`SpecialistRunResult` status string.
@@ -302,6 +303,13 @@ def classify_specialist_failure(
         return SpecialistFailureType.NONE, False
     if status == "tool_violation":
         return SpecialistFailureType.TOOL_VIOLATION, False
+    if status == "partial":
+        # Salvaged work: classify the failure but never retry over it.
+        if "timeout" in err:
+            return SpecialistFailureType.TIMEOUT, False
+        if "stale_heartbeat" in err:
+            return SpecialistFailureType.STALE_HEARTBEAT, False
+        return SpecialistFailureType.CRASH, False
     if status == "stale":
         if "timeout" in err:
             ftype = SpecialistFailureType.TIMEOUT
@@ -326,8 +334,7 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Satisfies PolicyGate R3 schema (``empty=true``, ``proposal_set=[]``,
-    non-empty summary).
+    Shape: ``empty=true``, ``proposal_set=[]``, non-empty summary.
 
     Args:
         gap_canonical_id: Canonical id of the gap the specialist addressed.
@@ -605,8 +612,6 @@ class SpecialistRunner:
                 # WS1 wall-clock budget so the specialist can self-throttle.
                 wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
-                # proposal_set self-curation target; shapes the prompt, not a hard cap.
-                max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
@@ -1041,6 +1046,7 @@ class SpecialistRunner:
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             wall_budget_sec=wall_budget_sec,
             gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
+            progress_cb=(ctx.extra or {}).get("specialist_progress_cb"),
         )
         self._append_transcript(
             workspace,
@@ -1119,13 +1125,16 @@ class SpecialistRunner:
         )
 
         # Decode subprocess error: backend_error → 'stale', clean miss → empty_synthesised.
+        # The classifier keys off the leading token; the reaper's own text is kept
+        # after it so the reader sees the elapsed/threshold numbers.
+        detail = (sub_result.error or "").strip()
         backend_error = ""
         if sub_result.timed_out:
-            backend_error = "subprocess_timeout"
+            backend_error = f"subprocess_timeout: {detail}" if detail else "subprocess_timeout"
         elif sub_result.stale_heartbeat:
-            backend_error = "subprocess_stale_heartbeat"
-        elif sub_result.error:
-            backend_error = f"subprocess_error:{sub_result.error}"
+            backend_error = f"subprocess_stale_heartbeat: {detail}" if detail else "subprocess_stale_heartbeat"
+        elif detail:
+            backend_error = f"subprocess_error:{detail}"
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
@@ -1155,9 +1164,9 @@ class SpecialistRunner:
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
-        Synthesises an empty payload when none was produced, sanitises and
-        truncates the proposal set, merges discovered patches and writes the
-        on-disk ``specialist_done.json``.
+        Synthesises an empty payload when none was produced, sanitises the
+        proposal set, merges discovered patches and writes the on-disk
+        ``specialist_done.json``.
 
         Args:
             ctx (RunnerContext): Dispatch context carrying the task.
@@ -1217,7 +1226,6 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        # ``max_proposals`` is a prompt-side target, not a hard cap.
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
@@ -1310,10 +1318,17 @@ class SpecialistRunner:
         notes.extend(safety.notes())
 
         self._write_specialist_done(workspace, done_payload)
+        recovered = bool(done_payload.get("_recovered_from_partial"))
+        # ``partial`` keeps an infra failure visible without making the attempt
+        # retry-eligible, which would discard whatever was salvaged.
         status = "succeeded"
         if tool_violations:
             status = "tool_violation"
             notes.append(f"tool_violations:{tool_violations}")
+        elif backend_error or recovered:
+            status = "partial"
+        if recovered:
+            notes.append("recovered_from_partial")
 
         return SpecialistRunResult(
             task_id=ctx.task.task_id,
@@ -1325,6 +1340,7 @@ class SpecialistRunner:
             workspace=str(workspace) if workspace else "",
             transcript_path=str(self._transcript_path(workspace)) if workspace else "",
             done_path=str(self._done_path(workspace)) if workspace else "",
+            error=backend_error,
             notes=notes,
         )
 

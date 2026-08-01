@@ -266,7 +266,9 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "throughput",
     "tput_tok_s",
 )
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+# Notes rendered per inbox line.
+_OUTCOME_NOTES_MAX: int = 3
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
@@ -346,6 +348,7 @@ def _format_inbox_event(m: "Message") -> str:
         error = payload.get("error")
         result = payload.get("result")
         parts = [head, f"kind={kind!r}", f"state={state!r}"]
+        notes: list[Any] = []
         if isinstance(result, dict):
             status = _first_present(result, _OUTCOME_STATUS_KEYS)
             gain = _first_present(result, _OUTCOME_GAIN_KEYS)
@@ -359,8 +362,18 @@ def _format_inbox_event(m: "Message") -> str:
                 parts.append(f"gain={gain}")
             if tput is not None:
                 parts.append(f"tput={tput}")
+            # Executors that never raise report the failure inside the result
+            # envelope, leaving the top-level error None.
+            if not error:
+                error = result.get("error")
+            raw_notes = result.get("notes")
+            if isinstance(raw_notes, list):
+                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
         if error:
             parts.append(f"error={str(error)[:200]!r}")
+        if notes:
+            shown = "; ".join(str(n) for n in notes)
+            parts.append(f"notes={shown[:300]!r}")
         return " ".join(parts)
 
     if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
@@ -554,19 +567,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._proposal_scorer: Any = proposal_scorer
         # Phase budget percentages, normalised once at construction.
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
-        # Specialist stale scan threshold (seconds).
-        try:
-            self._specialist_stale_sec: float = max(
-                0.0,
-                float(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_SPECIALIST_STALE_SEC",
-                        "600",
-                    )
-                ),
-            )
-        except ValueError:
-            self._specialist_stale_sec = 600.0
         self._model_class_override: str = (model_class or "").strip()
 
         # Validate every reactor has a backend wired.
@@ -675,20 +675,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
             _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
         )
-        _hard_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_HARD_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION,
-        )
         self._checkpoint_policy = _orch_mem.CheckpointPolicy(
             context_token_soft=int(_ctx_window * _soft_frac),
-            context_token_hard=int(_ctx_window * _hard_frac),
         )
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
-        # Minimum ticks between orchestration-memory compactions, to avoid a
-        # checkpoint-every-tick loop. A near-window emergency bypasses this floor.
-        self._checkpoint_min_tick_gap = 3
         # Consecutive degenerate checkpoint replies; resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
@@ -862,10 +854,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_review_verdict": "router",
         "_handle_single_verdict": "router",
         "_handle_delegate": "router",
-        "_handle_specialist_done": "router",
         "_handle_request": "router",
         "_handle_response": "router",
         "_handle_kill_task": "router",
+        "_handle_extend_lease": "router",
+        "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
         "_handle_escalate_strategy_change": "router",
         "_handle_send_message": "router",
@@ -971,9 +964,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_on_enter_explore": "phase_explore",
         "_maybe_force_stalled_domain_specialist": "phase_explore",
         "_seed_gaps_from_research_hints": "phase_explore",
-        "_scan_stale_specialists": "phase_explore",
         "_fan_out_specialist_wave": "phase_explore",
         "_maybe_auto_retry_specialist": "phase_explore",
+        "_record_specialist_retry_exhausted": "phase_explore",
         "_warm_specialist_params": "phase_explore",
         "_refresh_gaps": "phase_explore",
         "_extract_gaps_from_baseline": "phase_explore",
@@ -1066,6 +1059,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
+        "_context_running_tasks_reader": "conversation",
+        "_task_heartbeat_age_sec": "conversation",
         "_context_analysis_reader": "conversation",
         "_record_reactor_conversation": "conversation",
         "_compose_prompt": "conversation",
@@ -1100,6 +1095,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_spawn_fitting_queued": "dispatcher",
         "_run_dispatched_with_gpu_release": "dispatcher",
         "_specialist_wall_budget_sec": "dispatcher",
+        "_specialist_progress_publisher": "dispatcher",
         "_resolve_serving_tp": "dispatcher",
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",

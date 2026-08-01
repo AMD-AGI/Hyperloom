@@ -59,7 +59,7 @@ def test_orchestration_permissions():
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
-    assert IntentType.KILL_TASK not in role.allowed_intents
+    assert IntentType.KILL_TASK in role.allowed_intents
     assert IntentType.RESPONSE not in role.allowed_intents
 
 
@@ -123,7 +123,7 @@ def test_review_verdict_critic_only():
 
 
 def test_kill_and_robustness_only_renamed():
-    assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"robustness"})
+    assert KILL_TASK_SOURCE_ALLOWLIST == frozenset({"robustness", "orchestration"})
     assert ROBUSTNESS_ONLY_SOURCE_ALLOWLIST == frozenset({"robustness"})
     assert ROBUSTNESS_ONLY_INTENTS == frozenset(
         {
@@ -527,16 +527,26 @@ def test_gate_robustness_kill_task_ok(gate):
     )
 
 
-def test_gate_orchestration_kill_task_rejected(gate):
+def test_gate_orchestration_kill_task_allowed(gate):
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.KILL_TASK,
+            payload={"task_id": "t1", "reason": "stalled"},
+        ),
+    )
+
+
+def test_gate_orchestration_kill_task_process_scope_rejected(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
             Intent(
                 type=IntentType.KILL_TASK,
-                payload={"task_id": "t1", "reason": "stalled"},
+                payload={"task_id": "t1", "reason": "stalled", "scope": "process"},
             ),
         )
-    assert exc.value.rule == "role"
+    assert exc.value.rule == "kill_scope"
 
 
 def test_gate_robustness_kill_task_process_scope_rejected(gate):
