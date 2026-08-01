@@ -2011,16 +2011,16 @@ class KernelPhase(PhaseHandler):
             per_tuner_timeout_sec = 15 * 60
         per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
 
+        # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's
+        # CK fused-MoE rejects a non-128-aligned intermediate_size_per_partition.
+        # Validating it anyway costs a full cold start that can only end in a
+        # dead server.
+        from hyperloom.inference_optimizer.cli.model_gate import (
+            model_supports_aiter_ck_fused_moe,
+        )
+
         for cand in candidates:
             tuner_name = cand["tuner"]
-            # fmoe_ck is only meaningful with --moe-runner-backend aiter, and
-            # aiter's CK fused-MoE rejects a non-128-aligned
-            # intermediate_size_per_partition. Validating it anyway costs a full
-            # cold start that can only end in a dead server.
-            from hyperloom.inference_optimizer.cli.model_gate import (
-                model_supports_aiter_ck_fused_moe,
-            )
-
             if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
                 str(getattr(self.shared_state, "model_path", "") or ""),
                 int(getattr(self.shared_state, "tp", 0) or 0),
