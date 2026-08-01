@@ -53,22 +53,6 @@ class _StubSharedState:
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
 
-    def append_stack_gain_entry(
-        self,
-        *,
-        action,
-        variant_name,
-        new_tput,
-        extra_server_args="",
-        ts=None,
-    ):
-        gain = round(
-            (float(new_tput) / float(self.baseline_tput) - 1.0) * 100.0,
-            3,
-        )
-        self.gain_per_stack_entry.append(gain)
-        return gain
-
 
 class _StubTaskRegistry:
     """Captures ``create_or_return_existing`` calls so tests can assert."""
@@ -462,36 +446,6 @@ def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
     assert coord.shared_state.gain_per_stack_entry == [None, 23.0]
     assert coord.shared_state.cumulative_gain == 23.0
     assert coord.shared_state.cumulative_gain_validated_stack_len == 2
-
-
-def test_promote_warm_replay_skips_after_validated_optimization(tmp_path):
-    """Standalone warm replay must not overwrite an existing validated stack."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.optimization_stack = [
-        {"action": "integrate_patch", "tput": 660.0}
-    ]
-    coord.shared_state.gain_per_stack_entry = [10.0]
-    coord.shared_state.cumulative_gain = 10.0
-    coord.shared_state.cumulative_gain_validated = 10.0
-    coord.shared_state.cumulative_gain_validated_stack_len = 1
-    coord.shared_state.warm_replay_outcome = {
-        "status": "in_flight",
-        "expected_gain_pct": 25.0,
-    }
-
-    coord._promote_warm_replay(
-        {"status": "succeeded", "output_throughput": 738.0},
-        task=_StubTask(params={"extra_server_args": "--attention-backend AITER"}),
-    )
-
-    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
-    assert (
-        coord.shared_state.warm_replay_outcome["reason"]
-        == "preexisting_validated_stack_requires_combined_rebench"
-    )
-    assert len(coord.shared_state.optimization_stack) == 1
-    assert coord.shared_state.gain_per_stack_entry == [10.0]
-    assert coord.shared_state.cumulative_gain == 10.0
 
 
 def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):

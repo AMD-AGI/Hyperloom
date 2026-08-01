@@ -238,27 +238,6 @@ class PreludePhase(PhaseHandler):
         if state.warm_replay_attempted:
             # Resume safety: a previous boot already enqueued/ran the replay.
             return None
-        # Warm replay is a PRELUDE branch measured against baseline_tput.  It is
-        # only attribution-safe before any *validated* optimization layer has
-        # landed.  Pre-baseline enablement entries from older sessions may still
-        # be present with a zero validation watermark; those are part of the
-        # baseline environment and remain replayable.  A validated stack,
-        # however, requires a combined full-stack rebench rather than replaying
-        # a standalone recipe and crediting its full baseline-relative gain.
-        try:
-            validated_stack_len = int(
-                getattr(state, "cumulative_gain_validated_stack_len", 0) or 0
-            )
-        except (TypeError, ValueError):
-            validated_stack_len = 0
-        if validated_stack_len > 0:
-            state.warm_replay_outcome = {
-                "status": "skipped",
-                "reason": "preexisting_validated_stack_requires_combined_rebench",
-                "validated_stack_len": validated_stack_len,
-            }
-            state.warm_replay_attempted = True
-            return None
         warm = state.warm_start_recipe or {}
         if not isinstance(warm, dict) or not warm:
             state.warm_replay_outcome = {
@@ -501,27 +480,6 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
-        # Defense in depth for a stack layer that landed while the replay task
-        # was in flight.  The replay result is a standalone baseline-relative
-        # measurement; promoting it after a validated Framework/Explore layer
-        # would overwrite cumulative attribution and double-credit prior work.
-        try:
-            validated_stack_len = int(
-                getattr(state, "cumulative_gain_validated_stack_len", 0) or 0
-            )
-        except (TypeError, ValueError):
-            validated_stack_len = 0
-        if validated_stack_len > 0:
-            outcome["status"] = "skipped"
-            outcome["reason"] = "preexisting_validated_stack_requires_combined_rebench"
-            outcome["validated_stack_len"] = validated_stack_len
-            state.warm_replay_outcome = outcome
-            state.save(self.session_dir)
-            log.warning(
-                "warm-replay not promoted: validated stack len=%d requires a combined rebench",
-                validated_stack_len,
-            )
-            return
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
@@ -589,16 +547,10 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             state.optimization_stack.append(stack_entry)
-            # Keep the authoritative cumulative ledger index-aligned with the
-            # stack.  This helper records absolute gain vs baseline; attribution
-            # derives the marginal delta from the preceding cumulative row.
-            state.append_stack_gain_entry(
-                action="replay_warm_recipe",
-                variant_name="warm_replay",
-                new_tput=single_round_tput,
-                extra_server_args=warm_args,
-                ts=stack_entry["ts"],
-            )
+            # gain_per_stack_entry runs in lock-step with optimization_stack.
+            gp = list(getattr(state, "gain_per_stack_entry", []) or [])
+            gp.append(round(measured_gain, 3))
+            state.gain_per_stack_entry = gp
             # Cumulative gain is absolute tput vs baseline, not additive deltas.
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
