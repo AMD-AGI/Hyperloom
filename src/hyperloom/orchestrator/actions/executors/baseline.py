@@ -58,6 +58,7 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
     materialize_config_with_envs,
+    prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
@@ -1957,6 +1958,23 @@ class BaselineExecutor:
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
             except Exception:  # noqa: BLE001 — runtime overlay is best-effort
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
+        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
+        # capability-preflight aiperf before Magpie runs the materialized config.
+        # Baseline/profile shell out here (not via _run_magpie), so without this the
+        # materialize-time swap to aiperf_client.sh would point at a script that was
+        # never deployed. No-op when HYPERLOOM_AGENTX is off.
+        _agx_err = prepare_agentx_runtime(
+            env=os.environ,
+            inferencex_path=effective_inferencex_path,
+            config_path=config_path,
+        )
+        if _agx_err:
+            return {
+                "status": "failed",
+                "error_class": "agentx_preflight",
+                "error": _agx_err,
+                "output_dir": str(output_dir),
+            }
         # Whether THIS run actually executes lm-eval, read back from the
         # materialized config the subprocess consumes -- the single source of
         # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base

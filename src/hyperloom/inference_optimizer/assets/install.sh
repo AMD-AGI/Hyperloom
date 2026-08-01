@@ -209,6 +209,14 @@ MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # re-pin with MAGPIE_REF=<tag|sha>.
 MAGPIE_REF="${MAGPIE_REF:-0171222c532db6fc5cb174667db66e34f1d9dd98}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
+
+# aiperf (SemiAnalysis AgentX benchmark client) — pinned to an immutable commit
+# on the SemiAnalysisAI org repo. Only needed for AgentX mode (HYPERLOOM_AGENTX).
+# Installed fail-soft (see ensure_aiperf): a failure must never block the default
+# synthetic path. Operators can override AIPERF_BIN to skip this install.
+AIPERF_REPO="${AIPERF_REPO:-https://github.com/SemiAnalysisAI/aiperf.git}"
+AIPERF_REF="${AIPERF_REF:-dc975aaa4491388defe28725934bd08348253fb8}"
+AIPERF_PACKAGE_SPEC="${AIPERF_PACKAGE_SPEC:-aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
 # operator, ensure_magpie resolves it from the pip-installed package; explicit
@@ -1038,6 +1046,36 @@ PY
   fi
 }
 
+# --- 2a. aiperf (AgentX benchmark client) — fail-soft, AgentX-only ---
+# Installs the pinned aiperf so HYPERLOOM_AGENTX works out of the box. A failure
+# here is NON-fatal: it only warns and leaves aiperf absent, so the default
+# synthetic path is never blocked by an AgentX-only dependency. Skipped when the
+# operator points AIPERF_BIN at their own build.
+ensure_aiperf() {
+  if [ -n "${AIPERF_BIN:-}" ]; then
+    log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if command -v aiperf >/dev/null 2>&1; then log "aiperf on PATH"; else warn "aiperf not found (check-only)"; fi
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would pip install aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
+    return 0
+  fi
+  if command -v aiperf >/dev/null 2>&1; then
+    log "aiperf already on PATH; skipping install"
+    return 0
+  fi
+  log "installing aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
+  if "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$AIPERF_PACKAGE_SPEC"; then
+    log "aiperf installed OK"
+  else
+    warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
+  fi
+}
+
 # --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
 # Hyperloom bugs.md §C #1 (vllm_mi300x.sh / sglang_mi300x.sh sourced by a
 # leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
@@ -1484,6 +1522,26 @@ ensure_inferencex
 # RUN_EVAL=true baselines aborting on 'Unknown parameter'.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   ensure_magpie_atomic_scripts_patch
+fi
+
+# aiperf (AgentX client) is an OPT-IN Magpie-path add-on: installed only when the
+# operator explicitly asks (INSTALL_AIPERF or HYPERLOOM_AGENTX truthy), so a
+# default install grows no extra network/build dependency. If AgentX is turned on
+# at runtime without aiperf present, the runtime preflight fails loud with
+# guidance (install it, or point AIPERF_BIN at an existing build). Fail-soft
+# inside ensure_aiperf. Never for the bypass backend.
+if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
+  # Strip surrounding whitespace then lowercase, so the installer
+  # parses these flags identically to the Python runtime's agentx_enabled()
+  # (which .strip()s) — e.g. HYPERLOOM_AGENTX=" on " must be ON in both.
+  _agx_want="$(printf '%s' "${INSTALL_AIPERF:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  _agx_sw="$(printf '%s' "${HYPERLOOM_AGENTX:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  case "${_agx_want}:${_agx_sw}" in
+    1:*|true:*|yes:*|on:*|*:1|*:true|*:yes|*:on)
+      ensure_aiperf ;;
+    *)
+      log "aiperf (AgentX) skipped: set INSTALL_AIPERF=1 or HYPERLOOM_AGENTX=1 to install it (or point AIPERF_BIN at an existing build)." ;;
+  esac
 fi
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
