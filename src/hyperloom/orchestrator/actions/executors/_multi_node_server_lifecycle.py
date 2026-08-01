@@ -1267,7 +1267,6 @@ async def _wait_for_server_health_async(
             ``timeout_s``.
     """
     import time as _time
-    import re as _re
 
     try:
         import httpx as _httpx
@@ -1275,14 +1274,11 @@ async def _wait_for_server_health_async(
         log.warning("httpx not available; skipping post-restart /health wait")
         return
 
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
+
     state = _read_state() or {}
-    service_url = str(state.get("service_url") or "").strip()
+    service_url = reachable_service_url(state)
     backend = str(state.get("backend") or "").strip().lower()
-    head_ip = str(state.get("head_pod_ip") or "").strip()
-    if head_ip and ".svc.cluster.local" in service_url:
-        m = _re.search(r":(\d+)$", service_url)
-        port = m.group(1) if m else "8888"
-        service_url = f"http://{head_ip}:{port}"
 
     if not service_url:
         log.warning("no service_url in state; skipping post-restart /health wait")

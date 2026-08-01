@@ -24,6 +24,7 @@ from typing import Any
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,
     load_multi_node_state,
+    reachable_service_url,
 )
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
@@ -376,15 +377,7 @@ def magpie_remote_env() -> dict[str, str]:
         return {}
 
     state = _read_state()
-    service_url = str(state.get("service_url") or "").strip()
-    # Prefer head_pod_ip:port over ClusterIP (sandbox may not reach ClusterIP).
-    head_ip = str(state.get("head_pod_ip") or "").strip()
-    if head_ip and ".svc.cluster.local" in service_url:
-        import re
-
-        port = re.search(r":(\d+)$", service_url)
-        port = port.group(1) if port else "8888"
-        service_url = f"http://{head_ip}:{port}"
+    service_url = reachable_service_url(state)
     if not service_url:
         log.warning(
             "INFERENCE_OPTIMIZER_NODES=%s but %s has no service_url; "

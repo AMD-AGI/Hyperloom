@@ -45,7 +45,7 @@ from ._internal.server_args_safety import (
 )
 from .state_paths import resolve_state_file
 from ._internal.env_safety import filter_forward_env
-from ._internal.external_state import external_service_url, load_multi_node_state
+from ._internal.external_state import external_service_url, load_multi_node_state, reachable_service_url
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -90,6 +90,11 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
 # Ray dashboard job status strings.
 _TERMINAL_FAIL_STATUSES = {"FAILED", "STOPPED"}
 _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
+
+# Budget for the single /health probe that gates a resume. Short by design: it
+# is deciding an optimization, not waiting for readiness.
+_RESUME_PROBE_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S"
+_DEFAULT_RESUME_PROBE_TIMEOUT_S = 10
 
 
 def _normalize_extra_args(s: str | None) -> str:
@@ -1623,6 +1628,62 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     return rc
 
 
+def _resume_probe_timeout_s() -> int:
+    """Whole-request budget for the resume health probe.
+
+    Returns:
+        int: Seconds, from ``$HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S`` or the default.
+    """
+    try:
+        return max(1, int(os.environ.get(_RESUME_PROBE_TIMEOUT_ENV, "") or _DEFAULT_RESUME_PROBE_TIMEOUT_S))
+    except ValueError:
+        return _DEFAULT_RESUME_PROBE_TIMEOUT_S
+
+
+def _served_endpoint_answers(state: dict[str, Any], timeout_s: int) -> bool:
+    """Whether the cluster's frontend answers ``/health`` right now.
+
+    This is the evidence a resume needs and the launch job's status cannot give.
+    That job is the fan-out driver: it reports SUCCEEDED once the ranks are
+    spawned and stays there whether the detached servers then live or die, so it
+    survives a crash, an eviction, or an out-of-band kill untouched. For rayjob
+    the served endpoint is the server itself, whose ``/health`` only returns 200
+    after the weight load finishes -- which is why the post-launch wait already
+    gates on exactly this signal.
+
+    One short attempt by design, not a readiness wait: resuming is an
+    optimization, so anything short of a prompt 200 -- timeout, refusal, no
+    httpx -- should just cost a full KILL+LAUNCH.
+
+    Two things it does not establish. That the answering server runs the config
+    being asked for: only ``prev_match`` speaks to that, and only about what was
+    last launched from here. And, on a PD-disaggregated cluster, that both legs
+    live -- the frontend can answer while one is down, which the orchestrator's
+    per-worker wait catches after the resume.
+
+    Args:
+        state: Multi-node state naming the service URL.
+        timeout_s: Whole-request budget for the probe.
+
+    Returns:
+        bool: True only on a 200 from ``/health``.
+    """
+    url = reachable_service_url(state)
+    if not url:
+        return False
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
+        info("resume probe: httpx unavailable; falling back to KILL+LAUNCH")
+        return False
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            return client.get(url.rstrip("/") + "/health").status_code == 200
+    except Exception as exc:  # noqa: BLE001
+        info(f"resume probe: {url}/health unreachable ({exc!r}); falling back to KILL+LAUNCH")
+        return False
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1719,10 +1780,21 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 )
                 launch_sub = prev_sub
             elif _prev_status in _TERMINAL_OK_STATUSES:
-                info(
-                    f"resume: prior launch_sub={prev_sub} already SUCCEEDED; skipping KILL+LAUNCH, treating as healthy"
-                )
-                launch_sub = prev_sub
+                # A finished driver says a launch happened, never that a server
+                # is still up, so ask the server itself before skipping a
+                # relaunch.
+                _probe_budget = _resume_probe_timeout_s()
+                if _served_endpoint_answers(state, _probe_budget):
+                    info(
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and the served endpoint "
+                        f"answers /health; skipping KILL+LAUNCH"
+                    )
+                    launch_sub = prev_sub
+                else:
+                    info(
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the served endpoint "
+                        f"did not answer /health within {_probe_budget}s; doing a full KILL+LAUNCH"
+                    )
 
         kill_sub = ""
         if not launch_sub:
@@ -1932,11 +2004,14 @@ def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
 
     ``last_restart_submission_id`` names the launch *driver*, which exits as soon
     as every rank has spawned its server, so the job reaches ``SUCCEEDED`` while
-    the servers keep running detached. :func:`cmd_restart_server`'s resume fast
-    path reads that terminal-OK status as proof of health and skips KILL+LAUNCH,
-    which is correct only while the servers it started are still up. A kill ends
-    exactly that, so leaving the id behind would let the next restart with an
-    unchanged config resume onto nothing and report success.
+    the servers keep running detached. A kill ends exactly the launch that id
+    refers to, so keeping it would leave the state claiming a launch this cluster
+    no longer has.
+
+    :func:`cmd_restart_server` no longer trusts that id on its own -- it probes
+    the served endpoint before resuming -- so this is state hygiene rather than
+    the safety property, and it spares the next restart a probe whose answer is
+    already known.
 
     Args:
         state (dict): The multi-node state to mutate and persist.

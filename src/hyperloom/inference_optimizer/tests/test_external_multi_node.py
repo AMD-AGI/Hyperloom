@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -330,6 +333,40 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
     assert "measures the SAME unchanged server" in out.err
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        # A ClusterIP name resolves only inside the cluster; the head pod is the
+        # way in from outside it, on the URL's own port.
+        (
+            {"service_url": "http://wid.ns.svc.cluster.local:8000", "head_pod_ip": "10.0.2.1"},
+            "http://10.0.2.1:8000",
+        ),
+        # No port on the URL: fall back to the frontend port the launch scripts publish.
+        (
+            {"service_url": "http://wid.ns.svc.cluster.local", "head_pod_ip": "10.0.2.1"},
+            "http://10.0.2.1:8888",
+        ),
+        # Nothing to rewrite through.
+        ({"service_url": "http://wid.ns.svc.cluster.local:8000"}, "http://wid.ns.svc.cluster.local:8000"),
+        # Already an address this sandbox can dial.
+        ({"service_url": "http://10.0.9.9:8000", "head_pod_ip": "10.0.2.1"}, "http://10.0.9.9:8000"),
+        ({}, ""),
+    ],
+)
+def test_reachable_service_url_prefers_the_head_pod_over_a_clusterip_name(
+    state: dict[str, object],
+    expected: str,
+) -> None:
+    """One definition of "where the frontend answers" for every caller.
+
+    The rewrite was copy-pasted into the benchmark env builder and the
+    post-restart health wait, so the two could drift into disagreeing about
+    which endpoint a run is actually talking to.
+    """
+    assert ext.reachable_service_url(state) == expected
+
+
 def _write_disk_state(**overrides: object) -> Path:
     """Persist an external state file carrying resume bookkeeping."""
     state_file = resolve_state_file()
@@ -438,6 +475,131 @@ def test_rayjob_handoff_without_pod_ips_keeps_the_stated_node_count(
     assert ext.build_external_state_from_env()["nodes"] == 1
 
 
+def _fake_httpx(status_code: int = 200, raises: Exception | None = None) -> types.SimpleNamespace:
+    """Stand-in httpx exposing just the Client/get/status_code the probe uses."""
+
+    class _Resp:
+        def __init__(self) -> None:
+            self.status_code = status_code
+
+    class _Client:
+        def __init__(self, timeout: object = None) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> "_Client":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def get(self, _url: str) -> _Resp:
+            if raises is not None:
+                raise raises
+            return _Resp()
+
+    return types.SimpleNamespace(Client=_Client)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "raises", "expected"),
+    [
+        (200, None, True),
+        (503, None, False),
+        (200, ConnectionError("connection refused"), False),
+    ],
+)
+def test_served_endpoint_probe_accepts_only_a_prompt_200(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    raises: Exception | None,
+    expected: bool,
+) -> None:
+    """Anything short of a 200 must cost a relaunch, never a resume."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setitem(sys.modules, "httpx", _fake_httpx(status_code, raises))
+
+    assert mncli._served_endpoint_answers({"service_url": "http://frontend:8000"}, 5) is expected
+
+
+def test_served_endpoint_probe_without_a_service_url_is_not_evidence() -> None:
+    """No endpoint to ask means no grounds to skip a relaunch."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    assert mncli._served_endpoint_answers({}, 5) is False
+
+
+@pytest.mark.parametrize(("endpoint_answers", "expect_relaunch"), [(True, False), (False, True)])
+def test_resume_relaunches_unless_the_served_endpoint_answers(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_answers: bool,
+    expect_relaunch: bool,
+) -> None:
+    """A finished launch driver is not evidence that a server is up.
+
+    The driver reports SUCCEEDED once the ranks are spawned and stays there
+    whether the detached servers then live or die, so resuming on that status
+    alone returned 0 with nothing serving whenever the cluster had since crashed,
+    been evicted, or been killed out of band. The status now only selects which
+    question to ask; the served endpoint answers it.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    _write_disk_state(
+        backend="rayjob",
+        head_pod_ip="10.0.2.1",
+        last_restart_model="/models/test",
+        last_restart_tp=8,
+        last_restart_ep=1,
+        last_restart_pd_mode="aggregated",
+        last_restart_extra_args="",
+    )
+
+    submitted: list[str] = []
+    killed: list[str] = []
+
+    class _FakeRay:
+        def get_job(self, _sub: str) -> dict[str, str]:
+            return {"status": "SUCCEEDED"}
+
+        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
+            submitted.append("launch")
+            return "launch-2"
+
+    @contextlib.contextmanager
+    def _fake_client(_state: object):
+        yield _FakeRay()
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
+    monkeypatch.setattr(mncli, "_build_multinode_kill_entrypoint", lambda *_a, **_k: "kill-ep")
+    monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
+    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
+    monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
+    monkeypatch.setattr(mncli, "_served_endpoint_answers", lambda *_a, **_k: endpoint_answers)
+
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/models/test",
+        tp=8,
+        ep=1,
+        pd_mode="aggregated",
+        extra_args="",
+        pid_file=None,
+        log_file=None,
+        poll_interval=1,
+        poll_timeout=5,
+        print_logs=False,
+    )
+
+    assert mncli.cmd_restart_server(args) == 0
+    assert bool(killed) is expect_relaunch
+    assert bool(submitted) is expect_relaunch
+
+
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,14 +638,12 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A kill must drop the launch id, or resume treats a dead cluster as healthy.
+    """A kill must drop the launch id it just invalidated.
 
     ``last_restart_submission_id`` names the fan-out driver, which reaches
     SUCCEEDED once the ranks are spawned and stays there whether the detached
-    servers live or die. ``cmd_restart_server``'s resume fast path reads that
-    terminal-OK status as proof of health, so a kill that left the id behind let
-    the next restart with an unchanged config skip KILL+LAUNCH and report
-    success onto nothing.
+    servers live or die. A kill ends exactly that launch, so keeping the id would
+    leave the state claiming a launch this cluster no longer has.
     """
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 

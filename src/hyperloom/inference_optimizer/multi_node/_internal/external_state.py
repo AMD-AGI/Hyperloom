@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,10 @@ _HANDOFF_IDENTITY_KEYS = (
     "decode_pod_ips",
     "worker_pod_ips",
 )
+
+# Port assumed when a ClusterIP service URL carries none. Matches the frontend
+# port the launch scripts publish.
+_DEFAULT_FRONTEND_PORT = "8888"
 
 _MN_BACKENDS = ("infera", "rayjob")
 # Mirrors the CLI's --mn-backend default (cli/multi_node.py::_resolve_mn_backend)
@@ -291,6 +296,29 @@ def _read_state_file(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def reachable_service_url(state: dict[str, Any]) -> str:
+    """Return the cluster's frontend URL as this sandbox can actually reach it.
+
+    ``service_url`` is stored as the platform published it, and for a ClusterIP
+    Service that is a ``.svc.cluster.local`` name which only resolves inside the
+    cluster. The sandbox sits outside it, so whenever the hand-off also names the
+    head pod, address the head directly on the URL's own port.
+
+    Args:
+        state: Multi-node state carrying ``service_url`` / ``head_pod_ip``.
+
+    Returns:
+        str: A base URL reachable from here, or ``""`` when the state names no
+        service at all.
+    """
+    service_url = str(state.get("service_url") or "").strip()
+    head_ip = str(state.get("head_pod_ip") or "").strip()
+    if head_ip and ".svc.cluster.local" in service_url:
+        matched = re.search(r":(\d+)$", service_url)
+        return f"http://{head_ip}:{matched.group(1) if matched else _DEFAULT_FRONTEND_PORT}"
+    return service_url
+
+
 def _describes_same_handoff(disk: dict[str, Any], ext_state: dict[str, Any]) -> bool:
     """Whether an on-disk state was written against the cluster now handed over.
 
@@ -331,14 +359,12 @@ def load_multi_node_state() -> dict[str, Any]:
     assumed -- see :func:`_describes_same_handoff` -- because a state file
     outlives the cluster it describes.
 
-    What the two backends do with a carried-over entry differs. Infera re-checks
-    liveness for real, SSHing every GPU pod and signalling the recorded PID.
-    RayJob only reads the launch job's status, and that job is the fan-out
-    driver: it reaches ``SUCCEEDED`` once the ranks are spawned and stays there
-    while the detached servers live or die, so it is evidence that a launch
-    happened, never that a server is up. Kill therefore drops the launch id
-    itself (see ``cli._record_kill_and_invalidate_launch``) rather than relying
-    on the probe to notice.
+    Both backends re-verify liveness before acting on a carried-over entry, by
+    asking something that can only answer while a server is up: infera SSHes
+    every GPU pod and signals the recorded PID, RayJob probes the served
+    endpoint's ``/health``. Neither reads the launch job's status as proof --
+    that job is the fan-out driver, which reaches ``SUCCEEDED`` once the ranks
+    are spawned and stays there whether the detached servers live or die.
 
     Returns:
         dict[str, Any]: The effective multi-node state for this process.
