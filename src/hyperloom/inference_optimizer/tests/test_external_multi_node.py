@@ -330,6 +330,85 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
     assert "measures the SAME unchanged server" in out.err
 
 
+def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Benchmark-only must survive the adoption it was just promised.
+
+    Adoption printed "Continuing in benchmark-only mode" and then submitted the
+    head-pod bootstrap anyway. ``cmd_bootstrap`` opens with
+    ``_require_state("head_pod_ip")``, which is exactly the field this mode
+    omits, so the run died on the line that said it would continue.
+
+    ``cmd_bootstrap`` is deliberately left unstubbed: stubbing it to return 0 is
+    what hid the abort from the existing adoption tests.
+    """
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    for role in ("PREFILL", "DECODE", "WORKER"):
+        monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    calls: list[str] = []
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+
+    args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
+    _prepare_multi_node_state(args)
+
+    assert calls == ["geak", "replay"]
+    assert "skipping the head-pod bootstrap" in capsys.readouterr().err
+
+
+def test_kill_inference_invalidates_the_launch_it_terminated(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kill must drop the launch id, or resume treats a dead cluster as healthy.
+
+    ``last_restart_submission_id`` names the fan-out driver, which reaches
+    SUCCEEDED once the ranks are spawned and stays there whether the detached
+    servers live or die. ``cmd_restart_server``'s resume fast path reads that
+    terminal-OK status as proof of health, so a kill that left the id behind let
+    the next restart with an unchanged config skip KILL+LAUNCH and report
+    success onto nothing.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    state_file = resolve_state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "external": True,
+                "backend": "rayjob",
+                "last_restart_submission_id": "launch-1",
+                "last_restart_framework": "sglang",
+                "last_server_pid_dir": "/tmp/multi_node_pids",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: "kill-9")
+
+    assert (
+        mncli.cmd_kill_inference(argparse.Namespace(pid_file=None, print_logs=False, poll_interval=1, poll_timeout=5))
+        == 0
+    )
+
+    after = ext.load_multi_node_state()
+    assert "last_restart_submission_id" not in after
+    assert after["last_kill_submission_id"] == "kill-9"
+    # The rest of the bookkeeping is untouched: only the launch identity died.
+    assert after["last_restart_framework"] == "sglang"
+
+
 def test_adopting_a_rayjob_bootstraps_and_replays_patches(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,

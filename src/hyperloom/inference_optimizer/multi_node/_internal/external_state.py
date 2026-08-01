@@ -249,9 +249,16 @@ def load_multi_node_state() -> dict[str, Any]:
     config, pid/log dirs) is carried over from an on-disk state that describes
     the same hand-off: env synthesis never produces it, so dropping it would
     leave it written every round and read never, costing the resume fast path a
-    full cold start on each retry. Carrying a stale entry is safe because both
-    backends re-verify liveness (RayJob probes the submission, infera SSHes the
-    pods) before skipping a relaunch.
+    full cold start on each retry.
+
+    What the two backends do with a carried-over entry differs. Infera re-checks
+    liveness for real, SSHing every GPU pod and signalling the recorded PID.
+    RayJob only reads the launch job's status, and that job is the fan-out
+    driver: it reaches ``SUCCEEDED`` once the ranks are spawned and stays there
+    while the detached servers live or die, so it is evidence that a launch
+    happened, never that a server is up. Kill therefore drops the launch id
+    itself (see ``cli._record_kill_and_invalidate_launch``) rather than relying
+    on the probe to notice.
 
     Returns:
         dict[str, Any]: The effective multi-node state for this process.

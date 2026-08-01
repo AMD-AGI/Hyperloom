@@ -1927,6 +1927,26 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
+    """Persist a kill submission and drop the launch identity it terminated.
+
+    ``last_restart_submission_id`` names the launch *driver*, which exits as soon
+    as every rank has spawned its server, so the job reaches ``SUCCEEDED`` while
+    the servers keep running detached. :func:`cmd_restart_server`'s resume fast
+    path reads that terminal-OK status as proof of health and skips KILL+LAUNCH,
+    which is correct only while the servers it started are still up. A kill ends
+    exactly that, so leaving the id behind would let the next restart with an
+    unchanged config resume onto nothing and report success.
+
+    Args:
+        state (dict): The multi-node state to mutate and persist.
+        kill_sub (str): The kill submission id to record.
+    """
+    state["last_kill_submission_id"] = kill_sub
+    state.pop("last_restart_submission_id", None)
+    _save_state(state)
+
+
 def cmd_kill_inference(args: argparse.Namespace) -> int:
     """Kill vllm/sglang on the RayJob without starting replacements.
 
@@ -1958,8 +1978,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
             label="kill-inference",
             args=args,
         )
-        state["last_kill_submission_id"] = kill_sub
-        _save_state(state)
+        _record_kill_and_invalidate_launch(state, kill_sub)
         return 0
 
     pid_file = (
@@ -1973,8 +1992,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         label="kill-inference",
         args=args,
     )
-    state["last_kill_submission_id"] = kill_sub
-    _save_state(state)
+    _record_kill_and_invalidate_launch(state, kill_sub)
     return 0
 
 
