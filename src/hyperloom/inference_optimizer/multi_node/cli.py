@@ -845,7 +845,7 @@ def _build_kill_single_entrypoint(pid_file: str) -> str:
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
         f"{kill_sh}__MN_KILL_EOF__\n"
         'chmod +x "$WORK_DIR/kill_server.sh"; '
-        f'"$WORK_DIR/kill_server.sh" {pid_file!s}'
+        f'"$WORK_DIR/kill_server.sh" {shlex.quote(str(pid_file))}'
     )
 
 
@@ -911,7 +911,7 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
         f'python3 "$WORK_DIR/kill_multinode.py" '
-        f"--pid-dir {pid_dir!s} --grace-sec {grace_sec}"
+        f"--pid-dir {shlex.quote(str(pid_dir))} --grace-sec {grace_sec}"
     )
 
 
@@ -1037,7 +1037,7 @@ def _build_multinode_launch_entrypoint(
         f"--framework {shlex.quote(str(args.framework))} "
         f"--model {shlex.quote(str(args.model))} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
-        f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
+        f"--pid-dir {shlex.quote(str(pid_dir))} --log-dir {shlex.quote(str(log_dir))} "
         f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
     )
 

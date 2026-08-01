@@ -475,6 +475,49 @@ def test_rayjob_handoff_without_pod_ips_keeps_the_stated_node_count(
     assert ext.build_external_state_from_env()["nodes"] == 1
 
 
+@pytest.mark.parametrize(
+    ("builder", "build"),
+    [
+        ("_build_kill_single_entrypoint", lambda fn, path: fn(path)),
+        ("_build_multinode_kill_entrypoint", lambda fn, path: fn(path)),
+    ],
+)
+def test_kill_entrypoints_quote_state_derived_paths(builder: str, build: object) -> None:
+    """A PID path reaches the pod as one argument, whatever it contains.
+
+    These paths come from ``--pid-file`` or the state file's
+    ``last_server_pid_dir``, and were interpolated raw while the neighbouring
+    restart entrypoint quoted the same values. A directory with a space split
+    into two arguments and the kill silently addressed the wrong path.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    entrypoint = build(getattr(mncli, builder), "/tmp/my pids/rank.pid")  # type: ignore[operator]
+
+    assert "'/tmp/my pids/rank.pid'" in entrypoint
+
+
+def test_launch_entrypoint_quotes_state_derived_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same for the launch entrypoint's pid/log directories."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "")
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/models/test",
+        tp=8,
+        ep=1,
+        pd_mode="aggregated",
+        extra_args="",
+        no_wait_health=False,
+    )
+
+    entrypoint = mncli._build_multinode_launch_entrypoint(args, 2, "/tmp/my pids", "/tmp/my logs")
+
+    assert "--pid-dir '/tmp/my pids'" in entrypoint
+    assert "--log-dir '/tmp/my logs'" in entrypoint
+
+
 def _fake_httpx(status_code: int = 200, raises: Exception | None = None) -> types.SimpleNamespace:
     """Stand-in httpx exposing just the Client/get/status_code the probe uses."""
 
