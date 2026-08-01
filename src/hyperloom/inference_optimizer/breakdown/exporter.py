@@ -362,6 +362,12 @@ def build(
         ),
         warnings,
     )
+    gemm_tuning = _safe_collect(
+        "gemm_tuning",
+        lambda: collectors.collect_gemm_tuning(state),
+        warnings,
+        default={},
+    )
     # Canonical optimization read model.  This is the single downstream entry
     # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
     # changes; the historical sections below remain compatibility/audit data.
@@ -373,12 +379,17 @@ def build(
             geak_invocations,
             forge_invocations,
             warnings,
+            gemm_tuning=gemm_tuning,
         ),
         warnings,
         default={
-            "schema_version": 1,
+            "schema_version": 2,
             "entries": [],
+            "backend_attempts": [],
             "summary_by_source": {},
+            "summary_by_kind": {},
+            "validation": {},
+            "gemm_tuning_runs": [],
         },
     )
     kb_provenance = _pick(
@@ -1732,9 +1743,13 @@ def build_v4_live(session_dir: Path | str) -> dict[str, Any]:
         ),
         warnings,
         default={
-            "schema_version": 1,
+            "schema_version": 2,
             "entries": [],
+            "backend_attempts": [],
             "summary_by_source": {},
+            "summary_by_kind": {},
+            "validation": {},
+            "gemm_tuning_runs": [],
         },
     )
     compat = _v4_compat_projection(

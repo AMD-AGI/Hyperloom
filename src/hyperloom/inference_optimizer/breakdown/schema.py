@@ -1378,6 +1378,14 @@ class WarmReplayOutcome(TypedDict, total=False):
     throughput_after: float
     warm_recipe_tier: str
     warm_recipe_conf: float
+    config_source: str
+    config_donor_tier: str
+    donor_canonical_id: str
+    donor_model: str
+    donor_session_id: str
+    donor_family_tags: list[str]
+    donor_gain_pct: float
+    donor_breakdown_link: str
     replay_task_id: str
     error_class: str
     reason: str
@@ -1660,6 +1668,11 @@ class OptimizationEntry(TypedDict, total=False):
     backend: KernelOptimizationBackend | None
     execution_mode: KernelExecutionMode | None
     kernel_id: str | None
+    adopted_attempt_id: str | None
+    action: str
+    variant_name: str
+    fingerprint: str
+    scope: str
     gain_pct: float | None
     cumulative_gain_pct: float | None
     throughput_before: float | None
@@ -1680,12 +1693,48 @@ class OptimizationSourceSummary(TypedDict, total=False):
     by_backend: dict[str, "OptimizationSourceSummary"]
 
 
+class OptimizationBackendAttempt(TypedDict, total=False):
+    """One ordered backend attempt, including non-adopted outcomes."""
+
+    attempt_id: str
+    run_id: str
+    kernel_id: str
+    backend: str
+    decision: str
+    sequence: int
+    ts: str
+    duration_sec: float | None
+    micro_speedup: float | None
+    compile_passed: bool | None
+    correctness_passed: bool | None
+    error_class: str | None
+    error: str | None
+    result_path: str | None
+    verification_path: str | None
+
+
+class OptimizationValidation(TypedDict, total=False):
+    """Attribution trust, reconciliation, and diagnostic metadata."""
+
+    method: str
+    validated_total_gain_pct: float | None
+    attributed_total_gain_pct: float
+    attribution_gap_pct: float | None
+    notes: list[str]
+    phase_breakdown: dict[str, Any]
+    domain_attribution: dict[str, Any]
+
+
 class Optimizations(TypedDict, total=False):
     """Canonical downstream optimization API."""
 
     schema_version: int
     entries: list[OptimizationEntry]
+    backend_attempts: list[OptimizationBackendAttempt]
     summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
+    summary_by_kind: dict[str, OptimizationSourceSummary]
+    validation: OptimizationValidation
+    gemm_tuning_runs: list["GemmTuningRun"]
 
 
 # GEMM tuning — fixed FP8 block-scale GEMM tuning stage that runs at KERNEL
@@ -1734,6 +1783,9 @@ class GemmTuningRun(TypedDict, total=False):
     decision: str
     source: str
     ts: str
+    duration_sec: float | None
+    error_class: str
+    error: str
     precision: str
     framework: str
     gpu_type: str
@@ -1751,6 +1803,8 @@ class GemmTuningRun(TypedDict, total=False):
     workspace: str
     adopted: bool
     summary: dict[str, Any]
+    parameters: dict[str, Any]
+    candidates: list[dict[str, Any]]
     shapes: list[dict[str, Any]]
 
 
@@ -2671,12 +2725,14 @@ __all__ = [
     "OperationRelation",
     "OperationSubstep",
     "OptimizationArtifact",
+    "OptimizationBackendAttempt",
     "OptimizationConfiguration",
     "OptimizationEntry",
     "Optimizations",
     "OptimizationSource",
     "OptimizationSourceMethod",
     "OptimizationSourceSummary",
+    "OptimizationValidation",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",

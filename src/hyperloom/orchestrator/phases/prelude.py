@@ -289,6 +289,18 @@ class PreludePhase(PhaseHandler):
             config_source = str(recipe.get("canonical_id") or "")
             config_tier = "self"
             donor_expected_gain = 0.0
+        donor_metadata = {
+            field: replay.get(field)
+            for field in (
+                "donor_canonical_id",
+                "donor_model",
+                "donor_session_id",
+                "donor_family_tags",
+                "donor_gain_pct",
+                "donor_breakdown_link",
+            )
+            if replay.get(field) not in (None, "", [])
+        }
         # Gate on the config-transfer confidence.
         if replay_conf < min_conf:
             state.warm_replay_outcome = {
@@ -298,6 +310,7 @@ class PreludePhase(PhaseHandler):
                 "warm_recipe_conf": conf,
                 "config_donor_tier": config_tier,
                 "config_source": config_source,
+                **donor_metadata,
             }
             state.warm_replay_attempted = True
             return None
@@ -313,6 +326,7 @@ class PreludePhase(PhaseHandler):
                 "reason": "best_config_empty",
                 "warm_recipe_tier": tier,
                 "warm_recipe_conf": conf,
+                **donor_metadata,
             }
             state.warm_replay_attempted = True
             return None
@@ -382,6 +396,7 @@ class PreludePhase(PhaseHandler):
             "config_source": config_source,
             "expected_gain_pct": expected_gain,
             "replay_task_id": task.task_id,
+            **donor_metadata,
         }
         return task
 

@@ -145,6 +145,11 @@ optimizations
 │   ├── backend
 │   ├── execution_mode
 │   ├── kernel_id
+│   ├── adopted_attempt_id
+│   ├── action
+│   ├── variant_name
+│   ├── fingerprint
+│   ├── scope
 │   ├── gain_pct
 │   ├── cumulative_gain_pct
 │   ├── throughput_before
@@ -155,7 +160,16 @@ optimizations
 │   ├── provenance
 │   ├── configuration
 │   └── artifacts[]
-└── summary_by_source
+├── backend_attempts[]
+│   ├── attempt_id
+│   ├── kernel_id
+│   ├── backend
+│   ├── decision
+│   ├── sequence
+│   ├── duration_sec
+│   ├── error_class
+│   └── error
+├── summary_by_source
     ├── warm_replay
     ├── explore
     ├── framework_agent
@@ -165,17 +179,47 @@ optimizations
     │       ├── forge
     │       └── unattributed
     └── unattributed
+├── summary_by_kind
+├── validation
+│   ├── method
+│   ├── validated_total_gain_pct
+│   ├── attributed_total_gain_pct
+│   ├── attribution_gap_pct
+│   ├── notes
+│   ├── phase_breakdown
+│   └── domain_attribution
+└── gemm_tuning_runs[]
 ```
 
 `source` is one of `warm_replay`, `explore`, `framework_agent`,
 `kernel_agent`, or `unattributed`. Kernel entries additionally identify
 `backend=geak|forge` and `execution_mode=whole_pipeline|per_kernel`.
-Only validated entries contribute to `summary_by_source`.
+Only validated entries contribute to `summary_by_source` and
+`summary_by_kind`. The former answers which agent or phase produced the
+gain; the latter groups the same entries by `optimization_kind`. These
+summaries are alternate views of the same gains and must not be added
+together.
+
+`backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
+including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
+within each kernel. Adopted kernel entries link back through
+`adopted_attempt_id`.
+
+`validation` carries the attribution lineage and reconciliation diagnostics
+previously available only through the legacy attribution projection.
+`gemm_tuning_runs` retains the complete tuning run records; the corresponding
+adopted gain remains represented exactly once by a `gemm_tuning` entry.
 
 The historical `optimization_stack`, attribution, GEAK invocation, Forge
 invocation, and GEMM-tuning result projections are not emitted in the new wire
-shape. Raw actions remain in `action_timeline`, while kernel attempt evidence
-remains in `kernel_lifecycle`; neither is an optimization display API.
+shape. Their required downstream evidence is instead normalized into the
+canonical fields above.
+
+When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
+preserves the available `donor_canonical_id`, `donor_model`,
+`donor_session_id`, `donor_family_tags`, `donor_gain_pct`, and
+`donor_breakdown_link`. Fields absent from the source recipe remain absent
+rather than being inferred.
 
 ## `session` — `SessionMeta`
 

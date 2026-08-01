@@ -222,12 +222,22 @@ def test_recipe_is_actionable() -> None:
 
 def test_build_warm_start_context_hit() -> None:
     recipe = {
+        "canonical_id": "inference:donor:h:f:v:p",
+        "model": "donor-model",
+        "family_tags": ["moe", "mla"],
         "best_config": {
             "extra_server_args": "--cuda-graph-max-bs 256",
             "extra_envs": {"FOO": "1"},
         },
         "best_throughput": 5430.9,
         "validated_gain_pct": 7.8,
+        "sessions": [
+            {
+                "session_id": "donor-session",
+                "gain_pct": 7.8,
+                "breakdown_link": "https://example.test/session/donor-session",
+            }
+        ],
         "what_worked": [{"id": "w1"}],
         "what_failed": [{"id": "f1"}],
         "lessons": [{"attrs": {"statement": "x"}}],
@@ -246,6 +256,15 @@ def test_build_warm_start_context_hit() -> None:
     assert ctx["recommended_replay"]["extra_server_args"] == "--cuda-graph-max-bs 256"
     assert ctx["recommended_replay"]["extra_envs"] == {"FOO": "1"}
     assert ctx["recommended_replay"]["expected_gain_pct"] == 7.8
+    assert ctx["recommended_replay"]["donor_canonical_id"] == "inference:donor:h:f:v:p"
+    assert ctx["recommended_replay"]["donor_model"] == "donor-model"
+    assert ctx["recommended_replay"]["donor_session_id"] == "donor-session"
+    assert ctx["recommended_replay"]["donor_family_tags"] == ["moe", "mla"]
+    assert ctx["recommended_replay"]["donor_gain_pct"] == 7.8
+    assert (
+        ctx["recommended_replay"]["donor_breakdown_link"]
+        == "https://example.test/session/donor-session"
+    )
     assert ctx["proven_prior"] == [{"id": "w1"}]
     assert ctx["do_not_repeat"] == [{"id": "f1"}]
     assert ctx["lessons"] == [{"attrs": {"statement": "x"}}]

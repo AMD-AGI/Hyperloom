@@ -330,6 +330,12 @@ async def test_warm_replay_prefers_warm_start_context_recommended_replay(tmp_pat
             "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
             "expected_gain_pct": 25.0,
             "best_throughput": 5430.9,
+            "donor_canonical_id": "inference:donor:h:f:v:p",
+            "donor_model": "donor-model",
+            "donor_session_id": "donor-session",
+            "donor_family_tags": ["moe"],
+            "donor_gain_pct": 25.0,
+            "donor_breakdown_link": "https://example.test/session/donor-session",
         },
     }
     coord = _make_coord(
@@ -342,6 +348,9 @@ async def test_warm_replay_prefers_warm_start_context_recommended_replay(tmp_pat
     params = coord.tasks.calls[0]["params"]
     assert params["extra_server_args"] == "--from-context --cuda-graph-max-bs 256"
     assert params["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    assert coord.shared_state.warm_replay_outcome["donor_model"] == "donor-model"
+    assert coord.shared_state.warm_replay_outcome["donor_session_id"] == "donor-session"
+    assert coord.shared_state.warm_replay_outcome["donor_family_tags"] == ["moe"]
 
 
 @pytest.mark.asyncio

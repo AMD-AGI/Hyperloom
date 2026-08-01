@@ -60,7 +60,8 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
         "explore",
     ]
     assert [entry["gain_pct"] for entry in result["entries"]] == [50.0, 10.0, 10.0]
-    assert "action" not in result["entries"][1]
+    assert result["entries"][1]["action"] == "integrate_patch"
+    assert result["entries"][1]["variant_name"] == "framework-patch"
     assert result["entries"][1]["optimization_kind"] == "framework_patch"
     assert result["entries"][2]["optimization_kind"] == "env"
     summary = result["summary_by_source"]
@@ -73,6 +74,7 @@ def test_collect_optimizations_splits_kernel_backend():
     state = {
         "session_id": "s2",
         "baseline_tput": 100.0,
+        "cumulative_gain_validated": 20.0,
         "cumulative_gain_validated_stack_len": 2,
         "optimization_stack": [
             {
@@ -95,16 +97,104 @@ def test_collect_optimizations_splits_kernel_backend():
         "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
     }
     attribution = collect_attribution(state, [], [], [])
+    geak_invocations = [
+        {
+            "attempt_id": "geak-failed",
+            "kernel_id": "k0",
+            "backend": "geak",
+            "decision": "FAILED",
+            "ts": "1970-01-01T00:00:05+00:00",
+            "duration_sec": 3.0,
+            "error_class": "CompileError",
+            "error": "compile failed",
+        }
+    ]
+    forge_invocations = [
+        {
+            "attempt_id": "forge-kept",
+            "kernel_id": "k1",
+            "backend": "forge",
+            "decision": "KEEP",
+            "ts": "1970-01-01T00:00:15+00:00",
+            "elapsed_sec": 7.5,
+        }
+    ]
 
-    result = collect_optimizations(state, attribution, [], [], [])
+    result = collect_optimizations(
+        state,
+        attribution,
+        geak_invocations,
+        forge_invocations,
+        [],
+        gemm_tuning={
+            "runs": [
+                {
+                    "engine": "forge",
+                    "status": "succeeded",
+                    "decision": "KEEP",
+                    "adopted": True,
+                }
+            ]
+        },
+    )
 
     assert result["entries"][0]["backend"] == "geak"
     assert result["entries"][0]["execution_mode"] == "whole_pipeline"
     assert result["entries"][1]["backend"] == "forge"
     assert result["entries"][1]["execution_mode"] == "per_kernel"
+    assert result["entries"][1]["adopted_attempt_id"] == "forge-kept"
+    assert result["backend_attempts"] == [
+        {
+            "attempt_id": "geak-failed",
+            "run_id": "",
+            "kernel_id": "k0",
+            "backend": "geak",
+            "decision": "FAILED",
+            "ts": "1970-01-01T00:00:05+00:00",
+            "duration_sec": 3.0,
+            "micro_speedup": None,
+            "compile_passed": None,
+            "correctness_passed": None,
+            "error_class": "CompileError",
+            "error": "compile failed",
+            "result_path": None,
+            "verification_path": None,
+            "sequence": 1,
+        },
+        {
+            "attempt_id": "forge-kept",
+            "run_id": "",
+            "kernel_id": "k1",
+            "backend": "forge",
+            "decision": "KEEP",
+            "ts": "1970-01-01T00:00:15+00:00",
+            "duration_sec": 7.5,
+            "micro_speedup": None,
+            "compile_passed": None,
+            "correctness_passed": None,
+            "error_class": None,
+            "error": None,
+            "result_path": None,
+            "verification_path": None,
+            "sequence": 1,
+        },
+    ]
     by_backend = result["summary_by_source"]["kernel_agent"]["by_backend"]
     assert by_backend["geak"] == {"keeps": 1, "total_gain_pct": 10.0}
     assert by_backend["forge"] == {"keeps": 1, "total_gain_pct": 10.0}
+    assert result["summary_by_kind"]["gemm_tuning"] == {
+        "keeps": 1,
+        "total_gain_pct": 10.0,
+        "by_backend": {
+            "geak": {"keeps": 0, "total_gain_pct": 0.0},
+            "forge": {"keeps": 1, "total_gain_pct": 10.0},
+            "unattributed": {"keeps": 0, "total_gain_pct": 0.0},
+        },
+    }
+    assert result["validation"]["method"] == "reconstructed"
+    assert result["validation"]["validated_total_gain_pct"] == 20.0
+    assert result["validation"]["attribution_gap_pct"] == 0.0
+    assert result["gemm_tuning_runs"][0]["engine"] == "forge"
 
 
 def test_collect_optimizations_excludes_non_optimization_stack_anchors():
@@ -146,6 +236,7 @@ def test_exporter_emits_canonical_optimizations(tmp_path):
     state = {
         "session_id": "export",
         "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
         "cumulative_gain_validated_stack_len": 1,
         "optimization_stack": [
             {
@@ -156,6 +247,18 @@ def test_exporter_emits_canonical_optimizations(tmp_path):
             }
         ],
         "gain_per_stack_entry": [10.0],
+        "gemm_tuning_attempts": [
+            {
+                "engine": "geak",
+                "status": "failed",
+                "decision": "FAILED",
+                "duration_sec": 4.5,
+                "error_class": "TuningError",
+                "error": "no valid candidate",
+                "parameters": {"libtype": "ck"},
+                "candidates": [{"name": "candidate-1", "status": "eliminated"}],
+            }
+        ],
     }
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
     (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
@@ -163,8 +266,17 @@ def test_exporter_emits_canonical_optimizations(tmp_path):
     result = exporter.build(tmp_path)
 
     assert result["schema_version"] == "hyperloom.session_breakdown.v5.0"
-    assert result["optimizations"]["schema_version"] == 1
+    assert result["optimizations"]["schema_version"] == 2
     assert result["optimizations"]["entries"][0]["source"] == "warm_replay"
+    assert result["optimizations"]["validation"]["validated_total_gain_pct"] == 10.0
+    assert result["optimizations"]["gemm_tuning_runs"][0]["duration_sec"] == 4.5
+    assert result["optimizations"]["gemm_tuning_runs"][0]["error_class"] == "TuningError"
+    assert result["optimizations"]["gemm_tuning_runs"][0]["parameters"] == {
+        "libtype": "ck"
+    }
+    assert result["optimizations"]["gemm_tuning_runs"][0]["candidates"] == [
+        {"name": "candidate-1", "status": "eliminated"}
+    ]
     assert "optimization_stack" not in result
     assert "attribution" not in result
     assert "geak_invocations" not in result

@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 
-OPTIMIZATIONS_SCHEMA_VERSION = 1
+OPTIMIZATIONS_SCHEMA_VERSION = 2
 
 _SOURCES = (
     "warm_replay",
@@ -267,12 +267,130 @@ def _empty_summary() -> dict[str, Any]:
     return summary
 
 
+def _collect_backend_attempts(
+    geak_invocations: list[dict[str, Any]],
+    forge_invocations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize every backend invocation into one chronological attempt list."""
+
+    attempts: list[dict[str, Any]] = []
+    for default_backend, invocations in (
+        ("geak", geak_invocations),
+        ("forge", forge_invocations),
+    ):
+        for raw in invocations:
+            if not isinstance(raw, dict):
+                continue
+            duration = next(
+                (
+                    _to_float(raw.get(field))
+                    for field in (
+                        "duration_sec",
+                        "elapsed_sec",
+                        "elapsed_time_sec",
+                        "elapsed",
+                    )
+                    if _to_float(raw.get(field)) is not None
+                ),
+                None,
+            )
+            attempts.append(
+                {
+                    "attempt_id": str(raw.get("attempt_id") or raw.get("run_id") or ""),
+                    "run_id": str(raw.get("run_id") or ""),
+                    "kernel_id": str(raw.get("kernel_id") or ""),
+                    "backend": str(raw.get("backend") or default_backend),
+                    "decision": str(raw.get("decision") or "").upper(),
+                    "ts": str(raw.get("ts") or ""),
+                    "duration_sec": duration,
+                    "micro_speedup": _to_float(raw.get("micro_speedup")),
+                    "compile_passed": raw.get("compile_passed"),
+                    "correctness_passed": raw.get("correctness_passed"),
+                    "error_class": (
+                        str(raw.get("error_class")) if raw.get("error_class") else None
+                    ),
+                    "error": str(raw.get("error")) if raw.get("error") else None,
+                    "result_path": (
+                        str(raw.get("result_path")) if raw.get("result_path") else None
+                    ),
+                    "verification_path": (
+                        str(raw.get("verification_path"))
+                        if raw.get("verification_path")
+                        else None
+                    ),
+                }
+            )
+
+    attempts.sort(
+        key=lambda row: (
+            str(row.get("kernel_id") or ""),
+            _parse_ts(row.get("ts")) if _parse_ts(row.get("ts")) is not None else float("inf"),
+            str(row.get("backend") or ""),
+            str(row.get("attempt_id") or ""),
+        )
+    )
+    sequence_by_kernel: dict[str, int] = {}
+    for attempt in attempts:
+        kernel_id = str(attempt.get("kernel_id") or "")
+        sequence_by_kernel[kernel_id] = sequence_by_kernel.get(kernel_id, 0) + 1
+        attempt["sequence"] = sequence_by_kernel[kernel_id]
+    return attempts
+
+
+def _empty_kind_summary() -> dict[str, Any]:
+    return {"keeps": 0, "total_gain_pct": 0.0}
+
+
+def _validation_summary(
+    state: dict[str, Any],
+    attribution: dict[str, Any],
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_breakdown = attribution.get("source_breakdown")
+    if not isinstance(source_breakdown, dict):
+        source_breakdown = {}
+    validated_total = _to_float(source_breakdown.get("validated_total_pct"))
+    if validated_total is None:
+        validated_total = _to_float(state.get("cumulative_gain_validated"))
+    attributed_total = sum(
+        _to_float(entry.get("gain_pct")) or 0.0
+        for entry in entries
+        if entry.get("validated") is True
+    )
+    phase_breakdown = attribution.get("phase_breakdown")
+    if not isinstance(phase_breakdown, dict):
+        phase_breakdown = {}
+    explore = phase_breakdown.get("explore")
+    domain_attribution = (
+        dict(explore.get("by_domain") or {})
+        if isinstance(explore, dict) and isinstance(explore.get("by_domain"), dict)
+        else {}
+    )
+    notes = attribution.get("notes")
+    return {
+        "method": str(attribution.get("method") or "missing"),
+        "validated_total_gain_pct": (
+            round(validated_total, 6) if validated_total is not None else None
+        ),
+        "attributed_total_gain_pct": round(attributed_total, 6),
+        "attribution_gap_pct": (
+            round(validated_total - attributed_total, 6)
+            if validated_total is not None
+            else None
+        ),
+        "notes": [str(note) for note in notes] if isinstance(notes, list) else [],
+        "phase_breakdown": phase_breakdown,
+        "domain_attribution": domain_attribution,
+    }
+
+
 def collect_optimizations(
     state: dict[str, Any],
     attribution: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
     forge_invocations: list[dict[str, Any]],
     warnings: list[str],
+    gemm_tuning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the single canonical optimization read model.
 
@@ -301,6 +419,18 @@ def collect_optimizations(
     baseline_tput = _to_float(state.get("baseline_tput"))
     session_id = str(state.get("session_id") or "session")
     timeline = _phase_timeline(state)
+    backend_attempts = _collect_backend_attempts(
+        geak_invocations,
+        forge_invocations,
+    )
+    kept_attempts = {
+        (
+            str(attempt.get("kernel_id") or ""),
+            str(attempt.get("backend") or ""),
+        ): str(attempt.get("attempt_id") or "")
+        for attempt in backend_attempts
+        if str(attempt.get("decision") or "").upper() == "KEEP"
+    }
     entries: list[dict[str, Any]] = []
     previous_tput = baseline_tput
 
@@ -356,6 +486,11 @@ def collect_optimizations(
             "backend": backend,
             "execution_mode": _execution_mode(raw, backend),
             "kernel_id": kernel_id or None,
+            "adopted_attempt_id": kept_attempts.get((kernel_id, str(backend or ""))) or None,
+            "action": str(raw.get("action") or ""),
+            "variant_name": str(raw.get("variant_name") or ""),
+            "fingerprint": str(raw.get("fingerprint") or ""),
+            "scope": str(raw.get("scope") or ""),
             "gain_pct": round(delta, 6) if delta is not None else None,
             "cumulative_gain_pct": (
                 round(cumulative, 6) if cumulative is not None else None
@@ -382,6 +517,7 @@ def collect_optimizations(
             previous_tput = throughput_after
 
     summary = _empty_summary()
+    summary_by_kind: dict[str, dict[str, Any]] = {}
     for entry in entries:
         if not entry["validated"]:
             continue
@@ -396,6 +532,24 @@ def collect_optimizations(
                 backend = "unattributed"
             bucket["by_backend"][backend]["keeps"] += 1
             bucket["by_backend"][backend]["total_gain_pct"] += gain
+        kind = str(entry.get("optimization_kind") or "unknown")
+        kind_bucket = summary_by_kind.setdefault(kind, _empty_kind_summary())
+        kind_bucket["keeps"] += 1
+        kind_bucket["total_gain_pct"] += gain
+        if source == "kernel_agent":
+            by_backend = kind_bucket.setdefault(
+                "by_backend",
+                {
+                    "geak": _empty_kind_summary(),
+                    "forge": _empty_kind_summary(),
+                    "unattributed": _empty_kind_summary(),
+                },
+            )
+            backend = str(entry.get("backend") or "unattributed")
+            if backend not in by_backend:
+                backend = "unattributed"
+            by_backend[backend]["keeps"] += 1
+            by_backend[backend]["total_gain_pct"] += gain
 
     for bucket in summary.values():
         bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]), 6)
@@ -404,11 +558,28 @@ def collect_optimizations(
                 float(backend_bucket["total_gain_pct"]),
                 6,
             )
+    for bucket in summary_by_kind.values():
+        bucket["total_gain_pct"] = round(float(bucket["total_gain_pct"]), 6)
+        for backend_bucket in bucket.get("by_backend", {}).values():
+            backend_bucket["total_gain_pct"] = round(
+                float(backend_bucket["total_gain_pct"]),
+                6,
+            )
+
+    gemm_tuning_runs = []
+    if isinstance(gemm_tuning, dict) and isinstance(gemm_tuning.get("runs"), list):
+        gemm_tuning_runs = [
+            dict(run) for run in gemm_tuning["runs"] if isinstance(run, dict)
+        ]
 
     return {
         "schema_version": OPTIMIZATIONS_SCHEMA_VERSION,
         "entries": entries,
+        "backend_attempts": backend_attempts,
         "summary_by_source": summary,
+        "summary_by_kind": summary_by_kind,
+        "validation": _validation_summary(state, attribution, entries),
+        "gemm_tuning_runs": gemm_tuning_runs,
     }
 
 
