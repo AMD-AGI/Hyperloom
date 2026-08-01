@@ -19,6 +19,42 @@ log = logging.getLogger(__name__)
 # across a hand-off reload without having to be registered here.
 _SESSION_KEY_PREFIX = "last_"
 
+_MN_BACKENDS = ("infera", "rayjob")
+# Mirrors the CLI's --mn-backend default (cli/multi_node.py::_resolve_mn_backend)
+# so a hand-off and a fresh `optimize` never disagree about the same cluster.
+_DEFAULT_MN_BACKEND = "rayjob"
+
+
+def _handoff_backend(*, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
+    """Resolve which control plane a handed-over cluster speaks.
+
+    ``state["backend"]`` is a routing switch: every ``hyperloom-mn`` subcommand
+    sends ``"infera"`` down the SSH fan-out and everything else to the Ray
+    Dashboard. An explicit ``$INFERENCE_OPTIMIZER_MN_BACKEND`` therefore wins,
+    but the platform can export the ``HYPERLOOM_MN_EXT_*`` block without that
+    companion var, so the shape of the hand-off decides next: infera hands over
+    an SSH key plus pod IPs, rayjob hands over the Ray head IP. SSH outranks the
+    head IP, matching :func:`external_has_server_control`. A hand-off with
+    neither is benchmark-only (restarts are skipped), so the routing is moot and
+    the CLI default applies.
+
+    Args:
+        ssh_key: ``HYPERLOOM_MN_EXT_SSH_KEY`` value.
+        has_pod_ips: Whether any prefill/decode/worker IP list is non-empty.
+        head_ip: ``HYPERLOOM_MN_EXT_HEAD_IP`` value.
+
+    Returns:
+        str: ``"infera"`` or ``"rayjob"``.
+    """
+    explicit = os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip().lower()
+    if explicit in _MN_BACKENDS:
+        return explicit
+    if ssh_key and has_pod_ips:
+        return "infera"
+    if head_ip:
+        return "rayjob"
+    return _DEFAULT_MN_BACKEND
+
 
 def external_service_url() -> str:
     """Return the handed-over cluster's benchmark URL, or empty when there is none.
@@ -97,8 +133,12 @@ def build_external_state_from_env() -> dict[str, Any]:
         _ips("HYPERLOOM_MN_EXT_DECODE_IPS"),
         _ips("HYPERLOOM_MN_EXT_WORKER_IPS"),
     )
-    backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "infera").strip().lower()
     head_ip = os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip()
+    backend = _handoff_backend(
+        ssh_key=ssh_key,
+        has_pod_ips=bool(prefill or decode or worker),
+        head_ip=head_ip,
+    )
     ray_address = f"{head_ip}:6379" if head_ip else ""
     ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
 
@@ -106,7 +146,7 @@ def build_external_state_from_env() -> dict[str, Any]:
     dn = _int_env("PD_DECODE_NODES", 0) or len(decode)
 
     state: dict[str, Any] = {
-        "backend": backend if backend in ("infera", "rayjob") else "infera",
+        "backend": backend,
         "external": True,
         "service_url": url,
         "nodes": nodes,

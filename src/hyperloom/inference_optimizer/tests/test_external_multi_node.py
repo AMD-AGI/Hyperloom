@@ -47,6 +47,57 @@ def test_build_external_state_from_env_pd_topology(_external_env: Path) -> None:
     assert state["last_restart_pd_decode_nodes"] == 1
 
 
+@pytest.mark.parametrize(
+    ("explicit", "ssh", "head_ip", "expected"),
+    [
+        # An explicit backend wins even against the opposite hand-off shape.
+        ("rayjob", True, "", "rayjob"),
+        ("infera", False, "10.0.0.9", "infera"),
+        # Without one, the shape the platform handed over decides.
+        ("", True, "", "infera"),
+        ("", False, "10.0.0.9", "rayjob"),
+        # SSH outranks a head IP, matching external_has_server_control.
+        ("", True, "10.0.0.9", "infera"),
+        # Benchmark-only (neither shape): restarts are skipped, CLI default applies.
+        ("", False, "", "rayjob"),
+        # An unusable explicit value defers to the shape instead of guessing.
+        ("bogus", False, "10.0.0.9", "rayjob"),
+    ],
+)
+def test_backend_follows_handoff_shape_without_an_explicit_env(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    explicit: str,
+    ssh: bool,
+    head_ip: str,
+    expected: str,
+) -> None:
+    """``state["backend"]`` routes every hyperloom-mn subcommand to SSH or Ray.
+
+    The platform can export the ``HYPERLOOM_MN_EXT_*`` block without the
+    companion backend var, so a hardcoded default sent those subcommands at the
+    wrong control plane; the hand-off itself has to decide.
+    """
+    if explicit:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", explicit)
+    else:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_BACKEND", raising=False)
+    if ssh:
+        monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_KEY", str(tmp_path / "id_ed25519"))
+        monkeypatch.setenv("HYPERLOOM_MN_EXT_WORKER_IPS", "10.0.2.1")
+    else:
+        monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+        for role in ("PREFILL", "DECODE", "WORKER"):
+            monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
+    if head_ip:
+        monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", head_ip)
+    else:
+        monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
+
+    assert ext.build_external_state_from_env()["backend"] == expected
+
+
 def test_external_state_default_ssh_port_matches_image(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
