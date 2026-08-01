@@ -322,7 +322,7 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
     """Single-node KB keys must stay byte-for-byte identical to pre-infera runs."""
     gpu = "MI300X"
     assert kb_hardware_slug(gpu, nodes=1) == gpu
-    # PD / world-size kwargs are ignored when nodes < 2.
+    # PD / world-size / formation kwargs are all ignored when nodes < 2.
     assert (
         kb_hardware_slug(
             gpu,
@@ -331,6 +331,9 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
             pd_mode="disaggregated",
             pd_prefill_nodes=2,
             pd_decode_nodes=1,
+            tp=8,
+            ep=8,
+            backend="rayjob",
         )
         == gpu
     )
@@ -349,4 +352,40 @@ def test_kb_hardware_slug_multi_node_adds_topology_suffix() -> None:
             pd_decode_nodes=1,
         )
         == "MI300X_ws16_pd1p1d"
+    )
+
+
+def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
+    """tp/ep/backend enter the key for BOTH aggregated and disaggregated."""
+    # Aggregated (no _pd): world_size + tp + ep + backend.
+    assert (
+        kb_hardware_slug(
+            "MI325X",
+            nodes=2,
+            gpus_per_node=2,
+            tp=4,
+            ep=4,
+            backend="rayjob",
+        )
+        == "MI325X_ws4_tp4_ep4_rayjob"
+    )
+    # Disaggregated: _pd split precedes the formation dims.
+    assert (
+        kb_hardware_slug(
+            "MI300X",
+            nodes=2,
+            gpus_per_node=8,
+            pd_mode="disaggregated",
+            pd_prefill_nodes=1,
+            pd_decode_nodes=1,
+            tp=8,
+            ep=8,
+            backend="infera",
+        )
+        == "MI300X_ws16_pd1p1d_tp8_ep8_infera"
+    )
+    # ep==1 (no expert parallelism) is omitted; tp still encoded.
+    assert (
+        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob")
+        == "MI300X_ws16_tp8_rayjob"
     )

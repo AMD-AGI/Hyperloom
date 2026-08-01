@@ -152,27 +152,38 @@ def kb_hardware_slug(
     pd_mode: str = "aggregated",
     pd_prefill_nodes: int = 0,
     pd_decode_nodes: int = 0,
+    tp: int = 0,
+    ep: int = 0,
+    backend: str = "",
 ) -> str:
     """Topology-aware hardware dimension for the recipe ``canonical_id``.
 
     Single-node (``nodes < 2``) returns ``gpu_type`` UNCHANGED, so existing
     single-node recipe keys and their KB data are byte-for-byte preserved.
 
-    Multi-node (``nodes >= 2``) encodes the deployment topology so structurally
+    Multi-node (``nodes >= 2``) encodes the deployment formation so structurally
     different formations never share a key (and never overwrite each other's
-    ``best_config``):
+    ``best_config``). The suffix order is deterministic:
 
     * ``_ws{world_size}`` (``world_size = nodes * gpus_per_node``) — physical
       scale, always present multi-node.
     * ``_pd{pn}p{dn}d`` — appended ONLY for prefill/decode disaggregation
-      (``pd_mode == "disaggregated"``), since a disaggregated config carries
-      disagg flags absent from an aggregated one and different prefill/decode
-      splits (1P1D vs 3P1D) have different optima. Aggregated keeps just
-      ``_ws{N}``.
+      (``pd_mode == "disaggregated"``); aggregated omits it. Different splits
+      (1P1D vs 3P1D) have different optima.
+    * ``_tp{tp}`` / ``_ep{ep}`` — the parallel formation. These are fixed at
+      launch (not explored), so a ``best_config`` tuned at one split (e.g. TP4
+      vs TP2/DP2 over the same world size) is invalid at another — the same
+      "different split -> different optimum" rule that gates ``_pd``. Applied to
+      BOTH aggregated and disaggregated. ``tp<=0`` / ``ep<=0`` mean "unspecified"
+      and are omitted; ``ep==1`` (no expert parallelism) is omitted so dense
+      keys stay clean.
+    * ``_{backend}`` — the multi-node backend (``rayjob`` / ``infera``). The two
+      control planes provision pods differently (networking / RDMA / pod env),
+      so their optima differ and must not share a key.
 
-    Tuning knobs (kv_transfer_backend, per-role tp/ep, server flags) are
-    deliberately NOT encoded here — they are the ``best_config`` the KB exists
-    to accumulate within one topology.
+    Remaining tuning knobs (kv_transfer_backend, batch sizes, server flags) are
+    deliberately NOT encoded — they are the ``best_config`` the KB accumulates
+    within one formation.
 
     The result feeds BOTH :func:`recipe_canonical_id`'s ``hardware=`` segment
     AND the top-level ``hardware`` label used by ``/recipes/search``, so callers
@@ -188,11 +199,14 @@ def kb_hardware_slug(
         pd_mode: ``"aggregated"`` or ``"disaggregated"``.
         pd_prefill_nodes: Prefill-group node count (disaggregated only).
         pd_decode_nodes: Decode-group node count (disaggregated only).
+        tp: Tensor-parallel size (omitted when ``<= 0``).
+        ep: Expert-parallel size (omitted when ``<= 1``).
+        backend: Multi-node backend name, e.g. ``rayjob`` / ``infera``
+            (omitted when empty).
 
     Returns:
-        ``gpu_type`` unchanged for single-node; ``{gpu_type}_ws{world_size}``
-        (aggregated) or ``{gpu_type}_ws{world_size}_pd{pn}p{dn}d``
-        (disaggregated) for multi-node.
+        ``gpu_type`` unchanged for single-node; otherwise
+        ``{gpu_type}_ws{ws}[_pd{pn}p{dn}d][_tp{tp}][_ep{ep}][_{backend}]``.
     """
     base = (gpu_type or "").strip()
     try:
@@ -216,6 +230,21 @@ def kb_hardware_slug(
             pn = dn = 0
         if pn > 0 and dn > 0:
             slug = f"{slug}_pd{pn}p{dn}d"
+    try:
+        tp_i = int(tp)
+    except (TypeError, ValueError):
+        tp_i = 0
+    if tp_i > 0:
+        slug = f"{slug}_tp{tp_i}"
+    try:
+        ep_i = int(ep)
+    except (TypeError, ValueError):
+        ep_i = 0
+    if ep_i > 1:
+        slug = f"{slug}_ep{ep_i}"
+    be = _slug(backend, "")
+    if be:
+        slug = f"{slug}_{be}"
     return slug
 
 

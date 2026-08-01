@@ -101,9 +101,9 @@ def resolve_kb_topology() -> dict[str, int]:
 
     Returns:
         A ``{"nodes", "gpus_per_node", "pd_mode", "pd_prefill_nodes",
-        "pd_decode_nodes"}`` mapping ready to splat into
+        "pd_decode_nodes", "tp", "ep", "backend"}`` mapping ready to splat into
         :func:`kb_hardware_slug`. Single-node returns ``nodes=1`` so the KB key
-        is left unchanged (the PD fields are then ignored downstream).
+        is left unchanged (the remaining fields are then ignored downstream).
     """
     state = _read_state()
     try:
@@ -152,12 +152,44 @@ def resolve_kb_topology() -> dict[str, int]:
     pn = _pd_nodes("PD_PREFILL_NODES", "pd_prefill_nodes", "last_restart_pd_prefill_nodes")
     dn = _pd_nodes("PD_DECODE_NODES", "pd_decode_nodes", "last_restart_pd_decode_nodes")
 
+    # Parallel formation (tp / ep) is fixed at launch, not explored, so it
+    # belongs in the KB key: a best_config tuned at one split is invalid at
+    # another. The CLI exports TP / EP before T0 (stable across --resume), so
+    # env wins; state fields are the resume fallback.
+    def _int_pref_env(env_key: str, *state_keys: str, default: int = 1) -> int:
+        raw = (os.environ.get(env_key, "") or "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        for sk in state_keys:
+            try:
+                v = int(state.get(sk) or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v:
+                return v
+        return default
+
+    tp = _int_pref_env("TP", "tp", "last_restart_tp", default=1)
+    ep = _int_pref_env("EP", "ep", "last_restart_ep", default=1)
+
+    # Multi-node backend (rayjob / infera): the CLI exports the resolved value;
+    # state is the resume fallback; default to the CLI's own multi-node default.
+    backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "").strip().lower()
+    if not backend:
+        backend = str(state.get("backend") or "").strip().lower() or "rayjob"
+
     return {
         "nodes": max(1, nodes),
         "gpus_per_node": max(1, gpn),
         "pd_mode": pd_mode or "aggregated",
         "pd_prefill_nodes": pn,
         "pd_decode_nodes": dn,
+        "tp": max(1, tp),
+        "ep": max(1, ep),
+        "backend": backend,
     }
 
 
