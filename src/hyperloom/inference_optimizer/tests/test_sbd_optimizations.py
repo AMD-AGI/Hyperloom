@@ -90,6 +90,10 @@ def test_collect_optimizations_splits_kernel_backend():
                 "tput": 120.0,
                 "backend": "forge",
                 "kernel_id": "k1",
+                "source_phase": "KERNEL_AGENT",
+                "accepted_heads": ["mla"],
+                "extra_server_args_is_invariant": True,
+                "candidate_flags": {"fast_math": True},
                 "ts": "1970-01-01T00:00:20+00:00",
             },
         ],
@@ -143,6 +147,11 @@ def test_collect_optimizations_splits_kernel_backend():
     assert result["entries"][1]["backend"] == "forge"
     assert result["entries"][1]["execution_mode"] == "per_kernel"
     assert result["entries"][1]["adopted_attempt_id"] == "forge-kept"
+    assert result["entries"][1]["source_phase"] == "KERNEL_AGENT"
+    assert result["entries"][1]["gain_method"] == "legacy_ledger_derived"
+    assert result["entries"][1]["accepted_heads"] == ["mla"]
+    assert result["entries"][1]["extra_server_args_is_invariant"] is True
+    assert result["entries"][1]["candidate_flags"] == {"fast_math": True}
     assert result["backend_attempts"] == [
         {
             "attempt_id": "geak-failed",
@@ -194,6 +203,7 @@ def test_collect_optimizations_splits_kernel_backend():
     assert result["validation"]["method"] == "reconstructed"
     assert result["validation"]["validated_total_gain_pct"] == 20.0
     assert result["validation"]["attribution_gap_pct"] == 0.0
+    assert result["validation"]["validated_at_stack_len"] == 2
     assert result["gemm_tuning_runs"][0]["engine"] == "forge"
 
 
@@ -202,11 +212,13 @@ def test_collect_optimizations_excludes_non_optimization_stack_anchors():
         "session_id": "anchors",
         "optimization_stack": [
             {"action": "baseline", "tput": 100.0},
-            {"action": "validate_stack", "tput": 110.0},
+            {"action": "sweep", "tput": 110.0},
+            {"action": "validate_stack", "tput": 115.0},
             {"action": "explore", "variant_name": "kept", "tput": 120.0},
         ],
-        "gain_per_stack_entry": [0.0, 10.0, 20.0],
-        "cumulative_gain_validated_stack_len": 3,
+        "gain_per_stack_entry": [0.0, 10.0, 15.0, 20.0],
+        "cumulative_gain_validated": 20.0,
+        "cumulative_gain_validated_stack_len": 4,
         "phase_history": [{"to_phase": "EXPLORE", "ts_unix": 0.0}],
     }
     attribution = collect_attribution(state, [], [], [])
@@ -214,6 +226,68 @@ def test_collect_optimizations_excludes_non_optimization_stack_anchors():
     result = collect_optimizations(state, attribution, [], [], [])
 
     assert [entry["name"] for entry in result["entries"]] == ["kept"]
+    assert result["validation"]["source_breakdown"]["sweep_gain_pct"] == 10.0
+
+
+def test_collect_optimizations_generates_stable_attempt_ids_and_rejects_ambiguous_keep():
+    state = {
+        "session_id": "stable",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "kernel_optimize",
+                "kernel_id": "k1",
+                "backend": "forge",
+                "tput": 110.0,
+            }
+        ],
+        "gain_per_stack_entry": [
+            {
+                "delta_pct": 10.0,
+                "cum_gain_after": 10.0,
+            }
+        ],
+    }
+    attribution = collect_attribution(state, [], [], [])
+
+    single = collect_optimizations(
+        state,
+        attribution,
+        [],
+        [{"kernel_id": "k1", "backend": "forge", "decision": "KEEP"}],
+        [],
+    )
+
+    generated = "stable:kernel-attempt:k1:forge:1"
+    assert single["backend_attempts"][0]["attempt_id"] == generated
+    assert single["entries"][0]["adopted_attempt_id"] == generated
+
+    warnings: list[str] = []
+    ambiguous = collect_optimizations(
+        state,
+        attribution,
+        [],
+        [
+            {
+                "attempt_id": "keep-1",
+                "kernel_id": "k1",
+                "backend": "forge",
+                "decision": "KEEP",
+            },
+            {
+                "attempt_id": "keep-2",
+                "kernel_id": "k1",
+                "backend": "forge",
+                "decision": "KEEP",
+            },
+        ],
+        warnings,
+    )
+
+    assert ambiguous["entries"][0]["adopted_attempt_id"] is None
+    assert any("multiple KEEP attempts" in warning for warning in warnings)
 
 
 def test_collect_optimizations_keeps_unknown_source_honest():

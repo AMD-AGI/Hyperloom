@@ -268,6 +268,7 @@ def _empty_summary() -> dict[str, Any]:
 
 
 def _collect_backend_attempts(
+    session_id: str,
     geak_invocations: list[dict[str, Any]],
     forge_invocations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -296,7 +297,7 @@ def _collect_backend_attempts(
             )
             attempts.append(
                 {
-                    "attempt_id": str(raw.get("attempt_id") or raw.get("run_id") or ""),
+                    "attempt_id": str(raw.get("attempt_id") or ""),
                     "run_id": str(raw.get("run_id") or ""),
                     "kernel_id": str(raw.get("kernel_id") or ""),
                     "backend": str(raw.get("backend") or default_backend),
@@ -334,7 +335,47 @@ def _collect_backend_attempts(
         kernel_id = str(attempt.get("kernel_id") or "")
         sequence_by_kernel[kernel_id] = sequence_by_kernel.get(kernel_id, 0) + 1
         attempt["sequence"] = sequence_by_kernel[kernel_id]
+        if not attempt.get("attempt_id"):
+            attempt["attempt_id"] = (
+                f"{session_id}:kernel-attempt:"
+                f"{kernel_id or 'unknown'}:{attempt.get('backend') or 'unknown'}:"
+                f"{attempt['sequence']}"
+            )
     return attempts
+
+
+def _adopted_attempt_id(
+    raw: dict[str, Any],
+    *,
+    kernel_id: str,
+    backend: str | None,
+    backend_attempts: list[dict[str, Any]],
+    warnings: list[str],
+) -> str | None:
+    explicit = str(
+        raw.get("adopted_attempt_id")
+        or raw.get("best_attempt_id")
+        or raw.get("attempt_id")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    matches = [
+        str(attempt.get("attempt_id") or "")
+        for attempt in backend_attempts
+        if str(attempt.get("kernel_id") or "") == kernel_id
+        and str(attempt.get("backend") or "") == str(backend or "")
+        and str(attempt.get("decision") or "").upper() == "KEEP"
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        warnings.append(
+            "optimizations: multiple KEEP attempts match "
+            f"kernel={kernel_id!r} backend={backend!r}; "
+            "adopted_attempt_id requires explicit producer evidence"
+        )
+    return None
 
 
 def _empty_kind_summary() -> dict[str, Any]:
@@ -367,8 +408,33 @@ def _validation_summary(
         else {}
     )
     notes = attribution.get("notes")
+    canonical_source_breakdown = {
+        "sweep_gain_pct": round(
+            _to_float(source_breakdown.get("sweep_pct_of_total")) or 0.0,
+            6,
+        ),
+        "params_gain_pct": round(
+            _to_float(source_breakdown.get("params_pct_of_total")) or 0.0,
+            6,
+        ),
+        "backends_gain_pct": round(
+            _to_float(source_breakdown.get("backends_pct_of_total")) or 0.0,
+            6,
+        ),
+        "gemm_tuning_gain_pct": round(
+            _to_float(source_breakdown.get("gemm_tuning_pct_of_total")) or 0.0,
+            6,
+        ),
+    }
+    try:
+        validated_at_stack_len = int(
+            state.get("cumulative_gain_validated_stack_len") or 0
+        )
+    except (TypeError, ValueError):
+        validated_at_stack_len = 0
     return {
         "method": str(attribution.get("method") or "missing"),
+        "validated_at_stack_len": validated_at_stack_len,
         "validated_total_gain_pct": (
             round(validated_total, 6) if validated_total is not None else None
         ),
@@ -379,6 +445,7 @@ def _validation_summary(
             else None
         ),
         "notes": [str(note) for note in notes] if isinstance(notes, list) else [],
+        "source_breakdown": canonical_source_breakdown,
         "phase_breakdown": phase_breakdown,
         "domain_attribution": domain_attribution,
     }
@@ -406,6 +473,9 @@ def collect_optimizations(
     gain_rows = attribution.get("gain_per_stack_entry") or []
     if not isinstance(gain_rows, list):
         gain_rows = []
+    state_gain_rows = state.get("gain_per_stack_entry")
+    if not isinstance(state_gain_rows, list):
+        state_gain_rows = []
     if gain_rows and len(gain_rows) != len(raw_stack):
         warnings.append(
             "optimizations: gain_per_stack_entry length does not match "
@@ -420,17 +490,10 @@ def collect_optimizations(
     session_id = str(state.get("session_id") or "session")
     timeline = _phase_timeline(state)
     backend_attempts = _collect_backend_attempts(
+        session_id,
         geak_invocations,
         forge_invocations,
     )
-    kept_attempts = {
-        (
-            str(attempt.get("kernel_id") or ""),
-            str(attempt.get("backend") or ""),
-        ): str(attempt.get("attempt_id") or "")
-        for attempt in backend_attempts
-        if str(attempt.get("decision") or "").upper() == "KEEP"
-    }
     entries: list[dict[str, Any]] = []
     previous_tput = baseline_tput
 
@@ -465,8 +528,24 @@ def collect_optimizations(
         throughput_before = previous_tput
         delta = _to_float(gain.get("delta_pct"))
         cumulative = _to_float(gain.get("cum_gain_after"))
+        original_gain = (
+            state_gain_rows[stack_index]
+            if stack_index < len(state_gain_rows)
+            else None
+        )
+        if isinstance(original_gain, dict) and _to_float(
+            original_gain.get("delta_pct")
+        ) is not None:
+            gain_method = "ledger"
+        elif isinstance(original_gain, (int, float)):
+            gain_method = "legacy_ledger_derived"
+        elif delta is not None:
+            gain_method = "reconstructed"
+        else:
+            gain_method = "missing"
         if delta is None and throughput_before and throughput_after is not None:
             delta = (throughput_after / throughput_before - 1.0) * 100.0
+            gain_method = "throughput_derived"
         if cumulative is None and baseline_tput and throughput_after is not None:
             cumulative = (throughput_after / baseline_tput - 1.0) * 100.0
 
@@ -486,11 +565,42 @@ def collect_optimizations(
             "backend": backend,
             "execution_mode": _execution_mode(raw, backend),
             "kernel_id": kernel_id or None,
-            "adopted_attempt_id": kept_attempts.get((kernel_id, str(backend or ""))) or None,
+            "adopted_attempt_id": _adopted_attempt_id(
+                raw,
+                kernel_id=kernel_id,
+                backend=backend,
+                backend_attempts=backend_attempts,
+                warnings=warnings,
+            ),
             "action": str(raw.get("action") or ""),
             "variant_name": str(raw.get("variant_name") or ""),
             "fingerprint": str(raw.get("fingerprint") or ""),
             "scope": str(raw.get("scope") or ""),
+            "source_phase": str(
+                raw.get("source_phase")
+                or gain.get("source_phase")
+                or raw.get("phase")
+                or gain.get("phase")
+                or ""
+            ),
+            "gain_method": gain_method,
+            "accepted_heads": (
+                list(raw.get("accepted_heads") or [])
+                if isinstance(raw.get("accepted_heads"), list)
+                else []
+            ),
+            "extra_server_args_is_invariant": (
+                raw.get("extra_server_args_is_invariant")
+                if isinstance(raw.get("extra_server_args_is_invariant"), bool)
+                else None
+            ),
+            "candidate_flags": (
+                raw.get("candidate_flags")
+                if raw.get("candidate_flags") is not None
+                else raw.get("flags")
+                if raw.get("flags") is not None
+                else str(raw.get("candidate_extra_server_args") or "")
+            ),
             "gain_pct": round(delta, 6) if delta is not None else None,
             "cumulative_gain_pct": (
                 round(cumulative, 6) if cumulative is not None else None
@@ -581,6 +691,222 @@ def collect_optimizations(
         "validation": _validation_summary(state, attribution, entries),
         "gemm_tuning_runs": gemm_tuning_runs,
     }
+
+
+def _duration_between(started_at: Any, ended_at: Any) -> float | None:
+    started = _parse_ts(started_at)
+    ended = _parse_ts(ended_at)
+    if started is None or ended is None or ended < started:
+        return None
+    return round(ended - started, 6)
+
+
+def _collect_v4_backend_invocations(
+    operations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    validated_operation_ids = {
+        str(adoption.get("operation_id") or "")
+        for adoption in adoptions
+        if isinstance(adoption, dict)
+        and adoption.get("validated") is True
+        and str(adoption.get("decision") or "").upper()
+        in {"KEEP", "ADOPT", "ADOPTED"}
+    }
+    micro_speedup_by_attempt = {
+        str((measurement.get("dimensions") or {}).get("attempt_id") or ""): _to_float(
+            measurement.get("value")
+        )
+        for measurement in measurements
+        if isinstance(measurement, dict)
+        and str(measurement.get("name") or "") == "micro_speedup"
+        and isinstance(measurement.get("dimensions"), dict)
+        and (measurement.get("dimensions") or {}).get("attempt_id")
+    }
+    geak: list[dict[str, Any]] = []
+    forge: list[dict[str, Any]] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        operation_id = str(operation.get("operation_id") or "")
+        subject = (
+            operation.get("subject")
+            if isinstance(operation.get("subject"), dict)
+            else {}
+        )
+        kernel_id = str(subject.get("name") or operation.get("name") or "")
+        outputs = (
+            operation.get("outputs")
+            if isinstance(operation.get("outputs"), dict)
+            else {}
+        )
+        verification = (
+            outputs.get("verification")
+            if isinstance(outputs.get("verification"), dict)
+            else {}
+        )
+        proposal = (
+            outputs.get("proposal")
+            if isinstance(outputs.get("proposal"), dict)
+            else {}
+        )
+        best_attempt_id = str(verification.get("best_attempt_id") or "")
+        operation_decision = str(
+            outputs.get("decision")
+            or proposal.get("decision")
+            or ""
+        ).upper()
+        for index, attempt_value in enumerate(operation.get("attempts") or []):
+            if not isinstance(attempt_value, dict):
+                continue
+            attempt = dict(attempt_value)
+            attempt_outputs = (
+                attempt.get("outputs")
+                if isinstance(attempt.get("outputs"), dict)
+                else {}
+            )
+            attempt_id = str(attempt.get("attempt_id") or "")
+            backend = str(
+                attempt.get("backend")
+                or attempt_outputs.get("backend")
+                or operation.get("strategy")
+                or ""
+            ).lower()
+            if "geak" in backend:
+                backend = "geak"
+                lane = geak
+            elif "forge" in backend:
+                backend = "forge"
+                lane = forge
+            else:
+                continue
+            status = str(attempt.get("status") or "").upper()
+            decision = str(attempt_outputs.get("decision") or "").upper()
+            if not decision and operation_id in validated_operation_ids:
+                if not best_attempt_id or attempt_id == best_attempt_id:
+                    decision = "KEEP"
+            if not decision and status in {"FAILED", "ERROR", "CANCELLED"}:
+                decision = "FAILED"
+            error = attempt.get("error")
+            error_class = None
+            error_message = None
+            if isinstance(error, dict):
+                error_class = str(
+                    error.get("class")
+                    or error.get("error_class")
+                    or error.get("type")
+                    or ""
+                ) or None
+                error_message = str(
+                    error.get("message") or error.get("error") or ""
+                ) or None
+            elif error:
+                error_message = str(error)
+            lane.append(
+                {
+                    "attempt_id": attempt_id,
+                    "run_id": operation_id,
+                    "kernel_id": kernel_id,
+                    "backend": backend,
+                    "decision": decision or operation_decision,
+                    "ts": str(
+                        attempt.get("started_at")
+                        or operation.get("started_at")
+                        or ""
+                    ),
+                    "sequence": attempt.get("sequence") or index + 1,
+                    "duration_sec": _duration_between(
+                        attempt.get("started_at"),
+                        attempt.get("ended_at"),
+                    ),
+                    "micro_speedup": _to_float(
+                        attempt_outputs.get("micro_speedup")
+                        or attempt_outputs.get("speedup")
+                    )
+                    or micro_speedup_by_attempt.get(attempt_id),
+                    "compile_passed": attempt_outputs.get("compile_passed"),
+                    "correctness_passed": attempt_outputs.get(
+                        "correctness_passed"
+                    ),
+                    "error_class": error_class,
+                    "error": error_message,
+                }
+            )
+    return geak, forge
+
+
+def _collect_v4_gemm_tuning_runs(
+    operations: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    adoption_by_operation = {
+        str(adoption.get("operation_id") or ""): adoption
+        for adoption in adoptions
+        if isinstance(adoption, dict) and adoption.get("operation_id")
+    }
+    runs: list[dict[str, Any]] = []
+    for operation in operations:
+        if not isinstance(operation, dict) or operation.get("kind") != "gemm_tuning":
+            continue
+        extensions = (
+            operation.get("extensions")
+            if isinstance(operation.get("extensions"), dict)
+            else {}
+        )
+        gemm_extension = (
+            extensions.get("gemm")
+            if isinstance(extensions.get("gemm"), dict)
+            else {}
+        )
+        result = (
+            dict(gemm_extension.get("result"))
+            if isinstance(gemm_extension.get("result"), dict)
+            else {}
+        )
+        outputs = (
+            operation.get("outputs")
+            if isinstance(operation.get("outputs"), dict)
+            else {}
+        )
+        adoption = adoption_by_operation.get(
+            str(operation.get("operation_id") or ""),
+            {},
+        )
+        result.setdefault(
+            "engine",
+            outputs.get("engine") or operation.get("strategy") or "",
+        )
+        result.setdefault("status", operation.get("status") or "")
+        result.setdefault("decision", outputs.get("decision") or "")
+        result.setdefault("source", operation.get("producer") or "")
+        result.setdefault(
+            "ts",
+            operation.get("ended_at") or operation.get("started_at") or "",
+        )
+        result.setdefault(
+            "duration_sec",
+            _duration_between(
+                operation.get("started_at"),
+                operation.get("ended_at"),
+            ),
+        )
+        result.setdefault(
+            "adopted",
+            adoption.get("validated") is True
+            and str(adoption.get("decision") or "").upper()
+            in {"KEEP", "ADOPT", "ADOPTED"},
+        )
+        if result.get("gain_pct") is None:
+            result["gain_pct"] = _to_float(adoption.get("gain_pct"))
+        if "candidates" not in result:
+            result["candidates"] = [
+                dict(attempt.get("outputs") or {})
+                for attempt in operation.get("attempts") or []
+                if isinstance(attempt, dict)
+            ]
+        runs.append(result)
+    return runs
 
 
 def collect_v4_optimizations(
@@ -736,14 +1062,34 @@ def collect_v4_optimizations(
         "baseline_tput": baseline_tput,
         "optimization_stack": stack,
         "gain_per_stack_entry": gains,
+        "cumulative_gain_validated": cumulative,
         "cumulative_gain_validated_stack_len": len(stack),
         "phase_history": [],
     }
+    geak_invocations, forge_invocations = _collect_v4_backend_invocations(
+        operations,
+        measurements,
+        adoptions,
+    )
+    synthetic_attribution = {
+        "gain_per_stack_entry": gains,
+        "method": "validated" if gains else "missing",
+        "source_breakdown": {
+            "validated_total_pct": cumulative,
+        },
+        "phase_breakdown": {},
+        "notes": [
+            "Attribution synthesized from validated V4 adoption streams."
+        ],
+    }
     return collect_optimizations(
         synthetic_state,
-        {"gain_per_stack_entry": gains},
-        [],
-        [],
+        synthetic_attribution,
+        geak_invocations,
+        forge_invocations,
         warnings,
+        gemm_tuning={
+            "runs": _collect_v4_gemm_tuning_runs(operations, adoptions),
+        },
     )
 

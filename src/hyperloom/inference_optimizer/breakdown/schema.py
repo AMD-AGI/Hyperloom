@@ -1622,6 +1622,9 @@ class OptimizationStackEntry(TypedDict, total=False):
     # explore KEEPs); specialist dial.
     operation_kind: str
     scope: str
+    accepted_heads: list[Any]
+    extra_server_args_is_invariant: bool
+    candidate_flags: Any
 
 
 # Canonical optimizations — single downstream read model
@@ -1673,6 +1676,11 @@ class OptimizationEntry(TypedDict, total=False):
     variant_name: str
     fingerprint: str
     scope: str
+    source_phase: str
+    gain_method: str
+    accepted_heads: list[Any]
+    extra_server_args_is_invariant: bool | None
+    candidate_flags: Any
     gain_pct: float | None
     cumulative_gain_pct: float | None
     throughput_before: float | None
@@ -1717,10 +1725,12 @@ class OptimizationValidation(TypedDict, total=False):
     """Attribution trust, reconciliation, and diagnostic metadata."""
 
     method: str
+    validated_at_stack_len: int
     validated_total_gain_pct: float | None
     attributed_total_gain_pct: float
     attribution_gap_pct: float | None
     notes: list[str]
+    source_breakdown: dict[str, float]
     phase_breakdown: dict[str, Any]
     domain_attribution: dict[str, Any]
 

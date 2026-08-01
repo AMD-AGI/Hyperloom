@@ -693,6 +693,15 @@ def test_v4_forge_operation_carries_correctness_evidence(tmp_path):
     )
     assert operation["parent_operation_id"] == native_route["operation_id"]
     assert operation["attempts"][0]["outputs"]["correctness_source"] == "generated_harness"
+    assert out["optimizations"]["backend_attempts"][0]["attempt_id"] == "attempt-1"
+    assert out["optimizations"]["backend_attempts"][0]["kernel_id"] == "k001"
+    assert out["optimizations"]["backend_attempts"][0]["backend"] == "forge"
+    assert out["optimizations"]["backend_attempts"][0]["micro_speedup"] == 1.25
+    assert out["optimizations"]["backend_attempts"][0]["compile_passed"] is True
+    assert (
+        out["optimizations"]["backend_attempts"][0]["correctness_passed"]
+        is True
+    )
     gate_names = {gate["name"] for gate in operation["gates"]}
     assert {"compile", "correctness", "kernel_verification"} <= gate_names
     measurement = next(item for item in out["measurements"] if item["name"] == "micro_speedup")
@@ -735,6 +744,10 @@ def test_v4_gemm_adoption_is_keep_only(tmp_path):
     assert revert["optimizations"]["entries"] == []
     assert keep["optimizations"]["entries"][0]["backend"] == "forge"
     assert keep["optimizations"]["entries"][0]["optimization_kind"] == "gemm_tuning"
+    assert keep["optimizations"]["gemm_tuning_runs"][0]["engine"] == "forge"
+    assert keep["optimizations"]["gemm_tuning_runs"][0]["adopted"] is True
+    assert keep["optimizations"]["validation"]["method"] == "validated"
+    assert keep["optimizations"]["validation"]["validated_total_gain_pct"] == 5.0
 
 
 def test_v4_kernel_keep_then_revert_revokes_adoption(tmp_path):

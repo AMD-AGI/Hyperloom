@@ -150,6 +150,11 @@ optimizations
 │   ├── variant_name
 │   ├── fingerprint
 │   ├── scope
+│   ├── source_phase
+│   ├── gain_method
+│   ├── accepted_heads
+│   ├── extra_server_args_is_invariant
+│   ├── candidate_flags
 │   ├── gain_pct
 │   ├── cumulative_gain_pct
 │   ├── throughput_before
@@ -182,10 +187,12 @@ optimizations
 ├── summary_by_kind
 ├── validation
 │   ├── method
+│   ├── validated_at_stack_len
 │   ├── validated_total_gain_pct
 │   ├── attributed_total_gain_pct
 │   ├── attribution_gap_pct
 │   ├── notes
+│   ├── source_breakdown
 │   ├── phase_breakdown
 │   └── domain_attribution
 └── gemm_tuning_runs[]
@@ -203,12 +210,25 @@ together.
 `backend_attempts` retains adopted and non-adopted GEAK/Forge attempts,
 including KEEP, PARTIAL, REVERT, and FAILED outcomes. `sequence` is ordered
 within each kernel. Adopted kernel entries link back through
-`adopted_attempt_id`.
+`adopted_attempt_id`. Missing producer attempt IDs receive a stable
+session/kernel/backend/sequence ID. When multiple KEEP attempts match the
+same entry and the producer did not identify the adopted one, the link stays
+`null` and a warning is emitted rather than guessing.
 
 `validation` carries the attribution lineage and reconciliation diagnostics
 previously available only through the legacy attribution projection.
+`validation.source_breakdown` retains non-entry gain categories such as
+Sweep, params, and backend exploration without treating `sweep`,
+`conc_sweep`, or `validate_stack` as adopted optimizations.
 `gemm_tuning_runs` retains the complete tuning run records; the corresponding
 adopted gain remains represented exactly once by a `gemm_tuning` entry.
+
+`gain_method` is `ledger`, `legacy_ledger_derived`, `reconstructed`,
+`throughput_derived`, or `missing`; `source_phase` and
+`validated_at_stack_len` preserve the evidence needed to audit historical
+source, validation, and gain inference. V4 conversion reconstructs backend
+attempts and GEMM runs from canonical operation streams when that evidence is
+present, and marks validation as synthesized from validated adoptions.
 
 The historical `optimization_stack`, attribution, GEAK invocation, Forge
 invocation, and GEMM-tuning result projections are not emitted in the new wire
