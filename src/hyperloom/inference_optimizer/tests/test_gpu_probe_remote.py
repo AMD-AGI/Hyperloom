@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import subprocess
-import types
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -78,11 +79,87 @@ def test_infera_probe_parses_product_name(monkeypatch):
 
     def _fake_ssh_run(host, command, **_kwargs):
         assert host == "10.0.0.2"
-        return subprocess.CompletedProcess(
-            args=[command], returncode=0, stdout="GPU[0] : MI325X\n", stderr=""
-        )
+        return subprocess.CompletedProcess(args=[command], returncode=0, stdout="GPU[0] : MI325X\n", stderr="")
 
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
+
+    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
+
+
+def _infera_state():
+    return {
+        "backend": "infera",
+        "ssh_key_path": "/tmp/key",
+        "ssh_known_hosts": "",
+        "prefill_pods": [{"podIP": "10.0.0.2", "sshPort": 27720}],
+    }
+
+
+def _track_scratch_dirs(monkeypatch, tmp_path):
+    """Redirect the probe's keyscan mkdtemp into tmp_path and record what it made."""
+    created: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _tracking_mkdtemp(*args, **kwargs):
+        kwargs["dir"] = str(tmp_path)
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(gpu_probe.tempfile, "mkdtemp", _tracking_mkdtemp)
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", _infera_state)
+    monkeypatch.setattr(gpu_probe.ssh_known_hosts, "refresh_known_hosts", lambda _hosts, dest: dest)
+    return created
+
+
+@pytest.mark.parametrize("ssh_explodes", [False, True])
+def test_infera_probe_removes_its_scratch_known_hosts(monkeypatch, tmp_path, ssh_explodes):
+    """The one-shot keyscan dir must not accumulate under /tmp, even on failure."""
+    created = _track_scratch_dirs(monkeypatch, tmp_path)
+
+    def _fake_ssh_run(_host, command, **_kwargs):
+        if ssh_explodes:
+            raise RuntimeError("ssh died")
+        return subprocess.CompletedProcess(args=[command], returncode=0, stdout="MI325X", stderr="")
+
+    monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
+
+    gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+
+    assert created, "the probe should have keyscanned into a scratch dir"
+    assert not any(p.exists() for p in created)
+
+
+def test_infera_probe_parses_output_despite_a_nonzero_exit(monkeypatch, tmp_path):
+    """_PROBE_CMD's `||` fallback can print a usable name and still exit non-zero.
+
+    Gating the parse on the exit status would discard that answer, so a non-zero
+    return is only logged.
+    """
+    _track_scratch_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gpu_probe.ssh_client,
+        "ssh_run",
+        lambda _host, command, **_kw: subprocess.CompletedProcess(
+            args=[command], returncode=1, stdout="gfx942", stderr="rocm-smi: not found"
+        ),
+    )
+
+    assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi300x"
+
+
+def test_rayjob_probe_parses_logs_despite_a_failed_job(monkeypatch):
+    """Same rule on the Ray path: a FAILED job may still have logged the name."""
+    monkeypatch.setattr(
+        gpu_probe,
+        "build_external_state_from_env",
+        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
+    )
+    monkeypatch.setattr(
+        gpu_probe.ray_dashboard,
+        "RayDashboardClient",
+        lambda *_a, **_k: _FakeRayClient("AMD Instinct MI325X", status="FAILED"),
+    )
 
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) == "mi325x"
 

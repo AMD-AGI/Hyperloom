@@ -15,6 +15,7 @@ caller can fall back to the ``--gpu-type`` / ``$GPU_TYPE`` hint.
 from __future__ import annotations
 
 import logging
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -115,11 +116,17 @@ def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
     with ray_dashboard.RayDashboardClient(head, token=token) as ray:
         sub_id = ray.submit_job(_PROBE_CMD)
         deadline = time.monotonic() + max(1, timeout_s)
+        status = ""
         while time.monotonic() < deadline:
             status = str(ray.get_job(sub_id).get("status", "")).upper()
             if status in _TERMINAL_STATUSES:
                 break
             time.sleep(2)
+        if status != "SUCCEEDED":
+            # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable
+            # name and still exit non-zero, so the logs are parsed either way
+            # and an unparsable result already degrades to None.
+            log.warning("remote GPU probe: ray job %s ended %r", sub_id, status or "no terminal status")
         logs = ray.get_job_logs(sub_id)
     return _parse_gpu_type(logs)
 
@@ -160,20 +167,30 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
     port = int(pod.get("sshPort") or state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
 
     known_hosts_hint = str(state.get("ssh_known_hosts") or "").strip()
+    scratch: Path | None = None
     if known_hosts_hint and Path(known_hosts_hint).is_file():
         known_hosts = Path(known_hosts_hint)
     else:
         # Keyscan the pod into a throwaway known_hosts so StrictHostKeyChecking
         # still holds for this one-shot probe.
-        dest = Path(tempfile.mkdtemp(prefix="mn_gpu_probe_")) / "known_hosts"
-        known_hosts = ssh_known_hosts.refresh_known_hosts([(host, port)], dest)
+        scratch = Path(tempfile.mkdtemp(prefix="mn_gpu_probe_"))
+        known_hosts = ssh_known_hosts.refresh_known_hosts([(host, port)], scratch / "known_hosts")
 
-    cp = ssh_client.ssh_run(
-        host,
-        _PROBE_CMD,
-        key_path=key_path,
-        known_hosts=known_hosts,
-        port=port,
-        timeout=max(1, timeout_s),
-    )
+    try:
+        cp = ssh_client.ssh_run(
+            host,
+            _PROBE_CMD,
+            key_path=key_path,
+            known_hosts=known_hosts,
+            port=port,
+            timeout=max(1, timeout_s),
+        )
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+    if cp.returncode != 0:
+        # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name
+        # and still exit non-zero, so the output is parsed either way and an
+        # unparsable result already degrades to None.
+        log.warning("remote GPU probe: ssh to %s exited %s", host, cp.returncode)
     return _parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")
