@@ -60,37 +60,78 @@ def _server_pid_files(pid_dir: str) -> list[Path]:
     return sorted(ranks + list(root.glob("prefill_*.pid")) + list(root.glob("decode_*.pid")))
 
 
-def _probe_remote(pid_dir: str) -> dict[str, Any]:
-    """Check every recorded server PID on this node.
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` names a live, non-zombie process.
 
-    A PID file whose process is gone counts as dead; an unreadable or malformed
-    one counts as dead too, so a half-written directory can never be mistaken
-    for a healthy cluster.
+    Kept in step with ``kill_multinode._pid_alive``, which is the reason this
+    cannot be a bare ``os.kill(pid, 0)``: that call succeeds on a zombie, and
+    zombies are routine here. The launcher spawns servers under
+    ``nohup setsid``, so the parent exits immediately and the server is
+    reparented to the container's PID 1, which does not reap. A killed server
+    then lingers as ``<defunct>`` forever -- and reading it as alive is the one
+    mistake this probe must never make, since the caller would resume onto a
+    cluster that has already released its GPUs and ports.
+
+    Args:
+        pid: Process id to probe.
+
+    Returns:
+        bool: True only when the process exists and is not a zombie.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+        # "pid (comm) state ..." -- comm may contain ')', so read two bytes
+        # past the last one.
+        rparen = data.rfind(b")")
+        if rparen != -1 and data[rparen + 2 : rparen + 3] == b"Z":
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _probe_remote(pid_dir: str) -> dict[str, Any]:
+    """Classify every recorded server PID on this node.
+
+    Three outcomes, not two. ``stale`` is the launcher's sentinel ``0``, written
+    on nodes that legitimately run no server of their own -- vLLM's non-rank-0
+    workers, which KubeRay has already joined to the GCS -- so counting those as
+    dead would report every healthy vLLM cluster as broken. A file whose process
+    is gone is dead, and so is an unreadable or malformed one, so a half-written
+    directory can never pass for a healthy cluster.
 
     Args:
         pid_dir: Directory containing the PID files.
 
     Returns:
-        dict[str, Any]: ``{"alive": [...], "dead": [...]}`` keyed by file name.
+        dict[str, Any]: ``{"alive": [...], "dead": [...], "stale": [...]}``
+        keyed by file name.
     """
     alive: list[str] = []
     dead: list[str] = []
+    stale: list[str] = []
     for pid_file in _server_pid_files(pid_dir):
         try:
             raw = pid_file.read_text(encoding="utf-8").strip()
         except OSError:
             dead.append(pid_file.name)
             continue
-        if not raw.isdigit() or int(raw) <= 0:
+        if not raw.isdigit():
             dead.append(pid_file.name)
             continue
-        try:
-            os.kill(int(raw), 0)
-        except OSError:
-            dead.append(pid_file.name)
-        else:
+        pid = int(raw)
+        if pid == 0:
+            stale.append(pid_file.name)
+        elif _pid_alive(pid):
             alive.append(pid_file.name)
-    return {"alive": alive, "dead": dead}
+        else:
+            dead.append(pid_file.name)
+    return {"alive": alive, "dead": dead, "stale": stale}
 
 
 def main() -> int:
@@ -127,6 +168,7 @@ def main() -> int:
     per_node: dict[str, dict] = {}
     alive = 0
     dead = 0
+    stale = 0
     for short_id, ref in refs:
         try:
             result = ray.get(ref, timeout=_ACTOR_TIMEOUT_S)
@@ -139,12 +181,17 @@ def main() -> int:
         per_node[short_id] = result
         alive += len(result.get("alive") or [])
         dead += len(result.get("dead") or [])
+        stale += len(result.get("stale") or [])
 
     summary = {
+        # ``nodes`` is what the caller checks against the cluster it expects: a
+        # node that was evicted is absent from ray.nodes() entirely, so its
+        # ranks cannot show up as dead here -- only as missing.
         "nodes": len(nodes),
-        "total": alive + dead,
+        "total": alive + dead + stale,
         "alive": alive,
         "dead": dead,
+        "stale": stale,
         "per_node": per_node,
     }
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")

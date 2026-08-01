@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -182,6 +183,78 @@ def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
         assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
     assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
     assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
+
+
+def test_probe_remote_counts_a_zombie_as_gone(tmp_path):
+    """A zombie holds a PID but nothing else, so it must not read as alive.
+
+    The launcher spawns servers under ``nohup setsid``, so the parent exits and
+    the server is reparented to a PID 1 that does not reap. A killed server then
+    lingers as ``<defunct>`` indefinitely, and ``os.kill(pid, 0)`` -- which the
+    probe used at first -- succeeds on it. That is the one direction this check
+    must never get wrong: the caller would skip a relaunch and resume onto a
+    cluster that has already released its GPUs.
+    """
+    pm = _load_script_module("pm_test_zombie", "probe_multinode.py")
+
+    # A child that exits while its parent never waits is a zombie.
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        for _ in range(200):
+            with open(f"/proc/{proc.pid}/stat", "rb") as fh:
+                data = fh.read()
+            if data[data.rfind(b")") + 2 : data.rfind(b")") + 3] == b"Z":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.skip("could not produce a zombie on this platform")
+
+        (tmp_path / "rank_0.pid").write_text(str(proc.pid))
+        out = pm._probe_remote(str(tmp_path))
+
+        assert out["dead"] == ["rank_0.pid"]
+        assert out["alive"] == []
+    finally:
+        proc.wait()
+
+
+def test_probe_remote_treats_the_vllm_sentinel_as_stale_not_dead(tmp_path):
+    """vLLM's non-rank-0 nodes record ``0`` because they run no server.
+
+    Counting that as dead reported every healthy vLLM cluster as broken, so the
+    resume path relaunched over live cold starts for that framework -- the exact
+    failure the liveness check was added to prevent.
+    """
+    pm = _load_script_module("pm_test_sentinel", "probe_multinode.py")
+    (tmp_path / "rank_0.pid").write_text(str(os.getpid()))
+    (tmp_path / "rank_1.pid").write_text("0")
+
+    out = pm._probe_remote(str(tmp_path))
+
+    assert out["alive"] == ["rank_0.pid"]
+    assert out["stale"] == ["rank_1.pid"]
+    assert out["dead"] == []
+
+
+def test_probe_remote_reads_a_corrupt_pid_file_as_dead(tmp_path):
+    """A half-written directory must never pass for a healthy cluster."""
+    pm = _load_script_module("pm_test_corrupt", "probe_multinode.py")
+    (tmp_path / "rank_0.pid").write_text("not-a-pid")
+
+    assert pm._probe_remote(str(tmp_path))["dead"] == ["rank_0.pid"]
+
+
+def test_probe_remote_skips_the_rayjoin_helpers(tmp_path):
+    """Only server PIDs speak to whether the cluster is serving."""
+    pm = _load_script_module("pm_test_rayjoin", "probe_multinode.py")
+    (tmp_path / "rank_0.pid").write_text(str(os.getpid()))
+    (tmp_path / "rank_0_rayjoin.pid").write_text("0")
+    (tmp_path / "router.pid").write_text("0")
+
+    out = pm._probe_remote(str(tmp_path))
+
+    assert out["alive"] == ["rank_0.pid"]
+    assert out["stale"] == []
 
 
 def test_kill_remote_missing_pid_dir():

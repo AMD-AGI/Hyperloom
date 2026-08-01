@@ -102,12 +102,11 @@ _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
 # Budget for the rank-liveness fan-out, which is a Ray job rather than an HTTP
 # call: submission, scheduling, interpreter start, ray.init and one actor per
-# node all land inside it, so it belongs to a different order of magnitude than
-# the serving probe. Must clear probe_multinode.py's own per-actor wait. Only
-# spent when the cluster is not already serving, and only to avoid relaunching
-# over a multi-minute boot, so a slow answer here is still the cheap outcome.
+# node all land inside it. Sized against the caller's own poll budget rather
+# than fixed (see _resume_liveness_timeout_s), with a floor so a very short
+# budget does not guarantee a timeout, since a timed-out probe relaunches.
 _RESUME_LIVENESS_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S"
-_DEFAULT_RESUME_LIVENESS_TIMEOUT_S = 240
+_MIN_RESUME_LIVENESS_TIMEOUT_S = 30
 
 
 def _normalize_extra_args(s: str | None) -> str:
@@ -1653,16 +1652,30 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
-def _resume_liveness_timeout_s() -> int:
+def _resume_liveness_timeout_s(args: argparse.Namespace) -> int:
     """Budget for the rank-liveness Ray job, from submission to summary.
 
+    Derived from this invocation's own poll budget rather than fixed, because a
+    constant cannot be right for both callers. A foreground CLI call has to
+    finish under the sandbox's 120s ceiling, while the orchestrator hands in
+    budgets measured in the hundreds of seconds for MoE cold starts; a value
+    large enough for the second silently blows the first, and the probe is spent
+    before the launch poll even begins. Half leaves room for the rest of the
+    invocation.
+
+    Args:
+        args: Parsed ``restart-server`` arguments, for the poll budget.
+
     Returns:
-        int: Seconds, from ``$HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S`` or the default.
+        int: Seconds, from ``$HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S`` when set.
     """
-    try:
-        return max(1, int(os.environ.get(_RESUME_LIVENESS_TIMEOUT_ENV, "") or _DEFAULT_RESUME_LIVENESS_TIMEOUT_S))
-    except ValueError:
-        return _DEFAULT_RESUME_LIVENESS_TIMEOUT_S
+    override = os.environ.get(_RESUME_LIVENESS_TIMEOUT_ENV, "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            warn(f"invalid {_RESUME_LIVENESS_TIMEOUT_ENV}={override!r}; deriving from the poll budget")
+    return max(_MIN_RESUME_LIVENESS_TIMEOUT_S, _poll_timeout_from_args(args) // 2)
 
 
 def _build_multinode_probe_entrypoint(pid_dir: str) -> str:
@@ -1684,25 +1697,34 @@ def _build_multinode_probe_entrypoint(pid_dir: str) -> str:
     )
 
 
-def _ranks_alive(state: dict[str, Any], pid_dir: str, args: argparse.Namespace) -> bool:
-    """Whether every rank the last launch recorded still has a live process.
+def _ranks_alive(state: dict[str, Any], pid_dir: str, nnodes: int, args: argparse.Namespace) -> bool:
+    """Whether the cluster still holds the launch it recorded, intact.
 
     The signal that separates a cold start from a dead cluster, and the only one
     that can: a server still loading weights serves nothing yet but its process
-    is there, while a crashed or evicted one is gone. This is the rayjob
-    counterpart of infera's per-pod ``kill -0`` on the recorded PID.
+    is there, while a crashed one is gone. This is the rayjob counterpart of
+    infera's per-pod ``kill -0`` on the recorded PID.
 
-    Fail-safe in both directions. An unreachable node, an unparseable summary,
-    or a cluster reporting no server PIDs at all all answer False, so the caller
-    relaunches rather than resuming onto something it could not confirm.
+    Three conditions, because a live process is not by itself a usable cluster.
+    Every expected node has to have answered -- an evicted pod drops out of
+    ``ray.nodes()`` and its ranks then cannot report as dead, only as missing,
+    and resuming onto that leaves the framework waiting forever on a rank that
+    no longer exists. No recorded process may be gone. And at least one has to
+    be a real server, since a cluster of nothing but vLLM's sentinel files has
+    not launched anything.
+
+    Fail-safe throughout: an unreachable node, an unparseable summary, or a
+    missing count all answer False, so the caller relaunches rather than
+    resuming onto something it could not confirm.
 
     Args:
         state: Multi-node state (names the Ray dashboard).
         pid_dir: Directory the last launch wrote per-rank PID files into.
+        nnodes: How many nodes this run expects to be serving.
         args: Parsed ``restart-server`` arguments, for the poll knobs.
 
     Returns:
-        bool: True only when at least one server PID was found and none is dead.
+        bool: True only when the recorded launch is present and whole.
     """
     try:
         with _ray_dashboard_client(state) as ray:
@@ -1723,22 +1745,26 @@ def _ranks_alive(state: dict[str, Any], pid_dir: str, args: argparse.Namespace) 
                 is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
                 is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
                 interval_s=args.poll_interval,
-                timeout_s=_resume_liveness_timeout_s(),
+                timeout_s=_resume_liveness_timeout_s(args),
             )
             summary = _extract_launcher_summary(ray.get_job_logs(sub))
     except Exception as exc:  # noqa: BLE001
         info(f"rank-liveness probe failed ({exc!r}); treating the cluster as not resumable")
         return False
 
-    total = int(summary.get("total") or 0)
+    reported = int(summary.get("nodes") or 0)
+    alive = int(summary.get("alive") or 0)
     dead = int(summary.get("dead") or 0)
-    if total <= 0:
-        info("rank-liveness probe: no server PIDs recorded on any node")
+    if reported < nnodes:
+        info(f"rank-liveness probe: only {reported}/{nnodes} nodes are still in the cluster")
         return False
     if dead:
-        info(f"rank-liveness probe: {dead}/{total} recorded server processes are gone")
+        info(f"rank-liveness probe: {dead} recorded server processes are gone")
         return False
-    info(f"rank-liveness probe: all {total} recorded server processes are alive")
+    if alive <= 0:
+        info("rank-liveness probe: no server process is recorded on any node")
+        return False
+    info(f"rank-liveness probe: {alive} server processes alive across {reported} nodes")
     return True
 
 
@@ -1852,7 +1878,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                         f"tokens; skipping KILL+LAUNCH"
                     )
                     launch_sub = prev_sub
-                elif _ranks_alive(state, pid_dir, args):
+                elif _ranks_alive(state, pid_dir, nnodes, args):
                     info(
                         f"resume: prior launch_sub={prev_sub} SUCCEEDED and every rank is alive but not "
                         f"serving yet; skipping KILL+LAUNCH and waiting on the boot in progress"

@@ -861,19 +861,25 @@ def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
 @pytest.mark.parametrize(
     ("summary", "expected"),
     [
-        ({"total": 4, "alive": 4, "dead": 0}, True),
-        ({"total": 4, "alive": 3, "dead": 1}, False),
-        # No PID files anywhere: nothing was ever launched, or the dir is gone.
-        ({"total": 0, "alive": 0, "dead": 0}, False),
+        ({"nodes": 4, "alive": 4, "dead": 0}, True),
+        # vLLM: only rank 0 runs a server, the rest record the sentinel. A
+        # healthy cluster here reports one alive and three stale.
+        ({"nodes": 4, "alive": 1, "dead": 0, "stale": 3}, True),
+        ({"nodes": 4, "alive": 3, "dead": 1}, False),
+        # An evicted pod leaves ray.nodes() entirely, so its ranks are missing
+        # rather than dead. Resuming would wait forever on a rank that is gone.
+        ({"nodes": 3, "alive": 3, "dead": 0}, False),
+        # Nothing was ever launched, or the pid dir is gone.
+        ({"nodes": 4, "alive": 0, "dead": 0}, False),
         ({}, False),
     ],
 )
-def test_ranks_alive_requires_every_recorded_process(
+def test_ranks_alive_requires_a_whole_cluster_not_just_live_processes(
     monkeypatch: pytest.MonkeyPatch,
     summary: dict,
     expected: bool,
 ) -> None:
-    """Fail-safe: anything but a full house of live ranks means relaunch."""
+    """Fail-safe: anything short of every node holding its launch means relaunch."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     class _FakeRay:
@@ -896,18 +902,43 @@ def test_ranks_alive_requires_every_recorded_process(
 
     args = argparse.Namespace(poll_interval=1, poll_timeout=5)
 
-    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", args) is expected
+    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", 4, args) is expected
 
 
-def test_ranks_alive_polls_on_its_own_budget_not_the_http_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Ray fan-out is not an HTTP call and cannot share its budget.
+@pytest.mark.parametrize(
+    ("poll_timeout", "expected"),
+    [
+        # Foreground CLI: must leave room under the sandbox's 120s ceiling.
+        (110, 55),
+        # Orchestrator budgets for an MoE cold start.
+        (900, 450),
+        # Floor, so a tiny budget does not guarantee a timeout -- and a
+        # timed-out probe relaunches over the boot it was meant to protect.
+        (10, 30),
+    ],
+)
+def test_liveness_budget_is_sized_against_the_calls_own_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    poll_timeout: int,
+    expected: int,
+) -> None:
+    """A fixed budget cannot be right for both callers.
 
-    The liveness probe submits a job that must be scheduled, start an
-    interpreter, run ray.init and place one actor per node before it answers.
-    Handing it the serving probe's seconds-scale budget timed it out every time,
-    and because a failed probe reads as "not resumable", the cluster it was
-    supposed to protect got relaunched anyway.
+    A Ray fan-out is not an HTTP call and cannot share the serving probe's
+    seconds-scale budget. But a constant large enough for the orchestrator's
+    cold-start budgets silently overruns a foreground invocation, and it is
+    spent before the launch poll even starts.
     """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.delenv("HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S", raising=False)
+    args = argparse.Namespace(poll_timeout=poll_timeout)
+
+    assert mncli._resume_liveness_timeout_s(args) == expected
+
+
+def test_ranks_alive_polls_on_the_liveness_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fan-out is what the budget must cover, so that is what it gets."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     budgets: list[int] = []
@@ -920,7 +951,7 @@ def test_ranks_alive_polls_on_its_own_budget_not_the_http_one(monkeypatch: pytes
             return "probe-1"
 
         def get_job_logs(self, _sub: str) -> str:
-            return json.dumps({"total": 2, "alive": 2, "dead": 0})
+            return json.dumps({"nodes": 2, "alive": 2, "dead": 0})
 
     @contextlib.contextmanager
     def _fake_client(_state: object):
@@ -934,9 +965,9 @@ def test_ranks_alive_polls_on_its_own_budget_not_the_http_one(monkeypatch: pytes
     monkeypatch.setattr(mncli, "_build_multinode_probe_entrypoint", lambda *_a, **_k: "probe-ep")
     monkeypatch.setattr(mncli, "_short_poll", _record_poll)
 
-    assert mncli._ranks_alive({}, "/tmp/pids", argparse.Namespace(poll_interval=1, poll_timeout=5)) is True
-    assert budgets == [mncli._resume_liveness_timeout_s()]
-    assert budgets[0] > mncli._resume_probe_timeout_s()
+    args = argparse.Namespace(poll_interval=1, poll_timeout=110)
+    assert mncli._ranks_alive({}, "/tmp/pids", 2, args) is True
+    assert budgets == [mncli._resume_liveness_timeout_s(args)]
 
 
 def test_ranks_alive_treats_an_unreachable_cluster_as_not_resumable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -950,7 +981,8 @@ def test_ranks_alive_treats_an_unreachable_cluster_as_not_resumable(monkeypatch:
 
     monkeypatch.setattr(mncli, "_ray_dashboard_client", _exploding_client)
 
-    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", argparse.Namespace(poll_interval=1, poll_timeout=5)) is False
+    args = argparse.Namespace(poll_interval=1, poll_timeout=5)
+    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", 2, args) is False
 
 
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
