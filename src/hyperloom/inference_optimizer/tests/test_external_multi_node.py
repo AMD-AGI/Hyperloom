@@ -572,6 +572,100 @@ def test_served_endpoint_probe_without_a_service_url_is_not_evidence() -> None:
     assert mncli._served_endpoint_answers({}, 5) is False
 
 
+@pytest.mark.parametrize(
+    ("pd_mode", "no_wait_health", "expected"),
+    [
+        ("aggregated", False, True),
+        # The launcher returns before the ranks are serving in both of these, so
+        # a terminal-OK driver says nothing about a server.
+        ("disaggregated", False, False),
+        ("aggregated", True, False),
+    ],
+)
+def test_launch_verified_health_tracks_what_the_launcher_actually_waited_for(
+    pd_mode: str,
+    no_wait_health: bool,
+    expected: bool,
+) -> None:
+    """Only a launch that waited for rank 0 makes SUCCEEDED mean anything."""
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    args = argparse.Namespace(pd_mode=pd_mode, no_wait_health=no_wait_health)
+
+    assert mncli._launch_verified_health(args) is expected
+
+
+def test_resume_does_not_probe_when_the_launch_never_waited_for_health(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold start in progress must not be torn down by the resume probe.
+
+    ``launch_multinode.py`` returns early without probing under
+    ``--no-wait-health`` and under PD disaggregation, so its job reaches
+    SUCCEEDED within seconds of spawning the ranks -- while the weight load, and
+    in the PD case the router submission, are still ahead. Probing there reports
+    the cold start rather than a dead cluster, and relaunching on that answer
+    restarted a 20-30 minute MoE boot from zero on every poll-timeout retry,
+    which never converges when the boot outlasts the poll budget.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    _write_disk_state(
+        backend="rayjob",
+        head_pod_ip="10.0.2.1",
+        last_restart_model="/models/test",
+        last_restart_tp=8,
+        last_restart_ep=1,
+        last_restart_pd_mode="aggregated",
+        last_restart_extra_args="",
+    )
+
+    killed: list[str] = []
+    probed: list[str] = []
+
+    class _FakeRay:
+        def get_job(self, _sub: str) -> dict[str, str]:
+            return {"status": "SUCCEEDED"}
+
+        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
+            return "launch-2"
+
+    @contextlib.contextmanager
+    def _fake_client(_state: object):
+        yield _FakeRay()
+
+    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
+    monkeypatch.setattr(mncli, "_build_multinode_kill_entrypoint", lambda *_a, **_k: "kill-ep")
+    monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
+    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
+    monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
+    # A dead endpoint: the pre-fix code would have relaunched on this answer.
+    monkeypatch.setattr(mncli, "_served_endpoint_answers", lambda *_a, **_k: probed.append("probe") or False)
+
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/models/test",
+        tp=8,
+        ep=1,
+        pd_mode="aggregated",
+        extra_args="",
+        pid_file=None,
+        log_file=None,
+        poll_interval=1,
+        poll_timeout=5,
+        print_logs=False,
+        no_wait_health=True,
+    )
+
+    assert mncli.cmd_restart_server(args) == 0
+    assert probed == [], "must not consult a probe whose answer cannot distinguish booting from dead"
+    assert killed == [], "must not tear down a cold start that is still in progress"
+
+
 @pytest.mark.parametrize(("endpoint_answers", "expect_relaunch"), [(True, False), (False, True)])
 def test_resume_relaunches_unless_the_served_endpoint_answers(
     _external_env: Path,
@@ -636,6 +730,9 @@ def test_resume_relaunches_unless_the_served_endpoint_answers(
         poll_interval=1,
         poll_timeout=5,
         print_logs=False,
+        # This launch waits for rank 0, so a terminal-OK driver is a claim the
+        # probe is entitled to check.
+        no_wait_health=False,
     )
 
     assert mncli.cmd_restart_server(args) == 0

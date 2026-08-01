@@ -1640,6 +1640,32 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
+def _launch_verified_health(args: argparse.Namespace) -> bool:
+    """Whether a SUCCEEDED launch driver had to see a healthy rank 0 to exit.
+
+    ``launch_multinode.py`` returns 0 early, without probing anything, in two
+    cases: ``--no-wait-health``, and PD disaggregation, where the router owns the
+    serving port and the caller polls it separately. The driver then finishes
+    within seconds of spawning the ranks -- long before the weight load, and in
+    the PD case before the router has even been submitted.
+
+    That distinction decides whether a failed ``/health`` means anything. When
+    the driver did wait, SUCCEEDED means the server was up once, so silence now
+    is news: it died. When the driver did not wait, silence is the expected
+    state of a cold start, indistinguishable from a dead cluster, and acting on
+    it would tear down the very boot the retry meant to resume.
+
+    Args:
+        args: Parsed ``restart-server`` arguments.
+
+    Returns:
+        bool: True when a terminal-OK launch implies a server answered once.
+    """
+    if getattr(args, "no_wait_health", False):
+        return False
+    return (getattr(args, "pd_mode", "") or "aggregated").lower() != "disaggregated"
+
+
 def _served_endpoint_answers(state: dict[str, Any], timeout_s: int) -> bool:
     """Whether the cluster's frontend answers ``/health`` right now.
 
@@ -1777,6 +1803,18 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     f"(framework={args.framework} model={args.model} "
                     f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
                     f"— skipping KILL+LAUNCH, just polling"
+                )
+                launch_sub = prev_sub
+            elif _prev_status in _TERMINAL_OK_STATUSES and not _launch_verified_health(args):
+                # The driver exits before the servers are up in these modes, so
+                # a probe here could only report the cold start still running
+                # and would relaunch over it. Resume and let the orchestrator's
+                # post-launch /health wait be the one that fails, at the cost of
+                # a wait budget rather than a restart from zero.
+                info(
+                    f"resume: prior launch_sub={prev_sub} SUCCEEDED; skipping KILL+LAUNCH without a probe "
+                    f"(this launch does not wait for /health, so an unanswered endpoint would not mean the "
+                    f"cluster is down)"
                 )
                 launch_sub = prev_sub
             elif _prev_status in _TERMINAL_OK_STATUSES:
