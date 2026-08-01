@@ -191,6 +191,9 @@ def build_external_state_from_env() -> dict[str, Any]:
     ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", DEFAULT_SSH_PORT)
     known_hosts = os.environ.get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS", "").strip()
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
+    # From the --pd-mode flag, mirrored into the env by `optimize`. Not inferred
+    # from the handed-over pod lists: unset means the operator did not ask for
+    # disaggregation, and guessing otherwise would split a run they wanted whole.
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
 
     try:

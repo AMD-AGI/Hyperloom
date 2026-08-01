@@ -91,19 +91,21 @@ def _infera_require_state() -> dict[str, Any]:
     """
     state = _mn_cli._load_state()
     if state.get("backend") != "infera":
-        raise RuntimeError(
+        raise _mn_cli.ConfigurationError(
             "state backend is not 'infera'; the platform selects the backend, check "
             "INFERENCE_OPTIMIZER_MN_BACKEND and the HYPERLOOM_MN_EXT_* hand-off"
         )
     has_gpu_pods = bool(_infera_all_gpu_targets(state))
     if not has_gpu_pods:
-        raise RuntimeError(
-            "no GPU pod IPs in state; check HYPERLOOM_MN_EXT_PREFILL_IPS / "
-            "_DECODE_IPS / _WORKER_IPS (LWS pods may not have had IPs yet when "
-            "the workload reached Running)"
+        raise _mn_cli.ConfigurationError(
+            f"no GPU pod IPs in state for pd_mode={state.get('pd_mode')!r}. That mode reads "
+            f"{'HYPERLOOM_MN_EXT_PREFILL_IPS + _DECODE_IPS' if state.get('pd_mode') == 'disaggregated' else 'HYPERLOOM_MN_EXT_WORKER_IPS'} "
+            f"and nothing else, so a hand-off whose IPs live under the other names looks empty here: "
+            f"a PD cluster needs PD_MODE=disaggregated set too. (LWS pods may also not have had IPs "
+            f"yet when the workload reached Running.)"
         )
     if not state.get("ssh_key_path"):
-        raise RuntimeError("no ssh_key_path in state; check HYPERLOOM_MN_EXT_SSH_KEY")
+        raise _mn_cli.ConfigurationError("no ssh_key_path in state; check HYPERLOOM_MN_EXT_SSH_KEY")
     return state
 
 
@@ -431,7 +433,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state = _infera_require_state()
     framework = (args.framework or state.get("framework") or "sglang").lower()
     if framework not in ("sglang", "vllm"):
-        raise RuntimeError(f"unsupported framework: {framework!r}")
+        raise _mn_cli.ConfigurationError(f"unsupported framework: {framework!r}")
     shared_extra = getattr(args, "extra_args", "") or ""
     try:
         validate_server_args(shared_extra, context="infera restart-server --extra-args")
@@ -496,7 +498,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
 
     if pd_mode == "disaggregated":
         if framework != "sglang":
-            raise RuntimeError("PD disaggregation is sglang-only on the Infera backend")
+            raise _mn_cli.ConfigurationError("PD disaggregation is sglang-only on the Infera backend")
         # Prefill group + decode group: each is its own LWS, each pod uses its
         # own $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS. We send per-group tp/nnodes
         # and the matching --disaggregation-mode.
@@ -512,6 +514,19 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             default_port=_mn_cli._infera_default_ssh_port(state) + infera_support.INFERA_SSH_PORT_ROLE_STRIDE,
             default_role="decode",
         )
+        # A PD restart needs both legs. Skipping an empty one used to leave
+        # rc_total at 0, so a --pd-mode disaggregated run against a state whose
+        # pod lists are aggregated made no SSH connection at all and still
+        # reported "infera servers launched" and exit 0 -- after which the round
+        # benchmarked whatever was already running and called it a result.
+        missing = [role for role, targets in (("prefill", prefill_targets), ("decode", decode_targets)) if not targets]
+        if missing:
+            raise _mn_cli.ConfigurationError(
+                f"PD disaggregation was requested but the state records no {' or '.join(missing)} pods. "
+                f"state pd_mode={state.get('pd_mode')!r}: the pod lists are chosen by the state's own mode, "
+                f"so a PD hand-off needs PD_MODE=disaggregated (or --pd-mode disaggregated on `optimize`, "
+                f"which exports it) alongside HYPERLOOM_MN_EXT_PREFILL_IPS / _DECODE_IPS."
+            )
         pd_prefill_nodes, pd_decode_nodes = _resolve_pd_node_counts(
             args,
             state,
@@ -534,8 +549,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             ("prefill", prefill_targets, pn, ptp, pep, prefill_extra),
             ("decode", decode_targets, dn, dtp, dep, decode_extra),
         ):
-            if not targets:
-                continue
             launch_args = infera_support.build_node_launch_args(
                 framework=framework,
                 model=args.model,

@@ -90,7 +90,13 @@ a `--nodes >= 2` run has nothing to drive and exits 2.
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | no | known_hosts path (else lax host-key check) |
 
 infera **requires** SSH (`_SSH_KEY` + ≥1 `*_IPS`); missing → fails fast
-(exit 2), no degrade.
+(**exit 3**, config error), no degrade.
+
+Which list is read is decided by `$PD_MODE` alone, never guessed from which
+lists you set: unset means aggregated, so a PD cluster that exports
+`_PREFILL_IPS` / `_DECODE_IPS` without `PD_MODE=disaggregated` reads as having
+no GPU pods at all. `optimize` exports it from `--pd-mode`; a standalone
+`hyperloom-mn` subcommand needs it in the environment.
 
 **rayjob (`--mn-backend rayjob`)** — ignores the infera `_SSH_*` / `*_IPS` vars.
 

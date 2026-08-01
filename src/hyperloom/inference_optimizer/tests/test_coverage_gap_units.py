@@ -322,6 +322,97 @@ def _restart_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def test_pd_restart_against_an_aggregated_state_fails_instead_of_reporting_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart that touches nothing must not report that it launched servers.
+
+    ``--pd-mode disaggregated`` is honoured even when the state's own pd_mode is
+    aggregated, but the pod lists are chosen by the state alone, so both legs
+    resolved empty. Each was then skipped, ``rc_total`` stayed 0, and the
+    command printed "infera servers launched" and exited 0 without opening a
+    single SSH connection -- after which the round benchmarked whatever was
+    already running and recorded it as this candidate's result.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    state = {
+        "backend": "infera",
+        "framework": "sglang",
+        "nodes": 2,
+        "pd_mode": "aggregated",
+        "worker_pod_ips": ["10.0.1.0", "10.0.1.1"],
+        "ssh_key_path": "/tmp/k",
+        "ssh_port": 2222,
+    }
+    fanout_calls: list[str] = []
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
+    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda _payload: None)
+    monkeypatch.setattr(
+        inf,
+        "_infera_fanout_launch",
+        lambda st, args, targets, **kw: fanout_calls.append(kw["label"]) or (0, [{"ok": True}]),
+    )
+
+    with pytest.raises(inf._mn_cli.ConfigurationError, match="no prefill or decode pods"):
+        inf._infera_restart_server(_restart_args(pd_mode="disaggregated"))
+
+    assert fanout_calls == []
+
+
+@pytest.mark.parametrize(
+    ("state", "match"),
+    [
+        ({"backend": "rayjob"}, "backend is not 'infera'"),
+        ({"backend": "infera", "pd_mode": "aggregated"}, "no GPU pod IPs"),
+        ({"backend": "infera", "worker_pod_ips": ["10.0.1.0"]}, "no ssh_key_path"),
+    ],
+)
+def test_infera_state_errors_are_config_errors_not_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict,
+    match: str,
+) -> None:
+    """Rerunning cannot supply an SSH key, so these must not read as retryable.
+
+    ``main`` classifies a bare RuntimeError by message substring and none of
+    these matched, so all three fell through to EXIT_TRANSIENT -- which the
+    controller is told means "rerun the same subcommand". A permanently
+    misconfigured hand-off was retried forever. ConfigurationError is matched by
+    type instead, which is what it exists for.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
+
+    with pytest.raises(inf._mn_cli.ConfigurationError, match=match):
+        inf._infera_require_state()
+
+
+def test_missing_gpu_pods_names_the_mode_that_chose_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The message has to explain why IPs that ARE set look absent.
+
+    A PD hand-off invoked without ``PD_MODE=disaggregated`` synthesizes as
+    aggregated, so only ``_WORKER_IPS`` is consulted and the error read "check
+    PREFILL / DECODE / WORKER" while both of those were in fact set.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setattr(
+        inf._mn_cli,
+        "_load_state",
+        lambda: {"backend": "infera", "pd_mode": "aggregated", "prefill_pod_ips": ["10.0.2.0"]},
+    )
+
+    with pytest.raises(inf._mn_cli.ConfigurationError) as excinfo:
+        inf._infera_require_state()
+
+    message = str(excinfo.value)
+    assert "pd_mode='aggregated'" in message
+    assert "HYPERLOOM_MN_EXT_WORKER_IPS" in message
+    assert "PD_MODE=disaggregated" in message
+
+
 def test_resolve_pd_node_counts_infers_from_pod_lists() -> None:
     """PD node counts fall back to discovered pod-list lengths when CLI is unset."""
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
@@ -1152,7 +1243,6 @@ def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(Path, "iterdir", _iterdir_with_bad_stat)
     opt_mn._gc_old_profile_traces(str(root), retention_days=7)
-
 
 
 def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
