@@ -22,6 +22,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _detect_p_level,
     _read_done_payload,
 )
+from hyperloom.orchestrator.actions.executors._stack_rebench import StackRebenchResult
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
@@ -271,6 +272,40 @@ def _stub_confirm(result: dict):
         return result
 
     return _c
+
+
+@pytest.mark.asyncio
+async def test_confirmation_rebench_floor_stays_below_keep_threshold(tmp_path, monkeypatch):
+    """A late-cycle confirmation cannot impose a stricter gain floor than KEEP."""
+    config_path = tmp_path / "base.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    captured: dict[str, float] = {}
+
+    def _materialize(*_args, **_kwargs):
+        return config_path
+
+    async def _measure(**kwargs):
+        captured["stable_threshold_pct"] = kwargs["stable_threshold_pct"]
+        return StackRebenchResult(tput=None, workspace=None)
+
+    monkeypatch.setattr(ip, "materialize_config_with_envs", _materialize)
+    monkeypatch.setattr(ip, "measure_stack_rebench", _measure)
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path)
+    await executor._confirm_stack_rebench(
+        params={
+            "config_path": str(config_path),
+            "keep_threshold_pct": 0.4,
+            "rebench_stable_threshold_pct": 0.5,
+        },
+        output_root=tmp_path / "output",
+        extra_server_args_applied="",
+        extra_envs_applied={},
+        specialist_task_id="spec",
+        base_tput=100.0,
+    )
+
+    assert captured["stable_threshold_pct"] == pytest.approx(0.2)
 
 
 @pytest.mark.asyncio
