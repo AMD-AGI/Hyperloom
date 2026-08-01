@@ -185,6 +185,71 @@ def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
     assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
 
 
+def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
+    """A second router must not be stacked on top of the one already running.
+
+    The spawn ends with ``echo $! > router.pid``, so a router started while one
+    was live left the old process holding the public port with nothing naming
+    it: ``kill_multinode`` sweeps ``router*.pid``, which now points at the
+    newcomer, so the orphan survives every later kill. The resume paths reach
+    this without ever sweeping the pid dir, which is what made it reachable.
+    """
+    lr = _load_script_module("lr_test_replace", "launch_router.py")
+    pid_file = tmp_path / "router.pid"
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        pid_file.write_text(str(victim.pid))
+
+        lr._retire_previous_router(pid_file, grace_s=5.0)
+
+        assert victim.poll() is not None, "the previous router must be stopped, not left holding the port"
+    finally:
+        if victim.poll() is None:  # pragma: no cover - only on an unexpected failure
+            victim.kill()
+        victim.wait()
+
+
+def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
+    """The replacement has to happen on the spawn path, not just be available.
+
+    Guards the wiring rather than the helper: it is the call inside
+    ``_detach_router`` that keeps a resume from stacking a second router.
+    """
+    lr = _load_script_module("lr_test_wiring", "launch_router.py")
+    pid_file = tmp_path / "router.pid"
+    log_file = tmp_path / "router.log"
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    spawned = 0
+    try:
+        pid_file.write_text(str(victim.pid))
+
+        spawned = lr._detach_router(["sleep", "30"], log_file, pid_file)
+
+        assert victim.poll() is not None, "the previous router must be stopped by the spawn path"
+        assert spawned != victim.pid
+        assert int(pid_file.read_text().strip()) == spawned
+    finally:
+        for pid in (victim.pid, spawned):
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        victim.wait()
+
+
+def test_router_launch_tolerates_a_stale_pid_file(tmp_path):
+    """A pid file naming nothing live is the normal first-launch case."""
+    lr = _load_script_module("lr_test_stale", "launch_router.py")
+
+    for content in ("", "0", "not-a-pid", "999999999"):
+        pid_file = tmp_path / "router.pid"
+        pid_file.write_text(content)
+        lr._retire_previous_router(pid_file, grace_s=0.1)
+
+
 def test_probe_remote_counts_a_zombie_as_gone(tmp_path):
     """A zombie holds a PID but nothing else, so it must not read as alive.
 

@@ -665,6 +665,73 @@ def _fake_serving_httpx(
     return types.SimpleNamespace(Client=_Client)
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"usage": {"completion_tokens": 5}}, 5),
+        # No usage block: a non-empty text still proves something was generated.
+        ({"choices": [{"text": "hello"}]}, 1),
+        # The broken PD KV handoff: 200, and nothing came back.
+        ({"choices": [{"text": "   "}]}, 0),
+        ({"usage": {"completion_tokens": 0}, "choices": [{"text": ""}]}, 0),
+        # Shapes a server should never send, which must not raise here.
+        ({"usage": {"completion_tokens": "many"}}, 0),
+        ({"usage": "nonsense", "choices": []}, 0),
+        ({}, 0),
+        ("not a body", 0),
+    ],
+)
+def test_generated_tokens_counts_only_what_was_actually_produced(body: object, expected: int) -> None:
+    """The reading that separates a serving cluster from one that answers 200."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    assert serving_probe.generated_tokens(body) == expected
+
+
+def test_probe_thresholds_survive_a_junk_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed tunable must not decide whether a cluster looks alive."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", "lots")
+
+    assert serving_probe._int_env("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8) == 8
+
+
+def test_cluster_is_serving_survives_a_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable endpoint is a "not serving" answer, never an exception.
+
+    The caller treats any raise as a failed probe, but letting one escape here
+    would bypass the liveness check that decides whether a relaunch is safe.
+    """
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    class _Exploding:
+        def __init__(self, timeout: object = None) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> "_Exploding":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def get(self, _url: str, timeout: float | None = None) -> object:
+            raise ConnectionError("connection refused")
+
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(Client=_Exploding))
+
+    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is False
+
+
+def test_cluster_is_serving_without_httpx_is_not_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preflight backfills httpx; until it does, nothing can be confirmed."""
+    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
+
+    monkeypatch.setitem(sys.modules, "httpx", None)
+
+    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is False
+
+
 def test_cluster_is_serving_accepts_a_cluster_that_generates_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one answer that lets a resume skip a relaunch outright."""
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe

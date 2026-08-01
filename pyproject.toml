@@ -317,6 +317,12 @@ omit = [
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/multi_node/cli.py",
     "src/hyperloom/inference_optimizer/multi_node/scripts/*",
+    # Only ray_dashboard.py here is the subprocess-wrapper case above; the rest
+    # is library code (hand-off state synthesis, serving/GPU probes, SSH and
+    # known-hosts, server-arg safety) that this blanket entry excuses from the
+    # gate. Measured at 88.79% as of writing -- ssh_known_hosts.py 75.6% and
+    # external_state.py 85.8% are what keep the subtree under fail_under, so
+    # narrowing this entry needs those covered first.
     "src/hyperloom/inference_optimizer/multi_node/_internal/*",
     # Subprocess wrappers + multi-node server lifecycle.
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,77 @@ def _log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_router {ts}] {msg}\n")
     sys.stderr.flush()
+
+
+def _router_alive(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie router.
+
+    Same reasoning as ``kill_multinode._pid_alive``: the router is spawned under
+    ``nohup setsid``, so it is reparented to a PID 1 that does not reap, and a
+    dead one lingers as ``<defunct>`` where a bare ``os.kill(pid, 0)`` still
+    succeeds. A zombie holds no port, so treating it as running would only stall
+    the replacement.
+
+    Args:
+        pid: Process id to probe.
+
+    Returns:
+        bool: True only when the process exists and is not a zombie.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+        rparen = data.rfind(b")")
+        if rparen != -1 and data[rparen + 2 : rparen + 3] == b"Z":
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0) -> None:
+    """Stop the router this PID file names, if one is still running.
+
+    The spawn below ends with ``echo $! > pid_file``, so without this step the
+    previous router is not replaced but orphaned: it goes on holding the public
+    port while the file that named it now points at the newcomer, which puts it
+    beyond the reach of ``kill_multinode``'s ``router*.pid`` sweep for the rest
+    of the pod's life. The new router then finds its port taken.
+
+    Reached on every restart, including the resume paths that skip KILL+LAUNCH
+    and so never sweep the pid dir. Nothing is being interrupted mid-flight --
+    a restart is the caller -- and a router is a proxy rather than a model
+    server, so replacing one costs a moment instead of a weight load.
+
+    Args:
+        pid_file: Path the previous router's PID was written to.
+        grace_s: Seconds to wait for a clean exit before SIGKILL.
+    """
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return
+    if pid <= 0 or not _router_alive(pid):
+        return
+    _log(f"replacing router pid={pid}, which still holds port {_PUBLIC_PORT}")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
+        if not _router_alive(pid):
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+        _log(f"router pid={pid} ignored SIGTERM for {grace_s:.0f}s; sent SIGKILL")
+    except OSError:
+        return
 
 
 def _build_sglang_router_cmd(
@@ -133,6 +205,7 @@ def _detach_router(
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
+    _retire_previous_router(pid_file)
     log_q = shlex.quote(str(log_file))
     pid_q = shlex.quote(str(pid_file))
     inner = " ".join(shlex.quote(c) for c in cmd)
