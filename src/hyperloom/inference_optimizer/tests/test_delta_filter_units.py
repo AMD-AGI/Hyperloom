@@ -126,6 +126,19 @@ def test_empty_input_is_returned_unchanged(monkeypatch, tmp_path, ctx):
     assert info["reason"] == "empty_input"
 
 
+@pytest.fixture
+def checkpoint(tmp_path):
+    """A readable config.json, which the LLM backend requires before ranking."""
+    d = tmp_path / "ckpt"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"],
+        "hidden_size": 5120, "num_hidden_layers": 64, "num_attention_heads": 64,
+        "num_key_value_heads": 8, "vocab_size": 151936, "intermediate_size": 25600,
+    }))
+    return str(d)
+
+
 class TestLLMBackend:
     """The served-ranker path, which prunes by keeping a fraction of the order."""
 
@@ -135,46 +148,82 @@ class TestLLMBackend:
         return lambda variants, identity_text: (
             [int(t) - 1 for t in order.split(",")] if order else None)
 
-    def test_keeps_the_top_fraction(self, monkeypatch, grid, ctx):
+    def test_keeps_the_top_fraction(self, monkeypatch, grid, ctx, checkpoint):
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.3")
         monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
-        kept, info = df.filter_variants(grid, **ctx)
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert info["reason"] == "ok_llm"
         # ceil(3 * 0.3) == 1, and the reply ranked candidate 3 first.
         assert [v.name for v in kept] == ["both"]
 
-    def test_survivors_keep_their_original_order(self, monkeypatch, grid, ctx):
+    def test_survivors_keep_their_original_order(self, monkeypatch, grid, ctx, checkpoint):
         """The ranking selects; it does not reorder what the caller then measures."""
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.6")
         monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
-        kept, _ = df.filter_variants(grid, **ctx)
+        kept, _ = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         # ceil(3 * 0.6) == 2: candidates 3 and 1 survive, and they come back in
         # grid order rather than rank order.
         assert [v.name for v in kept] == ["kv", "both"]
 
-    def test_version_mismatch_disables_the_llm_path(self, monkeypatch, grid, ctx):
+    def test_version_mismatch_disables_the_llm_path(self, monkeypatch, grid, ctx, checkpoint):
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setenv(df.ENV_LLM_VERSION, "0.5.11")
         monkeypatch.setattr(df, "_rank_with_llm", self._reply("3,1,2"))
-        kept, info = df.filter_variants(grid, **ctx)
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert kept == grid
         assert info["reason"] == "version_mismatch"
 
-    def test_unreachable_ranker_keeps_everything(self, monkeypatch, grid, ctx):
+    def test_unreachable_ranker_keeps_everything(self, monkeypatch, grid, ctx, checkpoint):
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setattr(df, "_rank_with_llm", self._reply(""))
-        kept, info = df.filter_variants(grid, **ctx)
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert kept == grid
         assert info["reason"] == "llm_unavailable"
 
-    def test_never_empties_the_grid(self, monkeypatch, grid, ctx):
+    def test_never_empties_the_grid(self, monkeypatch, grid, ctx, checkpoint):
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.0")
         monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,3,1"))
-        kept, _ = df.filter_variants(grid, **ctx)
+        kept, _ = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert len(kept) == 1
+
+    def test_unreadable_checkpoint_refuses_rather_than_ranking(
+            self, monkeypatch, grid, ctx):
+        """A hollow identity still yields a confident order, so refuse instead."""
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        called = []
+        monkeypatch.setattr(df, "_rank_with_llm",
+                            lambda *a, **k: called.append(1) or [0, 1, 2])
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": "/nope"})
+        assert kept == grid
+        assert info["reason"] == "identity_unavailable"
+        assert not called, "the ranker must not be asked without an identity"
+
+    def test_token_budget_scales_with_candidate_count(self, monkeypatch):
+        """A fixed budget truncates long orderings, and truncation is invisible."""
+        seen = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"1"}}]}'
+
+        def fake_urlopen(req, timeout=None):
+            seen.update(json.loads(req.data))
+            return _Resp()
+
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        df._rank_with_llm([_variant("v%d" % i, "--flag-%d" % i) for i in range(24)], "x")
+        assert seen["max_tokens"] >= 24 * 4, "24 candidates need room for 24 numbers"
+        assert seen["chat_template_kwargs"] == {"enable_thinking": False}
 
     def test_delta_text_matches_the_training_rendering(self):
         """A paraphrase is a distribution shift; the ranker saw this exact form."""

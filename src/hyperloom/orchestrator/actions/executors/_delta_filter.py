@@ -23,6 +23,15 @@ measured to matter:
     slow search into no search.
   * Everything is opt-in via ``HYPERLOOM_DELTA_FILTER_DIR``. Unset, or with the
     artifact or lightgbm unavailable, behaviour is byte-identical to no filter.
+
+A served-LLM backend is also available and is measurably the better ranker, but
+it carries one constraint this module cannot enforce: it needs a GPU of its own.
+Concurrent GPU work on a single node was measured to slow a benchmark by more
+than 4x -- a 57 GB MoE that loads in 3m38s alone did not finish in 15 minutes
+beside another job -- so hosting the ranker next to the benchmarks corrupts the
+very measurements the optimizer decides on. Serve it on a separate node, or take
+it down while EXPLORE measures. The GBDT backend has no such conflict: it is
+microseconds of CPU.
 """
 
 from __future__ import annotations
@@ -213,8 +222,17 @@ def _rank_with_llm(variants: list, identity_text: str) -> list[int] | None:
             {"role": "user", "content": "Model: %s\n\nCandidates:\n%s"
                                         % (identity_text, listing)},
         ],
-        "max_tokens": 96,
+        # Roughly four tokens per "12, " plus slack. A fixed budget silently
+        # truncates the tail of a long ordering, and a truncated ordering is not
+        # an error the caller can see -- the unranked remainder just keeps its
+        # original position.
+        "max_tokens": max(32, 5 * len(variants) + 16),
         "temperature": 0,
+        # The fine-tune was done with thinking off. Left on, the reply carries an
+        # empty <think></think> pair that eats the token budget for nothing, and
+        # a model or sampling change that made those blocks non-empty would eat
+        # all of it.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     lora = os.environ.get(ENV_LLM_LORA, "").strip()
     if lora:
@@ -306,6 +324,15 @@ def filter_variants(
             info["reason"] = "version_mismatch"
             return variants, info
         ident = _identity_features(model_path, precision, hardware, framework, running)
+        if not ident.get("hidden_size"):
+            # Without the checkpoint the identity collapses to a couple of
+            # labels, which is a prompt the ranker never saw. Ranking from it
+            # would still return a confident order, so refuse instead: the GBDT
+            # backend degrades gracefully on missing features, this one does not.
+            log.warning("delta_filter: no readable config at %r; not filtering",
+                        model_path)
+            info["reason"] = "identity_unavailable"
+            return variants, info
         order = _rank_with_llm(variants, _describe_identity(model_path, ident))
         if order is None:
             info["reason"] = "llm_unavailable"
