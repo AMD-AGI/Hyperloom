@@ -1205,6 +1205,12 @@ def _normalize_optimization_stack_entry(
         out["provenance"] = str(raw.get("provenance") or "")
     if "task_id" in raw:
         out["task_id"] = str(raw.get("task_id") or "")
+    if "source_phase" in raw:
+        out["source_phase"] = str(raw.get("source_phase") or "")
+    if "operation_kind" in raw:
+        out["operation_kind"] = str(raw.get("operation_kind") or "")
+    if "scope" in raw:
+        out["scope"] = str(raw.get("scope") or "")
     return out
 
 

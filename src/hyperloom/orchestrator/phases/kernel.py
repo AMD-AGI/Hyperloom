@@ -1174,6 +1174,7 @@ class KernelPhase(PhaseHandler):
         if not self._geak_win_already_recorded():
             entry = {
                 "action": "geak_e2e",
+                "source_phase": "KERNEL_AGENT",
                 "variant_name": "geak_e2e",
                 "tput": measured,
                 "candidate_extra_server_args": accepted_flags,
@@ -1879,6 +1880,7 @@ class KernelPhase(PhaseHandler):
 
         entry = {
             "action": "gemm_tuning",
+            "source_phase": "KERNEL_AGENT",
             "variant_name": variant_name,
             "tuned_file": tuned_file,
             "final_report_path": final_report,
@@ -2118,6 +2120,7 @@ class KernelPhase(PhaseHandler):
 
                 entry = {
                     "action": "gemm_tuning",
+                    "source_phase": "KERNEL_AGENT",
                     "variant_name": f"forge_{tuner_name}",
                     "tuned_file": (
                         env.get(cand["env_var"])
@@ -2465,6 +2468,7 @@ class KernelPhase(PhaseHandler):
         extra_args = str(integrate_result.get("extra_server_args") or "")
         entry = {
             "action": "fusion",
+            "source_phase": "KERNEL_AGENT",
             "variant_name": "forge_fusion",
             "backend": "forge",
             "engine": "forge_fusion",

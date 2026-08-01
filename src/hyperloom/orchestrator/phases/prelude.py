@@ -501,6 +501,7 @@ class PreludePhase(PhaseHandler):
             # Push warm best_config onto the stack (schema mirrors explore-KEEP).
             stack_entry = {
                 "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
                 "name": "warm_replay",
                 "variant_name": "warm_replay",
                 "task_id": str(getattr(task, "task_id", "") or ""),

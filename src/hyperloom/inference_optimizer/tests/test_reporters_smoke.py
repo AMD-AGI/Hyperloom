@@ -133,6 +133,7 @@ def test_all_renderers_register_in_stable_order() -> None:
         "sweep",
         "critic_robustness",
         "attribution",
+        "optimizations",
         "source_files",
         "data_provenance",
     ]

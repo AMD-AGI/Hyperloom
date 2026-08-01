@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer.breakdown.schema import (
     ArtifactRef,
     Measurement,
     SCHEMA_VERSION_V4,
+    SCHEMA_VERSION_V5,
     Operation,
     SessionBreakdownV4,
 )
@@ -105,7 +106,7 @@ def test_v4_missing_streams_are_unavailable_and_poison_files_are_ignored(tmp_pat
     monkeypatch.setattr(exporter, "collectors", RejectCollectors())
     out = exporter.build_v4_live(tmp_path)
 
-    assert out["schema_version"] == SCHEMA_VERSION_V4
+    assert out["schema_version"] == SCHEMA_VERSION_V5
     assert out["operations"] == []
     assert out["measurements"] == []
     assert out["artifacts"] == []
@@ -281,11 +282,15 @@ def test_write_breakdown_json_uses_v4_feature_flag(tmp_path, monkeypatch):
     record_operation(tmp_path, operation_id="op-flag", status="succeeded")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_V4", "1")
     target = exporter.write_breakdown_json(tmp_path)
-    assert json.loads(target.read_text())["schema_version"] == SCHEMA_VERSION_V4
+    flagged = json.loads(target.read_text())
+    assert flagged["schema_version"] == SCHEMA_VERSION_V5
+    assert "run" in flagged
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BREAKDOWN_V4")
     target = exporter.write_breakdown_json(tmp_path)
-    assert json.loads(target.read_text())["schema_version"] != SCHEMA_VERSION_V4
+    fallback = json.loads(target.read_text())
+    assert fallback["schema_version"] == SCHEMA_VERSION_V5
+    assert "session" in fallback
 
 
 def test_v4_helpers_reject_invalid_producer_without_raising(tmp_path):
@@ -478,7 +483,7 @@ def test_v4_state_snapshot_does_not_infer_canonical_entities_from_stack(tmp_path
     assert out["measurements"] == []
     assert out["artifacts"] == []
     assert out["adoptions"] == []
-    assert out["optimization_stack"] == []
+    assert out["optimizations"]["entries"] == []
     assert len(assemble_parts(tmp_path)["optimization_stack"]) == 3
 
 
@@ -629,7 +634,8 @@ def test_v4_geak_final_validation_creates_validated_adoption(tmp_path):
     )
     assert final["value"] == 111.0
     assert final["metric_basis"] == "output"
-    assert out["geak"]["final_validation_precedence"] == "orchestrator_final_validation"
+    assert out["optimizations"]["entries"][0]["source"] == "kernel_agent"
+    assert out["optimizations"]["entries"][0]["backend"] == "geak"
 
 
 def test_v4_forge_operation_carries_correctness_evidence(tmp_path):
@@ -726,8 +732,9 @@ def test_v4_gemm_adoption_is_keep_only(tmp_path):
     assert [adoption["decision"] for adoption in keep["adoptions"]] == ["KEEP"]
     assert revert["adoptions"][0]["status"] == "revoked"
     assert revert["adoptions"][0]["validated"] is False
-    assert revert["optimization_stack"] == []
-    assert keep["gemm_tuning"]["operations"][0].get("parent_operation_id") is None
+    assert revert["optimizations"]["entries"] == []
+    assert keep["optimizations"]["entries"][0]["backend"] == "forge"
+    assert keep["optimizations"]["entries"][0]["optimization_kind"] == "gemm_tuning"
 
 
 def test_v4_kernel_keep_then_revert_revokes_adoption(tmp_path):
@@ -762,8 +769,11 @@ def test_v4_kernel_keep_then_revert_revokes_adoption(tmp_path):
     assert out["adoptions"][0]["status"] == "revoked"
     assert out["adoptions"][0]["decision"] == "REVERT"
     assert out["adoptions"][0]["validated"] is False
-    assert out["optimization_stack"] == []
-    assert out["attribution"]["by_strategy"] == {}
+    assert out["optimizations"]["entries"] == []
+    assert all(
+        summary["keeps"] == 0
+        for summary in out["optimizations"]["summary_by_source"].values()
+    )
 
 
 def test_v4_warm_replay_keep_then_revert_revokes_same_adoption(tmp_path):
@@ -803,7 +813,7 @@ def test_v4_warm_replay_keep_then_revert_revokes_same_adoption(tmp_path):
     assert len(out["adoptions"]) == 1
     assert out["adoptions"][0]["status"] == "revoked"
     assert out["adoptions"][0]["validated"] is False
-    assert out["optimization_stack"] == []
+    assert out["optimizations"]["entries"] == []
 
 
 def test_v4_geak_final_validation_failure_revokes_prior_keep(tmp_path):
@@ -844,7 +854,7 @@ def test_v4_geak_final_validation_failure_revokes_prior_keep(tmp_path):
     assert len(out["adoptions"]) == 1
     assert out["adoptions"][0]["status"] == "revoked"
     assert out["adoptions"][0]["validated"] is False
-    assert out["optimization_stack"] == []
+    assert out["optimizations"]["entries"] == []
 
 
 def test_v4_gemm_micro_keep_is_provisional_until_e2e_keep(tmp_path):

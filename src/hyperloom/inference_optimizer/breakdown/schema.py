@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-#: breakdown schema version. Emitted on the legacy fallback path (no recorder fragments).
-SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
+#: Historical collector-only schema retained for archived-reader identification.
+SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
 #: breakdown schema version stamped when the file was assembled from the
 #: author-time recorder fragments. Same wire shape as v2 plus recorder-only
@@ -26,6 +26,13 @@ SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 #: exclusively from recorder SDK fragments and never reconstructed from session
 #: business files.
 SCHEMA_VERSION_V4 = "hyperloom.session_breakdown.v4.0"
+
+#: Unified optimization schema. This is a breaking wire-shape cutover: adopted
+#: optimizations are emitted only through ``optimizations``.
+SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
+
+#: Current breakdown schema version.
+SCHEMA_VERSION = SCHEMA_VERSION_V5
 
 
 # Session metadata
@@ -1602,10 +1609,83 @@ class OptimizationStackEntry(TypedDict, total=False):
     fingerprint: str
     provenance: str
     task_id: str
+    source_phase: str
     # filter label for the kind of optimization (backend / param / env on
     # explore KEEPs); specialist dial.
     operation_kind: str
     scope: str
+
+
+# Canonical optimizations — single downstream read model
+OptimizationSource = Literal[
+    "warm_replay",
+    "explore",
+    "framework_agent",
+    "kernel_agent",
+    "unattributed",
+]
+OptimizationSourceMethod = Literal[
+    "recorded",
+    "phase_history_ts",
+    "action_family",
+    "unknown",
+]
+KernelOptimizationBackend = Literal["geak", "forge"]
+KernelExecutionMode = Literal["whole_pipeline", "per_kernel"]
+
+
+class OptimizationArtifact(TypedDict, total=False):
+    """One artifact attached to a canonical optimization entry."""
+
+    kind: str
+    path: str
+
+
+class OptimizationConfiguration(TypedDict, total=False):
+    """Effective serving configuration carried by one optimization."""
+
+    extra_server_args: str
+    extra_envs: dict[str, str]
+
+
+class OptimizationEntry(TypedDict, total=False):
+    """One adopted optimization, independent of its internal action name."""
+
+    id: str
+    stack_index: int
+    source: OptimizationSource
+    source_method: OptimizationSourceMethod
+    optimization_kind: str
+    name: str
+    backend: KernelOptimizationBackend | None
+    execution_mode: KernelExecutionMode | None
+    kernel_id: str | None
+    gain_pct: float | None
+    cumulative_gain_pct: float | None
+    throughput_before: float | None
+    throughput_after: float | None
+    validated: bool
+    task_id: str
+    ts: str
+    provenance: str
+    configuration: OptimizationConfiguration
+    artifacts: list[OptimizationArtifact]
+
+
+class OptimizationSourceSummary(TypedDict, total=False):
+    """Validated KEEP count and gain for one canonical source."""
+
+    keeps: int
+    total_gain_pct: float
+    by_backend: dict[str, "OptimizationSourceSummary"]
+
+
+class Optimizations(TypedDict, total=False):
+    """Canonical downstream optimization API."""
+
+    schema_version: int
+    entries: list[OptimizationEntry]
+    summary_by_source: dict[OptimizationSource, OptimizationSourceSummary]
 
 
 # GEMM tuning — fixed FP8 block-scale GEMM tuning stage that runs at KERNEL
@@ -2436,6 +2516,7 @@ class SessionBreakdownV4(TypedDict, total=False):
     operations: list[Operation]
     measurements: list[Measurement]
     adoptions: list[Adoption]
+    optimizations: Optimizations
     outcome: dict[str, Any]
     artifacts: list[ArtifactRef]
     trace: dict[str, Any]
@@ -2468,20 +2549,17 @@ class SessionBreakdown(TypedDict, total=False):
         phase_segments (list[PhaseSegment]): Phase-boundary view (M2).
         action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
-        geak_invocations (list[Invocation]): GEAK backend invocations.
-        forge_invocations (list[Invocation]): Forge backend invocations.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         param_search (ParamSearch): v1-reader compat alias for ``explore_search``.
         explore_search (ParamSearch): Merged explore-search ledger.
         sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
-        attribution (Attribution): Gain attribution across stack/source/phase.
+        optimizations (Optimizations): Canonical adopted-optimization read
+            model spanning Warm Replay, Explore, Framework Agent, and Kernel
+            Agent.
         kb_provenance (KBProvenance): Recipe KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
-        optimization_stack (list[OptimizationStackEntry]): Raw KEEP ledger passthrough.
-        gemm_tuning (GemmTuning): Fixed FP8 GEMM-tuning stage, engine-tagged
-            (geak today, forge later); empty {} on non-fp8/sglang or old sessions.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
@@ -2508,24 +2586,17 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
-    geak_invocations: list[Invocation]
-    forge_invocations: list[Invocation]
     kernel_lifecycle: KernelLifecycle
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
-    # GEAK e2e KERNEL-phase section; ``{}`` on native sessions.
-    geak: Geak
     critic_robustness: CriticRobustness
     telemetry: Telemetry
-    attribution: Attribution
+    # Single downstream read model for every formally adopted optimization.
+    optimizations: Optimizations
     kb_provenance: KBProvenance  # Recipe KB audit
     specialist_runs: list[SpecialistRound]
-    # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
-    optimization_stack: list["OptimizationStackEntry"]
-    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry), engine-tagged; {} when absent.
-    gemm_tuning: GemmTuning
     # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
     # Kernel-agent attempt outcome summary; empty → dashboard hides Block 1.
@@ -2555,8 +2626,10 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
+    "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V4",
+    "SCHEMA_VERSION_V5",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -2597,6 +2670,13 @@ __all__ = [
     "OperationGate",
     "OperationRelation",
     "OperationSubstep",
+    "OptimizationArtifact",
+    "OptimizationConfiguration",
+    "OptimizationEntry",
+    "Optimizations",
+    "OptimizationSource",
+    "OptimizationSourceMethod",
+    "OptimizationSourceSummary",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",
@@ -2609,6 +2689,8 @@ __all__ = [
     "KernelLifecycle",
     "KernelMetadata",
     "KernelOptimizationSummary",
+    "KernelExecutionMode",
+    "KernelOptimizationBackend",
     "OptimizedKernel",
     "ParamSearch",
     "ParamSearchEntry",
