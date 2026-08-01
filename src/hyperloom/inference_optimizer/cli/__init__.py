@@ -104,6 +104,7 @@ log = logging.getLogger("hyperloom.inference_optimizer.cli")
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
+    _redact_unknown_args as _redact_unknown_args,
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
@@ -2275,74 +2276,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
 
 
-# Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
-# Deliberately broad: over-redacting a pod env var costs nothing, while missing
-# one writes a live token into a log the platform ships elsewhere.
-_SECRET_NAME_HINTS = (
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "credential",
-    "key",
-    "auth",
-)
-_REDACTED = "***"
-
-
-def _is_secret_name(name: str) -> bool:
-    """Report whether a flag or variable name suggests a credential.
-
-    Args:
-        name: A flag (leading dashes tolerated) or a ``NAME=VALUE`` name.
-
-    Returns:
-        bool: ``True`` when the name matches any known credential hint.
-    """
-    lowered = name.lstrip("-").lower()
-    return any(hint in lowered for hint in _SECRET_NAME_HINTS)
-
-
-def _redact_unknown_args(tokens: list[str]) -> str:
-    """Render unrecognised CLI tokens for logging with credential values masked.
-
-    Names are always kept and only values are dropped, so a misspelled real flag
-    stays as diagnosable as before. A value is masked when its own flag looks
-    sensitive (``--api-key foo``) or when it is a ``NAME=VALUE`` pair with a
-    sensitive name (``--extra-env HF_TOKEN=foo``), which is how credentials
-    normally reach the pods.
-
-    Args:
-        tokens: The leftover argv entries from ``parse_known_args``.
-
-    Returns:
-        str: A space-joined, log-safe rendering of ``tokens``.
-    """
-
-    def _mask(value: str, flag_is_secret: bool) -> str:
-        name, sep, _ = value.partition("=")
-        if sep and _is_secret_name(name):
-            return f"{name}={_REDACTED}"
-        return _REDACTED if flag_is_secret else value
-
-    rendered: list[str] = []
-    # A bare value belongs to the flag before it, so its sensitivity carries over.
-    flag_is_secret = False
-    for token in tokens:
-        if token.startswith("-"):
-            flag, sep, inline = token.partition("=")
-            flag_is_secret = _is_secret_name(flag)
-            if sep:
-                rendered.append(f"{flag}={_mask(inline, flag_is_secret)}")
-                flag_is_secret = False
-            else:
-                rendered.append(flag)
-        else:
-            rendered.append(_mask(token, flag_is_secret))
-            flag_is_secret = False
-    return " ".join(rendered)
-
-
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: parse arguments and dispatch the requested subcommand.
 
@@ -2368,22 +2301,17 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(line_buffering=True)
 
     parser = _build_parser()
-    # Tolerate unrecognised arguments instead of exiting 2: the provisioning
-    # platform (Primus-Claw) hands the same FLAGS block to both itself and
-    # `optimize`, and the flags it consumes on its own side (cluster image,
-    # per-pod cpu/mem, pod env) are not declared here. They are inert for us.
-    args, unknown_args = parser.parse_known_args(argv)
+    # Strict on purpose. The platform's prompt FLAGS block is authored by hand,
+    # so a typo is likelier here than in generated argv, and the flags the
+    # platform consumes on its own side are declared as inert no-ops rather than
+    # waved through — tolerating unknown arguments wholesale would let
+    # `--target-gai 5` run for hours on the default instead of failing now.
+    args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
     )
-    # Warn only after basicConfig, so logging here cannot pre-empt the root
-    # handler and silently discard the -v level chosen above. Loud on purpose:
-    # a misspelled real flag also lands here and would otherwise run for hours
-    # with the default value.
-    if unknown_args:
-        log.warning("ignoring unrecognised arguments: %s", _redact_unknown_args(unknown_args))
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):

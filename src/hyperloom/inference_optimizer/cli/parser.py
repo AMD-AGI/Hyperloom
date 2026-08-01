@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import NoReturn
 
 from .. import framework_registry
 from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_MODEL
@@ -27,6 +28,99 @@ DEFAULT_CONC = 64
 DEFAULT_TP = 1
 DEFAULT_EP = 1
 DEFAULT_PRECISION = "bf16"
+
+
+# Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
+# Deliberately broad: over-redacting a pod env var costs nothing, while missing
+# one writes a live token into a log the platform ships elsewhere.
+_SECRET_NAME_HINTS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "key",
+    "auth",
+)
+_REDACTED = "***"
+
+
+def _is_secret_name(name: str) -> bool:
+    """Report whether a flag or variable name suggests a credential.
+
+    Args:
+        name: A flag (leading dashes tolerated) or a ``NAME=VALUE`` name.
+
+    Returns:
+        bool: ``True`` when the name matches any known credential hint.
+    """
+    lowered = name.lstrip("-").lower()
+    return any(hint in lowered for hint in _SECRET_NAME_HINTS)
+
+
+def _redact_unknown_args(tokens: list[str]) -> str:
+    """Render unrecognised CLI tokens for logging with credential values masked.
+
+    Names are always kept and only values are dropped, so a misspelled real flag
+    stays as diagnosable as before. A value is masked when its own flag looks
+    sensitive (``--api-key foo``) or when it is a ``NAME=VALUE`` pair with a
+    sensitive name (``--extra-env HF_TOKEN=foo``), which is how credentials
+    normally reach the pods.
+
+    Args:
+        tokens: The leftover argv entries argparse could not place.
+
+    Returns:
+        str: A space-joined, log-safe rendering of ``tokens``.
+    """
+
+    def _mask(value: str, flag_is_secret: bool) -> str:
+        name, sep, _ = value.partition("=")
+        if sep and _is_secret_name(name):
+            return f"{name}={_REDACTED}"
+        return _REDACTED if flag_is_secret else value
+
+    rendered: list[str] = []
+    # A bare value belongs to the flag before it, so its sensitivity carries over.
+    flag_is_secret = False
+    for token in tokens:
+        if token.startswith("-"):
+            flag, sep, inline = token.partition("=")
+            flag_is_secret = _is_secret_name(flag)
+            if sep:
+                rendered.append(f"{flag}={_mask(inline, flag_is_secret)}")
+                flag_is_secret = False
+            else:
+                rendered.append(flag)
+        else:
+            rendered.append(_mask(token, flag_is_secret))
+            flag_is_secret = False
+    return " ".join(rendered)
+
+
+class RedactingArgumentParser(argparse.ArgumentParser):
+    """Parser whose unrecognised-argument error cannot print a credential.
+
+    argparse renders the offending tokens verbatim. The platform hands its whole
+    prompt FLAGS block to this CLI, pod credentials included, so an argument
+    this parser does not know -- a flag the platform added before Hyperloom
+    declared it, or a plain typo -- would otherwise write a live token into a
+    log shipped elsewhere. Only the values are masked; every name survives, so
+    the message still says exactly which argument was rejected.
+    """
+
+    _UNRECOGNIZED_PREFIX = "unrecognized arguments: "
+
+    def error(self, message: str) -> NoReturn:
+        """Exit 2 like argparse, with credential values masked.
+
+        Args:
+            message: The argparse-generated error message.
+        """
+        if message.startswith(self._UNRECOGNIZED_PREFIX):
+            tail = message[len(self._UNRECOGNIZED_PREFIX) :]
+            message = self._UNRECOGNIZED_PREFIX + _redact_unknown_args(tail.split())
+        super().error(message)
 
 
 def _positive_int_arg(value: str) -> int:
@@ -118,7 +212,7 @@ def _build_parser() -> argparse.ArgumentParser:
         DEFAULT_SPECIALIST_MAX_TURNS as _DEFAULT_SPECIALIST_MAX_TURNS,
     )
 
-    p = argparse.ArgumentParser(
+    p = RedactingArgumentParser(
         prog="inference_optimizer",
         description="Inference Optimizer — multi-agent inference optimization (SGLang/vLLM/Atom/xDiT)",
     )
@@ -215,6 +309,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
         "head+workers). Defaults to 8 when omitted.",
     )
+    # Platform-owned, inert here. Primus-Claw parses ONE prompt FLAGS block for
+    # both itself and this CLI, and these configure the cluster it provisions
+    # (pod image, per-pod cpu/mem, pod env) before the optimizer ever starts.
+    # Nothing reads them; they are declared so strict parsing accepts a real
+    # platform prompt.
+    #
+    # Declared individually rather than tolerating unknown arguments wholesale,
+    # so a misspelled Hyperloom flag still fails fast instead of running for
+    # hours on a default. No similarity heuristic could stand in for this list:
+    # ``--cpus-per-node`` and ``--gpus-per-node`` are one character apart.
+    opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)
+    opt.add_argument("--cpus-per-node", type=int, default=None, help=argparse.SUPPRESS)
+    opt.add_argument("--mem-per-node", type=int, default=None, help=argparse.SUPPRESS)
+    opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
     opt.add_argument(
         "--tp",
         type=int,
