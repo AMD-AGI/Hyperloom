@@ -93,9 +93,11 @@ for an hour, a five-minute agent can already be wedged. Judge on what you
 asked for, whether successive checkpoints advance or repeat, and what is
 queued behind the lane or GPUs it holds. Three moves:
 
-- `kill_task{task_id, scope='task', reason}` — reap it; it still reports
-  what it had produced, so this costs remaining budget, not work done. For
-  a mandate the evidence says is a dead end.
+- `kill_task{task_id, scope='task', reason}` — cancel the coordinator task.
+  This does **not** terminate an already-running specialist process: its lane
+  and GPU leases release only when its worker exits or its reaper terminates
+  it. Do not use this to promptly free capacity; use it when the mandate is a
+  dead end and the remaining task budget is not worth spending.
 - `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
   and it acts without restarting. Prefer this when the agent works well but
   on the wrong question, or to answer its `residual_questions`.

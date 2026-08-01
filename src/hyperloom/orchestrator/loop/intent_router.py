@@ -847,7 +847,10 @@ class IntentRouter:
                 running_sec = max(0.0, time.time() - started)
         except Exception:  # noqa: BLE001 — fall back to the full TTL
             log.exception("extend_lease: could not read running age for task=%s", task_id)
-        remaining_sec = max(1, int(new_ttl - running_sec))
+        # A late extension can arrive after the cumulative task TTL expired but
+        # before the worker/reaper acted on it. It must still buy the full newly
+        # granted increment rather than refreshing leases for only one second.
+        remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         gpu_error = ""
         try:
@@ -858,19 +861,22 @@ class IntentRouter:
             gpu_error = repr(exc)[:200]
         # Push the live subprocess's hard wall-clock kill deadline out too, so
         # the extension actually buys the specialist more time to run.
+        wall_budget_error = ""
         try:
             from ..specialists.subprocess_ import grant_wall_budget_extension
 
             grant_wall_budget_extension(task_id, extra_sec)
-        except Exception:  # noqa: BLE001 — best-effort; lease rows already moved
+        except Exception as exc:  # noqa: BLE001 — lease rows already moved
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
-        # A swallowed GPU failure would leave the lane extended while the GPU
-        # reaper can still reclaim the cards mid-run — report it as degraded.
+            wall_budget_error = repr(exc)[:200]
+        # A swallowed GPU or wall-budget failure would leave the lane extended
+        # while the GPU reaper or subprocess wall-clock cap can still interrupt
+        # the work — report the partial extension as degraded.
         await self._record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease_degraded" if gpu_error else "extend_lease",
+                "kind": "extend_lease_degraded" if gpu_error or wall_budget_error else "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
@@ -879,6 +885,7 @@ class IntentRouter:
                 "lanes": lanes,
                 "gpu_rows": gpus,
                 **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
+                **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )

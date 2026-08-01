@@ -19,7 +19,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir, make_session_dir
 
 
 # fixtures
@@ -49,6 +49,21 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
     assert "policy_denied" in text.lower()
+
+
+def test_orchestration_prompt_explains_kill_task_resource_lifetime(registry):
+    text = build_orchestration_prompt(
+        action_registry=registry,
+        enabled_actions=default_enabled_actions(no_kernel=False),
+        framework="sglang",
+        objective_kind="gain_pct",
+        objective_value=10.0,
+        max_minutes=120,
+        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+    )
+
+    assert "does **not** terminate an already-running specialist process" in text
+    assert "Do not use this to promptly free capacity" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
@@ -640,6 +655,51 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
 
 
 @pytest.mark.asyncio
+async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(coordinator_with_mocks):
+    """A late extension must not reduce newly granted resource time to one second."""
+    c = coordinator_with_mocks
+    try:
+        task = await c.tasks.create(
+            kind="specialist",
+            params={"needs_gpu": True},
+            idempotency_key="k-extend-late",
+            requires_lanes=["research_lane"],
+            lease_ttl_sec=1800,
+        )
+        await c.tasks.transition(task.task_id, "running")
+        await c.locks.acquire_many(
+            ["research_lane"],
+            holder_id=f"h-{task.task_id}",
+            task_id=task.task_id,
+            action="specialist",
+            ttl_sec=1800,
+        )
+        await c.db.execute(
+            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (0, f"h-gpu-{task.task_id}", task.task_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:30:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
+        await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": task.task_id, "extra_sec": 600},
+            ),
+        )
+
+        lane_rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
+        gpu_rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
+        for row in [*lane_rows, *gpu_rows]:
+            expires_in = _parse_iso_unix(str(row["expires_at"])) - time.time()
+            assert 550 < expires_in < 650
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_with_mocks):
     """A swallowed GPU-refresh failure must not read as a clean extension."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -732,7 +792,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 
 @pytest.mark.asyncio
 async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_mocks):
-    """The lease rows already moved; a grant failure must not raise past here."""
+    """A wall-budget failure retains DB changes but reports a degraded extension."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.specialists import subprocess_ as _sub
 
@@ -751,6 +811,14 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
 
         original = _sub.grant_wall_budget_extension
         _sub.grant_wall_budget_extension = _boom  # type: ignore[assignment]
+        recorded: list[dict] = []
+        original_record = c._record_observation
+
+        async def _capture(agent, topic, payload):
+            recorded.append(dict(payload))
+            return await original_record(agent, topic, payload)
+
+        c._record_observation = _capture  # type: ignore[method-assign]
         try:
             await c._handle_intent(
                 "orchestration",
@@ -765,6 +833,8 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
         # The DB-side extension still stands.
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
+        degraded = next(r for r in recorded if r.get("kind") == "extend_lease_degraded")
+        assert "registry unavailable" in degraded["wall_budget_extension_error"]
     finally:
         await c.stop()
 
