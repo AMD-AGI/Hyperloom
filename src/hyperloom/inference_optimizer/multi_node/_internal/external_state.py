@@ -19,6 +19,17 @@ log = logging.getLogger(__name__)
 # across a hand-off reload without having to be registered here.
 _SESSION_KEY_PREFIX = "last_"
 
+# The fields that identify *which* cluster a state describes. Connection
+# endpoints rather than counts: a replacement cluster is reachable at different
+# addresses, while its node count or PD split is typically identical.
+_HANDOFF_IDENTITY_KEYS = (
+    "service_url",
+    "head_pod_ip",
+    "prefill_pod_ips",
+    "decode_pod_ips",
+    "worker_pod_ips",
+)
+
 _MN_BACKENDS = ("infera", "rayjob")
 # Mirrors the CLI's --mn-backend default (cli/multi_node.py::_resolve_mn_backend)
 # so a hand-off and a fresh `optimize` never disagree about the same cluster.
@@ -54,6 +65,53 @@ def _handoff_backend(*, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
     if head_ip:
         return "rayjob"
     return _DEFAULT_MN_BACKEND
+
+
+def _handoff_nodes(pod_ip_count: int) -> int:
+    """Resolve the run's node count, deriving one only when nobody stated any.
+
+    A stated ``$INFERENCE_OPTIMIZER_NODES`` is honoured verbatim, and a
+    disagreement with the hand-off is only reported. This asymmetry is
+    deliberate: ``is_multi_node()`` consults this value before it consults the
+    environment, so inferring a larger count from the handed-over shape would
+    drag a single-node run onto the multi-node path in any sandbox that exports
+    pod IPs, which is the one property the hand-off must not disturb.
+
+    An unset variable is the opposite case, since nothing is being overridden. A
+    standalone ``hyperloom-mn`` subcommand that did not inherit it used to fall
+    back to 1 and silently take the single-pod path -- which starts one detached
+    server per pod rather than one cluster across them -- so there the handed-over
+    pod count is the only statement of intent available and it wins.
+
+    Args:
+        pod_ip_count: How many GPU pod IPs the hand-off carries. Zero for a
+            rayjob hand-off, which describes its cluster by head IP alone and so
+            offers nothing to cross-check.
+
+    Returns:
+        int: The node count to record in the synthesized state.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_NODES", "").strip()
+    if raw:
+        try:
+            stated = int(raw)
+        except ValueError:
+            log.warning(
+                "external mode: INFERENCE_OPTIMIZER_NODES=%r is not an integer; "
+                "falling back to the %d GPU pod IPs handed over",
+                raw,
+                pod_ip_count,
+            )
+        else:
+            if pod_ip_count and stated != pod_ip_count:
+                log.warning(
+                    "external mode: INFERENCE_OPTIMIZER_NODES=%d disagrees with the %d GPU "
+                    "pod IPs handed over; honouring the stated value",
+                    stated,
+                    pod_ip_count,
+                )
+            return max(1, stated)
+    return max(1, pod_ip_count)
 
 
 def external_service_url() -> str:
@@ -95,7 +153,6 @@ def build_external_state_from_env() -> dict[str, Any]:
     ssh_key = os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip()
     ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", DEFAULT_SSH_PORT)
     known_hosts = os.environ.get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS", "").strip()
-    nodes = _int_env("INFERENCE_OPTIMIZER_NODES", 1)
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
 
@@ -139,6 +196,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         has_pod_ips=bool(prefill or decode or worker),
         head_ip=head_ip,
     )
+    nodes = _handoff_nodes(len(prefill) + len(decode) + len(worker))
     ray_address = f"{head_ip}:6379" if head_ip else ""
     ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
 
@@ -233,6 +291,26 @@ def _read_state_file(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _describes_same_handoff(disk: dict[str, Any], ext_state: dict[str, Any]) -> bool:
+    """Whether an on-disk state was written against the cluster now handed over.
+
+    The ``last_*`` bookkeeping is only meaningful for the cluster that produced
+    it: ``last_restart_submission_id`` names a job on one Ray cluster,
+    ``last_server_pid_dir`` names PIDs on one set of pods. Inheriting either
+    across a replacement cluster hands the resume fast path a launch identity
+    that was never valid here, so it can skip a relaunch for a server that this
+    cluster never started.
+
+    Args:
+        disk: State read from the state file.
+        ext_state: State synthesized from the current ``HYPERLOOM_MN_EXT_*``.
+
+    Returns:
+        bool: True when every identifying endpoint matches.
+    """
+    return all(disk.get(key) == ext_state.get(key) for key in _HANDOFF_IDENTITY_KEYS)
+
+
 def load_multi_node_state() -> dict[str, Any]:
     """Load multi-node state; a cluster hand-off wins over on-disk state.
 
@@ -249,7 +327,9 @@ def load_multi_node_state() -> dict[str, Any]:
     config, pid/log dirs) is carried over from an on-disk state that describes
     the same hand-off: env synthesis never produces it, so dropping it would
     leave it written every round and read never, costing the resume fast path a
-    full cold start on each retry.
+    full cold start on each retry. "Same hand-off" is checked rather than
+    assumed -- see :func:`_describes_same_handoff` -- because a state file
+    outlives the cluster it describes.
 
     What the two backends do with a carried-over entry differs. Infera re-checks
     liveness for real, SSHing every GPU pod and signalling the recorded PID.
@@ -277,6 +357,12 @@ def load_multi_node_state() -> dict[str, Any]:
                     "on-disk state at %s (non-external backend=%r)",
                     path,
                     disk.get("backend"),
+                )
+            elif disk and not _describes_same_handoff(disk, ext_state):
+                log.warning(
+                    "external mode: on-disk state at %s describes a different cluster; dropping its %s* bookkeeping",
+                    path,
+                    _SESSION_KEY_PREFIX,
                 )
             elif disk:
                 for key, value in disk.items():

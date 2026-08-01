@@ -330,6 +330,114 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
     assert "measures the SAME unchanged server" in out.err
 
 
+def _write_disk_state(**overrides: object) -> Path:
+    """Persist an external state file carrying resume bookkeeping."""
+    state_file = resolve_state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "external": True,
+        "backend": "infera",
+        "service_url": "http://frontend:8000",
+        "prefill_pod_ips": ["10.0.1.1"],
+        "decode_pod_ips": ["10.0.1.2"],
+        "worker_pod_ips": [],
+        "last_restart_submission_id": "launch-1",
+        "last_restart_framework": "sglang",
+    }
+    state.update(overrides)
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    return state_file
+
+
+def test_bookkeeping_carries_over_within_the_same_handoff(_external_env: Path) -> None:
+    """The whole point of the merge: one cluster's session survives a reload."""
+    _write_disk_state()
+
+    state = ext.load_multi_node_state()
+
+    assert state["last_restart_submission_id"] == "launch-1"
+    assert state["last_restart_framework"] == "sglang"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("service_url", "http://other-frontend:8000"),
+        ("prefill_pod_ips", ["10.9.9.1"]),
+        ("decode_pod_ips", ["10.9.9.2"]),
+        ("head_pod_ip", "10.9.9.3"),
+    ],
+)
+def test_bookkeeping_is_dropped_when_the_cluster_was_replaced(
+    _external_env: Path,
+    field: str,
+    value: object,
+) -> None:
+    """A state file outlives the cluster it describes, so identity must be checked.
+
+    ``last_restart_submission_id`` names a job on one Ray cluster and
+    ``last_server_pid_dir`` names PIDs on one set of pods. Carrying either onto a
+    replacement cluster hands the resume fast path a launch identity that was
+    never valid here, letting it skip a relaunch for a server this cluster never
+    started. The merge only tested the ``external`` flag, which a stale file from
+    a previous hand-off also carries.
+    """
+    _write_disk_state(**{field: value})
+
+    state = ext.load_multi_node_state()
+
+    assert "last_restart_submission_id" not in state
+    assert "last_restart_framework" not in state
+    # The hand-off itself still wins: only the bookkeeping was dropped.
+    assert state["service_url"] == "http://frontend:8000"
+    assert state["prefill_pod_ips"] == ["10.0.1.1"]
+
+
+def test_unset_nodes_falls_back_to_the_handed_over_pod_count(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subcommand that did not inherit NODES must not degrade to one pod.
+
+    ``hyperloom-mn restart-server`` invoked on its own got ``nodes=1`` and took
+    the single-pod path, which starts one detached server per pod instead of one
+    cluster across them. Nothing states an intent here, so the two GPU pod IPs
+    the platform handed over are the only evidence of the cluster's shape.
+    """
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+
+    assert ext.build_external_state_from_env()["nodes"] == 2
+
+
+def test_stated_single_node_survives_a_multi_pod_handoff(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-node guarantee outranks the hand-off's shape.
+
+    ``is_multi_node()`` reads ``state["nodes"]`` before it reads the environment,
+    so deriving a larger count from the handed-over pod IPs would drag a
+    single-node run onto the multi-node path in any sandbox that exports them for
+    an unrelated cluster. A stated value is therefore honoured verbatim.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+
+    assert ext.build_external_state_from_env()["nodes"] == 1
+
+
+def test_rayjob_handoff_without_pod_ips_keeps_the_stated_node_count(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rayjob hand-off carries no pod IPs, so there is nothing to cross-check."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
+
+    assert ext.build_external_state_from_env()["nodes"] == 1
+
+
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -381,19 +489,10 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
 
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
-    state_file = resolve_state_file()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(
-        json.dumps(
-            {
-                "external": True,
-                "backend": "rayjob",
-                "last_restart_submission_id": "launch-1",
-                "last_restart_framework": "sglang",
-                "last_server_pid_dir": "/tmp/multi_node_pids",
-            }
-        ),
-        encoding="utf-8",
+    _write_disk_state(
+        backend="rayjob",
+        head_pod_ip="10.0.2.1",
+        last_server_pid_dir="/tmp/multi_node_pids",
     )
     monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: "kill-9")
 
