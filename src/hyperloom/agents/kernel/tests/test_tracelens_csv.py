@@ -21,6 +21,7 @@ if str(_TOOL_DIR) not in sys.path:
 import tracelens_analysis as tla  # noqa: E402
 import _bypass_report as bypass_report  # noqa: E402
 import _idle_gate as idle_gate  # noqa: E402
+import _task_group_contract as task_group_contract  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
@@ -2540,6 +2541,58 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
         assert canonical_key not in extras
 
 
+def test_unified_attention_fixture_emits_semantic_workload_selectors():
+    candidates = tlr.parse_analysis_md(
+        _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD,
+        top_k=10,
+    )
+    candidate = candidates[0]
+    candidate["kernel_id"] = "k001"
+    group = {
+        "primary_kernel_id": "k001",
+        "rows": [candidate],
+    }
+
+    cases = task_group_contract.build_task_group_shape_cases(group)
+    assert len(cases) == 1
+    selector = cases[0]["selector"]
+    assert selector == {
+        "CASE_ID": "case_001",
+        "QTOKENS": 1087,
+        "QHEADS": 32,
+        "KVHEADS": 4,
+        "HEADSIZE": 128,
+    }
+    assert {
+        key: value
+        for key, value in selector.items()
+        if key != "CASE_ID"
+    } == {
+        "QTOKENS": 1087,
+        "QHEADS": 32,
+        "KVHEADS": 4,
+        "HEADSIZE": 128,
+    }
+    canonical_workload = "_".join(
+        f"{key}{selector[key]}"
+        for key in sorted(selector)
+        if key != "CASE_ID"
+    )
+    assert canonical_workload == (
+        "HEADSIZE128_KVHEADS4_QHEADS32_QTOKENS1087"
+    )
+
+    grouped_candidate = dict(candidate)
+    grouped_candidate["task_group"] = {
+        **group,
+        "shape_cases": cases,
+    }
+    shapes = task_group_contract.forge_shapes_from_candidate(grouped_candidate)
+    assert shapes["primary"] == selector
+    assert shapes["minimal"] == selector
+    assert shapes["validation"] == [selector]
+
+
 def test_parse_analysis_md_tolerates_subcategory_10_column_table_per_spec(tmp_path):
     """A 10-column table with a trailing ``Sub-Category`` must parse using the first 9 cells."""
     md = tmp_path / "analysis.md"
@@ -3583,7 +3636,7 @@ def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
     nested templates are handled; an all-template name falls back to the
     original so a group key never collapses to empty."""
-    from hyperloom.agents.kernel.tools._task_group_contract import normalize_operation_key
+    normalize_operation_key = task_group_contract.normalize_operation_key
 
     assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
     assert normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"

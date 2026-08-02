@@ -218,8 +218,49 @@ def test_recovers_complete_source_and_runtime_symbols(tmp_path):
 
     assert spec["edit_target"]["source_symbol"] == "_scaled_gemm_kernel"
     assert spec["edit_target"]["runtime_symbols"] == [full_symbol]
+    assert spec["implementation"]["symbols"] == ["_scaled_gemm_kernel"]
     assert "unresolved_runtime_symbol_prefixes" not in spec["edit_target"]
     assert "..." not in json.dumps(spec["edit_target"])
+
+
+def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
+    repo = tmp_path / "repo"
+    implementation = repo / "aiter" / "ops" / "triton" / "attention.py"
+    implementation.parent.mkdir(parents=True)
+    implementation.write_text(
+        "@triton.jit\ndef unified_attention_kernel(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    wrapper = repo / "vllm" / "attention" / "wrapper.py"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("def unified_attention(x):\n    return x\n", encoding="utf-8")
+    candidate = {
+        "name": "vllm::fallback_name",
+        "operation": "vllm::fallback_operation",
+        "framework": "vllm",
+        "kernel_repo": str(repo),
+        "source_file": str(wrapper),
+        "kernel_sources": [str(implementation)],
+        "kernel_kind": "triton",
+        "device_kernel_names": ["unified_attention_kernel"],
+        "task_group": {
+            "operator_identity": {
+                "operation": "vllm :: unified_attention_with_output"
+            }
+        },
+    }
+
+    spec = invocation_spec.build_invocation_spec(candidate)
+
+    assert spec["logical_operator"] == "vllm::unified_attention_with_output"
+    assert spec["source_framework"] == "aiter"
+    assert spec["execution"]["framework"] == "vllm"
+    assert spec["implementation"] == {
+        "sources": [str(wrapper), str(implementation)],
+        "kernel_kind": "triton",
+        "symbols": ["unified_attention_kernel"],
+    }
+    assert spec["edit_target"]["kernel_sources"] == [str(implementation)]
 
 
 def test_missing_optional_context_is_fail_soft(tmp_path):
@@ -371,6 +412,14 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     assert cmd[cmd.index("--deadline-unix") + 1] == "9999999999.0"
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
+    assert result.pristine_baseline_ms == 1.0
+    assert result.search_start_ms == 1.0
+    assert result.improved_during_search is True
+    assert result.structured_result == {
+        "baseline_ms": 1.0,
+        "best_ms": 0.9,
+        "improved": True,
+    }
 
 
 def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):

@@ -890,6 +890,45 @@ def test_source_type_python_from_trace_kernel_file():
     assert cand["source_type"] == "python"
 
 
+def test_trace_proven_triton_sets_source_type_and_kernel_kind():
+    kernels = [
+        {
+            "name": "direct_kernel",
+            "op_name": "custom::direct",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_file": "/repo/triton/direct.py",
+            "op_kernel_backend": "triton",
+        }
+    ]
+    cand = report.build_candidates(
+        _analyze(kernels),
+        framework="vllm",
+        target_platform="MI300X",
+    )["hot_kernels"][0]
+    assert cand["source_type"] == "triton"
+    assert cand["kernel_kind"] == "triton"
+
+
+def test_pseudo_op_flydsl_sets_deterministic_implementation_contract():
+    kernels = [
+        {
+            "name": "generated_moe_stage1",
+            "op_name": "pseudo_op::moe_flydsl_stage1",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_backend": "flydsl",
+        }
+    ]
+    cand = report.build_candidates(
+        _analyze(kernels),
+        framework="vllm",
+        target_platform="MI300X",
+    )["hot_kernels"][0]
+    assert cand["source_type"] == "flydsl"
+    assert cand["kernel_kind"] == "flydsl"
+
+
 def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monkeypatch):
     # discover_benchmarks populates benchmark_files/kernel_repo on a routable
     # candidate (seeds the rocprof roofline enrichment); off by default.

@@ -36,6 +36,24 @@ def normalize_operation_key(operation: str) -> str:
     return result or value
 
 
+def logical_operator_name(candidate: dict[str, Any] | None) -> str:
+    """Return the balanced-template-normalized logical operation for Forge."""
+    candidate = candidate or {}
+    task_group = candidate.get("task_group")
+    identity = (
+        task_group.get("operator_identity")
+        if isinstance(task_group, dict)
+        else None
+    )
+    raw = (
+        identity.get("operation")
+        if isinstance(identity, dict)
+        else ""
+    ) or candidate.get("operation") or candidate.get("name") or ""
+    normalized = normalize_operation_key(str(raw).strip())
+    return re.sub(r"\s*::\s*", "::", normalized)
+
+
 def native_operation_key(operation: str) -> str:
     """Return a stable native operator identity across template instances."""
     normalized = str(operation or "").strip()
@@ -285,11 +303,62 @@ def _moe_dimensions(shapes: list[list[int]]) -> dict[str, int]:
     return dimensions
 
 
+def _is_attention_workload(row: dict[str, Any]) -> bool:
+    """Classify attention generically from trace-visible semantic metadata."""
+    labels = " ".join(
+        str(row.get(key) or "")
+        for key in (
+            "operation",
+            "name",
+            "kernel_category",
+            "tracelens_category",
+        )
+    ).lower()
+    contract = row.get("kernel_contract")
+    contract_kind = (
+        str(contract.get("kind") or "").lower()
+        if isinstance(contract, dict)
+        else ""
+    )
+    return (
+        "attention" in labels
+        or "attn" in labels
+        or contract_kind == "attention"
+        or str(row.get("kernel_category") or "").strip().lower() == "sdpa"
+    )
+
+
+def _attention_dimensions(shapes: list[list[int]]) -> dict[str, int]:
+    """Derive Q/K/V semantic dimensions from ordered rank-3 tensor shapes."""
+    rank_three = [
+        shape
+        for shape in shapes
+        if len(shape) == 3 and all(dimension > 0 for dimension in shape)
+    ]
+    for index in range(len(rank_three) - 2):
+        query, key, value = rank_three[index : index + 3]
+        if (
+            key == value
+            and query[0] == key[0]
+            and query[2] == key[2]
+            and query[1] >= key[1]
+        ):
+            return {
+                "QTOKENS": query[0],
+                "QHEADS": query[1],
+                "KVHEADS": key[1],
+                "HEADSIZE": query[2],
+            }
+    return {}
+
+
 def named_dimensions(row: dict[str, Any]) -> dict[str, int]:
     """Derive backend-friendly dimensions while retaining a generic case ID."""
     operation = f"{row.get('operation') or ''} {row.get('name') or ''}".lower()
     shapes = tensor_dim_lists(row)
-    if "moe" in operation:
+    if _is_attention_workload(row):
+        dimensions = _attention_dimensions(shapes)
+    elif "moe" in operation:
         dimensions = _moe_dimensions(shapes)
     elif any(token in operation for token in ("gemm", "matmul", "_mm", "linear")):
         dimensions = _gemm_dimensions(shapes)
