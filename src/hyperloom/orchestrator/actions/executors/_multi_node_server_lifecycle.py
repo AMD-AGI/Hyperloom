@@ -741,6 +741,14 @@ async def restart_server_for_round(
                         timeout_s=health_wait_s,
                         poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
                     )
+                    # The reachable /health above can be a pod-pinned head
+                    # address; the benchmark dials the published ClusterIP
+                    # Service, whose endpoints lag readiness after a restart.
+                    # Confirm it serves too so we don't benchmark into ECONNREFUSED.
+                    await _wait_for_published_service_ready_async(
+                        timeout_s=int(os.environ.get("HYPERLOOM_MN_PUBLISHED_READY_S", "300") or 300),
+                        poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
+                    )
                 except ServerRestartFailed as exc:
                     _collect_worker_server_logs(_read_state() or {}, str(exc))
                     raise
@@ -1460,6 +1468,137 @@ async def _wait_for_server_health_async(
                     "post-restart /health still waiting t=%ds last_err=%s",
                     elapsed,
                     last_err,
+                )
+            await asyncio.sleep(poll_every_s)
+
+
+def _is_name_resolution_error(exc: BaseException) -> bool:
+    """Whether an httpx/OS error was caused by DNS name resolution failing.
+
+    Distinguishes "this name does not resolve from here" -- the sandbox sits
+    outside the cluster, so a published ClusterIP DNS name is unusable and the
+    benchmark addresses the cluster some other way -- from "resolves but nothing
+    is listening yet" (a ConnectionRefused during a post-restart readiness
+    window, which must be waited on rather than skipped).
+
+    Args:
+        exc: The exception raised by the health probe.
+
+    Returns:
+        bool: True when the root cause is name resolution, else False.
+    """
+    import socket as _socket
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, _socket.gaierror):
+            return True
+        text = str(cur).lower()
+        if (
+            "name or service not known" in text
+            or "nodename nor servname" in text
+            or "temporary failure in name resolution" in text
+            or "getaddrinfo failed" in text
+            or "no address associated with hostname" in text
+        ):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+async def _wait_for_published_service_ready_async(
+    timeout_s: int = 300,
+    poll_every_s: int = 10,
+) -> None:
+    """Gate on the published ``service_url`` the benchmark dials, not only the
+    reachable address :func:`_wait_for_server_health_async` proves.
+
+    ``reachable_service_url`` rewrites a ClusterIP ``service_url`` to
+    ``head_pod_ip`` so the sandbox can reach it, and that head address is pinned
+    to a pod whose /health flips up seconds after a restart. The benchmark and
+    lm_eval, however, dial the published ClusterIP Service, whose endpoints are
+    readiness-gated: right after a router restart it briefly has no ready
+    endpoint and refuses connections. A gate that returned on the head /health
+    then green-lit a benchmark that got ECONNREFUSED for every request
+    (completed=0 -> ``magpie_nonzero_invalid_measurement``). Requiring the
+    published endpoint to answer /health closes that window.
+
+    Scoped to RayJob: Infera hands the sandbox no in-cluster route to the
+    ClusterIP name (its benchmark uses the reachable address instead), so the
+    published name would not resolve and this gate is a no-op there.
+
+    Args:
+        timeout_s: Max seconds to wait for the published endpoint's /health.
+        poll_every_s: Seconds between polls.
+
+    Raises:
+        ServerRestartFailed: If the published endpoint resolves but never
+            returns 200 within ``timeout_s``.
+    """
+    import time as _time
+
+    try:
+        import httpx as _httpx
+    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
+        return
+
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
+
+    state = _read_state() or {}
+    if str(state.get("backend") or "").strip().lower() != "rayjob":
+        return
+    published = str(state.get("service_url") or "").strip().rstrip("/")
+    reachable = reachable_service_url(state).rstrip("/")
+    # Nothing new to prove without a rewrite: the reachable wait already covered
+    # this exact endpoint.
+    if not published or published == reachable:
+        return
+
+    health_url = published + "/health"
+    # Two consecutive 200s so a single endpoint-list flap does not pass us.
+    required_ok = 2
+    ok_streak = 0
+    started = _time.monotonic()
+    last_err = ""
+    log.info(
+        "post-restart published-service /health wait: url=%s timeout_s=%d",
+        health_url,
+        timeout_s,
+    )
+    async with _httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            elapsed = int(_time.monotonic() - started)
+            try:
+                resp = await client.get(health_url)
+                if resp.status_code == 200:
+                    ok_streak += 1
+                    if ok_streak >= required_ok:
+                        log.info(
+                            "post-restart published-service /health OK after %ds (url=%s)",
+                            elapsed,
+                            health_url,
+                        )
+                        return
+                else:
+                    ok_streak = 0
+                    last_err = f"http_status={resp.status_code}"
+            except Exception as exc:  # noqa: BLE001
+                if _is_name_resolution_error(exc):
+                    log.info(
+                        "published service_url %s does not resolve from here; "
+                        "skipping published-service readiness gate",
+                        health_url,
+                    )
+                    return
+                ok_streak = 0
+                last_err = format_exc_brief(exc, limit=120)
+            if elapsed > timeout_s:
+                raise ServerRestartFailed(
+                    f"published service /health did not return 200 within {timeout_s}s "
+                    f"(url={health_url}, last_err={last_err}); the endpoint the benchmark "
+                    f"dials had no ready backend (post-restart readiness window did not close)"
                 )
             await asyncio.sleep(poll_every_s)
 
