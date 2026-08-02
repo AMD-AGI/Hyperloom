@@ -563,7 +563,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         operator_name="vllm::logical_op",
         source_files=[str(kernel)],
         target_functions=["kernel_impl", "device_kernel"],
-        kernel_kind="triton",
     )
 
     # The loop result is a 7-field outcome; unpacking it as a bare tuple is what
@@ -614,11 +613,11 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--operator-name": "vllm::logical_op",
         "--source-files": str(kernel),
         "--target-functions": "kernel_impl,device_kernel",
-        "--kernel-kind": "triton",
     }
     for flag, value in expected_flags.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
+    assert "--kernel-kind" not in command
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
     assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
@@ -771,7 +770,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             framework=framework,
             target_functions=symbols,
             source_files=source_values,
-            kernel_kind=kind,
         )
 
         command = commands[-1]
@@ -785,10 +783,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         assert kind == case["expected_kind"]
         assert framework == case["expected_framework"]
         assert symbols == case["expected_symbols"]
-        if kind:
-            assert command[command.index("--kernel-kind") + 1] == kind
-        else:
-            assert "--kernel-kind" not in command
+        assert "--kernel-kind" not in command
         if framework:
             assert command[command.index("--framework") + 1] == framework
         else:

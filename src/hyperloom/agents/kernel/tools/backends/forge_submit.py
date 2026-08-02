@@ -2596,7 +2596,6 @@ def _run_loop_via_cli(
     framework: str = "",
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
-    kernel_kind: str = "",
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2692,8 +2691,6 @@ def _run_loop_via_cli(
         cmd += ["--target-functions", ",".join(target_functions)]
     if source_files:
         cmd += ["--source-files", ",".join(source_files)]
-    if kernel_kind:
-        cmd += ["--kernel-kind", kernel_kind]
     # Pin the KB framework identity so producer/consumer resolve the same kernel
     # page across differing workspace layouts. Omitted when unknown, in which
     # case forge-loop infers it from the kernel path (soft, never fatal).
@@ -3266,7 +3263,6 @@ def submit(
             framework=source_framework,
             target_functions=implementation_symbols,
             source_files=implementation_sources,
-            kernel_kind=kernel_kind,
         )
         # keep/revert is decided from forge's own published best, in descending
         # order of trust:
