@@ -3636,7 +3636,7 @@ def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
     nested templates are handled; an all-template name falls back to the
     original so a group key never collapses to empty."""
-    from hyperloom.agents.kernel.tools._task_group_contract import normalize_operation_key
+    normalize_operation_key = task_group_contract.normalize_operation_key
 
     assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
     assert normalize_operation_key("rmsnorm_kernel<fp16>") == "rmsnorm_kernel"

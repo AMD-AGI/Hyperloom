@@ -3130,6 +3130,7 @@ def build_verification(
             ):
                 sp = pristine_ms / result_best_ms
         except (TypeError, ValueError):
+            # Missing or invalid structured timings fall back to report parsing below.
             pass
         speedup_source = "forge_pristine_result" if sp is not None else "report_scan"
         if sp is None:

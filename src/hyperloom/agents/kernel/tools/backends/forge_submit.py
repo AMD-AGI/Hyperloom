@@ -274,6 +274,7 @@ def _stable_implementation_symbols(
             if isinstance(implementation, dict):
                 values.extend(implementation.get("symbols") or [])
         except (OSError, json.JSONDecodeError, TypeError):
+            # The optional spec only augments symbols; source inspection remains available.
             pass
     for source_file in source_files or []:
         try:
@@ -506,6 +507,7 @@ def _remap_implementation_sources(
             original.relative_to(workspace_path)
             candidates.append(original)
         except ValueError:
+            # Sources outside the workspace may still map through a known root below.
             pass
         for root in original_roots:
             try:
