@@ -1454,12 +1454,20 @@ def _roofline_attainment_pct(row: dict[str, Any]) -> float | None:
     trusted only when the kernel is compute-bound, and a memory-bound row
     without attainment stays unknown rather than being scored on the wrong axis.
 
+    A clamped estimate is refused outright. ``roofline_estimate_capped`` marks
+    a closed form that overshot the roof and was truncated to 100%, which says
+    the model does not fit the kernel -- not that the kernel is saturated. A
+    MoE grouped GEMM billed for all experts by a dense form is the live case;
+    trusting it would zero the ROI of a kernel nobody has actually measured.
+
     Args:
         row: A ``hot_kernels`` entry.
 
     Returns:
         Attainment in percent, or ``None`` when the row cannot supply one.
     """
+    if row.get("roofline_estimate_capped"):
+        return None
     attainment = row.get("roofline_attainment_pct")
     if isinstance(attainment, (int, float)) and not isinstance(attainment, bool):
         return float(attainment)

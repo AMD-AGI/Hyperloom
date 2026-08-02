@@ -124,6 +124,38 @@ class TestHeadroomIsReadOnTheBindingSide:
         assert kd._kernel_optimization_roi({"efficiency_percent": 90.0}, 5.0) == 5.0
 
 
+class TestCappedEstimatesAreRefused:
+    """A clamped roofline means the model missed, not that the kernel is full."""
+
+    def test_capped_attainment_falls_back_to_raw_share(self):
+        # Regression: aiter::moe_cktile2stages_gemm2_ck is a grouped GEMM billed
+        # for all 128 experts by the elementwise form when only topk=4 run. The
+        # estimate implied ~68 TB/s, overshot the roof, and was clamped to 100%
+        # -- which would zero the ROI of a kernel worth 14.6% of GPU time.
+        row = {
+            "roofline_attainment_pct": 100.0,
+            "bound_type": "memory_bound",
+            "roofline_estimate_capped": True,
+        }
+        assert kd._kernel_optimization_roi(row, 14.6232) == 14.6232
+
+    def test_capped_compute_side_estimate_is_also_refused(self):
+        row = {
+            "efficiency_percent": 100.0,
+            "bound_type": "compute_bound",
+            "roofline_estimate_capped": True,
+        }
+        assert kd._kernel_optimization_roi(row, 9.0) == 9.0
+
+    def test_uncapped_attainment_is_still_trusted(self):
+        row = {
+            "roofline_attainment_pct": 100.0,
+            "bound_type": "memory_bound",
+            "roofline_estimate_capped": False,
+        }
+        assert kd._kernel_optimization_roi(row, 14.0) == 0.0
+
+
 class TestRankingPrefersHeadroom:
     """Selection order under the top_n cap."""
 
