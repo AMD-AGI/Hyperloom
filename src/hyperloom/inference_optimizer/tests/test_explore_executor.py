@@ -579,6 +579,127 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
 
 
 @pytest.mark.asyncio
+async def test_explore_serving_high_risk_without_baseline_warns(
+    sub_agent_runner,
+    tmp_path,
+    caplog,
+):
+    """Without an accuracy baseline the serving gate cannot run, and a high-risk
+    variant is then judged on throughput alone. That is intentional, but it used
+    to be silent, and silence reads as a pass: --kv-cache-dtype fp8 was measured
+    at +13.8% throughput and -11.75pp GSM8K on Qwen3-8B, and reached KEEP
+    unremarked. The verdict is unchanged here; the variant must merely say so."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)  # +5% vs base 800
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {
+            "name": "v_risky",
+            "extra_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "provenance": "llm_direct",
+        }
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-acc-nobaseline"),
+            "base_tput": 800.0,
+            # accuracy_baseline intentionally absent -- the silent case.
+            "grid": grid,
+            "enable_stack_rebench": False,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-acc-no-baseline",
+    )
+    sub.register_executor(
+        "explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False)
+    )
+    with caplog.at_level("WARNING"), patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    # Behaviour is deliberately unchanged: throughput still decides.
+    assert {w["name"] for w in out["winners"]} == {"v_risky"}
+    fp = canonical_fingerprint("--kv-cache-dtype fp8", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    assert tested["outcome"] == "KEEP"
+    # ...but the ungated KEEP is now marked, in the ledger and on the winner.
+    assert tested["accuracy_gate"] == "skipped_no_baseline"
+    assert out["winners"][0]["accuracy_gate"] == "skipped_no_baseline"
+    assert "no baseline accuracy was recorded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_explore_serving_low_risk_without_baseline_is_unmarked(
+    sub_agent_runner,
+    tmp_path,
+):
+    """The marker is specific to high-risk variants. A flag that cannot move
+    accuracy is not gated whether or not a baseline exists, so marking it would
+    train readers to ignore the field."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-acc-lowrisk"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "v_safe",
+                    "extra_args": "--stream-interval 20",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "enable_stack_rebench": False,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-acc-low-risk",
+    )
+    sub.register_executor(
+        "explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False)
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    fp = canonical_fingerprint("--stream-interval 20", {})
+    assert out["explore_search_update"]["tested"][fp]["accuracy_gate"] == ""
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"

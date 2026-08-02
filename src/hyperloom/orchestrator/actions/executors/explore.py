@@ -1321,6 +1321,7 @@ class ExploreExecutor:
                     gain = gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""
+                    accuracy_gate: str = ""
                     if r.status != "succeeded" or gain is None:
                         reason = (r.error or "")[-1200:] or "no_measurement"
                     elif gain < keep_threshold_pct:
@@ -1336,15 +1337,13 @@ class ExploreExecutor:
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
+                        high_risk = is_high_accuracy_risk(
+                            extra_args=gv.extra_server_args,
+                            extra_envs=gv.extra_envs,
+                        )
                         # Scriptable: gate every variant. Serving: only high-risk
                         # variants, and only when a baseline accuracy was recorded.
-                        if scriptable or (
-                            baseline_accuracy > 0
-                            and is_high_accuracy_risk(
-                                extra_args=gv.extra_server_args,
-                                extra_envs=gv.extra_envs,
-                            )
-                        ):
+                        if scriptable or (baseline_accuracy > 0 and high_risk):
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
@@ -1366,6 +1365,25 @@ class ExploreExecutor:
                                 # is where a missing accuracy result halts the run;
                                 # post-baseline it is a per-variant REVERT.
                                 accuracy_ok = False
+                        elif high_risk:
+                            # High-risk, but no baseline accuracy was recorded, so
+                            # there is nothing to compare a result against and the
+                            # variant is judged on throughput alone. Silence here
+                            # is indistinguishable from a pass, which is how a
+                            # measured 11.75pp GSM8K regression on Qwen3-8B
+                            # (--kv-cache-dtype fp8, +13.8% throughput) reached
+                            # KEEP unremarked. Setting RUN_EVAL without an
+                            # accuracy baseline is the usual cause.
+                            accuracy_gate = "skipped_no_baseline"
+                            log.warning(
+                                "explore: variant %s (%s) is high-accuracy-risk "
+                                "but no baseline accuracy was recorded, so the "
+                                "gate is skipped and the verdict rests on "
+                                "throughput alone. Pass params.accuracy_baseline "
+                                "to enable it.",
+                                gv.name,
+                                gv.extra_server_args or "(envs only)",
+                            )
                         if not accuracy_ok:
                             outcome = "REVERT"
                             reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
@@ -1381,6 +1399,7 @@ class ExploreExecutor:
                         **control_fields,
                         "note": gv.note,
                         "outcome": outcome,
+                        "accuracy_gate": accuracy_gate,
                         "status": r.status,
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
@@ -1447,6 +1466,7 @@ class ExploreExecutor:
                             **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
+                            "accuracy_gate": accuracy_gate,
                             "gain_pct": gain,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
