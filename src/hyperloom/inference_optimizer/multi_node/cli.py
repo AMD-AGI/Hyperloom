@@ -100,14 +100,6 @@ _TERMINAL_OK_STATUSES = {"SUCCEEDED"}
 _RESUME_PROBE_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_PROBE_TIMEOUT_S"
 _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
-# Budget for the rank-liveness fan-out, which is a Ray job rather than an HTTP
-# call: submission, scheduling, interpreter start, ray.init and one actor per
-# node all land inside it. Sized against the caller's own poll budget rather
-# than fixed (see _resume_liveness_timeout_s), with a floor so a very short
-# budget does not guarantee a timeout, since a timed-out probe relaunches.
-_RESUME_LIVENESS_TIMEOUT_ENV = "HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S"
-_MIN_RESUME_LIVENESS_TIMEOUT_S = 30
-
 
 def _normalize_extra_args(s: str | None) -> str:
     """Normalize ``--extra-args`` whitespace for equality (order-preserving; argv order matters).
@@ -1652,122 +1644,6 @@ def _resume_probe_timeout_s() -> int:
         return _DEFAULT_RESUME_PROBE_TIMEOUT_S
 
 
-def _resume_liveness_timeout_s(args: argparse.Namespace) -> int:
-    """Budget for the rank-liveness Ray job, from submission to summary.
-
-    Derived from this invocation's own poll budget rather than fixed, because a
-    constant cannot be right for both callers. A foreground CLI call has to
-    finish under the sandbox's 120s ceiling, while the orchestrator hands in
-    budgets measured in the hundreds of seconds for MoE cold starts; a value
-    large enough for the second silently blows the first, and the probe is spent
-    before the launch poll even begins. Half leaves room for the rest of the
-    invocation.
-
-    Args:
-        args: Parsed ``restart-server`` arguments, for the poll budget.
-
-    Returns:
-        int: Seconds, from ``$HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S`` when set.
-    """
-    override = os.environ.get(_RESUME_LIVENESS_TIMEOUT_ENV, "").strip()
-    if override:
-        try:
-            return max(1, int(override))
-        except ValueError:
-            warn(f"invalid {_RESUME_LIVENESS_TIMEOUT_ENV}={override!r}; deriving from the poll budget")
-    return max(_MIN_RESUME_LIVENESS_TIMEOUT_S, _poll_timeout_from_args(args) // 2)
-
-
-def _build_multinode_probe_entrypoint(pid_dir: str) -> str:
-    """Compose the Ray Dashboard entrypoint that reports per-rank liveness.
-
-    Args:
-        pid_dir (str): Directory of per-rank PID files.
-
-    Returns:
-        str: The composed Ray Dashboard entrypoint shell command.
-    """
-    py = _read_pod_script("probe_multinode.py")
-    return (
-        f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/probe_multinode.py\" <<'__MN_PROBE_PY_EOF__'\n"
-        f"{py}__MN_PROBE_PY_EOF__\n"
-        f'python3 "$WORK_DIR/probe_multinode.py" '
-        f"--pid-dir {shlex.quote(str(pid_dir))}"
-    )
-
-
-def _ranks_alive(state: dict[str, Any], pid_dir: str, nnodes: int, args: argparse.Namespace) -> bool:
-    """Whether the cluster still holds the launch it recorded, intact.
-
-    The signal that separates a cold start from a dead cluster, and the only one
-    that can: a server still loading weights serves nothing yet but its process
-    is there, while a crashed one is gone. This is the rayjob counterpart of
-    infera's per-pod ``kill -0`` on the recorded PID.
-
-    Three conditions, because a live process is not by itself a usable cluster.
-    Every expected node has to have answered -- an evicted pod drops out of
-    ``ray.nodes()`` and its ranks then cannot report as dead, only as missing,
-    and resuming onto that leaves the framework waiting forever on a rank that
-    no longer exists. No recorded process may be gone. And at least one has to
-    be a real server, since a cluster of nothing but vLLM's sentinel files has
-    not launched anything.
-
-    Fail-safe throughout: an unreachable node, an unparseable summary, or a
-    missing count all answer False, so the caller relaunches rather than
-    resuming onto something it could not confirm.
-
-    Args:
-        state: Multi-node state (names the Ray dashboard).
-        pid_dir: Directory the last launch wrote per-rank PID files into.
-        nnodes: How many nodes this run expects to be serving.
-        args: Parsed ``restart-server`` arguments, for the poll knobs.
-
-    Returns:
-        bool: True only when the recorded launch is present and whole.
-    """
-    try:
-        with _ray_dashboard_client(state) as ray:
-            sub = ray.submit_job(_build_multinode_probe_entrypoint(pid_dir))
-
-            def _fetch():
-                """Fetch the probe job status for the poll loop.
-
-                Returns:
-                    tuple[dict, str]: The job dict and a short status message.
-                """
-                job = ray.get_job(sub)
-                return job, f"probe status={job.get('status', '?')}"
-
-            _short_poll(
-                label=f"rank-liveness probe {sub}",
-                fetch=_fetch,
-                is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                interval_s=args.poll_interval,
-                timeout_s=_resume_liveness_timeout_s(args),
-            )
-            summary = _extract_launcher_summary(ray.get_job_logs(sub))
-    except Exception as exc:  # noqa: BLE001
-        info(f"rank-liveness probe failed ({exc!r}); treating the cluster as not resumable")
-        return False
-
-    reported = int(summary.get("nodes") or 0)
-    alive = int(summary.get("alive") or 0)
-    dead = int(summary.get("dead") or 0)
-    if reported < nnodes:
-        info(f"rank-liveness probe: only {reported}/{nnodes} nodes are still in the cluster")
-        return False
-    if dead:
-        info(f"rank-liveness probe: {dead} recorded server processes are gone")
-        return False
-    if alive <= 0:
-        info("rank-liveness probe: no server process is recorded on any node")
-        return False
-    info(f"rank-liveness probe: {alive} server processes alive across {reported} nodes")
-    return True
-
-
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1826,6 +1702,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         # framework/model/tp/ep/pd_mode and is still RUNNING, skip KILL+LAUNCH
         # and resume polling. Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0.
         launch_sub: str = ""
+        # Set only when a resume was granted because the cluster is serving,
+        # which in PD means its router is already up and must not be rebuilt.
+        resumed_serving = False
         resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
             "0",
             "false",
@@ -1863,31 +1742,28 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     f"— skipping KILL+LAUNCH, just polling"
                 )
                 launch_sub = prev_sub
-            elif _prev_status in _TERMINAL_OK_STATUSES:
-                # A finished driver says a launch happened, never that a server
-                # is still up. Two questions answer that, in this order because
-                # the cheap one also ends the call: is the cluster serving, and
-                # if not, is it still coming up or actually gone?
+            elif _prev_status in _TERMINAL_OK_STATUSES and not getattr(args, "no_wait_health", False):
+                # The driver waits for the servers it spawned before exiting, so
+                # a terminal-OK status means this cluster served once. Silence
+                # now is therefore news -- it died since -- rather than a boot
+                # still in progress, which is what a RUNNING status reports.
+                # --no-wait-health opts out of that guarantee, so it never
+                # resumes here.
                 if cluster_is_serving(
                     state,
                     pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
                     timeout_s=_resume_probe_timeout_s(),
                 ):
+                    resumed_serving = True
+                    launch_sub = prev_sub
                     info(
                         f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated "
                         f"tokens; skipping KILL+LAUNCH"
                     )
-                    launch_sub = prev_sub
-                elif _ranks_alive(state, pid_dir, nnodes, args):
-                    info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and every rank is alive but not "
-                        f"serving yet; skipping KILL+LAUNCH and waiting on the boot in progress"
-                    )
-                    launch_sub = prev_sub
                 else:
                     info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster neither serves "
-                        f"nor holds live ranks; doing a full KILL+LAUNCH"
+                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster no longer serves; "
+                        f"doing a full KILL+LAUNCH"
                     )
 
         kill_sub = ""
@@ -1958,7 +1834,18 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
             router_sub = ""
             router_state: dict = {}
-            if pd_mode == "disaggregated":
+            if pd_mode == "disaggregated" and resumed_serving:
+                # The serving probe just drove a completion through this
+                # cluster's public port, which in PD is the router: it is up and
+                # routing. Submitting another would replace the very process
+                # that answered, for nothing.
+                router_sub = str(state.get("last_router_submission_id") or "")
+                router_state = {
+                    "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
+                    "pd_decode_url": str(state.get("pd_decode_url") or ""),
+                }
+                info("resume: keeping the router that is already serving")
+            elif pd_mode == "disaggregated":
                 launch_logs = ray.get_job_logs(launch_sub)
                 router_state = _extract_launcher_summary(launch_logs)
                 prefill_url = str(router_state.get("pd_prefill_url") or "").strip()

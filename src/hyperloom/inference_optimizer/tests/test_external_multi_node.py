@@ -838,28 +838,28 @@ def test_unresolvable_endpoints_short_circuit_without_asking(monkeypatch: pytest
 
 
 @pytest.mark.parametrize(
-    ("serving", "ranks_alive", "expect_relaunch"),
+    ("serving", "no_wait_health", "expect_relaunch"),
     [
         (True, False, False),
-        # Not serving yet but every rank is there: a cold start in progress.
-        (False, True, False),
         (False, False, True),
+        # The launch opted out of waiting, so a terminal-OK driver proves
+        # nothing and the probe is not consulted.
+        (True, True, True),
     ],
 )
-def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
+def test_resume_needs_a_cluster_that_still_serves(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
     serving: bool,
-    ranks_alive: bool,
+    no_wait_health: bool,
     expect_relaunch: bool,
 ) -> None:
-    """A finished launch driver is not evidence either way, so ask two questions.
+    """A terminal-OK driver means this cluster served once, not that it still does.
 
-    The driver reports SUCCEEDED once the ranks are spawned and stays there
-    whether the detached servers then live or die. Resuming on that alone
-    returned 0 with nothing serving after a crash; relaunching on a failed
-    serving probe alone tore down cold starts, because "not serving" and "dead"
-    look identical from outside. Only the rank PIDs separate them.
+    The driver waits for the servers it spawned before exiting, so SUCCEEDED is
+    a claim about a moment that has passed. Resuming on it alone returned 0 with
+    nothing serving after a crash. Asking the endpoint settles it -- and where
+    the launch waived that wait, there is no claim to check, so no resume.
     """
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
@@ -878,7 +878,7 @@ def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
 
     submitted: list[str] = []
     killed: list[str] = []
-    liveness_asked: list[str] = []
+    probed: list[str] = []
 
     class _FakeRay:
         def get_job(self, _sub: str) -> dict[str, str]:
@@ -897,12 +897,7 @@ def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
     monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
     monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
     monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
-    monkeypatch.setattr(mncli, "cluster_is_serving", lambda *_a, **_k: serving)
-    monkeypatch.setattr(
-        mncli,
-        "_ranks_alive",
-        lambda *_a, **_k: liveness_asked.append("probe") or ranks_alive,
-    )
+    monkeypatch.setattr(mncli, "cluster_is_serving", lambda *_a, **_k: probed.append("probe") or serving)
 
     args = argparse.Namespace(
         framework="sglang",
@@ -916,140 +911,14 @@ def test_resume_relaunches_only_when_the_cluster_neither_serves_nor_lives(
         poll_interval=1,
         poll_timeout=5,
         print_logs=False,
+        no_wait_health=no_wait_health,
     )
 
     assert mncli.cmd_restart_server(args) == 0
     assert bool(killed) is expect_relaunch
     assert bool(submitted) is expect_relaunch
-    # A serving cluster settles it, so the fan-out is only paid for when needed.
-    assert liveness_asked == ([] if serving else ["probe"])
-
-
-@pytest.mark.parametrize(
-    ("summary", "expected"),
-    [
-        ({"nodes": 4, "alive": 4, "dead": 0}, True),
-        # vLLM: only rank 0 runs a server, the rest record the sentinel. A
-        # healthy cluster here reports one alive and three stale.
-        ({"nodes": 4, "alive": 1, "dead": 0, "stale": 3}, True),
-        ({"nodes": 4, "alive": 3, "dead": 1}, False),
-        # An evicted pod leaves ray.nodes() entirely, so its ranks are missing
-        # rather than dead. Resuming would wait forever on a rank that is gone.
-        ({"nodes": 3, "alive": 3, "dead": 0}, False),
-        # Nothing was ever launched, or the pid dir is gone.
-        ({"nodes": 4, "alive": 0, "dead": 0}, False),
-        ({}, False),
-    ],
-)
-def test_ranks_alive_requires_a_whole_cluster_not_just_live_processes(
-    monkeypatch: pytest.MonkeyPatch,
-    summary: dict,
-    expected: bool,
-) -> None:
-    """Fail-safe: anything short of every node holding its launch means relaunch."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    class _FakeRay:
-        def get_job(self, _sub: str) -> dict[str, str]:
-            return {"status": "SUCCEEDED"}
-
-        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
-            return "probe-1"
-
-        def get_job_logs(self, _sub: str) -> str:
-            return json.dumps(summary)
-
-    @contextlib.contextmanager
-    def _fake_client(_state: object):
-        yield _FakeRay()
-
-    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
-    monkeypatch.setattr(mncli, "_build_multinode_probe_entrypoint", lambda *_a, **_k: "probe-ep")
-    monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
-
-    args = argparse.Namespace(poll_interval=1, poll_timeout=5)
-
-    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", 4, args) is expected
-
-
-@pytest.mark.parametrize(
-    ("poll_timeout", "expected"),
-    [
-        # Foreground CLI: must leave room under the sandbox's 120s ceiling.
-        (110, 55),
-        # Orchestrator budgets for an MoE cold start.
-        (900, 450),
-        # Floor, so a tiny budget does not guarantee a timeout -- and a
-        # timed-out probe relaunches over the boot it was meant to protect.
-        (10, 30),
-    ],
-)
-def test_liveness_budget_is_sized_against_the_calls_own_budget(
-    monkeypatch: pytest.MonkeyPatch,
-    poll_timeout: int,
-    expected: int,
-) -> None:
-    """A fixed budget cannot be right for both callers.
-
-    A Ray fan-out is not an HTTP call and cannot share the serving probe's
-    seconds-scale budget. But a constant large enough for the orchestrator's
-    cold-start budgets silently overruns a foreground invocation, and it is
-    spent before the launch poll even starts.
-    """
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    monkeypatch.delenv("HYPERLOOM_MN_RESUME_LIVENESS_TIMEOUT_S", raising=False)
-    args = argparse.Namespace(poll_timeout=poll_timeout)
-
-    assert mncli._resume_liveness_timeout_s(args) == expected
-
-
-def test_ranks_alive_polls_on_the_liveness_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The fan-out is what the budget must cover, so that is what it gets."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    budgets: list[int] = []
-
-    class _FakeRay:
-        def get_job(self, _sub: str) -> dict[str, str]:
-            return {"status": "SUCCEEDED"}
-
-        def submit_job(self, _ep: str, runtime_env: object = None) -> str:
-            return "probe-1"
-
-        def get_job_logs(self, _sub: str) -> str:
-            return json.dumps({"nodes": 2, "alive": 2, "dead": 0})
-
-    @contextlib.contextmanager
-    def _fake_client(_state: object):
-        yield _FakeRay()
-
-    def _record_poll(**kwargs: object) -> dict[str, str]:
-        budgets.append(int(kwargs["timeout_s"]))  # type: ignore[arg-type]
-        return {"status": "SUCCEEDED"}
-
-    monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
-    monkeypatch.setattr(mncli, "_build_multinode_probe_entrypoint", lambda *_a, **_k: "probe-ep")
-    monkeypatch.setattr(mncli, "_short_poll", _record_poll)
-
-    args = argparse.Namespace(poll_interval=1, poll_timeout=110)
-    assert mncli._ranks_alive({}, "/tmp/pids", 2, args) is True
-    assert budgets == [mncli._resume_liveness_timeout_s(args)]
-
-
-def test_ranks_alive_treats_an_unreachable_cluster_as_not_resumable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unanswered probe is not permission to resume."""
-    from hyperloom.inference_optimizer.multi_node import cli as mncli
-
-    @contextlib.contextmanager
-    def _exploding_client(_state: object):
-        raise RuntimeError("dashboard unreachable")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(mncli, "_ray_dashboard_client", _exploding_client)
-
-    args = argparse.Namespace(poll_interval=1, poll_timeout=5)
-    assert mncli._ranks_alive({}, "/tmp/multi_node_pids", 2, args) is False
+    # Nothing to verify when the launch never made the claim.
+    assert probed == ([] if no_wait_health else ["probe"])
 
 
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
