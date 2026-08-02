@@ -15,6 +15,7 @@ caller can fall back to the ``--gpu-type`` / ``$GPU_TYPE`` hint.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import tempfile
 import time
@@ -84,20 +85,25 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     return _parse_gpu_type(out) if out is not None else None
 
 
+# Sentinel wrapper so the value is unambiguously extractable from a remote run's
+# combined output, which is interleaved with Ray runtime-env / INFO log lines.
+_ENV_SENTINEL_RE = re.compile(r"___MNENV\[(.*?)\]MNENV___")
+
+
 def _parse_env_value(text: str) -> str | None:
-    """Return the last non-empty line of ``printenv`` output, or ``None``.
+    """Extract a sentinel-wrapped env value from remote output.
 
     Args:
-        text: Combined stdout/stderr from a remote ``printenv`` run.
+        text: Combined stdout/stderr from a remote sentinel ``echo`` run.
 
     Returns:
-        str | None: The variable's value, or ``None`` when unset/empty.
+        str | None: The variable's value, or ``None`` when unset/empty/absent.
     """
-    for line in reversed((text or "").splitlines()):
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return None
+    match = _ENV_SENTINEL_RE.search(text or "")
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
 
 
 def remote_read_env(var: str, *, timeout_s: int = 120) -> str | None:
@@ -105,7 +111,8 @@ def remote_read_env(var: str, *, timeout_s: int = 120) -> str | None:
 
     The operator's server env (e.g. ``SGLANG_USE_AITER``) is baked into the
     inference pods, not the sandbox, so it must be read remotely: ``rayjob``
-    runs ``printenv`` on the Ray head, ``infera`` SSHes into the first GPU pod.
+    runs the probe on the Ray head, ``infera`` SSHes into the first GPU pod. The
+    value is wrapped in a sentinel so it survives interleaved Ray log lines.
     Best-effort: any failure or an unset variable returns ``None``.
 
     Args:
@@ -118,7 +125,9 @@ def remote_read_env(var: str, *, timeout_s: int = 120) -> str | None:
     name = (var or "").strip()
     if not name:
         return None
-    out = _remote_run(f"printenv {name}", timeout_s=timeout_s, label=f"env read {name}")
+    # Prints e.g. ``___MNENV[0]MNENV___`` (empty brackets when unset).
+    cmd = f'printf "___MNENV[%s]MNENV___\\n" "$(printenv {name})"'
+    out = _remote_run(cmd, timeout_s=timeout_s, label=f"env read {name}")
     return _parse_env_value(out) if out is not None else None
 
 

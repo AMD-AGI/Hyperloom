@@ -196,7 +196,8 @@ def test_remote_read_env_rayjob(monkeypatch):
     monkeypatch.setattr(
         gpu_probe.ray_dashboard,
         "RayDashboardClient",
-        lambda *_a, **_k: _FakeRayClient("0\n"),
+        # Sentinel-wrapped value interleaved with a Ray INFO line.
+        lambda *_a, **_k: _FakeRayClient("INFO Runtime env is setting up.\n___MNENV[0]MNENV___\n"),
     )
     assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) == "0"
 
@@ -217,14 +218,14 @@ def test_remote_read_env_infera(monkeypatch):
         gpu_probe.ssh_client,
         "ssh_run",
         lambda host, command, **_k: subprocess.CompletedProcess(
-            args=[command], returncode=0, stdout="0\n", stderr=""
+            args=[command], returncode=0, stdout="___MNENV[0]MNENV___\n", stderr=""
         ),
     )
     assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) == "0"
 
 
 def test_remote_read_env_unset_returns_none(monkeypatch):
-    # printenv of an unset var yields empty output -> None.
+    # An unset var prints empty sentinel brackets -> None.
     monkeypatch.setattr(
         gpu_probe,
         "build_external_state_from_env",
@@ -233,7 +234,7 @@ def test_remote_read_env_unset_returns_none(monkeypatch):
     monkeypatch.setattr(
         gpu_probe.ray_dashboard,
         "RayDashboardClient",
-        lambda *_a, **_k: _FakeRayClient("", status="FAILED"),
+        lambda *_a, **_k: _FakeRayClient("___MNENV[]MNENV___\n"),
     )
     assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) is None
 

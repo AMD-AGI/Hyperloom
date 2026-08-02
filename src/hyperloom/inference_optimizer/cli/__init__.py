@@ -1744,6 +1744,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     _pins["SGLANG_USE_AITER"] = _cluster_aiter
                     os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_pins)
                     print(f"Cluster env     : SGLANG_USE_AITER={_cluster_aiter} (read from pods)")
+                else:
+                    print("Cluster env     : SGLANG_USE_AITER unset/unreadable on pods (aiter-MoE filter stays off)")
         else:
             probed = _autodetect_gpu_type() or ""
         gpu_type, gpu_warnings = _resolve_gpu_type(
