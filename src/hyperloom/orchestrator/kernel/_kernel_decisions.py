@@ -1417,14 +1417,14 @@ def _kernel_optimization_roi(row: dict[str, Any], gpu_pct: float) -> float:
     Ranking candidates on ``gpu_pct`` alone spends the attempt budget on
     whatever owns the most trace time, including kernels already running at
     their roofline that have nothing left to give. Weighting by
-    ``1 - efficiency`` puts attempts where measured headroom actually is: a
-    kernel at 11% of GPU time and 30% efficiency outranks one at 12% and 90%.
+    ``1 - attainment`` puts attempts where measured headroom actually is: a
+    kernel at 11% of GPU time and 30% attainment outranks one at 12% and 90%.
 
     The bypass report already computes this as ``optimization_priority``, so
     prefer that value and keep one definition of the ROI. Recompute only for
-    the TraceLens path, which carries ``efficiency_percent`` but no ROI, and
-    degrade to the raw share when efficiency was never measured -- that
-    reproduces the previous ordering rather than inventing headroom.
+    the TraceLens path, which carries roofline fields but no ROI, and degrade
+    to the raw share when attainment is unknown -- that reproduces the previous
+    ordering rather than inventing headroom.
 
     Args:
         row: A ``hot_kernels`` entry.
@@ -1436,11 +1436,39 @@ def _kernel_optimization_roi(row: dict[str, Any], gpu_pct: float) -> float:
     precomputed = row.get("optimization_priority")
     if isinstance(precomputed, (int, float)) and not isinstance(precomputed, bool):
         return float(precomputed)
+    attainment = _roofline_attainment_pct(row)
+    if attainment is None:
+        return gpu_pct
+    headroom = 1.0 - min(max(attainment, 0.0), 100.0) / 100.0
+    return gpu_pct * headroom
+
+
+def _roofline_attainment_pct(row: dict[str, Any]) -> float | None:
+    """How much of its roofline a kernel already attains, or ``None`` if unknown.
+
+    Attainment must be read on the BINDING side. ``efficiency_percent`` is
+    compute-side, so a memory-bound kernel pinned at its bandwidth roof still
+    reports ~0 there; treating that as headroom would rank the one kernel with
+    nothing to recover at the top. The bypass route publishes the binding-side
+    value directly. The TraceLens route does not, so its compute-side number is
+    trusted only when the kernel is compute-bound, and a memory-bound row
+    without attainment stays unknown rather than being scored on the wrong axis.
+
+    Args:
+        row: A ``hot_kernels`` entry.
+
+    Returns:
+        Attainment in percent, or ``None`` when the row cannot supply one.
+    """
+    attainment = row.get("roofline_attainment_pct")
+    if isinstance(attainment, (int, float)) and not isinstance(attainment, bool):
+        return float(attainment)
     eff = row.get("efficiency_percent")
     if not isinstance(eff, (int, float)) or isinstance(eff, bool):
-        return gpu_pct
-    headroom = 1.0 - min(max(float(eff), 0.0), 100.0) / 100.0
-    return gpu_pct * headroom
+        return None
+    if str(row.get("bound_type") or "").strip().lower() != "compute_bound":
+        return None
+    return float(eff)
 
 
 def untried_hot_reusable_kernels(
@@ -1453,8 +1481,8 @@ def untried_hot_reusable_kernels(
 
     ROI is the GPU-time share weighted by roofline headroom (see
     :func:`_kernel_optimization_roi`), so the cap keeps kernels that can still
-    move rather than the largest ones. Kernels whose efficiency was never
-    measured rank on their raw share, as before.
+    move rather than the largest ones. Kernels whose roofline attainment is
+    unknown rank on their raw share, as before.
 
     Args:
         min_gpu_pct (float | None): Minimum GPU-share threshold; when
