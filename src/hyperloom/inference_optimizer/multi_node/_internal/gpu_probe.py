@@ -100,7 +100,7 @@ def _parse_env_value(text: str) -> str | None:
     return None
 
 
-def remote_read_env(var: str, *, timeout_s: int = 30) -> str | None:
+def remote_read_env(var: str, *, timeout_s: int = 120) -> str | None:
     """Read an env var from the handed-over inference cluster's pods.
 
     The operator's server env (e.g. ``SGLANG_USE_AITER``) is baked into the

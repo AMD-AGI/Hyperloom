@@ -1737,7 +1737,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             except (ValueError, TypeError):
                 _pins = {}
             if isinstance(_pins, dict) and "SGLANG_USE_AITER" not in _pins:
-                _cluster_aiter = remote_read_env("SGLANG_USE_AITER")
+                # Generous budget: a Ray job's submit + runtime-env setup alone
+                # can take ~50s, so a short timeout returns before printenv output.
+                _cluster_aiter = remote_read_env("SGLANG_USE_AITER", timeout_s=180)
                 if _cluster_aiter is not None:
                     _pins["SGLANG_USE_AITER"] = _cluster_aiter
                     os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_pins)
