@@ -29,21 +29,6 @@ from ..session.paths import (
 log = logging.getLogger(__name__)
 
 
-def _per_node_resources(args: argparse.Namespace) -> tuple[int, int]:
-    """Resolve (cpus, mem_gib) per node from the optimize CLI flags.
-
-    Both the RayJob and Infera provision paths honour ``--cpus-per-node`` /
-    ``--mem-per-node``; when a flag is unset the create-* subcommand defaults
-    (96 CPUs, 1024 GiB) apply. No environment variables are consulted.
-    """
-    cpus = getattr(args, "cpus_per_node", None)
-    mem = getattr(args, "mem_per_node", None)
-    return (
-        int(cpus) if cpus is not None else 96,
-        int(mem) if mem is not None else 1024,
-    )
-
-
 def _gc_old_profile_traces(
     root: str | None = None,
     retention_days: int = 7,
@@ -135,294 +120,178 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
     return backend
 
 
-def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2`` and ``--mn-backend infera``, create an idle
-    InferaDeployment and export the frontend service_url for benchmarks.
+def _prepare_multi_node_state(args: argparse.Namespace) -> None:
+    """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run.
 
-    No Ray head / bootstrap / RAY_ADDRESS: the worker pods are idle (sshd),
-    and ``restart-server`` (routed by ``state.backend == 'infera'``) SSHes in
-    to launch ``infera.engine.sglang``/``infera.engine.vllm``. Benchmarks
-    target the Infera frontend (:8000) via ``state.service_url`` — picked up
-    automatically by ``_multi_node_env.benchmark_env_for_subprocess``.
+    The cluster — RayJob head+workers, or an idle InferaDeployment whose pods run
+    sshd — is provisioned by the platform before the optimizer starts and handed
+    over through the ``HYPERLOOM_MN_EXT_*`` env vars. This synthesizes
+    ``multi_node_state.json`` from them so every downstream step
+    (``restart-server``, SSH fan-out, GPU sampling, Magpie client mode) reads one
+    stable source, and points benchmarks at the cluster's frontend.
+
+    Nothing here creates or releases a cluster; that is the platform's job. The
+    session-side setup the adopted cluster still needs runs in
+    :func:`_prepare_adopted_cluster`. No-op when ``--nodes < 2``.
 
     Args:
-        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``,
-            ``model``, ``mn_image``, ``gpus_per_node``, and PD flags).
+        args: Parsed CLI namespace (reads ``nodes`` and ``mn_backend``).
 
     Raises:
-        SystemExit: With code 2 when a required Infera image is not resolvable.
+        SystemExit: With code 2 when ``--nodes >= 2`` but no cluster was handed
+            over, when an infera cluster arrives without SSH control, or when the
+            synthesized state cannot be written; with the bootstrap return code
+            when that fails.
     """
-    nodes = max(1, int(args.nodes))
-    from ..multi_node.cli import cmd_create_infera, _load_state
-    from ..multi_node.state_paths import resolve_state_file
-
-    state_path = resolve_state_file()
-    image = (getattr(args, "mn_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_MN_IMAGE", ""
-    ).strip()
-    if not image and state_path.is_file():
-        try:
-            prior = json.loads(state_path.read_text(encoding="utf-8"))
-            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
-        except (OSError, json.JSONDecodeError, TypeError):
-            image = ""
-    if not image:
-        print(
-            "ERROR: --nodes >= 2 --mn-backend infera requires an Infera image "
-            "WITH the sshd layer (mn-idle.sh). Pass --mn-image <harbor/...> "
-            "or set INFERENCE_OPTIMIZER_MN_IMAGE.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    # The Infera frontend needs the model path for --router-tokenizer-path.
-    model = (str(getattr(args, "model", None) or "").strip()) or os.environ.get("MODEL_PATH", "").strip()
-    if not model:
-        print(
-            "ERROR: --nodes >= 2 --mn-backend infera requires --model (or "
-            "$MODEL_PATH) for the Infera frontend --router-tokenizer-path.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    gpn = getattr(args, "gpus_per_node", None)
-    if gpn is None:
-        try:
-            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
-        except ValueError:
-            gpn = 8
-
-    poll_timeout = int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110)
-    # Hyperloom patch (operator-local): forward --pd-* flags so the auto-created
-    # IDEP honours the operator's PD topology AND so cmd_create_infera's reuse
-    # path classifies pods under the correct prefill/decode roles when writing
-    # the resolved multi_node_state.json. Without these forwards the helper defaults
-    # pd_mode to 'aggregated' regardless of the optimize CLI, and downstream
-    # restart_server_for_round finds zero prefill/decode pods → no SSH launch →
-    # baseline gets 0 completed requests → baseline_failed after 3 attempts.
-    _pd_kv_backend = (getattr(args, "pd_transfer_backend", "") or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_INFERA_KV_BACKEND", "mori"
-    )
-    cpus_per_node, mem_per_node = _per_node_resources(args)
-    ns_create = argparse.Namespace(
-        workspace=None,
-        image=image,
-        model=model,
-        nodes=nodes,
-        gpus_per_node=int(gpn),
-        cpus_per_node=cpus_per_node,
-        mem_per_node=mem_per_node,
-        ephemeral_per_node=400,
-        shared_mem_per_node=200,
-        backend_framework=(getattr(args, "framework", None) or "sglang"),
-        kv_transfer_backend=_pd_kv_backend,
-        ssh_port=int(os.environ.get("MN_SSH_PORT", "2222") or 2222),
-        display_name=None,
-        description=None,
-        owner_id=None,
-        extra_env=list(getattr(args, "rayjob_extra_env", None) or []),
-        extra_label=[],
-        no_wait=False,
-        recreate=False,
-        poll_interval=6,
-        poll_timeout=poll_timeout,
-        # PD topology forward (see comment above).
-        pd_mode=(getattr(args, "pd_mode", "") or "aggregated"),
-        pd_prefill_nodes=int(getattr(args, "pd_prefill_nodes", 0) or 0),
-        pd_decode_nodes=int(getattr(args, "pd_decode_nodes", 0) or 0),
-        pd_prefill_tp=int(getattr(args, "pd_prefill_tp", 0) or 0),
-        pd_decode_tp=int(getattr(args, "pd_decode_tp", 0) or 0),
-    )
-    rc = cmd_create_infera(ns_create)
-    if rc != 0:
-        sys.exit(rc)
-
-    state = _load_state()
-    su = str(state.get("service_url") or "").strip()
-    if su:
-        # Also export here so the frontend URL is visible to any early
-        # shell-level Magpie call.
-        os.environ["BENCHMARK_BASE_URL"] = su
-        os.environ["MAGPIE_RUN_PHASE"] = "client"
-        print(f"multi-node(infera): BENCHMARK_BASE_URL={su} (frontend :8000)")
-
-    # Install GEAK kernel tooling on the GPU pods (SSH-installed so the
-    # kernel-agent finds `geak` on PATH). Skipped when the run opted out of
-    # the kernel phase. Best-effort (failures surface later as clear pod-side
-    # errors) and Infera-only (the helper no-ops for other backends).
-    from ..multi_node.cli import install_geak_on_pods_best_effort
-
-    if not getattr(args, "no_kernel", False):
-        install_geak_on_pods_best_effort()
-
-
-def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
-
-    When SaFE is absent and ``HYPERLOOM_MN_EXT_SERVICE_URL`` is set, synthesize
-    ``multi_node_state.json`` from env and skip all SaFE create/init (external
-    mode). Downstream restart / SSH / Magpie client mode read the synthetic state.
-
-    For ``--mn-backend infera`` this delegates to
-    :func:`_provision_multi_node_infera_stack` (idle InferaDeployment + SSH).
-
-    No-op when ``--nodes < 2``. The RayJob path resolves the container image
-    (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
-    one-time bootstrap if it hasn't run yet, exports ``RAY_ADDRESS`` for
-    kernel-agent Ray tasks, sets ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` to a
-    cluster-shared trace directory namespaced by ``rayjob_id`` (GC'ing older
-    sibling dirs), and replays previously-applied kernel patches onto the
-    (possibly fresh) pods.
-
-    Raises:
-        SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
-            configured, when external infera lacks SSH control, or with the
-            create/bootstrap return code on failure.
-    """
-    from ..multi_node._internal.external_state import (
-        build_external_state_from_env,
-        external_has_ssh_control,
-        external_service_url,
-    )
-
-    if external_service_url():
-        from ..multi_node.cli import _save_state
-        from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
-
-        ext_state = build_external_state_from_env()
-        ext_state["backend"] = _resolve_mn_backend(args)
-        if ext_state["backend"] == "infera" and not external_has_ssh_control():
-            print(
-                "ERROR: external infera mode requires SSH control. Set "
-                "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
-                "DECODE_IPS (or WORKER_IPS). rayjob external uses Ray, not SSH.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        try:
-            _save_state(ext_state)
-        except OSError as exc:
-            print(f"ERROR: external mode: cannot write synthetic state: {exc}", file=sys.stderr)
-            sys.exit(2)
-        os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
-        os.environ["MAGPIE_RUN_PHASE"] = "client"
-        export_ray_address_to_os()
-        print(
-            "multi-node(external): SaFE bypassed; state synthesized from env. "
-            f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
-            f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
-            f"ssh_control={'yes' if external_has_ssh_control() else 'no (benchmark-only)'}"
-        )
-        return
-
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
 
-    if _resolve_mn_backend(args) == "infera":
-        _provision_multi_node_infera_stack(args)
-        return
-
-    from ..multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
-    from ..multi_node.state_paths import resolve_state_file
+    from ..multi_node._internal.external_state import (
+        build_external_state_from_env,
+        external_has_server_control,
+        external_has_ssh_control,
+        external_service_url,
+    )
+    from ..multi_node.cli import _save_state
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
-    state_path = resolve_state_file()
-    image = (getattr(args, "mn_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_MN_IMAGE", ""
-    ).strip()
-    if not image and state_path.is_file():
-        try:
-            prior = json.loads(state_path.read_text(encoding="utf-8"))
-            image = str((prior.get("last_create_request") or {}).get("image") or "").strip()
-        except (OSError, json.JSONDecodeError, TypeError):
-            image = ""
-    if not image:
+    if not external_service_url():
         print(
-            "ERROR: --nodes >= 2 requires a RayJob container image. Pass "
-            "--mn-image <harbor/...> or set INFERENCE_OPTIMIZER_MN_IMAGE.",
+            "ERROR: --nodes >= 2 requires a cluster provisioned by the platform. "
+            "Set HYPERLOOM_MN_EXT_SERVICE_URL (plus HYPERLOOM_MN_EXT_SSH_KEY and "
+            "one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS for infera, or "
+            "HYPERLOOM_MN_EXT_HEAD_IP for rayjob); see multi_node/SKILL.md "
+            '"Cluster hand-off".',
             file=sys.stderr,
         )
         sys.exit(2)
 
-    gpn = getattr(args, "gpus_per_node", None)
-    if gpn is None:
-        try:
-            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
-        except ValueError:
-            gpn = 8
-
-    # Forward agent-supplied prompt env verbatim; no-op on RayJob reuse (see multi_node/SKILL.md).
-    rayjob_extra_env = list(getattr(args, "rayjob_extra_env", None) or [])
-
-    cpus_per_node, mem_per_node = _per_node_resources(args)
-    ns_create = argparse.Namespace(
-        workspace=None,
-        image=image,
-        nodes=nodes,
-        gpus_per_node=int(gpn),
-        cpus_per_node=cpus_per_node,
-        mem_per_node=mem_per_node,
-        ephemeral_per_node=400,
-        display_name=None,
-        description=None,
-        owner_id=None,
-        extra_env=rayjob_extra_env,
-        extra_label=[],
-        no_wait=False,
-        recreate=False,
-        poll_interval=6,
-        # In-process provisioning is not bound by the foreground/MCP 120s
-        # ceiling, so use a larger default so slow cluster scheduling
-        # (workload stuck Pending) does not abort create-rayjob before it
-        # can persist head_pod_ip. Override via HYPERLOOM_MN_POLL_TIMEOUT_S.
-        poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
-    )
-    rc = cmd_create_rayjob(ns_create)
-    if rc != 0:
-        sys.exit(rc)
-
-    state = _load_state()
-    if not state.get("last_bootstrap_submission_id"):
-        ns_boot = argparse.Namespace(
-            script=None,
-            force=False,
-            print_logs=False,
-            poll_interval=6,
-            # Same rationale as create-rayjob above: in-process provisioning
-            # gets a larger default than the foreground 120s ceiling.
-            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+    ext_state = build_external_state_from_env()
+    ext_state["backend"] = _resolve_mn_backend(args)
+    if ext_state["backend"] == "infera" and not external_has_ssh_control():
+        print(
+            "ERROR: the infera backend requires SSH control. Set "
+            "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
+            "DECODE_IPS (or WORKER_IPS). rayjob uses Ray, not SSH.",
+            file=sys.stderr,
         )
-        rc_boot = cmd_bootstrap(ns_boot)
-        if rc_boot != 0:
-            sys.exit(rc_boot)
-
-    export_ray_address_to_os()
-    ra = os.environ.get("RAY_ADDRESS", "")
-    if ra:
-        print(f"multi-node: exported RAY_ADDRESS={ra} for kernel-agent Ray tasks")
-
-    # Server pods write torch traces to a sandbox-readable wekafs path, namespaced by rayjob_id.
-    state_after = _load_state()
-    rid = (state_after.get("rayjob_id") or "").strip()
-    if rid:
-        # Anchor the torch-profile shared root on $USER_DATA_PATH so sandbox and pods agree.
-        trace_root_path = mn_profile_trace_root() / rid / "torch_trace"
-        trace_root = str(trace_root_path)
-        try:
-            trace_root_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
+        sys.exit(2)
+    # The mirror image, and the one that used to pass. --mn-backend defaults to
+    # rayjob, so an infera-shaped hand-off whose operator forgot the flag was
+    # rewritten to rayjob here and reported server_control=yes -- SSH control is
+    # real, it is simply not the control this backend uses. The run then died
+    # minutes later inside a per-round restart, on a head_pod_ip nobody asked
+    # for. Say it now, and name the flag that was meant.
+    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
+        if external_has_ssh_control():
             print(
-                f"WARN multi-node: cannot mkdir {trace_root}: {exc}; server traces will fall back to per-pod /tmp",
+                "ERROR: --mn-backend rayjob (the default) needs "
+                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
+                "credentials and GPU pod IPs instead -- it is an infera "
+                "cluster. Pass --mn-backend infera.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
+            "restarted, so the run is benchmark-only (see the warning below).",
+            file=sys.stderr,
+        )
+    try:
+        _save_state(ext_state)
+    except OSError as exc:
+        print(f"ERROR: cannot write multi-node state: {exc}", file=sys.stderr)
+        sys.exit(2)
+    os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
+    os.environ["MAGPIE_RUN_PHASE"] = "client"
+    export_ray_address_to_os()
+    # Report server *control*, not SSH specifically: rayjob restarts through the
+    # Ray dashboard with no SSH at all, so keying this on SSH labelled a fully
+    # controllable rayjob cluster "benchmark-only" and gave the genuinely
+    # uncontrollable one the same words -- exactly backwards on the one line an
+    # operator reads to find out whether the run can tune anything.
+    has_control = external_has_server_control()
+    print(
+        "multi-node: adopted the platform-provisioned cluster. "
+        f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
+        f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
+        f"server_control={'yes' if has_control else 'no (benchmark-only)'} "
+        f"ssh_control={'yes' if external_has_ssh_control() else 'no'}"
+    )
+    if not has_control:
+        # Loud, not fatal: benchmark-only is a documented mode (multi_node/SKILL.md),
+        # but without a restart every candidate re-measures the one unchanged
+        # server, so the run still reports gains that no config produced.
+        print(
+            "WARNING: no server control -- per-round restarts will be skipped, so every "
+            "candidate config measures the SAME unchanged server and the reported gains "
+            "are meaningless. Set HYPERLOOM_MN_EXT_HEAD_IP (rayjob) or "
+            "HYPERLOOM_MN_EXT_SSH_KEY plus one of _PREFILL_IPS / _DECODE_IPS / _WORKER_IPS "
+            "(infera) to tune. Continuing in benchmark-only mode.",
+            file=sys.stderr,
+        )
+    _prepare_adopted_cluster(
+        args,
+        str(ext_state["backend"]),
+        head_ip=str(ext_state.get("head_pod_ip") or ""),
+    )
+
+
+def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
+    """Make an adopted cluster usable by this session.
+
+    Adopting only records where the cluster is. These steps are what the run
+    still needs from it, and none of them provision anything -- they went on
+    working against a handed-over cluster once the create path was removed:
+
+    * rayjob: the BYOI bootstrap renders ``/etc/profile.d/hyperloom-env.sh`` in
+      the head pod, which every later Ray Dashboard REST job sources to find the
+      framework venv. It is submitted rather than tracked in the state file: the
+      synthesized state carries no submission id, and ``bootstrap.sh`` already
+      self-skips on its pod-side marker. Skipped without a head IP: that is the
+      documented benchmark-only hand-off, where there is no head pod to address
+      and no later dashboard job to prepare, and ``cmd_bootstrap`` would abort
+      the whole run on the ``head_pod_ip`` it requires.
+    * infera: GEAK is installed on the GPU pods over SSH so the kernel agent
+      finds it on PATH. Best-effort, and the helper no-ops for other backends.
+    * both: kernel patches applied earlier in this session are replayed, so a
+      cluster adopted mid-session does not serve from the pre-patch state.
+
+    Args:
+        args: Parsed CLI namespace (reads ``nodes`` and ``no_kernel``).
+        backend: The resolved multi-node backend.
+        head_ip: The handed-over Ray head IP; empty means benchmark-only.
+
+    Raises:
+        SystemExit: With the bootstrap return code when the head pod fails it.
+    """
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+
+    if backend == "rayjob":
+        if not head_ip:
+            print(
+                "multi-node: no HYPERLOOM_MN_EXT_HEAD_IP -- skipping the head-pod bootstrap "
+                "(benchmark-only hand-off has no head pod to prepare).",
                 file=sys.stderr,
             )
         else:
-            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = trace_root
-            print(f"multi-node: exported HYPERLOOM_MN_PROFILE_TRACE_DIR={trace_root}")
-            # GC older sibling RayJob trace dirs (active rayjob_id name-guarded).
-            _gc_old_profile_traces(keep=rid)
+            ns_boot = argparse.Namespace(
+                script=None,
+                force=False,
+                print_logs=False,
+                poll_interval=6,
+                # Adoption runs in-process, so it is not bound by the foreground/MCP
+                # 120s ceiling; a slow head pod should not abort the run.
+                poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+            )
+            rc_boot = cmd_bootstrap(ns_boot)
+            if rc_boot != 0:
+                sys.exit(rc_boot)
 
-    # RayJob recreate path: replay promoted patches since fresh pods lost them. Best-effort.
+    if not getattr(args, "no_kernel", False):
+        install_geak_on_pods_best_effort()
+
     _replay_kernel_patches_for_multi_node(args)
 
 
@@ -575,7 +444,6 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
             "MODEL_CLASS",
             "PRECISION",
             "USER_DATA_PATH",
-            "SAFE_WORKSPACE",
             "BENCHMARK_BASE_URL",
             "SKIP_VARIANTS",
             "RUN_EVAL",

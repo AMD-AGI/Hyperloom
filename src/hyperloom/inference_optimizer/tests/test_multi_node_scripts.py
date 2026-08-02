@@ -82,6 +82,261 @@ def _load_script_module(unique_name: str, script_name: str):
     return mod
 
 
+def test_resolve_kb_topology_carries_formation_and_backend(monkeypatch, tmp_path):
+    """tp/ep/backend are part of the KB key, so they must survive the env hop."""
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8")
+    monkeypatch.setenv("TP", "8")
+    monkeypatch.setenv("EP", "4")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["nodes"] == 2
+    assert topo["gpus_per_node"] == 8
+    assert topo["tp"] == 8
+    assert topo["ep"] == 4
+    assert topo["backend"] == "infera"
+
+
+def _kb_env(monkeypatch, tmp_path, **env):
+    """Isolate resolve_kb_topology from the ambient env and any real state file."""
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    for key in ("INFERENCE_OPTIMIZER_NODES", "INFERENCE_OPTIMIZER_GPUS_PER_NODE", "TP", "EP", "PD_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
+    """Env is exported before T0 and stable across --resume, so it outranks state."""
+    _kb_env(monkeypatch, tmp_path, TP="8", EP="4", INFERENCE_OPTIMIZER_NODES="2")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 2, "ep": 2})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 8
+    assert topo["ep"] == 4
+
+
+def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, tmp_path):
+    """A junk TP/EP env must not shadow the persisted value it cannot replace."""
+    _kb_env(monkeypatch, tmp_path, TP="not-a-number", EP="", INFERENCE_OPTIMIZER_NODES="2")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2, "tp": 4, "last_restart_ep": 8})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 4
+    assert topo["ep"] == 8
+
+
+def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(monkeypatch, tmp_path):
+    """An unresolvable TP must omit the suffix, not claim the run was TP1.
+
+    ``kb_hardware_slug`` documents ``tp <= 0`` as "unspecified"; defaulting to 1
+    instead keyed such runs as a formation nobody measured.
+    """
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path, INFERENCE_OPTIMIZER_NODES="2", INFERENCE_OPTIMIZER_GPUS_PER_NODE="8")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"nodes": 2})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["tp"] == 0
+    assert topo["ep"] == 0
+    assert "_tp" not in kb_hardware_slug("MI300X", **topo)
+
+
+def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tmp_path):
+    """The KB key must name the control plane the run actually routes to.
+
+    A hardcoded backend default let a rayjob hand-off be keyed (and routed) as
+    infera whenever the platform omitted INFERENCE_OPTIMIZER_MN_BACKEND.
+    """
+    from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_BACKEND", raising=False)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://frontend:8000")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.9")
+    for var in ("SSH_KEY", "PREFILL_IPS", "DECODE_IPS", "WORKER_IPS"):
+        monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{var}", raising=False)
+
+    assert ext.build_external_state_from_env()["backend"] == "rayjob"
+    assert mne.resolve_kb_topology()["backend"] == "rayjob"
+
+
+def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
+    # The pod-side copy must mirror server_args_safety: exempt the flag by name,
+    # but still constrain its value. Divergence silently blocks the sandbox-side
+    # exemption at the pod boundary.
+    mod = _load_script_module("_ln_mn_specdraft", "launch_multinode.py")
+    assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
+    assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
+    for bad in ("Qwen/draft", "hf://org/draft", "/wekafs/../etc/passwd"):
+        assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
+    assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
+    assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
+
+
+def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], pids: dict, alive: set[int] = frozenset()):
+    """Run _wait_pd_legs_health against a fake urlopen/os.kill, with no sleeping."""
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def _fake_urlopen(url, timeout=None):
+        role = "prefill" if "10.0.1.1" in url else "decode"
+        return _Resp(200 if role in healthy else 503)
+
+    def _fake_kill(pid, _sig):
+        if pid not in alive:
+            raise ProcessLookupError(pid)
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(lm.os, "kill", _fake_kill)
+    monkeypatch.setattr(lm.time, "sleep", lambda _s: None)
+    return lm._wait_pd_legs_health("http://10.0.1.1:30000", "http://10.0.1.2:30001", 1, pids)
+
+
+def test_pd_launch_waits_for_both_legs_before_reporting_done(monkeypatch):
+    """A terminal launch status has to mean the cluster served, not just spawned.
+
+    The driver used to return the moment the PD ranks were spawned, because the
+    router that owns the public port is only submitted afterwards. Its job then
+    read SUCCEEDED while the weight load had tens of minutes left, so a caller
+    retrying mid-boot could not tell a booting cluster from a dead one -- the
+    ambiguity the whole resume decision then had to work around.
+    """
+    lm = _load_script_module("lm_pd_ready", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill", "decode"}, pids=pids, alive={111, 222}) is True
+
+
+def test_pd_launch_reports_undetermined_when_a_leg_never_answers(monkeypatch):
+    """A slow boot must not be called a failure; the caller probes from there."""
+    lm = _load_script_module("lm_pd_slow", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111, 222}) is None
+
+
+def test_pd_launch_fails_fast_when_a_leg_leader_dies(monkeypatch):
+    """A dead leader is a confirmed failure, not something to wait out."""
+    lm = _load_script_module("lm_pd_dead", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111}) is False
+
+
+def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
+    """A second router must not be stacked on top of the one already running.
+
+    The spawn ends with ``echo $! > router.pid``, so a router started while one
+    was live left the old process holding the public port with nothing naming
+    it: ``kill_multinode`` sweeps ``router*.pid``, which now points at the
+    newcomer, so the orphan survives every later kill. The resume paths reach
+    this without ever sweeping the pid dir, which is what made it reachable.
+    """
+    lr = _load_script_module("lr_test_replace", "launch_router.py")
+    pid_file = tmp_path / "router.pid"
+
+    # start_new_session mirrors the setsid the real spawn uses, so the group
+    # signalled here is the router's own and not this test runner's.
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        pid_file.write_text(str(victim.pid))
+
+        lr._retire_previous_router(pid_file, grace_s=5.0)
+
+        assert victim.poll() is not None, "the previous router must be stopped, not left holding the port"
+    finally:
+        if victim.poll() is None:  # pragma: no cover - only on an unexpected failure
+            victim.kill()
+        victim.wait()
+
+
+def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
+    """The replacement has to happen on the spawn path, not just be available.
+
+    Guards the wiring rather than the helper: it is the call inside
+    ``_detach_router`` that keeps a resume from stacking a second router.
+    """
+    lr = _load_script_module("lr_test_wiring", "launch_router.py")
+    pid_file = tmp_path / "router.pid"
+    log_file = tmp_path / "router.log"
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    spawned = 0
+    try:
+        pid_file.write_text(str(victim.pid))
+
+        spawned = lr._detach_router(["sleep", "30"], log_file, pid_file)
+
+        assert victim.poll() is not None, "the previous router must be stopped by the spawn path"
+        assert spawned != victim.pid
+        assert int(pid_file.read_text().strip()) == spawned
+    finally:
+        for pid in (victim.pid, spawned):
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        victim.wait()
+
+
+def test_router_signal_never_blankets_a_group_it_does_not_lead(monkeypatch):
+    """A PID that leads no group belongs to someone else's, so signal it alone.
+
+    The router is spawned under setsid and leads its own group, which is why
+    reaching the group is right for it. A recorded PID that has since been
+    reused, though, sits in an unrelated group -- possibly the caller's own, as
+    this suite demonstrated by taking itself down -- and killpg there would
+    signal processes this has no business touching.
+    """
+    lr = _load_script_module("lr_test_group", "launch_router.py")
+    group_signals: list[int] = []
+    pid_signals: list[int] = []
+
+    monkeypatch.setattr(lr.os, "killpg", lambda pgid, _sig: group_signals.append(pgid))
+    monkeypatch.setattr(lr.os, "kill", lambda pid, _sig: pid_signals.append(pid))
+
+    monkeypatch.setattr(lr.os, "getpgid", lambda _pid: 4242)
+    assert lr._signal_router(4242, signal.SIGTERM) is True
+    assert (group_signals, pid_signals) == ([4242], [])
+
+    group_signals.clear()
+    monkeypatch.setattr(lr.os, "getpgid", lambda _pid: 999)
+    assert lr._signal_router(4242, signal.SIGTERM) is True
+    assert (group_signals, pid_signals) == ([], [4242])
+
+
+def test_router_launch_tolerates_a_stale_pid_file(tmp_path):
+    """A pid file naming nothing live is the normal first-launch case."""
+    lr = _load_script_module("lr_test_stale", "launch_router.py")
+
+    for content in ("", "0", "not-a-pid", "999999999"):
+        pid_file = tmp_path / "router.pid"
+        pid_file.write_text(content)
+        lr._retire_previous_router(pid_file, grace_s=0.1)
+
+
 def test_kill_remote_missing_pid_dir():
     km = _load_script_module("km_test_missing", "kill_multinode.py")
     out = km._kill_remote("/no/such/dir/exists", grace_sec=1)
@@ -656,300 +911,6 @@ def test_wait_health_false_on_timeout(monkeypatch):
     assert lm._wait_health(timeout_s=5) is False
 
 
-def test_find_head_pod_ip_prefers_kuberay_head_suffix():
-    """SaFE may list submitter as resourceId 0; real Ray head podId contains '-head-'."""
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    wl = {
-        "pods": [
-            {
-                "podId": "primus-claw-40290b670f98c7-twr9t-khlfj",
-                "resourceId": 0,
-                "podIP": "172.16.152.122",
-            },
-            {
-                "podId": "primus-claw-40290b670f98c7-twr9t-x6fkf-head-ddtvg",
-                "resourceId": 1,
-                "podIP": "192.0.2.77",
-            },
-        ],
-    }
-    assert mn_rayjob._find_head_pod_ip(wl) == "192.0.2.77"
-
-
-def test_find_head_pod_ip_fallback_resource_id_zero():
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    wl = {
-        "pods": [
-            {"podId": "legacy-pod", "resourceId": 0, "podIP": "10.0.0.1"},
-        ],
-    }
-    assert mn_rayjob._find_head_pod_ip(wl) == "10.0.0.1"
-
-
-def test_build_rayjob_entrypoints_empty_submitter_tail():
-    import base64
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_rayjob_workload_body(
-        workspace="example-hyperloom",
-        display_name="t",
-        image="harbor.example/sglang:1",
-        nodes=2,
-        gpus_per_node=8,
-        cpus_per_node=96,
-        mem_gi_per_node=1024,
-        ephemeral_gi_per_node=400,
-    )
-    assert b["entryPoints"] == ["", ""]
-    dec = base64.b64decode(b["env"]["RAY_JOB_ENTRYPOINT"]).decode().strip()
-    assert dec == "tail -f /dev/null"
-
-
-# Common kwargs for builder tests; keeps each test focused on the one field under test.
-_BUILDER_MIN_KWARGS = dict(
-    workspace="ws-a",
-    display_name="t",
-    image="img:1",
-    nodes=2,
-    gpus_per_node=8,
-    cpus_per_node=96,
-    mem_gi_per_node=1024,
-    ephemeral_gi_per_node=400,
-)
-
-
-def test_extra_env_rayjob_long_lived_passthrough():
-    # User-supplied RAYJOB_LONG_LIVED reaches body.env unchanged.
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_rayjob_workload_body(
-        extra_env={"RAYJOB_LONG_LIVED": "true", "NCCL_DEBUG": "INFO"},
-        **_BUILDER_MIN_KWARGS,
-    )
-    assert b["env"].get("RAYJOB_LONG_LIVED") == "true"
-    assert b["env"].get("NCCL_DEBUG") == "INFO"
-
-
-def test_extra_env_ray_job_entrypoint_still_stripped_and_forced():
-    # RAY_JOB_ENTRYPOINT is reserved: the builder overwrites it with base64("tail -f /dev/null") so the cluster lives the whole session.
-    import base64
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_rayjob_workload_body(
-        extra_env={"RAY_JOB_ENTRYPOINT": base64.b64encode(b"echo hi").decode()},
-        **_BUILDER_MIN_KWARGS,
-    )
-    decoded = base64.b64decode(b["env"]["RAY_JOB_ENTRYPOINT"]).decode().strip()
-    assert decoded == "tail -f /dev/null"
-
-
-def test_session_id_injects_primus_claw_label():
-    # session_id emits the primus-claw/session-id label so Brain can correlate the RayJob with its parent session.
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_rayjob_workload_body(
-        session_id="sess-123",
-        **_BUILDER_MIN_KWARGS,
-    )
-    assert b["labels"].get("primus-claw/session-id") == "sess-123"
-    # The builder writes no primus-safe.* labels.
-    assert not any(k.startswith("primus-safe.") for k in b["labels"])
-
-
-def test_session_id_omitted_skips_label():
-    # No session_id → the label is absent rather than written with an empty value.
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b_none = workload_spec.build_rayjob_workload_body(
-        session_id=None,
-        **_BUILDER_MIN_KWARGS,
-    )
-    b_empty = workload_spec.build_rayjob_workload_body(
-        session_id="",
-        **_BUILDER_MIN_KWARGS,
-    )
-    b_default = workload_spec.build_rayjob_workload_body(**_BUILDER_MIN_KWARGS)
-    for b in (b_none, b_empty, b_default):
-        assert "primus-claw/session-id" not in b["labels"]
-
-
-def test_extra_label_primus_claw_prefix_still_stripped():
-    # The reserved-namespace guard for extra_labels stays intact: users can't inject their own session-id.
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_rayjob_workload_body(
-        session_id="real-sess",
-        extra_labels={
-            "primus-claw/session-id": "spoofed",  # must be dropped
-            "custom.example/team": "infra",  # must survive
-        },
-        **_BUILDER_MIN_KWARGS,
-    )
-    # Builder-injected value wins; user spoof is dropped before merge.
-    assert b["labels"].get("primus-claw/session-id") == "real-sess"
-    # Non-reserved labels survive unchanged.
-    assert b["labels"].get("custom.example/team") == "infra"
-
-
-# ---------------------------------------------------------------------------
-# build_infera_workload_body tests (Infera idle-pod backend).
-
-_INFERA_MIN_KWARGS = dict(
-    workspace="ws-a",
-    display_name="t",
-    image="img:1-ssh",
-    model="/path/models/GLM-5.2-FP8",
-    nodes=2,
-    gpus_per_node=8,
-    cpus_per_node=96,
-    mem_gi_per_node=1024,
-    ephemeral_gi_per_node=400,
-    ssh_authorized_key="ssh-ed25519 AAAAC3xx mn",
-)
-
-
-def test_infera_body_multinode_idle_shape():
-    # Multi-node Infera body: InferaDeployment kind, [frontend, worker]
-    # resources, worker.replica == node count, multinodeRoles=["worker"],
-    # idle worker entryPoint, frontend on :8000.
-    import base64
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_infera_workload_body(**_INFERA_MIN_KWARGS)
-
-    assert b["groupVersionKind"] == {"kind": "InferaDeployment", "version": "v1"}
-    assert b["inferaOptions"]["serviceRoles"] == ["frontend", "worker"]
-    assert b["inferaOptions"]["multinodeRoles"] == ["worker"]
-    assert b["inferaOptions"]["backendFramework"] == "sglang"
-    assert b["inferaOptions"]["kvTransferBackend"] == "mori"
-
-    fe, worker = b["resources"]
-    assert fe["replica"] == 1 and "gpu" not in fe
-    # worker.replica IS the node count (new API), not a Deployment replica.
-    assert worker["replica"] == 2
-    assert worker["gpu"] == "8"
-    assert worker["sharedMemory"] == "200Gi"
-    assert worker["rdmaResource"] == "1"  # cross-node RDMA on multi-node
-
-    # entryPoints are base64; worker is the idle launcher, frontend is :8000.
-    fe_ep = base64.b64decode(b["entryPoints"][0]).decode()
-    wk_ep = base64.b64decode(b["entryPoints"][1]).decode()
-    assert "infera.server" in fe_ep and "--port 8000" in fe_ep
-    assert "--router-tokenizer-path /path/models/GLM-5.2-FP8" in fe_ep
-    assert "MN_SSH_PORT" in wk_ep and "mn-idle.sh" in wk_ep
-
-    # SSH control-plane env injected; service fronts :8000 (not sglang :8888).
-    assert b["env"]["MN_SSH_AUTHORIZED_KEY"] == "ssh-ed25519 AAAAC3xx mn"
-    assert b["env"]["MN_SSH_PORT"] == "2222"
-    assert b["service"]["port"] == 8000 and b["service"]["targetPort"] == 8000
-
-
-def test_infera_body_single_node_omits_multinode_and_rdma():
-    # nodes=1: no multinodeRoles, no rdmaResource (single-pod aggregated).
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    kw = dict(_INFERA_MIN_KWARGS)
-    kw["nodes"] = 1
-    b = workload_spec.build_infera_workload_body(**kw)
-
-    assert "multinodeRoles" not in b["inferaOptions"]
-    _, worker = b["resources"]
-    assert worker["replica"] == 1
-    assert "rdmaResource" not in worker
-
-
-def test_infera_body_requires_ssh_key():
-    # The idle-pod control plane is unreachable without an authorized key,
-    # so the builder fails fast rather than producing a dead deployment.
-    import pytest as _pytest
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    kw = dict(_INFERA_MIN_KWARGS)
-    kw["ssh_authorized_key"] = "   "
-    with _pytest.raises(ValueError, match="ssh_authorized_key"):
-        workload_spec.build_infera_workload_body(**kw)
-
-
-def test_infera_body_requires_model():
-    import pytest as _pytest
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    kw = dict(_INFERA_MIN_KWARGS)
-    kw["model"] = "   "
-    with _pytest.raises(ValueError, match="model is required"):
-        workload_spec.build_infera_workload_body(**kw)
-
-
-def test_infera_body_rejects_bad_enums():
-    import pytest as _pytest
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    with _pytest.raises(ValueError, match="backend_framework"):
-        workload_spec.build_infera_workload_body(
-            **{**_INFERA_MIN_KWARGS, "backend_framework": "tensorrt"},
-        )
-    with _pytest.raises(ValueError, match="kv_transfer_backend"):
-        workload_spec.build_infera_workload_body(
-            **{**_INFERA_MIN_KWARGS, "kv_transfer_backend": "rdma"},
-        )
-
-
-def test_infera_body_pd_independent_instances_no_multinode():
-    # PD with TP that fits one pod (tp <= gpus_per_node): prefill/decode are
-    # independent single-node instances -> NO multinodeRoles, but PD still
-    # carries rdmaResource for the cross-pod KV transfer plane.
-    # Matches the canonical PD body (replica=2, TP=8).
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_infera_workload_body(
-        **{
-            **_INFERA_MIN_KWARGS,
-            "nodes": 1,
-            "pd_mode": "disaggregated",
-            "pd_prefill_nodes": 2,
-            "pd_decode_nodes": 2,
-            "pd_prefill_tp": 8,
-            "pd_decode_tp": 8,
-        },
-    )
-    assert b["inferaOptions"]["serviceRoles"] == ["frontend", "prefill", "decode"]
-    assert "multinodeRoles" not in b["inferaOptions"]
-    assert len(b["resources"]) == 3 and len(b["images"]) == 3
-    assert b["resources"][1]["replica"] == 2 and b["resources"][2]["replica"] == 2
-    # PD always carries rdmaResource ("1k") for cross-pod KV transfer.
-    assert b["resources"][1]["rdmaResource"] == "1k"
-    assert b["resources"][2]["rdmaResource"] == "1k"
-
-
-def test_infera_body_pd_multinode_when_tp_exceeds_node():
-    # PD with TP that exceeds one pod's GPUs: prefill/decode span nodes (LWS)
-    # -> multinodeRoles + rdmaResource.
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_infera_workload_body(
-        **{
-            **_INFERA_MIN_KWARGS,
-            "nodes": 1,
-            "pd_mode": "disaggregated",
-            "pd_prefill_nodes": 2,
-            "pd_decode_nodes": 2,
-            "pd_prefill_tp": 16,
-            "pd_decode_tp": 16,
-        },
-    )
-    assert b["inferaOptions"]["multinodeRoles"] == ["prefill", "decode"]
-    assert b["resources"][1]["rdmaResource"] == "1k"
-    assert b["resources"][2]["rdmaResource"] == "1k"
-
-
 def test_infera_discover_role_pods_groups_prefill_decode():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
@@ -961,17 +922,24 @@ def test_infera_discover_role_pods_groups_prefill_decode():
             {"podId": "x-decodeworker-0", "resourceId": 2, "podIP": "10.0.2.0"},
         ]
     }
+    # Ports come off the default base, so assert against the constant: moving
+    # the default must not need this test edited.
+    base = infera_support.DEFAULT_SSH_PORT
+    stride = infera_support.ssh_role_port_offset("decode")
     r = infera_support.discover_role_pods(wl)
     assert [p["podIP"] for p in r["prefill"]] == ["10.0.1.0", "10.0.1.1"]
-    assert [p["sshPort"] for p in r["prefill"]] == [2222, 2223]
+    assert [p["sshPort"] for p in r["prefill"]] == [base, base + 1]
     assert [p["podIP"] for p in r["decode"]] == ["10.0.2.0"]
-    assert r["decode"][0]["sshPort"] == 2232
+    assert r["decode"][0]["sshPort"] == base + stride
     assert r["frontend"] and not r["worker"]
 
 
 def test_infera_ssh_port_role_stride_and_idle_entrypoint():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
+    from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
 
+    assert infera_support.ssh_port_for_pod("prefill", 0) == DEFAULT_SSH_PORT
+    assert infera_support.ssh_port_for_pod("decode", 0) == DEFAULT_SSH_PORT + infera_support.INFERA_SSH_PORT_ROLE_STRIDE
     assert infera_support.ssh_port_for_pod("prefill", 0, ssh_port_base=2222) == 2222
     assert infera_support.ssh_port_for_pod("decode", 0, ssh_port_base=2222) == 2232
     assert infera_support.ssh_port_for_pod("worker", 1, ssh_port_base=2222) == 2223
@@ -979,28 +947,8 @@ def test_infera_ssh_port_role_stride_and_idle_entrypoint():
     decode_ep = infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=2222)
     assert "2222" in prefill_ep and "LWS_WORKER_INDEX" in prefill_ep
     assert "2232" in decode_ep
-
-
-def test_infera_pd_body_decode_entrypoint_uses_higher_ssh_port():
-    import base64
-
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_infera_workload_body(
-        **{
-            **_INFERA_MIN_KWARGS,
-            "nodes": 1,
-            "pd_mode": "disaggregated",
-            "pd_prefill_nodes": 1,
-            "pd_decode_nodes": 1,
-            "pd_prefill_tp": 8,
-            "pd_decode_tp": 8,
-        },
-    )
-    prefill_ep = base64.b64decode(b["entryPoints"][1]).decode()
-    decode_ep = base64.b64decode(b["entryPoints"][2]).decode()
-    assert "2222" in prefill_ep
-    assert "2232" in decode_ep
+    default_prefill_ep = infera_support.idle_worker_entrypoint(role="prefill")
+    assert str(DEFAULT_SSH_PORT) in default_prefill_ep
 
 
 def test_infera_disagg_flags_and_launch_args():
@@ -1023,24 +971,24 @@ def test_infera_disagg_flags_and_launch_args():
     assert "--extra-args" in la and "decode" in la
 
 
-def test_infera_body_vllm_backend_and_session_label():
-    from hyperloom.inference_optimizer.multi_node._internal import workload_spec
-
-    b = workload_spec.build_infera_workload_body(
-        **{
-            **_INFERA_MIN_KWARGS,
-            "backend_framework": "vllm",
-            "kv_transfer_backend": "mooncake",
-            "session_id": "sess-xyz",
-        },
-    )
-    assert b["inferaOptions"]["backendFramework"] == "vllm"
-    assert b["inferaOptions"]["kvTransferBackend"] == "mooncake"
-    assert b["labels"].get("primus-claw/session-id") == "sess-xyz"
-
-
 # ---------------------------------------------------------------------------
 # infera_support pure-helper tests (Infera backend SSH fan-out).
+
+
+def test_infera_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
+    from hyperloom.inference_optimizer.multi_node._internal import infera_support
+
+    wl = {
+        "pods": [
+            {"podId": "dyn-frontend-abc", "resourceId": 0, "podIP": "10.0.0.9"},
+            {"podId": "dyn-worker-1", "resourceId": 1, "podIP": "10.0.0.2"},
+            {"podId": "dyn-worker-0", "resourceId": 1, "podIP": "10.0.0.1"},
+            {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
+        ]
+    }
+    w = infera_support.discover_role_pods(wl, pd_mode="aggregated")["worker"]
+    assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
+    assert [p["lwsIndex"] for p in w] == [0, 1]
 
 
 def test_infera_frontend_service_url_prefers_live_then_dns():
@@ -1294,6 +1242,55 @@ def test_infera_ssh_env_empty_without_pods_or_key(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# magpie_remote_env accuracy-gate interpreter tests.
+
+
+def test_magpie_remote_env_pins_eval_interpreter(tmp_path, monkeypatch):
+    """The eval must run in the interpreter preflight installed lm_eval into.
+
+    Magpie's ``magpie_run_eval_remote_direct`` runs ``${MAGPIE_EVAL_PYTHON:-python3}``
+    and has no InferenceX shim to install the harness for itself, so a bare PATH
+    ``python3`` would look for lm_eval in a different interpreter than preflight
+    installed it into and fail the gate on a box preflight called ready.
+    """
+    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 2, "service_url": "http://h:8888"})
+    monkeypatch.setattr(mne, "external_service_url", lambda: "")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
+        lambda: "/opt/venv/bin/python",
+    )
+
+    env = mne.magpie_remote_env()
+
+    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
+    assert env["BENCHMARK_BASE_URL"] == "http://h:8888"
+
+
+def test_magpie_remote_env_pins_eval_interpreter_external(tmp_path, monkeypatch):
+    """The platform hand-off path needs the same pin as the state-file path."""
+    _write_mn_state(tmp_path, monkeypatch, {"nodes": 2})
+    monkeypatch.setattr(mne, "external_service_url", lambda: "http://frontend:8000")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.benchmark_backend.resolve_benchmark_interpreter",
+        lambda: "/opt/venv/bin/python",
+    )
+
+    env = mne.magpie_remote_env()
+
+    assert env["MAGPIE_EVAL_PYTHON"] == "/opt/venv/bin/python"
+    assert env["BENCHMARK_BASE_URL"] == "http://frontend:8000"
+
+
+def test_magpie_remote_env_empty_for_single_node(tmp_path, monkeypatch):
+    """Single-node stays untouched: no client phase, no interpreter override."""
+    _write_mn_state(tmp_path, monkeypatch, {"backend": "rayjob", "nodes": 1})
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setattr(mne, "external_service_url", lambda: "")
+
+    assert mne.magpie_remote_env() == {}
+
+
+# ---------------------------------------------------------------------------
 # _write_rayjob_meta sidecar JSON tests.
 
 
@@ -1310,80 +1307,6 @@ def _write_meta_kwargs(**overrides):
     )
     defaults.update(overrides)
     return defaults
-
-
-def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
-    # Meta lands at <profile_traces>/<wid>/<session_id> with all fields populated and JSON-decodable.
-    import json as _json
-
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-
-    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
-
-    meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
-    assert meta_path.is_file()
-    payload = _json.loads(meta_path.read_text(encoding="utf-8"))
-    assert payload["rayjob_id"] == "wid-abc"
-    assert payload["session_id"] == "sess-1"
-    assert payload["owner_id"] == "owner-1"
-    assert payload["workspace"] == "ws-a"
-    assert payload["display_name"] == "demo"
-    assert payload["nodes"] == 2
-    assert payload["gpus_per_node"] == 8
-    # created_at is an ISO-8601 UTC string (datetime.isoformat output).
-    assert isinstance(payload["created_at"], str)
-    assert payload["created_at"].endswith("+00:00")
-
-
-def test_write_rayjob_meta_skipped_when_session_id_missing(tmp_path, monkeypatch):
-    # Empty/None session_id → the helper short-circuits and creates nothing under profile-traces/.
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-
-    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=None))
-    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=""))
-
-    profile_traces = tmp_path / "profile-traces"
-    # The directory may not even exist; if it does, it must be empty.
-    if profile_traces.exists():
-        assert list(profile_traces.iterdir()) == []
-
-
-def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
-    # owner_id is optional; the meta must still serialize cleanly with owner_id=None.
-    import json as _json
-
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-
-    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(owner_id=None))
-
-    meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
-    payload = _json.loads(meta_path.read_text(encoding="utf-8"))
-    assert payload["owner_id"] is None
-
-
-def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
-    # A filesystem failure must NOT propagate (meta is audit data); force Path.mkdir to raise OSError.
-    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-
-    def _boom(self, *a, **kw):
-        raise OSError("simulated read-only filesystem")
-
-    monkeypatch.setattr("pathlib.Path.mkdir", _boom)
-
-    # If the helper re-raised, this call would fail the test.
-    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
-
-    # And no file should have been created.
-    meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
-    assert not meta_path.exists()
 
 
 def test_ray_gcs_address_from_state_prefers_ray_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1411,9 +1334,44 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     p.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    # The head IP reaches a multi-node run through the hand-off, so supply it
+    # that way: state for >= 2 nodes is refused without one.
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     mne.export_ray_address_to_os()
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
+
+
+def test_subcommand_state_refuses_multi_node_without_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A stale state file must not stand in for a cluster hand-off.
+
+    The guard sits on the subcommand entry, not on the raw state read: callers
+    that only ask about multi-node configuration must stay unaffected.
+    """
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node._internal import external_state
+
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"external": True, "head_pod_ip": "10.0.0.5"}), encoding="utf-8")
+    p.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(p))
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
+
+    # Triggered by the run declaring multi-node ...
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    with pytest.raises(RuntimeError, match="without a cluster hand-off"):
+        mn_cli._load_state()
+
+    # ... and by the file itself claiming to describe a handed-over cluster,
+    # which is what a standalone subcommand sees.
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    with pytest.raises(RuntimeError, match="describes a handed-over cluster"):
+        mn_cli._load_state()
+
+    # The raw read stays lenient so config-only callers keep working.
+    assert external_state.load_multi_node_state()["head_pod_ip"] == "10.0.0.5"
 
 
 # ---------------------------------------------------------------------------
@@ -1559,76 +1517,6 @@ def test_multinode_op_args_shlex_quotes_malicious_value():
     )
     assert shlex.quote(evil) in ep
     assert f"--bench-command {evil}" not in ep
-
-
-def test_create_infera_env_omits_credentials(monkeypatch):
-    """create-infera must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
-    new inference pod's container env; only operator --extra-env is forwarded."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    # cmd_create_infera and its ssh_client/workload_spec usage live in the
-    # ``commands.infera`` sibling; patch it there.
-    from hyperloom.inference_optimizer.multi_node.commands import infera as mn_infera
-
-    # Credentials present in the controller env (would previously fan out).
-    for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OOB_API_KEY", "LLM_API_KEY"):
-        monkeypatch.setenv(k, f"secret-{k}")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
-
-    monkeypatch.setattr(mn_infera.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey"))
-
-    captured: dict = {}
-
-    class _Sentinel(Exception):
-        pass
-
-    def _capture(**kwargs):
-        captured["extra_env"] = kwargs.get("extra_env")
-        raise _Sentinel()
-
-    monkeypatch.setattr(mn_infera.workload_spec, "build_infera_workload_body", _capture)
-
-    args = argparse.Namespace(
-        workspace="ws",
-        extra_env=["FOO=bar"],
-        extra_label=[],
-        image="img",
-        model="/path/models/test",
-        nodes=2,
-        gpus_per_node=8,
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        shared_mem_per_node=200,
-        backend_framework="sglang",
-        kv_transfer_backend="nixl",
-        ssh_port=2222,
-        pd_mode="aggregated",
-        pd_prefill_nodes=0,
-        pd_decode_nodes=0,
-        pd_prefill_tp=0,
-        pd_decode_tp=0,
-        description=None,
-        owner_id=None,
-        display_name=None,
-        recreate=False,
-        no_wait=True,
-    )
-
-    with pytest.raises(_Sentinel):
-        mn_cli.cmd_create_infera(args)
-
-    env = captured["extra_env"]
-    assert env == {"FOO": "bar"}
-    for k in (
-        "SAFE_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OOB_API_KEY",
-        "LLM_API_KEY",
-        "OPENAI_BASE_URL",
-    ):
-        assert k not in env
 
 
 def _bootstrap_sh() -> Path:

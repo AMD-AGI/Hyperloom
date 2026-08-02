@@ -7,7 +7,7 @@
 dict: it blocks shell/loader injection vectors (``_DENY_KEYS``) and invalid
 key shapes. Credential exclusion (``*_API_KEY``, ``SAFE_API_KEY``, ``*_BASE_URL``)
 happens upstream in ``infera._collect_forward_env`` (prefix whitelist) and
-``create-infera`` (operator ``--extra-env`` only); those keys are never placed
+the platform's pod env (operator ``--extra-env`` only); those keys are never placed
 into the forward dict, so they are not SSH-forwarded to inference pods.
 """
 

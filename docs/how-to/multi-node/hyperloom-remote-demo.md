@@ -18,24 +18,84 @@ Pick one; both serve the same model, differ in control plane:
   each round. Supports *PD disaggregation* (separate prefill / decode pods).
 - **rayjob**: pods run under Ray; restarts go through the Ray dashboard.
 
-Requires `--mn-image` pointing at an operator-supplied image
-(`<INFERA_SSHD_IMAGE>` must include sshd; `<RAYJOB_IMAGE>` is a standard Ray
-image).
+## Hyperloom does not create the cluster
 
-## Two ways to connect the cluster
+The platform provisions the GPU pods before the optimizer starts — normally
+**[Primus-Claw](https://github.com/AMD-AGI/Primus-Claw)** — and hands the
+running cluster over through `HYPERLOOM_MN_EXT_*` env vars. Hyperloom
+adopts it, benchmarks it, and restarts the server on it each round. It never
+creates or releases the cluster, so the container image and per-pod CPU/memory
+are the platform's inputs, not `optimize` flags.
 
-- **Path A: SaFE-managed** (default): The optimizer runs in a *Primus-SaFE*
-  sandbox with `SAFE_API_URL` + `SAFE_API_KEY` (both auto-injected by the
-  platform). Hyperloom creates the GPU pods (`create-infera` / `create-rayjob`)
-  and tears them down with `stop-multi-job`.
-  **[Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)** is AMD's open-source
-  training and inference management platform.
-- **Path B: External**: The cluster is already running with no SaFE
-  API; you point Hyperloom at it with `HYPERLOOM_MN_EXT_*` env vars (see below).
+Without a hand-off, a `--nodes >= 2` run exits 2.
 
-If both SaFE creds and `HYPERLOOM_MN_EXT_*` are set, **SaFE wins** (Path A).
+| Variable | Backend | Required | Meaning |
+|----------|---------|----------|---------|
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`); use the port in this URL — the platform assigns it (not a fixed `:8000`) |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated, in rank order) |
+| `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated, leader first) |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Path to a private key authorized on the pods |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | no | SSH base port (default `2233`; decode is role-offset `+10`, and each pod of a multi-node role adds its rank) |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | no | known_hosts path (else relaxed host-key check) |
+| `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | no | Host serving the Ray control plane — Dashboard `:8265` + GCS `:6379`, i.e. KubeRay's `<rayCluster>-head-svc`; omit → benchmark-only |
+| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token if required |
 
-## Shared filesystem (mandatory, both paths)
+- **infera** requires `SSH_KEY` + at least one `*_IPS`, else `optimize` fails
+  fast (`sys.exit(2)`).
+- **rayjob** uses `HEAD_IP` for restarts (not SSH); without it, benchmark-only.
+
+## Pod image requirements
+
+Neither backend runs the inference engine at pod start: the pods come up idle and
+Hyperloom launches and relaunches the server on them each round. That is what the
+image has to support, and it differs per backend.
+
+**infera** — a standard sglang (or vLLM) image plus an SSH control plane, because
+Hyperloom reaches these pods over SSH:
+
+- `openssh-server` installed, with `/run/sshd` present and host keys generated at
+  build time (`ssh-keygen -A`) so sshd can start without write access at runtime.
+- An entryPoint that makes the pod SSH-reachable and then blocks, so it stays
+  alive as an allocated but idle node while `restart-server` SSHes in to launch
+  sglang with each round's flags. The platform injects the authorized public key
+  as `MN_SSH_AUTHORIZED_KEY` and the port as `MN_SSH_PORT`.
+- Nothing else: `ENTRYPOINT` / `CMD` are irrelevant, since the platform sets the
+  container command explicitly.
+
+The core of that entryPoint:
+
+```bash
+mkdir -p /root/.ssh /run/sshd && chmod 700 /root/.ssh
+printf '%s\n' "$MN_SSH_AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+ssh-keygen -A                              # no-op when host keys are baked in
+printf 'Port %s\nPermitRootLogin prohibit-password\nPasswordAuthentication no\n' \
+  "${MN_SSH_PORT:-2233}" > /etc/ssh/sshd_config.d/mn.conf
+/usr/sbin/sshd -e                          # detaches, so pid 1 must block below
+exec tail -f /dev/null
+```
+
+A dedicated port rather than `:22` is deliberate: these pods run with hostNetwork
+for RDMA, where `:22` collides with the node's own sshd.
+
+**rayjob** — a standard sglang (or vLLM) image plus Ray, because these pods are a
+KubeRay cluster and Hyperloom drives them through the Ray Dashboard:
+
+- `ray` importable and on `PATH`, at the version the cluster expects; KubeRay runs
+  `ray start` in the head and worker containers. Pin Ray's CLI dependency along
+  with it, e.g. `python -m pip install "ray[default]==2.44.1" "click==8.1.8"`.
+- No sshd and no SSH control plane — the Ray Dashboard REST API replaces it.
+- The cluster idles the same way, through the RayJob submitter: the platform sets
+  its entrypoint to `tail -f /dev/null` so the cluster stays up instead of
+  finishing a job and tearing itself down.
+
+Example: `…/custom/primussafe/sglang:v0.5.15-rocm720-mi30x-ray2.44.1` adds
+`ray 2.44.1` and `click 8.1.8` to the `lmsysorg/sglang-rocm:v0.5.15-rocm720-mi30x`
+base, which ships neither. Keep click below 8.2 whatever the Ray version claims:
+ray 2.44.1 declares only `click>=7.0`, but click 8.2 changed `Sentinel` and ray's
+CLI then dies on import, so KubeRay's `ray start` never runs.
+
+## Shared filesystem (mandatory)
 
 Multi-node *can't run* without a cluster-wide shared mount (`NFS_SHARED_ROOT`,
 NFS or equivalent) visible at the *same absolute path* on the sandbox and every
@@ -56,7 +116,7 @@ ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 A session under `$USER_DATA_PATH/<model_basename>/<UTC_timestamp>/` with launcher
 logs and a persisted `state.json` (holds `phase`, `cumulative_gain`,
 `crash_count`, `stop_reason`) for status and `--resume`. `$USER_DATA_PATH` comes
-from the environment (platform-injected under SaFE).
+from the environment (platform-injected).
 
 ---
 
@@ -80,18 +140,17 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 | Flag | Meaning |
 |------|---------|
 | `--model` | Model path under `${NFS_SHARED_ROOT}/models/...` (or HF id) |
-| `--nodes` | Node count (`>= 2` for multi-node) |
+| `--nodes` | Node count (`>= 2` for multi-node); must match the cluster handed over |
 | `--mn-backend` | `infera` or `rayjob` |
-| `--mn-image` | Container image (`<INFERA_SSHD_IMAGE>` needs sshd; `<RAYJOB_IMAGE>`) |
-| `--gpus-per-node` / `--cpus-per-node` / `--mem-per-node` | Per-pod resources (default GPUs 8) |
+| `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` / `--ep` | Tensor / expert parallel (MoE: often `ep == tp`) |
 | `--isl` / `--osl` / `--conc` | Benchmark input/output length and concurrency (flags only — `ISL`/`OSL`/`CONC` env vars are ignored and overwritten) |
 | `--gpu-type` / `--precision` | Target GPU (e.g. `mi325x`) and dtype (`bf16`) — flags (env is not an authoritative source; `--gpu-type` is re-exported for subprocesses) |
 | `--framework` | `sglang` |
 | `--target-gain` / `--max-hours` | Optimization goal and time budget |
-| `--pd-mode disaggregated` + `--pd-prefill-*` / `--pd-decode-*` | infera PD split (prefill + decode roles; node counts sum to `--nodes`) |
+| `--pd-mode disaggregated` + `--pd-prefill-*` / `--pd-decode-*` | infera PD split; must describe the topology the platform actually provisioned |
 | `--pd-transfer-backend mooncake` | PD KV transfer plane (prefer `mooncake`; `nixl` can yield 0 output tokens) |
-| `--server-args "..."` | rayjob shared sglang args (applied each restart) |
+| `--server-args "..."` | Shared sglang args applied on every restart |
 | `--no-framework-agent` | Skip the framework-tuning agent |
 
 **Environment** (exported before `optimize`; sandbox-side):
@@ -100,59 +159,29 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 |-----|---------|
 | `RANDOM_RANGE_RATIO` | Benchmark sequence-length jitter (env has a fallback; `ISL`/`OSL`/`CONC`/`GPU_TYPE`/`PRECISION` are flags — see FLAGS above) |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
-| `TRACELENS_INTERNAL_ROOT` | Optional `TraceLens-internal` checkout |
-| `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
-| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
+| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (Workload A only) |
+| `FORGE_PATH` | Kernel-Forge checkout, for the Kernel-Forge kernel backend (Workload B) |
 
-Platform-injected (do **not** set): `SAFE_API_URL`, `SAFE_API_KEY`,
-`SAFE_WORKSPACE`, `WORKLOAD_ID`, `DISPLAY_NAME`, and `USER_DATA_PATH`.
+Platform-injected (do **not** set): every `HYPERLOOM_MN_EXT_*` var above, plus
+`USER_DATA_PATH`.
 
----
-
-## Path B — External mode (no SaFE)
-
-Same run as Path A, but you point Hyperloom at an already-running cluster instead
-of letting SaFE provision it. Unset the SaFE creds, set
-`HYPERLOOM_MN_EXT_SERVICE_URL`, and Hyperloom skips provisioning and benchmarks
-that URL directly. The same FLAGS / Environment blocks apply.
-
-| Variable | Backend | Required | Meaning |
-|----------|---------|----------|---------|
-| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`) |
-| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) |
-| `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | no | SSH base port (default `2233`; decode +10) |
-| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | no | known_hosts path (else relaxed host-key check) |
-| `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | no | Ray head IP (Dashboard `:8265`, GCS `:6379`); omit → benchmark-only |
-| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token if required |
-
-- **infera** requires `SSH_KEY` + at least one `*_IPS`, else `optimize` fails
-  fast (`sys.exit(2)`).
-- **rayjob** uses `HEAD_IP` for restarts (not SSH); without it, benchmark-only.
-
-Example (infera + PD disaggregated):
+Example (infera + PD disaggregated) once the platform has handed a cluster over:
 
 ```bash
-unset SAFE_API_URL SAFE_API_KEY
-export HYPERLOOM_MN_EXT_SERVICE_URL=http://<frontend-host>:8000
-export HYPERLOOM_MN_EXT_PREFILL_IPS=<prefill-ip>  HYPERLOOM_MN_EXT_DECODE_IPS=<decode-ip>
-export HYPERLOOM_MN_EXT_SSH_KEY=/path/to/id_ed25519
-
 inference_optimizer optimize --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
   --nodes 2 --mn-backend infera --pd-mode disaggregated \
   --pd-prefill-nodes 1 --pd-decode-nodes 1 --tp 8 --ep 8 \
   --pd-transfer-backend mooncake ...
 ```
 
-For rayjob, swap `--mn-backend rayjob` and set `HYPERLOOM_MN_EXT_HEAD_IP` instead
-of the SSH/IPs vars.
+For rayjob, swap `--mn-backend rayjob`; the platform supplies
+`HYPERLOOM_MN_EXT_HEAD_IP` instead of the SSH/IPs vars.
 
 ---
 
 ## Related topics
 
 - [Workload skill (copy-paste flags/env)](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
-- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
-- [Multi-node CLI, SSH & external-mode semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
+- [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) — provisions the cluster and hands it over
+- [Multi-node CLI, SSH & hand-off semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
 - [Local single-node counterpart](https://github.com/AMD-AGI/Hyperloom/blob/main/examples/README.md)

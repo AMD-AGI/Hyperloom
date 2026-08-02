@@ -22,6 +22,64 @@ def test_allows_speculative_config_json():
     sas.validate_server_args('--speculative-config {"method":"deepseek_mtp"}')
 
 
+def test_allows_speculative_draft_model_path():
+    # Regression: a legitimate tuning flag ending in ``-path`` must not be
+    # rejected by the broad suffix guard (eagle3 speculative-decoding sweep).
+    sas.validate_server_args(
+        "--speculative-algorithm EAGLE3 "
+        "--speculative-draft-model-path /wekafs/models/draft "
+        "--speculative-num-steps 3"
+    )
+    assert not sas.is_denied_server_flag("--speculative-draft-model-path")
+
+
+def test_allows_speculative_draft_model_path_equals_form():
+    sas.validate_server_args("--speculative-draft-model-path=/wekafs/models/draft")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Qwen/EAGLE3-Qwen3-30B",  # bare repo id: every pod would download its own
+        "hf://org/draft",
+        "http://evil.example/draft",
+        "./draft",
+        "/wekafs/models/../../etc/passwd",
+    ],
+)
+def test_denies_unsafe_speculative_draft_model_path_values(value: str):
+    # The name-level exemption must not carry over to arbitrary values.
+    with pytest.raises(sas.ServerArgsRejected):
+        sas.validate_server_args(f"--speculative-draft-model-path {value}")
+    with pytest.raises(sas.ServerArgsRejected):
+        sas.validate_server_args(f"--speculative-draft-model-path={value}")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--speculative-draft-model-path --speculative-num-steps 3",
+        "--mem-fraction-static 0.9 --speculative-draft-model-path",
+    ],
+)
+def test_denies_dangling_speculative_draft_model_path(args: str):
+    # A value-less path flag would otherwise swallow the next flag as its value.
+    with pytest.raises(sas.ServerArgsRejected):
+        sas.validate_server_args(args)
+
+
+def test_unsafe_flag_value_report_names_flag_and_reason():
+    assert sas.find_unsafe_flag_values("--speculative-draft-model-path relative/draft") == [
+        "--speculative-draft-model-path: must be an absolute path, not a repo id or URI"
+    ]
+
+
+def test_explicit_deny_still_wins_over_suffix_exemption():
+    # Hard-denied flags must never be re-enabled via the exemption path.
+    assert sas.is_denied_server_flag("--model-path")
+    assert sas.is_denied_server_flag("--adapter-model-path")
+
+
 @pytest.mark.parametrize(
     "args",
     [

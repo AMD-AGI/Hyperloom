@@ -11,8 +11,9 @@ description: |
 Pinned workload for a remote multi-node `optimize` run. Pick **one** backend
 below and pass its `FLAGS` + `Environment` block to `inference_optimizer
 optimize`; the agent launches it in the background and monitors `state.json`
-until a terminal `stop_reason` (`target_reached`, `global_converged`,
-`time_exhausted`, `max_ticks`). Concept and variable reference:
+until a terminal `stop_reason` — success (`target_reached`, `global_converged`,
+`time_exhausted`, `max_ticks`) or early failure (`baseline_failed`,
+`baseline_accuracy_failed`) that ends the run before optimizing. Concept and variable reference:
 `@../hyperloom-remote-demo.md`. Optimizer skill: `@${HYPERLOOM_SKILL_PATH}`
 (fallback `@../../../../src/hyperloom/inference_optimizer/SKILL.md`).
 
@@ -21,11 +22,30 @@ until a terminal `stop_reason` (`target_reached`, `global_converged`,
 - **`NFS_SHARED_ROOT`**: cluster-wide shared mount at the **same absolute path**
   on the sandbox and every GPU pod (model, tool checkouts, session artifacts).
   Required; local-only paths break multi-node restart and benchmarks.
-- **`--mn-image`**: operator-supplied: `<INFERA_SSHD_IMAGE>` (must include sshd)
-  for infera, `<RAYJOB_IMAGE>` for rayjob.
-- **SaFE (Path A)**: `SAFE_API_URL`, `SAFE_API_KEY`, `SAFE_WORKSPACE` are
-  platform-injected; not passed on the CLI. For an external cluster with no SaFE,
-  see `@../hyperloom-remote-demo.md` § Path B.
+- **A provisioned cluster**: the platform creates the GPU pods and hands them
+  over via `HYPERLOOM_MN_EXT_*` (platform-injected; never passed on the CLI).
+  `optimize` adopts that cluster and exits 2 without it.
+  See `@../hyperloom-remote-demo.md`.
+
+### One FLAGS block, two readers
+
+The blocks below are written for Primus-Claw *and* `optimize`: Claw parses them to
+size and build the cluster, then the agent runs `optimize` with the same block.
+Four flags exist only for Claw and **should be dropped when composing the
+`optimize` command**, which has no such options and logs
+`ignoring unrecognised arguments` for them:
+
+| Claw-only flag | What Claw does with it |
+|---|---|
+| `--mn-image` | Container image for the GPU pods (infera needs the sshd layer) |
+| `--cpus-per-node` / `--mem-per-node` | Per-pod CPU / memory request |
+| `--extra-env K=V` | Baked into pod env at create time (repeatable) |
+
+They are listed last in each block so the `optimize` command is the block with
+its tail cut off.
+
+Everything else (`--nodes`, `--mn-backend`, `--gpus-per-node`, `--model`,
+`--framework`, `--pd-*`) is read by both and stays on the `optimize` command.
 
 Layout under `NFS_SHARED_ROOT` (replace `${NFS_SHARED_ROOT}` with the real mount):
 
@@ -49,6 +69,7 @@ path.
 ### FLAGS
 
 ```text
+--gpu-type mi325x \
 --model ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B \
 --target-gain 30 \
 --max-hours 4 \
@@ -56,20 +77,23 @@ path.
 --framework=sglang \
 --nodes 2 \
 --gpus-per-node 8 \
---cpus-per-node 90 \
---mem-per-node 1024 \
 --tp 8 --ep 8 \
 --isl 1024 --osl 1024 --conc 128 \
---gpu-type mi325x \
 --precision bf16 \
---mn-image <INFERA_SSHD_IMAGE> \
 --pd-mode disaggregated \
 --pd-prefill-nodes 1 --pd-decode-nodes 1 \
 --pd-prefill-tp 8 --pd-decode-tp 8 \
 --pd-prefill-ep 8 --pd-decode-ep 8 \
 --pd-transfer-backend mooncake \
---pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --deepep-mode normal --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --trust-remote-code" \
---pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code"
+--pd-ib-device rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 \
+--pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --load-balance-method round_robin --watchdog-timeout 3600 --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192" \
+--pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024" \
+--mn-image <INFERA_SSHD_IMAGE> \
+--cpus-per-node 90 \
+--mem-per-node 1024 \
+--extra-env MC_GID_INDEX=3 \
+--extra-env NCCL_IB_GID_INDEX=3 \
+--extra-env SGLANG_USE_AITER_AR=0
 ```
 
 ### Environment
@@ -90,13 +114,22 @@ Large-model MoE cold start may need a longer poll budget:
 
 ## Workload B — RayJob aggregated
 
-`--mn-backend rayjob` (no PD flags). Same model / topology / Environment as
-Workload A; the differences are:
+`--mn-backend rayjob` (no PD flags). Same model / Environment as Workload A; the
+differences are:
 
 - Drop all `--pd-*` flags.
 - Replace `--pd-*-extra-args` with a single `--server-args` (applied each restart).
-- `--mn-image <RAYJOB_IMAGE>` (standard Ray image, no sshd requirement).
+- `--mn-image` is a standard Ray image (no sshd layer needed).
 - Drop the `SGLANG_DISAGGREGATION_*` env vars (PD-only).
+- **`--tp` covers the whole cluster, not one node.** One server spans every pod
+  here, so `--tp` must be `nodes * gpus-per-node` (16) — sglang receives
+  `--tp <n> --nnodes 2` and splits the ranks, so `--tp 8` would leave half of
+  each pod's GPUs idle. Workload A differs because each PD role owns one node,
+  where `--pd-*-tp 8` fills all 8 of its GPUs.
+- Pod-side env reaches the GPU pods only through `--extra-env`, which Claw bakes
+  in at create time (Claw-only, see the table above — drop it from the `optimize`
+  command). Cross-node tensor parallel needs the RoCE GID there. The
+  `Environment` block below is sandbox-side only and never reaches the pods.
 
 ### FLAGS
 
@@ -108,16 +141,19 @@ Workload A; the differences are:
 --framework=sglang \
 --nodes 2 \
 --gpus-per-node 8 \
---cpus-per-node 90 \
---mem-per-node 1024 \
---tp 8 --ep 8 \
+--tp 16 --ep 16 \
 --isl 1024 --osl 1024 --conc 128 \
 --gpu-type mi325x \
 --precision bf16 \
---no-framework-agent \
+--server-args "--attention-backend aiter --mem-fraction-static 0.8 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024" \
 --mn-image <RAYJOB_IMAGE> \
---server-args "--attention-backend aiter --mem-fraction-static 0.8 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code"
+--cpus-per-node 90 \
+--mem-per-node 1024 \
+--extra-env NCCL_IB_GID_INDEX=3
 ```
+
+Optional model pins (omit to use the deployment defaults):
+`--claude-model <model>` / `--codex-model <model>`.
 
 ### Environment
 
@@ -126,7 +162,12 @@ RANDOM_RANGE_RATIO=0.8
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
+FORGE_PATH=${NFS_SHARED_ROOT}/KernelForge
 ```
+
+`FORGE_PATH` is only needed for the Kernel-Forge kernel backend (also accepts
+`KERNEL_FORGE_ROOT` / `KERNEL_FORGE_PATH`). Behind a TLS-terminating proxy add
+`NODE_TLS_REJECT_UNAUTHORIZED=0` and `ANTHROPIC_SKIP_TLS_VERIFY=true`.
 
 ---
 
@@ -136,5 +177,5 @@ MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
   is platform-injected and kept unchanged.
 - Crash recovery: `optimize --resume` on the **same** session dir (never a second
   `optimize`; resume past a terminal `stop_reason` needs `--force-resume`).
-- Release the cluster when done:
-  `python3 -m hyperloom.inference_optimizer.multi_node stop-multi-job --delete --clear-state`.
+- Releasing the cluster is the platform's job, not the optimizer's — it happens
+  when the session ends.

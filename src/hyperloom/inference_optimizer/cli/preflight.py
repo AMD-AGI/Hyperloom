@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -554,6 +555,214 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
     print("Preflight: benchmark_serving client deps installed OK")
 
 
+# RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
+_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
+
+# Probed one subprocess each: the base package and the [api] extra can arrive
+# from different places (image vs pip), and only the truly absent one is
+# installed. Order matters only for the log line.
+_LM_EVAL_DEPS = ("lm_eval", "tenacity")
+
+
+def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
+    """Report which accuracy-gate modules ``python_exe`` cannot import.
+
+    One subprocess per module, on purpose. Importing ``lm_eval`` pulls in torch,
+    which on a broken ROCm install can take the interpreter down with a signal
+    rather than an exception; a shared probe would lose the verdict for every
+    other module along with it. Separate probes also distinguish "no lm_eval at
+    all" from "the image ships lm_eval and only the extra is absent", which
+    decides whether the image's own build gets reinstalled over.
+
+    A real import rather than ``find_spec``, so a half-installed package that
+    fails at exec time counts as missing.
+
+    Args:
+        python_exe (str): The interpreter to probe.
+
+    Returns:
+        list[str] | None: The modules that failed to import, or ``None`` when
+            the interpreter could not run the probe at all, leaving absence
+            unproven.
+    """
+    try:
+        # A missing or non-executable interpreter raises instead of returning a
+        # code, and preflight must not die on it: absence stays unproven, which
+        # the caller reports without touching anything.
+        liveness = subprocess.run([python_exe, "-c", "pass"], capture_output=True)
+        if liveness.returncode != 0:
+            return None
+        missing: list[str] = []
+        for module in _LM_EVAL_DEPS:
+            probe = subprocess.run([python_exe, "-c", f"import {module}"], capture_output=True)
+            if probe.returncode != 0:
+                missing.append(module)
+    except OSError:
+        return None
+    return missing
+
+
+# The harness the single-node path ends up on: InferenceX's benchmark_lib.sh
+# force-reinstalls this commit over whatever pip resolved. Pinning the same one
+# keeps a multi-node accuracy number comparable with a single-node one instead
+# of silently measuring against whatever PyPI happens to serve that day.
+_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+_LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
+# git first, then the archive, because the sandbox may not ship a git binary.
+_LM_EVAL_PINNED_SPECS = (
+    ("git", f"lm_eval[api] @ git+https://{_LM_EVAL_REPO}.git@{_LM_EVAL_PINNED_REF}"),
+    ("archive", f"lm_eval[api] @ https://{_LM_EVAL_REPO}/archive/{_LM_EVAL_PINNED_REF}.tar.gz"),
+)
+# Settled by install.sh (or the image) and load-bearing elsewhere in the stack:
+# pandas for rocprof-compute's CSV converter, torch/triton for the ROCm build
+# PyPI has no equivalent of, numpy because both pin against it.
+_LM_EVAL_FROZEN_DEPS = ("torch", "pandas", "numpy", "triton")
+
+
+def _frozen_constraints(python_exe: str) -> list[str]:
+    """Pin the packages this install must not move, as ``pip -c`` arguments.
+
+    ``install.sh`` orders itself so the ``pandas<3`` pin is the last pip step,
+    on the stated grounds that "no later pip install can re-pull pandas>=3".
+    This install runs at ``optimize`` time, which is after that last word, in
+    the same interpreter, and resolves a dependency closure that reaches pandas
+    through ``datasets`` and torch directly. Left free, pip may satisfy those
+    from PyPI: pandas>=3 makes rocprof-compute drop every counter so forge
+    degrades to PMC with no roofline, and a PyPI torch is a CUDA build on a ROCm
+    box.
+
+    Constraining rather than passing ``--no-deps`` keeps the rest of the closure
+    resolvable -- lm_eval needs far more than the bench-serving set already
+    installed -- while making an incompatible requirement a loud pip failure
+    instead of a silently broken profiler.
+
+    Args:
+        python_exe (str): The interpreter being installed into.
+
+    Returns:
+        list[str]: ``["-c", <path>]``, or ``[]`` when nothing could be read.
+    """
+    pins: list[str] = []
+    for name in _LM_EVAL_FROZEN_DEPS:
+        probe = subprocess.run(
+            [python_exe, "-c", f"import importlib.metadata as m; print(m.version({name!r}))"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        version = probe.stdout.strip()
+        if probe.returncode == 0 and version:
+            pins.append(f"{name}=={version}")
+    if not pins:
+        print("Preflight: WARNING — could not read installed versions; lm_eval install is unconstrained")
+        return []
+    # The name deliberately carries no package name: this path is spliced into a
+    # pip command line that callers assert does not mention a package spec.
+    handle, path = tempfile.mkstemp(prefix="hyperloom_pip_constraints_", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(pins) + "\n")
+    print(f"Preflight: constraining the lm_eval install to {' '.join(pins)}")
+    return ["-c", path]
+
+
+def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
+    """Install the pinned ``lm_eval[api]``, falling back to the source archive.
+
+    Raises:
+        subprocess.CalledProcessError: If every spec fails; the last error wins.
+    """
+    constraints = _frozen_constraints(python_exe)
+    for i, (source, spec) in enumerate(_LM_EVAL_PINNED_SPECS):
+        is_last = i == len(_LM_EVAL_PINNED_SPECS) - 1
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, spec],
+            check=is_last,
+        )
+        if proc.returncode == 0:
+            return
+        print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
+
+
+def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
+
+    ``install.sh`` defers ``lm_eval`` to InferenceX's ``benchmark_lib.sh`` runtime
+    shim, but the multi-node ``magpie_bench_remote_compat`` client path runs
+    ``python -m lm_eval`` directly without that shim. On those runs ``lm_eval`` is
+    never installed, the eval subprocess dies with ``No module named lm_eval``,
+    and every ``RUN_EVAL=true`` baseline aborts with ``baseline_accuracy_failed``.
+    Ensure it here (preflight runs for all paths) with the benchmark interpreter.
+    Skipped when RUN_EVAL is explicitly disabled (default is enabled).
+
+    Multi-node only. Single-node reaches lm_eval through ``run_eval`` ->
+    InferenceX ``benchmark_lib.sh::run_lm_eval``, which installs the harness on
+    first use and then force-reinstalls its own pinned commit over whatever is
+    there. Installing ahead of it therefore cannot change a single-node outcome,
+    while ``check=True`` below would give a working run a new way to die, so
+    single-node is left exactly as it was before this ensure existed.
+
+    Even where it does run, it is a no-op on any interpreter that can already
+    import the modules, so an image that ships ``lm_eval`` is left untouched
+    rather than reinstalled over. When it does install, it pins
+    :data:`_LM_EVAL_PINNED_REF` -- the commit InferenceX force-reinstalls on the
+    single-node path -- so the two paths measure with the same harness.
+
+    Args:
+        python_exe (str): The interpreter that will run ``python -m lm_eval``.
+        pip_extra (list[str]): Extra ``pip install`` arguments.
+
+    Raises:
+        subprocess.CalledProcessError: If the install fails. Preflight aborts
+            rather than continuing, since letting a failed install through
+            reproduces the exact ``baseline_accuracy_failed`` this prevents,
+            only hours later and with the pip diagnostics long gone.
+    """
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return  # single-node: InferenceX installs lm_eval itself, see above
+    run_eval = os.environ.get("RUN_EVAL")
+    if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
+        return  # accuracy gate disabled; lm_eval not required
+    missing = _probe_missing_lm_eval_deps(python_exe)
+    if missing is None:
+        # Absence is unproven, so installing would be a guess that could replace
+        # an lm_eval the image ships. An interpreter that cannot run ``python -c``
+        # already breaks the benchmark far more loudly than a missing accuracy
+        # gate would, so this warns and changes nothing.
+        print("Preflight: WARNING — cannot run the lm_eval probe; leaving the interpreter untouched")
+        return
+    if not missing:
+        print("Preflight: lm_eval[api] OK")
+        return
+    if "lm_eval" in missing:
+        print(f"Preflight: installing lm_eval[api]@{_LM_EVAL_PINNED_REF[:12]} (accuracy gate) ...")
+        _install_pinned_lm_eval(python_exe, pip_extra)
+        print("Preflight: lm_eval[api] installed OK")
+        return
+    # The image already ships lm_eval. Install only the absent extra so pip
+    # cannot resolve a different lm_eval build over the one baked in, which
+    # would silently swap out a version the image pinned on purpose -- the same
+    # reason the pinned spec above is not force-reinstalled here.
+    targets = missing
+    print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
+    subprocess.run(
+        [
+            python_exe,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--no-cache-dir",
+            *_frozen_constraints(python_exe),
+            *pip_extra,
+            *targets,
+        ],
+        check=True,
+    )
+    print(f"Preflight: {' '.join(targets)} installed OK")
+
+
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
 
@@ -572,7 +781,25 @@ def _unset_hip_visible_devices() -> None:
 
 
 def _check_gpu_visibility() -> None:
-    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent)."""
+    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent).
+
+    Skipped in external multi-node mode: there the server runs on remote GPU
+    pods and the benchmark drives the frontend over HTTP, so this
+    orchestrator-only sandbox legitimately has no local GPUs. Probing rocm-smi
+    here would emit a misleading "0 GPUs; benchmark will fail" warning.
+
+    The node count is part of that test, not just the hand-off URL. The platform
+    exports one env block for single- and multi-node runs alike, so a stray
+    ``HYPERLOOM_MN_EXT_SERVICE_URL`` must not silently disarm this check on a
+    single-node run that really does need local GPUs.
+    """
+    # External multi-node: GPUs are on remote pods, not this sandbox.
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if is_multi_node() and external_service_url():
+        print("Preflight: external multi-node mode; skipping local GPU visibility check (GPUs are on remote pods)")
+        return
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showid"],
@@ -902,6 +1129,61 @@ def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> b
     return ok
 
 
+def _ensure_client_trust_compat(magpie_path: str) -> bool:
+    """Assert the custom-tokenizer trust patch on the resolved Magpie tree.
+
+    ``MAGPIE_TRUST_REMOTE_CODE=1`` is set by default for every run, but it is
+    inert on an unpatched Magpie: upstream's SGLang client call sites never
+    pass the ``trust`` argument, so ``benchmark_serving.py`` falls back to its
+    ``--trust-remote-code`` default of False and builds the tokenizer with
+    ``trust_remote_code=False``. For a model shipping custom tokenizer code
+    (Kimi, some Qwen / DeepSeek / ChatGLM) transformers then refuses to execute
+    it and the benchmark client dies while synthesizing prompts — before any
+    request reaches the server. transformers has no environment-variable
+    escape hatch, so the CLI flag is the only opt-in.
+
+    ``install.sh`` applies the patch, but preflight pip-installs Magpie on its
+    own, so a preflight-only box never gets it. Re-assert it here.
+
+    Multi-node only, keeping the blast radius off the single-node path: the
+    remote-direct client this unblocks is the multi-node one. Single-node keeps
+    whatever ``install.sh`` did (or did not) leave behind.
+
+    Warn-only: a drifted script leaves the run usable for every model that does
+    not need remote code, which is the common case.
+
+    Args:
+        magpie_path: Resolved Magpie root (``$MAGPIE_PATH``); may be empty.
+
+    Returns:
+        ``True`` when every resolved SGLang script carries the trust gating,
+        none was applicable, or the run is single-node.
+    """
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return True
+    try:
+        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+            ensure_client_trust_compat,
+        )
+
+        ok = ensure_client_trust_compat(magpie_path or None)
+    except Exception as exc:  # noqa: BLE001 — preflight must not die here
+        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
+        return False
+    if not ok:
+        print(
+            "Preflight: WARNING — could not apply the custom-tokenizer trust "
+            "patch to a Magpie SGLang script "
+            f"(MAGPIE_PATH={magpie_path or '<unset>'}). MAGPIE_TRUST_REMOTE_CODE=1 "
+            "will not reach benchmark_serving.py, so a model shipping custom "
+            "tokenizer code will fail to load its tokenizer before issuing any "
+            "request. Models without remote code are unaffected."
+        )
+    return ok
+
+
 def _clone_inferencex(dest: Path) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF.
 
@@ -1117,6 +1399,13 @@ def _preflight(
     # sys.executable differs from /opt/venv can still import the client.
     _ensure_bench_serving_deps(benchmark_python, pip_extra)
 
+    # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates
+    # itself). The multi-node magpie remote-compat client path runs
+    # ``python -m lm_eval`` directly, with no InferenceX runtime shim to install
+    # the harness, so every RUN_EVAL=true baseline there would otherwise abort
+    # with baseline_accuracy_failed.
+    _ensure_lm_eval_dep(benchmark_python, pip_extra)
+
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the
     # active benchmark backend does not need Magpie (e.g. bypass): for the
@@ -1229,6 +1518,11 @@ def _preflight(
     # RUN_EVAL=true baseline before any results*.json exists. Patch the trees we
     # just materialized, now that both paths are known.
     if _magpie_backend_active:
+        # Trust patch first, mirroring install.sh: the eval-concurrency strip
+        # removes the very `run_eval ... --concurrent-requests` line the legacy
+        # MI300X trust patcher matches on, so the reverse order would leave a
+        # tree permanently unpatchable by that path.
+        _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
         _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
 
     # --- node / claude / codex CLI presence (WARN-only) ---

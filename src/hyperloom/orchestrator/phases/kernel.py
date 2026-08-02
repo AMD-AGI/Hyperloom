@@ -2117,8 +2117,28 @@ class KernelPhase(PhaseHandler):
             per_tuner_timeout_sec = 15 * 60
         per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
 
+        # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's
+        # CK fused-MoE rejects a non-128-aligned intermediate_size_per_partition.
+        # Validating it anyway costs a full cold start that can only end in a
+        # dead server.
+        from hyperloom.inference_optimizer.cli.model_gate import (
+            model_supports_aiter_ck_fused_moe,
+        )
+
         for cand in candidates:
             tuner_name = cand["tuner"]
+            if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
+                str(getattr(self.shared_state, "model_path", "") or ""),
+                int(getattr(self.shared_state, "tp", 0) or 0),
+            ):
+                log.info(
+                    "forge gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
+                    "this model at tp=%s (intermediate size is not 128-aligned)",
+                    tuner_name,
+                    getattr(self.shared_state, "tp", 0),
+                )
+                reverted.append({**cand, "reason": "aiter_ck_moe_shape_unsupported"})
+                continue
             # Merge candidate CSV with the runtime config so that shapes NOT in
             # the candidate keep their existing tuned entries. Without this, the
             # E2E validation would run with ONLY the candidate's shapes tuned,

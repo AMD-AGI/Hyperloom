@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .server_args_safety import prepare_shell_safe_extra_args
+from .ssh_client import DEFAULT_SSH_PORT
 
 # Frontend HTTP port (SaFE common.InferaFrontendPort). Benchmarks target this
 # OpenAI-compatible endpoint, never sglang rank-0 :8888.
@@ -47,14 +48,15 @@ def ssh_port_for_pod(
     role: str,
     lws_index: int | None,
     *,
-    ssh_port_base: int = 2222,
+    ssh_port_base: int = DEFAULT_SSH_PORT,
 ) -> int:
     """Compute the sshd port a pod listens on.
 
     Args:
         role: Classified service role.
         lws_index: LWS worker ordinal (leader = 0), or ``None``.
-        ssh_port_base: Base port (``MN_SSH_PORT`` default / CLI ``--ssh-port``).
+        ssh_port_base: Base port; the platform sets ``MN_SSH_PORT`` per pod,
+            this default only applies when it does not.
 
     Returns:
         int: ``ssh_port_base + role_offset + lws_index``.
@@ -63,7 +65,7 @@ def ssh_port_for_pod(
     return int(ssh_port_base) + ssh_role_port_offset(role) + idx
 
 
-def idle_worker_entrypoint(*, role: str, ssh_port_base: int = 2222) -> str:
+def idle_worker_entrypoint(*, role: str, ssh_port_base: int = DEFAULT_SSH_PORT) -> str:
     """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``.
 
     The port is ``role_base + LWS_WORKER_INDEX`` so multi-node LWS groups on
@@ -72,7 +74,7 @@ def idle_worker_entrypoint(*, role: str, ssh_port_base: int = 2222) -> str:
 
     Args:
         role: GPU service role (``worker`` / ``prefill`` / ``decode``).
-        ssh_port_base: Base SSH port from the create-infera CLI.
+        ssh_port_base: Base SSH port written into ``MN_SSH_PORT``.
 
     Returns:
         str: Shell command executed as the pod entryPoint (before base64).
@@ -83,7 +85,7 @@ def idle_worker_entrypoint(*, role: str, ssh_port_base: int = 2222) -> str:
 
 def _service_roles_for(pd_mode: str) -> list[str]:
     """Positional serviceRoles list for the deployment topology (matches
-    ``build_infera_workload_body``): PD -> [frontend, prefill, decode];
+    the platform's deployment): PD -> [frontend, prefill, decode];
     aggregated -> [frontend, worker].
 
     Args:
@@ -163,7 +165,7 @@ def discover_role_pods(
     workload: dict[str, Any],
     *,
     pd_mode: str = "aggregated",
-    ssh_port_base: int = 2222,
+    ssh_port_base: int = DEFAULT_SSH_PORT,
 ) -> dict[str, list[dict[str, Any]]]:
     """Group a SaFE GetWorkloadResponse's pods by role.
 
@@ -177,7 +179,7 @@ def discover_role_pods(
     Args:
         workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
         pd_mode: Deployment topology selecting the positional service roles.
-        ssh_port_base: Base SSH port matching the deployed ``--ssh-port``.
+        ssh_port_base: Base SSH port the pods were deployed with.
 
     Returns:
         A mapping of role to its list of pod SSH target dicts, sorted by LWS
@@ -257,7 +259,7 @@ def pod_targets_from_lists(
 
 def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve every GPU pod SSH target from multi_node state."""
-    base = int(state.get("ssh_port") or 2222)
+    base = int(state.get("ssh_port") or DEFAULT_SSH_PORT)
     if (state.get("pd_mode") or "").lower() == "disaggregated":
         return pod_targets_from_lists(
             state.get("prefill_pods"),

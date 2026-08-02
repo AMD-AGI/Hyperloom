@@ -52,6 +52,7 @@ from ._grid_runner import (
     GridVariant,
     _num_gpus_for_config,
     _resolve_session_dir,
+    apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
     run_grid,
@@ -921,7 +922,11 @@ class ExploreExecutor:
         # strong candidates.
         if runnable:
             runnable, _mn_dropped = apply_multi_node_invalid_variants(runnable)
-            for _d in _mn_dropped:
+            # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that
+            # would re-enable the (hang-prone) aiter MoE runner. No-op unless
+            # the pin is set. Self-gates, so safe to run in any mode.
+            runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
+            for _d in (*_mn_dropped, *_aiter_dropped):
                 skipped_dup.append(
                     {
                         "name": _d.get("name", ""),

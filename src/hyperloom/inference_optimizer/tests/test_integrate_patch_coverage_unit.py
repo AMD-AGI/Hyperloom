@@ -956,9 +956,18 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     scratch.write_text("user work in progress\n", encoding="utf-8")
 
     # Force a non-empty artifact set and a failing install so the code hits the
-    # artifact_install_failed return branch.
+    # artifact_install_failed return branch. It must be a real _ArtifactSpec:
+    # integrate_patch inspects each spec (see _is_aiter_gemm_model_config, which
+    # reads .source/.target/.kind), so a bare placeholder object raises
+    # AttributeError before the branch under test is reached.
     def _fake_resolve(*args, **kwargs):
-        return [object()], []
+        spec = ip._ArtifactSpec(
+            source=tmp_path / "tuned.json",
+            target=repo / "tuned.json",
+            rel_target="tuned.json",
+            kind="config_json",
+        )
+        return [spec], []
 
     def _fake_apply(self, specs, *, backup_root):
         return [], [{"artifact": "tuned.json", "error": "disk full"}]
