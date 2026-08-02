@@ -762,6 +762,70 @@ def _wait_health(
     return False
 
 
+def _wait_pd_legs_health(
+    prefill_url: str,
+    decode_url: str,
+    timeout_s: int,
+    leg_pids: dict[str, int],
+) -> bool | None:
+    """Poll both PD legs' own ``/health`` until each answers, within one budget.
+
+    The router that will own the public port is submitted by the caller only
+    after this driver returns, so there is nothing to probe there yet -- but the
+    legs answer on their own ports, and they are what "the cluster is up" means.
+
+    Returning before that made this job's terminal status meaningless: it went
+    SUCCEEDED seconds after the ranks were spawned, while the weight load still
+    had tens of minutes to run, so a caller retrying mid-boot could not tell a
+    booting cluster from a dead one.
+
+    Args:
+        prefill_url: Base URL of the prefill group's rank 0.
+        decode_url: Base URL of the decode group's rank 0.
+        timeout_s: Shared budget for both legs.
+        leg_pids: Spawned PIDs by tag, for the ``prefill_0`` / ``decode_0``
+            early abort.
+
+    Returns:
+        bool | None: True once both legs answer, False when a leg's leader is
+        confirmed dead, None on timeout (undetermined, as for rank 0).
+    """
+    import urllib.error
+    import urllib.request
+
+    pending = {"prefill": prefill_url, "decode": decode_url}
+    started = time.monotonic()
+    while pending and time.monotonic() - started < timeout_s:
+        for role, url in list(pending.items()):
+            try:
+                with urllib.request.urlopen(  # nosec B310 - http URL built from this driver's own summary.
+                    f"{url.rstrip('/')}/health",
+                    timeout=3,
+                ) as resp:
+                    if 200 <= resp.status < 300:
+                        _log(f"{role} leg /health OK ({url})")
+                        pending.pop(role)
+                        continue
+            except (urllib.error.URLError, OSError):
+                pass
+            # Bail on a dead leader rather than wait out the budget on a corpse.
+            pid = leg_pids.get(f"{role}_0") or 0
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    _log(f"ERROR {role} leg leader pid={pid} died while waiting for /health")
+                    return False
+                except OSError:
+                    pass
+        if pending:
+            time.sleep(5)
+    if pending:
+        _log(f"WARN PD legs still not /health-ready after {timeout_s}s: {sorted(pending)}")
+        return None
+    return True
+
+
 def _emit_rank0_log_tail(log_dir: Path) -> None:
     """Append the tail of ``rank_0.log`` to stderr if the file exists.
 
@@ -1095,9 +1159,26 @@ def main() -> int:
         _log("--no-wait-health set; not probing /health")
         return 0
 
-    # In PD mode the router owns 8888; skip the local probe (caller polls externally).
+    # PD: the router that owns 8888 does not exist yet (the caller submits it
+    # once this driver returns), so wait on the legs themselves. Doing this is
+    # what lets a terminal status here mean the cluster served.
     if pd_mode == "disaggregated":
-        _log("pd_mode=disaggregated; /health probe skipped (router owns 8888)")
+        _log(f"polling both PD legs' /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
+        _legs_ready = _wait_pd_legs_health(
+            summary["pd_prefill_url"],
+            summary["pd_decode_url"],
+            _HEALTH_PROBE_TIMEOUT_SEC,
+            pids,
+        )
+        if _legs_ready:
+            _log("both PD legs /health OK")
+            return 0
+        _emit_rank0_log_tail(Path(args.log_dir))
+        if _legs_ready is False:
+            _log("ERROR a PD leg leader died before serving; marking the launch failed")
+            return 2
+        # Undetermined, as for rank 0: warn rather than fail a slow-but-live boot.
+        _log("WARN PD legs unconfirmed; the caller's serving probe decides from here")
         return 0
 
     _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")

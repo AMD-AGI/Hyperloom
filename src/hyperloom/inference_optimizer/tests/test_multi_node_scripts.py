@@ -185,6 +185,66 @@ def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
     assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
 
 
+def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], pids: dict, alive: set[int] = frozenset()):
+    """Run _wait_pd_legs_health against a fake urlopen/os.kill, with no sleeping."""
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def _fake_urlopen(url, timeout=None):
+        role = "prefill" if "10.0.1.1" in url else "decode"
+        return _Resp(200 if role in healthy else 503)
+
+    def _fake_kill(pid, _sig):
+        if pid not in alive:
+            raise ProcessLookupError(pid)
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(lm.os, "kill", _fake_kill)
+    monkeypatch.setattr(lm.time, "sleep", lambda _s: None)
+    return lm._wait_pd_legs_health("http://10.0.1.1:30000", "http://10.0.1.2:30001", 1, pids)
+
+
+def test_pd_launch_waits_for_both_legs_before_reporting_done(monkeypatch):
+    """A terminal launch status has to mean the cluster served, not just spawned.
+
+    The driver used to return the moment the PD ranks were spawned, because the
+    router that owns the public port is only submitted afterwards. Its job then
+    read SUCCEEDED while the weight load had tens of minutes left, so a caller
+    retrying mid-boot could not tell a booting cluster from a dead one -- the
+    ambiguity the whole resume decision then had to work around.
+    """
+    lm = _load_script_module("lm_pd_ready", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill", "decode"}, pids=pids, alive={111, 222}) is True
+
+
+def test_pd_launch_reports_undetermined_when_a_leg_never_answers(monkeypatch):
+    """A slow boot must not be called a failure; the caller probes from there."""
+    lm = _load_script_module("lm_pd_slow", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111, 222}) is None
+
+
+def test_pd_launch_fails_fast_when_a_leg_leader_dies(monkeypatch):
+    """A dead leader is a confirmed failure, not something to wait out."""
+    lm = _load_script_module("lm_pd_dead", "launch_multinode.py")
+    pids = {"prefill_0": 111, "decode_0": 222}
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111}) is False
+
+
 def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
     """A second router must not be stacked on top of the one already running.
 
