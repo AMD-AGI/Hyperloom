@@ -19,6 +19,7 @@ import json
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -72,7 +73,7 @@ def _router_alive(pid: int) -> bool:
     return True
 
 
-def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0) -> None:
+def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0, port_grace_s: float = 30.0) -> None:
     """Stop the router this PID file names, if one is still running.
 
     The spawn below ends with ``echo $! > pid_file``, so without this step the
@@ -89,6 +90,7 @@ def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0) -> None:
     Args:
         pid_file: Path the previous router's PID was written to.
         grace_s: Seconds to wait for a clean exit before SIGKILL.
+        port_grace_s: Seconds to wait for the public port to become bindable.
     """
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
@@ -97,20 +99,84 @@ def _retire_previous_router(pid_file: Path, *, grace_s: float = 5.0) -> None:
     if pid <= 0 or not _router_alive(pid):
         return
     _log(f"replacing router pid={pid}, which still holds port {_PUBLIC_PORT}")
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
+    if not _signal_router(pid, signal.SIGTERM):
         return
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
         if not _router_alive(pid):
-            return
+            break
         time.sleep(0.1)
+    else:
+        _log(f"router pid={pid} ignored SIGTERM for {grace_s:.0f}s; sending SIGKILL")
+        _signal_router(pid, signal.SIGKILL)
+
+    # The listener is what the replacement needs, and it can outlive the pid:
+    # the router is a session leader, so a child that inherited the socket keeps
+    # it bound. Binding is the only question worth asking, so ask it directly.
+    if not _wait_port_free(_PUBLIC_PORT, port_grace_s):
+        _log(f"WARN port {_PUBLIC_PORT} still bound after {port_grace_s:.0f}s; the replacement may fail to bind")
+
+
+def _signal_router(pid: int, sig: int) -> bool:
+    """Signal the router, taking its process group only when it leads one.
+
+    Reaching the group matters: the router is spawned under ``setsid``, so
+    anything it forks shares its group and inherits the listening socket, and
+    signalling the PID alone leaves those children holding the port the
+    replacement wants. ``kill_multinode`` signals groups for the same reason.
+
+    But only when ``setsid`` actually happened. A PID that is not its own group
+    leader belongs to somebody else's group -- after PID reuse, that group can
+    be anything at all, including the caller's -- and blanketing it would kill
+    processes this has no business touching.
+
+    Args:
+        pid: The router PID recorded by the spawn.
+        sig: Signal to deliver.
+
+    Returns:
+        bool: False when the process is already gone or cannot be signalled.
+    """
     try:
-        os.kill(pid, signal.SIGKILL)
-        _log(f"router pid={pid} ignored SIGTERM for {grace_s:.0f}s; sent SIGKILL")
+        leads_group = os.getpgid(pid) == pid
     except OSError:
-        return
+        return False
+    try:
+        if leads_group:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def _wait_port_free(port: int, timeout_s: float) -> bool:
+    """Poll until a fresh listener can bind ``port``.
+
+    Args:
+        port: TCP port the replacement router will bind.
+        timeout_s: Max seconds to wait.
+
+    Returns:
+        bool: True once the port is bindable, False at timeout.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # No SO_REUSEADDR: a live holder must report EADDRINUSE. A dead
+            # process releases a listen socket at once, so this has no
+            # TIME_WAIT false positives.
+            sock.bind(("0.0.0.0", port))  # nosec B104 - bind probe for the public router port.
+            return True
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
 
 
 def _build_sglang_router_cmd(

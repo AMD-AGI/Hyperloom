@@ -256,7 +256,9 @@ def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):
     lr = _load_script_module("lr_test_replace", "launch_router.py")
     pid_file = tmp_path / "router.pid"
 
-    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    # start_new_session mirrors the setsid the real spawn uses, so the group
+    # signalled here is the router's own and not this test runner's.
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     try:
         pid_file.write_text(str(victim.pid))
 
@@ -279,7 +281,7 @@ def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
     pid_file = tmp_path / "router.pid"
     log_file = tmp_path / "router.log"
 
-    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     spawned = 0
     try:
         pid_file.write_text(str(victim.pid))
@@ -297,6 +299,32 @@ def test_detach_router_retires_the_previous_one_before_spawning(tmp_path):
                 except OSError:
                     pass
         victim.wait()
+
+
+def test_router_signal_never_blankets_a_group_it_does_not_lead(monkeypatch):
+    """A PID that leads no group belongs to someone else's, so signal it alone.
+
+    The router is spawned under setsid and leads its own group, which is why
+    reaching the group is right for it. A recorded PID that has since been
+    reused, though, sits in an unrelated group -- possibly the caller's own, as
+    this suite demonstrated by taking itself down -- and killpg there would
+    signal processes this has no business touching.
+    """
+    lr = _load_script_module("lr_test_group", "launch_router.py")
+    group_signals: list[int] = []
+    pid_signals: list[int] = []
+
+    monkeypatch.setattr(lr.os, "killpg", lambda pgid, _sig: group_signals.append(pgid))
+    monkeypatch.setattr(lr.os, "kill", lambda pid, _sig: pid_signals.append(pid))
+
+    monkeypatch.setattr(lr.os, "getpgid", lambda _pid: 4242)
+    assert lr._signal_router(4242, signal.SIGTERM) is True
+    assert (group_signals, pid_signals) == ([4242], [])
+
+    group_signals.clear()
+    monkeypatch.setattr(lr.os, "getpgid", lambda _pid: 999)
+    assert lr._signal_router(4242, signal.SIGTERM) is True
+    assert (group_signals, pid_signals) == ([], [4242])
 
 
 def test_router_launch_tolerates_a_stale_pid_file(tmp_path):
