@@ -222,13 +222,23 @@ def _compute_within_and_gap(
     return within, round(100.0 - within, 2)
 
 
-def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
+def attach_perfmodel_breakdown(
+    snapshot: dict[str, Any],
+    state: Any,
+    *,
+    arm: str,
+    clocks: Any = None,
+) -> None:
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*.
 
-    Best-effort and in place: any failure leaves *snapshot* untouched.
+    Best-effort and in place: any failure leaves *snapshot* untouched. *clocks*
+    is an optional ``EffectiveClocks`` for the run being modelled; when given,
+    the ceiling is anchored to the sustained engine clock instead of boost and
+    the provenance records the applied derates.
     """
     try:
         from .roofline_ceiling import (
+            HW_SPECS,
             apply_runtime_dtype,
             compute_roofline_from_perfmodel,
             load_model_meta,
@@ -236,8 +246,14 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
             resolve_runtime_dtype,
             resolve_runtime_workload,
         )
+        from .roofline_effective import (
+            effective_clock_provenance,
+            resolve_effective_clocks_from_state,
+        )
 
         runtime = resolve_runtime_workload(state, arm=arm)
+        if clocks is None:
+            clocks = resolve_effective_clocks_from_state(state, arm=arm)
         meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
         if meta is None:
             return
@@ -252,10 +268,22 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
             osl=runtime.osl,
             num_gpus=runtime.tp,
             precision_tag=compute_precision_tag,
+            clocks=clocks,
         )
+        peak_provenance = resolve_compute_peak_provenance(
+            runtime.gpu_type, compute_precision_tag, clocks
+        )
+        gpu_spec = HW_SPECS.get((runtime.gpu_type or "").strip().lower()) or {}
         snapshot["roofline_provenance"] = {
             "formula": "perfmodel" if pm_bd is not None else "legacy",
-            **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+            **peak_provenance,
+            **effective_clock_provenance(
+                runtime.gpu_type,
+                clocks,
+                convention=str(peak_provenance.get("compute_peak_convention") or "achievable"),
+                peak_gbps=float(gpu_spec.get("hbm_bw_gbps") or 0.0),
+                active_gpus=runtime.tp,
+            ),
             "runtime_weight_dtype": rt.weight_dtype_tag,
             "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
             "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,

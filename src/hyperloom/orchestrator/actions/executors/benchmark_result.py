@@ -432,9 +432,21 @@ def _row_to_gpu_sample(header: list[str], row: list[str]) -> dict[str, Any]:
     )
     if power is not None:
         sample["power_w"] = power
-    clock = _pick(lambda c: "sclk" in c)
+    # ``--showclocks`` emits a "<x>clk clock speed:" column alongside a
+    # "<x>clk clock level:" DPM index. Excluding "level" matters: the level cell
+    # is a small integer that would otherwise be recorded as a frequency.
+    clock = _pick(
+        lambda c: "sclk" in c and "level" not in c,
+        lambda c: "sclk" in c,
+    )
     if clock is not None:
         sample["clock_mhz"] = clock
+    mclk = _pick(
+        lambda c: "mclk" in c and "level" not in c,
+        lambda c: "mclk" in c,
+    )
+    if mclk is not None:
+        sample["mclk_mhz"] = mclk
     util = _pick(lambda c: "gpu use" in c or "gpu_use" in c or c == "gpu%")
     if util is not None:
         sample["gpu_util_pct"] = util
@@ -774,6 +786,7 @@ def extract_benchmark_measurement(
         warnings.append("raw_inferencex_result_used")
 
     _derive_tpot_if_missing(measurement, report)
+    _attach_effective_clocks(measurement, report)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # Second-chance salvage from Magpie leak destinations when the
@@ -873,6 +886,34 @@ def _is_scriptable_measurement(result: dict[str, Any]) -> bool:
     if result.get("quality_gate") is not None:
         return True
     return framework_registry.is_scriptable(result.get("framework"))
+
+
+def _attach_effective_clocks(measurement: dict[str, Any], report: dict[str, Any] | None) -> None:
+    """Record the engine clock the benchmark actually sustained, in place.
+
+    Carried on the measurement so the roofline can anchor its compute ceiling to
+    the sustained clock instead of the vendor boost clock, without having to
+    rediscover the report from state. Absent clock telemetry leaves the keys
+    unset, which the ceiling reads as "no derate".
+
+    Args:
+        measurement (dict[str, Any]): Normalized measurement, mutated in place.
+        report (dict[str, Any] | None): Parsed ``benchmark_report.json``.
+    """
+    try:
+        from hyperloom.orchestrator.kernel.roofline_effective import (
+            effective_clocks_from_report,
+        )
+
+        clocks = effective_clocks_from_report(report)
+    except Exception:  # noqa: BLE001 — telemetry enrichment is best-effort
+        return
+    if not clocks.measured:
+        return
+    measurement["effective_sclk_mhz"] = round(clocks.sclk_mhz, 1)
+    measurement["effective_clock_samples"] = clocks.samples
+    if clocks.mclk_mhz > 0:
+        measurement["effective_mclk_mhz"] = round(clocks.mclk_mhz, 1)
 
 
 def is_valid_measurement(result: dict[str, Any] | None) -> bool:

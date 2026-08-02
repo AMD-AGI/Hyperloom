@@ -766,14 +766,18 @@ def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
     q_csv = shlex.quote(str(out_csv))
     q_rocm = shlex.quote(rocm)
     interval = max(1, int(interval_s))
+    # ``--showclocks`` carries sclk/mclk, which the roofline uses to anchor the
+    # compute ceiling to the clock the workload actually sustained instead of
+    # the vendor boost clock.
+    query = "--showuse --showmemuse --showpower --showtemp --showclocks --csv"
     # header once, then loop: prepend epoch ts to each rocm-smi --csv data row.
     script = (
         "set +e; "
-        f'H="ts,$({q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null | head -1)"; '
+        f'H="ts,$({q_rocm} {query} 2>/dev/null | head -1)"; '
         f'[ -s {q_csv} ] || echo "$H" > {q_csv}; '
         "while true; do "
         "TS=$(date +%s); "
-        f"{q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null "
+        f"{q_rocm} {query} 2>/dev/null "
         f'| tail -n +2 | sed "s/^/$TS,/" >> {q_csv}; '
         f"sleep {interval}; done"
     )

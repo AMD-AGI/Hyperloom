@@ -32,6 +32,24 @@ def _clear_kernel_request_handler_caches():
     krh._default_kernel_batch_parallel.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _disable_gpu_hw_probe(request, monkeypatch):
+    """Keep roofline assertions off real hardware measurements.
+
+    The probe layer feeds measured compute and bandwidth roofs into every
+    ceiling. On a machine that has run a probe, a cached result would silently
+    replace the table values these tests assert against, so results would depend
+    on whether the developer happens to own a GPU. Tests that exercise the probe
+    itself opt out by name.
+    """
+    from hyperloom.orchestrator.kernel import hw_probe
+
+    if request.node.module.__name__.endswith("test_hw_probe"):
+        return
+    monkeypatch.setenv(hw_probe.DISABLE_ENV, "1")
+    hw_probe.clear_caches()
+
+
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):

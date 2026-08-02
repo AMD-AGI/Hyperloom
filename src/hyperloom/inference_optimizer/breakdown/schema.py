@@ -1110,7 +1110,13 @@ class GpuMonitorAggregate(TypedDict, total=False):
         max_power_w (float): Peak power draw (watts).
         avg_temp_c (float): Average temperature (Celsius).
         max_temp_c (float): Peak temperature (Celsius).
-        avg_clock_mhz (float): Average clock frequency (MHz).
+        avg_clock_mhz (float): Average engine (sclk) frequency (MHz).
+        max_clock_mhz (float): Peak engine (sclk) frequency (MHz).
+        avg_mclk_mhz (float): Average memory (mclk) frequency (MHz). Recorded
+            for provenance; MI300-series parts expose a single mclk DPM state,
+            so this is expected to be constant.
+        clock_samples (int): Samples that carried an engine clock. Lower than
+            ``samples`` when the sampler predates ``--showclocks``.
     """
 
     samples: int
@@ -1119,6 +1125,9 @@ class GpuMonitorAggregate(TypedDict, total=False):
     avg_temp_c: float
     max_temp_c: float
     avg_clock_mhz: float
+    max_clock_mhz: float
+    avg_mclk_mhz: float
+    clock_samples: int
 
 
 class LaneTimelineEntry(TypedDict, total=False):
