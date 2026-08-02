@@ -186,59 +186,6 @@ def test_no_handoff_returns_none(monkeypatch):
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
 
 
-def test_remote_read_env_rayjob(monkeypatch):
-    # printenv on the Ray head returns the pod's SGLANG_USE_AITER value.
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
-    )
-    monkeypatch.setattr(
-        gpu_probe.ray_dashboard,
-        "RayDashboardClient",
-        # Sentinel-wrapped value interleaved with a Ray INFO line.
-        lambda *_a, **_k: _FakeRayClient("INFO Runtime env is setting up.\n___MNENV[0]MNENV___\n"),
-    )
-    assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) == "0"
-
-
-def test_remote_read_env_infera(monkeypatch):
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {
-            "backend": "infera",
-            "ssh_key_path": "/tmp/key",
-            "ssh_known_hosts": "",
-            "prefill_pods": [{"podIP": "10.0.0.2", "sshPort": 27720}],
-        },
-    )
-    monkeypatch.setattr(gpu_probe.ssh_known_hosts, "refresh_known_hosts", lambda _h, dest: dest)
-    monkeypatch.setattr(
-        gpu_probe.ssh_client,
-        "ssh_run",
-        lambda host, command, **_k: subprocess.CompletedProcess(
-            args=[command], returncode=0, stdout="___MNENV[0]MNENV___\n", stderr=""
-        ),
-    )
-    assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) == "0"
-
-
-def test_remote_read_env_unset_returns_none(monkeypatch):
-    # An unset var prints empty sentinel brackets -> None.
-    monkeypatch.setattr(
-        gpu_probe,
-        "build_external_state_from_env",
-        lambda: {"backend": "rayjob", "head_pod_ip": "10.0.0.1"},
-    )
-    monkeypatch.setattr(
-        gpu_probe.ray_dashboard,
-        "RayDashboardClient",
-        lambda *_a, **_k: _FakeRayClient("___MNENV[]MNENV___\n"),
-    )
-    assert gpu_probe.remote_read_env("SGLANG_USE_AITER", timeout_s=1) is None
-
-
 def test_parse_gpu_type_prefers_specific_tag():
     # gcnArchName fallback resolves gfx942 -> mi300x runner.
     assert gpu_probe._parse_gpu_type("gfx942:sramecc+:xnack-") == "mi300x"

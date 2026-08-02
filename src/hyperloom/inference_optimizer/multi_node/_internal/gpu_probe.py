@@ -15,7 +15,6 @@ caller can fall back to the ``--gpu-type`` / ``$GPU_TYPE`` hint.
 from __future__ import annotations
 
 import logging
-import re
 import shutil
 import tempfile
 import time
@@ -81,108 +80,41 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
     Returns:
         str | None: The resolved AMD runner type, or ``None`` when undetectable.
     """
-    out = _remote_run(_PROBE_CMD, timeout_s=timeout_s, label="GPU probe")
-    return _parse_gpu_type(out) if out is not None else None
-
-
-# Sentinel wrapper so the value is unambiguously extractable from a remote run's
-# combined output, which is interleaved with Ray runtime-env / INFO log lines.
-_ENV_SENTINEL_RE = re.compile(r"___MNENV\[(.*?)\]MNENV___")
-
-
-def _parse_env_value(text: str) -> str | None:
-    """Extract a sentinel-wrapped env value from remote output.
-
-    Args:
-        text: Combined stdout/stderr from a remote sentinel ``echo`` run.
-
-    Returns:
-        str | None: The variable's value, or ``None`` when unset/empty/absent.
-    """
-    match = _ENV_SENTINEL_RE.search(text or "")
-    if not match:
-        return None
-    value = match.group(1).strip()
-    return value or None
-
-
-def remote_read_env(var: str, *, timeout_s: int = 120) -> str | None:
-    """Read an env var from the handed-over inference cluster's pods.
-
-    The operator's server env (e.g. ``SGLANG_USE_AITER``) is baked into the
-    inference pods, not the sandbox, so it must be read remotely: ``rayjob``
-    runs the probe on the Ray head, ``infera`` SSHes into the first GPU pod. The
-    value is wrapped in a sentinel so it survives interleaved Ray log lines.
-    Best-effort: any failure or an unset variable returns ``None``.
-
-    Args:
-        var: The environment variable name to read on the cluster pods.
-        timeout_s: Per-probe budget (job poll ceiling / SSH timeout) in seconds.
-
-    Returns:
-        str | None: The variable's value on the pods, or ``None``.
-    """
-    name = (var or "").strip()
-    if not name:
-        return None
-    # Prints e.g. ``___MNENV[0]MNENV___`` (empty brackets when unset).
-    cmd = f'printf "___MNENV[%s]MNENV___\\n" "$(printenv {name})"'
-    out = _remote_run(cmd, timeout_s=timeout_s, label=f"env read {name}")
-    return _parse_env_value(out) if out is not None else None
-
-
-def _remote_run(command: str, *, timeout_s: int, label: str) -> str | None:
-    """Run ``command`` on the handed-over cluster and return its raw output.
-
-    Routes by ``state.backend``: ``rayjob`` submits the command on the Ray head
-    via the Dashboard; ``infera`` SSHes into the first GPU pod. Best-effort: any
-    failure (no hand-off, unreachable head/pod) returns ``None``.
-
-    Args:
-        command: Shell command to run on the cluster.
-        timeout_s: Per-run budget (job poll ceiling / SSH timeout) in seconds.
-        label: Short label used in warning logs.
-
-    Returns:
-        str | None: The combined stdout/stderr text, or ``None`` on failure.
-    """
     if not external_service_url():
         return None
     try:
         state = build_external_state_from_env()
     except Exception as exc:  # noqa: BLE001 - best-effort probe
-        log.warning("remote %s: could not build external state: %s", label, exc)
+        log.warning("remote GPU probe: could not build external state: %s", exc)
         return None
     backend = str(state.get("backend") or "").lower()
     try:
         if backend == "rayjob":
-            return _run_on_ray_head(state, command, timeout_s=timeout_s, label=label)
+            return _probe_via_ray_head(state, timeout_s=timeout_s)
         if backend == "infera":
-            return _run_on_infera_ssh(state, command, timeout_s=timeout_s, label=label)
-        log.warning("remote %s: unsupported backend %r", label, backend)
+            return _probe_via_infera_ssh(state, timeout_s=timeout_s)
+        log.warning("remote GPU probe: unsupported backend %r", backend)
     except Exception as exc:  # noqa: BLE001 - best-effort probe
-        log.warning("remote %s (%s) failed: %s", label, backend, exc)
+        log.warning("remote GPU probe (%s) failed: %s", backend, exc)
     return None
 
 
-def _run_on_ray_head(state: dict[str, Any], command: str, *, timeout_s: int, label: str) -> str | None:
-    """Submit ``command`` on the Ray head and return its raw job logs.
+def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
+    """Submit ``rocm-smi`` on the Ray head and parse its logs.
 
     Args:
         state: Multi-node state carrying ``head_pod_ip`` (+ optional token).
-        command: Shell command to submit as the Ray job entrypoint.
-        timeout_s: Poll ceiling in seconds for the job.
-        label: Short label used in warning logs.
+        timeout_s: Poll ceiling in seconds for the probe job.
 
     Returns:
-        str | None: The job logs, or ``None`` when the head IP is missing.
+        str | None: The detected GPU type, or ``None`` on any failure.
     """
     head = str(state.get("head_pod_ip") or "").strip()
     if not head:
         return None
     token = str(state.get("ray_dashboard_token") or "").strip() or None
     with ray_dashboard.RayDashboardClient(head, token=token) as ray:
-        sub_id = ray.submit_job(command)
+        sub_id = ray.submit_job(_PROBE_CMD)
         deadline = time.monotonic() + max(1, timeout_s)
         status = ""
         while time.monotonic() < deadline:
@@ -191,10 +123,12 @@ def _run_on_ray_head(state: dict[str, Any], command: str, *, timeout_s: int, lab
                 break
             time.sleep(2)
         if status != "SUCCEEDED":
-            # Logged, not fatal: the logs are parsed either way and an
-            # unparsable/empty result already degrades to None downstream.
-            log.warning("remote %s: ray job %s ended %r", label, sub_id, status or "no terminal status")
-        return ray.get_job_logs(sub_id)
+            # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable
+            # name and still exit non-zero, so the logs are parsed either way
+            # and an unparsable result already degrades to None.
+            log.warning("remote GPU probe: ray job %s ended %r", sub_id, status or "no terminal status")
+        logs = ray.get_job_logs(sub_id)
+    return _parse_gpu_type(logs)
 
 
 def _first_gpu_pod(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -213,17 +147,15 @@ def _first_gpu_pod(state: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _run_on_infera_ssh(state: dict[str, Any], command: str, *, timeout_s: int, label: str) -> str | None:
-    """SSH into the first Infera GPU pod, run ``command``, return raw output.
+def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | None:
+    """SSH into the first Infera GPU pod and parse ``rocm-smi`` output.
 
     Args:
         state: Multi-node state carrying SSH key / port and pod targets.
-        command: Shell command to run on the pod.
         timeout_s: SSH subprocess timeout in seconds.
-        label: Short label used in warning logs.
 
     Returns:
-        str | None: Combined stdout/stderr, or ``None`` when SSH is unavailable.
+        str | None: The detected GPU type, or ``None`` on any failure.
     """
     pod = _first_gpu_pod(state)
     key_path = str(state.get("ssh_key_path") or "").strip()
@@ -240,14 +172,14 @@ def _run_on_infera_ssh(state: dict[str, Any], command: str, *, timeout_s: int, l
         known_hosts = Path(known_hosts_hint)
     else:
         # Keyscan the pod into a throwaway known_hosts so StrictHostKeyChecking
-        # still holds for this one-shot command.
-        scratch = Path(tempfile.mkdtemp(prefix="mn_probe_"))
+        # still holds for this one-shot probe.
+        scratch = Path(tempfile.mkdtemp(prefix="mn_gpu_probe_"))
         known_hosts = ssh_known_hosts.refresh_known_hosts([(host, port)], scratch / "known_hosts")
 
     try:
         cp = ssh_client.ssh_run(
             host,
-            command,
+            _PROBE_CMD,
             key_path=key_path,
             known_hosts=known_hosts,
             port=port,
@@ -257,7 +189,8 @@ def _run_on_infera_ssh(state: dict[str, Any], command: str, *, timeout_s: int, l
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
     if cp.returncode != 0:
-        # Logged, not fatal: output is parsed either way and an unparsable/empty
-        # result already degrades to None downstream.
-        log.warning("remote %s: ssh to %s exited %s", label, host, cp.returncode)
-    return f"{cp.stdout or ''}\n{cp.stderr or ''}"
+        # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name
+        # and still exit non-zero, so the output is parsed either way and an
+        # unparsable result already degrades to None.
+        log.warning("remote GPU probe: ssh to %s exited %s", host, cp.returncode)
+    return _parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")
