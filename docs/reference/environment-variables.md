@@ -76,11 +76,10 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
   `--target-tput`, `--compare-against-gpu`.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
-  `--cpus-per-node`, `--mem-per-node`, `--gpu-type`, `--mn-backend`
-  (`rayjob` / `infera`), `--mn-image`, `--server-args` (rayjob),
-  `--rayjob-extra-env` (repeatable; the supported way to inject server-side env
-  such as `SGLANG_USE_AITER=0` into RayJob pods — the sandbox's own `SGLANG_*`
-  env is not forwarded).
+  `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
+  Per-pod sizing, the pod image and pod-side env are the provisioning
+  platform's inputs, not `optimize` flags — the cluster already exists by the
+  time the optimizer runs.
 - **PD disaggregation (infera):** `--pd-mode disaggregated`,
   `--pd-prefill-nodes` / `--pd-prefill-tp` / `--pd-prefill-ep` /
   `--pd-prefill-extra-args`, `--pd-decode-nodes` / `--pd-decode-tp` /
@@ -154,25 +153,23 @@ multi-node runs or when the Ray backend is disabled.
 
 Use CLI flags for multi-node topology and prefill-decode configuration:
 
-`--nodes`, `--mn-backend`, `--mn-image`, `--gpus-per-node`,
-`--cpus-per-node`, `--mem-per-node`, `--tp`, `--ep`,
+`--nodes`, `--mn-backend`, `--gpus-per-node`, `--tp`, `--ep`,
 `--pd-mode`, `--pd-prefill-nodes`, `--pd-decode-nodes`, `--pd-prefill-tp`,
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
-When the optimizer provisions the cluster itself (Primus-SaFE flow), those
-flags are all you need — no environment variables are required.
+`optimize` never creates or releases a multi-node cluster. The provisioning
+platform (e.g. Primus-Claw) creates the RayJob or InferaDeployment and hands it
+over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
-### External-mode variables (SaFE-less cluster)
+### Cluster hand-off variables
 
-When SaFE is unavailable (`SAFE_API_URL` / `SAFE_API_KEY` not both set) and
-`HYPERLOOM_MN_EXT_SERVICE_URL` is set, the optimizer skips all
-provisioning and benchmarks an already-running cluster described by these
-variables. When both `SAFE_API_*` are present these are ignored.
+`HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable that tells the optimizer a
+cluster is ready; the rest describe how to reach it.
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (SaFE injects one otherwise). |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
 | `HYPERLOOM_MN_EXT_SSH_PORT` | infera | No (default `2233`) | SSH base port; decode role is offset `+10`. |

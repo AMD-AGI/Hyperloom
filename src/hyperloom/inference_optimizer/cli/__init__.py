@@ -68,7 +68,7 @@ from .credentials import (
     _validate_agent_runtime as _validate_agent_runtime,
 )
 from .multi_node import (
-    _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
+    _prepare_multi_node_state as _prepare_multi_node_state,
     _dump_mn_input_params as _dump_mn_input_params,
     _resolve_mn_backend as _resolve_mn_backend,
 )
@@ -104,6 +104,7 @@ log = logging.getLogger("hyperloom.inference_optimizer.cli")
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
+    _redact_unknown_args as _redact_unknown_args,
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
@@ -280,6 +281,27 @@ try:
     )
 except (TypeError, ValueError):
     _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
+
+
+def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
+    """Return whether the GPU type should be probed on the remote cluster.
+
+    Multi-node runs the CLI on a GPU-less sandbox, so the real inference GPU
+    lives on the handed-over cluster and must be probed via the Ray head
+    (rayjob) or Infera SSH. Single-node runs keep the local probe.
+
+    Args:
+        args (argparse.Namespace): The parsed CLI namespace (reads ``nodes`` /
+            ``mn_backend``).
+
+    Returns:
+        bool: True when ``--nodes >= 2`` and the backend is rayjob/infera
+        (``--mn-backend`` unset defaults to rayjob).
+    """
+    if int(getattr(args, "nodes", 1) or 1) < 2:
+        return False
+    backend = (getattr(args, "mn_backend", None) or "rayjob").strip().lower()
+    return backend in ("rayjob", "infera")
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
@@ -1298,20 +1320,28 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
-    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # Multi-node topology handoff: export the CLI-flag-resolved backend /
     # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
-    # topology, external-mode state synthesis) read a single stable source. These
-    # are internal handoff envs, not a public config API; users pass --mn-backend
-    # / --mn-image / --gpus-per-node instead.
+    # topology, state synthesis) read a single stable source. These are internal
+    # handoff envs, not a public config API; users pass --mn-backend /
+    # --gpus-per-node instead. The pod image is not among them: the platform
+    # builds the pods before the optimizer starts.
     if nodes_resolved >= 2:
         os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
         os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
-        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
-        if mn_image_resolved:
-            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
+    # Operator --extra-env pins, serialized for downstream executors (e.g. the
+    # explore aiter-MoE filter honours a pinned SGLANG_USE_AITER=0 against
+    # variants that would flip it back on). Internal handoff, not a public API.
+    _operator_extra_env: dict[str, str] = {}
+    for _item in getattr(args, "extra_env", None) or []:
+        _k, _sep, _v = str(_item).partition("=")
+        if _sep and _k.strip():
+            _operator_extra_env[_k.strip()] = _v
+    if _operator_extra_env:
+        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_operator_extra_env)
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
@@ -1685,8 +1715,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _apply_atom_auto_tighten(args)
 
         # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
+        # Multi-node runs the CLI on a GPU-less sandbox, so the local probe sees
+        # nothing; probe the real inference GPU on the handed-over cluster (Ray
+        # head / Infera SSH) instead. Best-effort: on failure probed stays empty
+        # and the --gpu-type / $GPU_TYPE hint wins.
         user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
-        probed = _autodetect_gpu_type() or ""
+        if _should_remote_probe_gpu(args):
+            from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
+
+            probed = remote_autodetect_gpu_type() or ""
+            if probed:
+                print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+        else:
+            probed = _autodetect_gpu_type() or ""
         gpu_type, gpu_warnings = _resolve_gpu_type(
             user_specified=user_specified,
             probed=probed,
@@ -1825,7 +1866,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     bind_state_file_to_session(session_dir)
     if nodes_resolved >= 2:
-        await asyncio.to_thread(_provision_multi_node_rayjob_stack, args)
+        await asyncio.to_thread(_prepare_multi_node_state, args)
 
     objective = build_objective(
         {
@@ -2289,6 +2330,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(line_buffering=True)
 
     parser = _build_parser()
+    # Strict on purpose. The platform's prompt FLAGS block is authored by hand,
+    # so a typo is likelier here than in generated argv, and the flags the
+    # platform consumes on its own side are declared as inert no-ops rather than
+    # waved through — tolerating unknown arguments wholesale would let
+    # `--target-gai 5` run for hours on the default instead of failing now.
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(

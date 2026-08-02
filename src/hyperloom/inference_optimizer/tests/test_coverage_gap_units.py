@@ -236,71 +236,6 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     assert calls and calls[0][2:4] == ["hyperloom.inference_optimizer.multi_node", "apply-patch"]
 
 
-def test_provision_multi_node_rayjob_and_infera_stacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
-    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn_env
-
-    state_file = tmp_path / "state.json"
-    state_file.write_text(json.dumps({"last_create_request": {"image": "prior:tag"}}), encoding="utf-8")
-    monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
-    monkeypatch.setattr(opt_mn, "mn_profile_trace_root", lambda: tmp_path / "traces")
-    monkeypatch.setattr(opt_mn, "_replay_kernel_patches_for_multi_node", lambda args: None)
-
-    created: list[argparse.Namespace] = []
-    booted: list[argparse.Namespace] = []
-    monkeypatch.setattr(mn_cli, "cmd_create_rayjob", lambda ns: created.append(ns) or 0)
-    monkeypatch.setattr(mn_cli, "cmd_bootstrap", lambda ns: booted.append(ns) or 0)
-    loads = iter(
-        [
-            {"rayjob_id": "wid-rj"},
-            {"rayjob_id": "wid-rj", "head_pod_ip": "10.0.0.2"},
-        ]
-    )
-    monkeypatch.setattr(mn_cli, "_load_state", lambda: next(loads))
-    monkeypatch.setattr(
-        mn_env, "export_ray_address_to_os", lambda: os.environ.__setitem__("RAY_ADDRESS", "10.0.0.2:6379")
-    )
-    opt_mn._provision_multi_node_rayjob_stack(
-        argparse.Namespace(
-            nodes=2,
-            mn_backend="rayjob",
-            mn_image="",
-            gpus_per_node=None,
-            rayjob_extra_env=["A=B"],
-        )
-    )
-    assert created[0].image == "prior:tag"
-    assert booted
-    assert os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"].endswith("wid-rj/torch_trace")
-
-    infera_created: list[argparse.Namespace] = []
-    monkeypatch.setattr(mn_cli, "cmd_create_infera", lambda ns: infera_created.append(ns) or 0)
-    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"service_url": "http://svc:8000"})
-    monkeypatch.setattr(mn_cli, "install_geak_on_pods_best_effort", lambda: 0)
-    opt_mn._provision_multi_node_infera_stack(
-        argparse.Namespace(
-            nodes=2,
-            mn_image="dyn:tag",
-            model="/models/m",
-            gpus_per_node=4,
-            rayjob_extra_env=["X=Y"],
-            framework="sglang",
-            pd_transfer_backend="mooncake",
-            pd_mode="disaggregated",
-            pd_prefill_nodes=2,
-            pd_decode_nodes=1,
-            pd_prefill_tp=8,
-            pd_decode_tp=4,
-            no_kernel=False,
-        )
-    )
-    assert infera_created[0].image == "dyn:tag"
-    assert infera_created[0].kv_transfer_backend == "mooncake"
-    assert os.environ["BENCHMARK_BASE_URL"] == "http://svc:8000"
-
-
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
@@ -308,74 +243,6 @@ def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[di
     monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
     return saved
-
-
-def test_infera_create_and_state_requirements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
-
-    saved: list[dict] = []
-    monkeypatch.setenv("SAFE_WORKSPACE", "ws")
-    monkeypatch.setenv("CLAW_SESSION_ID", "sess-1")
-    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: saved[-1] if saved else {})
-    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(inf._mn_cli, "_infera_ssh_dir", lambda: tmp_path / "ssh")
-    monkeypatch.setattr(
-        inf.ssh_client, "generate_session_keypair", lambda _d: (tmp_path / "id_ed25519", "ssh-ed25519 pub")
-    )
-    monkeypatch.setattr(inf.workload_spec, "build_infera_workload_body", lambda **kw: {"body": kw})
-    workload = {
-        "phase": "Running",
-        "pods": [
-            {"podId": "app-worker-0", "resourceId": 1, "podIP": "10.0.1.0"},
-            {"podId": "app-worker-1", "resourceId": 1, "podIP": "10.0.1.1"},
-        ],
-    }
-    fake_safe = _FakeSafe(workload=workload)
-    monkeypatch.setattr(inf.safe_client, "from_env", lambda: fake_safe)
-    monkeypatch.setattr(inf._mn_cli, "_short_poll", lambda **kw: workload)
-    monkeypatch.setattr(inf._mn_cli, "_refresh_infera_known_hosts", lambda *a, **kw: tmp_path / "known_hosts")
-    monkeypatch.setattr(inf._mn_cli, "_infera_known_hosts_path", lambda state: tmp_path / "known_hosts")
-    monkeypatch.setattr(inf.ssh_client, "probe_ssh", lambda *a, **kw: True)
-
-    args = argparse.Namespace(
-        extra_env=["ENV=1"],
-        extra_label=["team=perf"],
-        owner_id=None,
-        workspace=None,
-        display_name="inf",
-        image="inf:tag",
-        model="/models/m",
-        nodes=2,
-        gpus_per_node=8,
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        shared_mem_per_node=200,
-        backend_framework="sglang",
-        kv_transfer_backend="nixl",
-        ssh_port=2222,
-        pd_mode="aggregated",
-        pd_prefill_nodes=0,
-        pd_decode_nodes=0,
-        pd_prefill_tp=0,
-        pd_decode_tp=0,
-        description=None,
-        no_wait=False,
-        recreate=False,
-        poll_interval=1,
-        poll_timeout=2,
-    )
-    assert inf.cmd_create_infera(args) == 0
-    assert saved[-1]["backend"] == "infera"
-    assert saved[-1]["worker_pod_ips"] == ["10.0.1.0", "10.0.1.1"]
-    assert saved[-1]["ssh_known_hosts"] == str(tmp_path / "known_hosts")
-
-    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: {"backend": "rayjob"})
-    with pytest.raises(RuntimeError, match="state backend"):
-        inf._infera_require_state()
-    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: {"backend": "infera", "worker_pod_ips": ["10.0.1.0"]})
-    with pytest.raises(RuntimeError, match="ssh_key_path"):
-        inf._infera_require_state()
 
 
 def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -453,6 +320,97 @@ def _restart_args(**overrides) -> argparse.Namespace:
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
+
+
+def test_pd_restart_against_an_aggregated_state_fails_instead_of_reporting_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart that touches nothing must not report that it launched servers.
+
+    ``--pd-mode disaggregated`` is honoured even when the state's own pd_mode is
+    aggregated, but the pod lists are chosen by the state alone, so both legs
+    resolved empty. Each was then skipped, ``rc_total`` stayed 0, and the
+    command printed "infera servers launched" and exited 0 without opening a
+    single SSH connection -- after which the round benchmarked whatever was
+    already running and recorded it as this candidate's result.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    state = {
+        "backend": "infera",
+        "framework": "sglang",
+        "nodes": 2,
+        "pd_mode": "aggregated",
+        "worker_pod_ips": ["10.0.1.0", "10.0.1.1"],
+        "ssh_key_path": "/tmp/k",
+        "ssh_port": 2222,
+    }
+    fanout_calls: list[str] = []
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
+    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda _payload: None)
+    monkeypatch.setattr(
+        inf,
+        "_infera_fanout_launch",
+        lambda st, args, targets, **kw: fanout_calls.append(kw["label"]) or (0, [{"ok": True}]),
+    )
+
+    with pytest.raises(inf._mn_cli.ConfigurationError, match="no prefill or decode pods"):
+        inf._infera_restart_server(_restart_args(pd_mode="disaggregated"))
+
+    assert fanout_calls == []
+
+
+@pytest.mark.parametrize(
+    ("state", "match"),
+    [
+        ({"backend": "rayjob"}, "backend is not 'infera'"),
+        ({"backend": "infera", "pd_mode": "aggregated"}, "no GPU pod IPs"),
+        ({"backend": "infera", "worker_pod_ips": ["10.0.1.0"]}, "no ssh_key_path"),
+    ],
+)
+def test_infera_state_errors_are_config_errors_not_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict,
+    match: str,
+) -> None:
+    """Rerunning cannot supply an SSH key, so these must not read as retryable.
+
+    ``main`` classifies a bare RuntimeError by message substring and none of
+    these matched, so all three fell through to EXIT_TRANSIENT -- which the
+    controller is told means "rerun the same subcommand". A permanently
+    misconfigured hand-off was retried forever. ConfigurationError is matched by
+    type instead, which is what it exists for.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: dict(state))
+
+    with pytest.raises(inf._mn_cli.ConfigurationError, match=match):
+        inf._infera_require_state()
+
+
+def test_missing_gpu_pods_names_the_mode_that_chose_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The message has to explain why IPs that ARE set look absent.
+
+    A PD hand-off invoked without ``PD_MODE=disaggregated`` synthesizes as
+    aggregated, so only ``_WORKER_IPS`` is consulted and the error read "check
+    PREFILL / DECODE / WORKER" while both of those were in fact set.
+    """
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    monkeypatch.setattr(
+        inf._mn_cli,
+        "_load_state",
+        lambda: {"backend": "infera", "pd_mode": "aggregated", "prefill_pod_ips": ["10.0.2.0"]},
+    )
+
+    with pytest.raises(inf._mn_cli.ConfigurationError) as excinfo:
+        inf._infera_require_state()
+
+    message = str(excinfo.value)
+    assert "pd_mode='aggregated'" in message
+    assert "HYPERLOOM_MN_EXT_WORKER_IPS" in message
+    assert "PD_MODE=disaggregated" in message
 
 
 def test_resolve_pd_node_counts_infers_from_pod_lists() -> None:
@@ -715,78 +673,6 @@ def test_infera_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     assert saved == []
 
 
-def test_rayjob_create_reuse_and_failure_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import hyperloom.inference_optimizer.multi_node.commands.rayjob as rayjob
-
-    saved: list[dict] = []
-    monkeypatch.setenv("SAFE_WORKSPACE", "ws")
-    monkeypatch.setenv("CLAW_SESSION_ID", "sess-rj")
-    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: saved[-1] if saved else {})
-    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(rayjob.workload_spec, "build_rayjob_workload_body", lambda **kw: {"body": kw})
-    monkeypatch.setattr(rayjob, "_write_rayjob_meta", lambda **kw: None)
-    workload = {
-        "phase": "Running",
-        "pods": [
-            {"podId": "submitter", "resourceId": 0, "podIP": "10.0.0.9"},
-            {"podId": "cluster-head-abc", "resourceId": 1, "podIP": "10.0.0.1"},
-        ],
-    }
-    monkeypatch.setattr(rayjob._mn_cli(), "_short_poll", lambda **kw: workload)
-    monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: _FakeSafe(workload=workload))
-
-    args = argparse.Namespace(
-        extra_env=["A=B"],
-        extra_label=["team=perf"],
-        owner_id=None,
-        workspace=None,
-        display_name="rj",
-        image="ray:tag",
-        nodes=2,
-        gpus_per_node=8,
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        description=None,
-        no_wait=False,
-        recreate=False,
-        poll_interval=1,
-        poll_timeout=2,
-    )
-    assert rayjob.cmd_create_rayjob(args) == 0
-    assert saved[-1]["backend"] == "rayjob"
-    assert saved[-1]["head_pod_ip"] == "10.0.0.1"
-    assert saved[-1]["ray_address"] == "10.0.0.1:6379"
-
-    diag, snapshot = rayjob._summarize_workload_failure(
-        {
-            "workloadId": "wid",
-            "phase": "Failed",
-            "message": "image pull",
-            "dispatchCount": 2,
-            "queuePosition": 5,
-            "pods": [
-                {
-                    "podId": "p0",
-                    "phase": "Failed",
-                    "resourceId": 0,
-                    "adminNodeName": "n",
-                    "podIP": "",
-                    "failedMessage": "boom",
-                },
-                "not-a-pod",
-            ],
-        }
-    )
-    assert "failed_pods" in diag
-    assert snapshot["pods"][0]["failedMessage"] == "boom"
-
-    err = rayjob.safe_client.SafeApiError(404, "missing", endpoint="GET /api/v1/workloads/wid")
-    assert rayjob._is_safe_get_workload_404(err) is True
-    assert rayjob._find_head_pod_ip({"pods": [{"resourceId": 0, "podIP": "10.0.0.2"}]}) == "10.0.0.2"
-    assert rayjob.ray_gcs_address("") == ""
-
-
 def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
@@ -815,79 +701,6 @@ def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         == 1
     )
-
-
-def test_rayjob_create_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    import hyperloom.inference_optimizer.multi_node.commands.rayjob as rayjob
-
-    # Missing workspace bails fast.
-    monkeypatch.delenv("SAFE_WORKSPACE", raising=False)
-    monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: _FakeSafe())
-    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: {})
-    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: None)
-    missing_ws = argparse.Namespace(
-        extra_env=[],
-        extra_label=[],
-        owner_id=None,
-        workspace=None,
-        display_name="rj",
-        image="ray:tag",
-        nodes=2,
-        gpus_per_node=8,
-    )
-    with pytest.raises(RuntimeError, match="workspace is required"):
-        rayjob.cmd_create_rayjob(missing_ws)
-
-    # Reuse a prior non-terminal workload (skip create) and honor --no-wait.
-    saved: list[dict] = []
-    monkeypatch.setenv("SAFE_WORKSPACE", "ws")
-    monkeypatch.setenv("WORKLOAD_ID", "owner-1")
-    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: saved[-1] if saved else {"rayjob_id": "wid-prior"})
-    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(rayjob, "_write_rayjob_meta", lambda **kw: None)
-
-    class _ReuseSafe(_FakeSafe):
-        def create_workload(self, body: dict) -> str:  # pragma: no cover - must not be called
-            raise AssertionError("create_workload should not run when reusing")
-
-    reuse_safe = _ReuseSafe(workload={"phase": "Running", "pods": []})
-    monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: reuse_safe)
-    args = argparse.Namespace(
-        extra_env=[],
-        extra_label=[],
-        owner_id=None,
-        workspace=None,
-        display_name="rj",
-        image="ray:tag",
-        nodes=2,
-        gpus_per_node=8,
-        cpus_per_node=96,
-        mem_per_node=1024,
-        ephemeral_per_node=400,
-        description=None,
-        no_wait=True,
-        recreate=False,
-        poll_interval=1,
-        poll_timeout=2,
-    )
-    assert rayjob.cmd_create_rayjob(args) == 0
-    # No head pod IP resolvable -> empty ray_address, still succeeds.
-    assert saved[-1]["head_pod_ip"] == ""
-    assert saved[-1]["ray_address"] == ""
-
-    # _find_head_pod_ip fallbacks and empty-pod path.
-    assert rayjob._find_head_pod_ip({"pods": []}) == ""
-    assert rayjob._find_head_pod_ip({"pods": [{"podId": "x-head-1", "podIP": "1.1.1.1"}]}) == "1.1.1.1"
-    assert rayjob._find_head_pod_ip({"pods": [{"podIP": "2.2.2.2"}]}) == "2.2.2.2"
-    assert rayjob.ray_gcs_address("3.3.3.3") == "3.3.3.3:6379"
-
-    # _summarize_workload_failure: pending queue + no failed pods branch.
-    diag, snap = rayjob._summarize_workload_failure(
-        {"phase": "Pending", "queuePosition": 4, "pods": [{"podId": "p", "phase": "Pending", "podIP": "9.9.9.9"}]}
-    )
-    assert "queuePosition=4" in diag
-    assert "pods=1" in diag
-    assert snap["phase"] == "Pending"
 
 
 def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1322,99 +1135,6 @@ def test_gbrain_page_client_envelopes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(gbrain.build_gbrain_page_client_from_env(), gbrain.GbrainPageClient)
 
 
-def test_cli_multi_node_error_and_early_return_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
-    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
-
-    opt_mn._gc_old_profile_traces(str(tmp_path / "missing"))
-    monkeypatch.setenv("HYPERLOOM_MN_TRACE_GC_DISABLE", "true")
-    opt_mn._gc_old_profile_traces(str(tmp_path))
-    monkeypatch.delenv("HYPERLOOM_MN_TRACE_GC_DISABLE", raising=False)
-    monkeypatch.setenv("HYPERLOOM_MN_TRACE_RETENTION_DAYS", "bad")
-    opt_mn._gc_old_profile_traces(str(tmp_path))
-
-    args = argparse.Namespace(nodes=1, mn_backend="rayjob")
-    assert opt_mn._provision_multi_node_rayjob_stack(args) is None
-
-    called: list[str] = []
-    with monkeypatch.context() as mp:
-        mp.setattr(opt_mn, "_provision_multi_node_infera_stack", lambda _args: called.append("infera"))
-        opt_mn._provision_multi_node_rayjob_stack(argparse.Namespace(nodes=2, mn_backend="infera"))
-    assert called == ["infera"]
-
-    state_file = tmp_path / "missing_state.json"
-    monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
-    for key in ("INFERENCE_OPTIMIZER_MN_IMAGE", "INFERENCE_OPTIMIZER_GPUS_PER_NODE"):
-        monkeypatch.delenv(key, raising=False)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_rayjob_stack(
-            argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="", gpus_per_node=None, rayjob_extra_env=[])
-        )
-    assert exc.value.code == 2
-
-    state_file.write_text(json.dumps({"last_create_request": {"image": "img:old"}}), encoding="utf-8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "bad")
-    monkeypatch.setattr(mn_cli, "cmd_create_rayjob", lambda ns: 7)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_rayjob_stack(
-            argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="", gpus_per_node=None, rayjob_extra_env=[])
-        )
-    assert exc.value.code == 7
-
-    monkeypatch.setattr(mn_cli, "cmd_create_rayjob", lambda ns: 0)
-    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"rayjob_id": "wid"})
-    monkeypatch.setattr(mn_cli, "cmd_bootstrap", lambda ns: 9)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_rayjob_stack(
-            argparse.Namespace(
-                nodes=2, mn_backend="rayjob", mn_image="img:new", gpus_per_node=None, rayjob_extra_env=[]
-            )
-        )
-    assert exc.value.code == 9
-
-    state_file.write_text("{}", encoding="utf-8")
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_infera_stack(
-            argparse.Namespace(
-                nodes=2,
-                mn_image="",
-                model="/models/m",
-                gpus_per_node=None,
-                rayjob_extra_env=[],
-                framework="sglang",
-                pd_transfer_backend="",
-                pd_mode="aggregated",
-                pd_prefill_nodes=0,
-                pd_decode_nodes=0,
-                pd_prefill_tp=0,
-                pd_decode_tp=0,
-                no_kernel=True,
-            )
-        )
-    assert exc.value.code == 2
-
-    state_file.write_text("{bad", encoding="utf-8")
-    with pytest.raises(SystemExit):
-        opt_mn._provision_multi_node_infera_stack(
-            argparse.Namespace(
-                nodes=2,
-                mn_image="",
-                model="/models/m",
-                gpus_per_node=None,
-                rayjob_extra_env=[],
-                framework="sglang",
-                pd_transfer_backend="",
-                pd_mode="aggregated",
-                pd_prefill_nodes=0,
-                pd_decode_nodes=0,
-                pd_prefill_tp=0,
-                pd_decode_tp=0,
-                no_kernel=True,
-            )
-        )
-
-
 def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
 
@@ -1496,212 +1216,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
     assert inf.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
 
 
-def test_infera_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
-
-    def _args(**overrides):
-        defaults = dict(
-            extra_env=[],
-            extra_label=[],
-            owner_id=None,
-            workspace="ws",
-            display_name="inf",
-            image="inf:tag",
-            model="/models/m",
-            nodes=2,
-            gpus_per_node=8,
-            cpus_per_node=96,
-            mem_per_node=1024,
-            ephemeral_per_node=400,
-            shared_mem_per_node=200,
-            backend_framework="sglang",
-            kv_transfer_backend="nixl",
-            ssh_port=2222,
-            pd_mode="aggregated",
-            pd_prefill_nodes=0,
-            pd_decode_nodes=0,
-            pd_prefill_tp=0,
-            pd_decode_tp=0,
-            description=None,
-            no_wait=True,
-            recreate=False,
-            poll_interval=1,
-            poll_timeout=2,
-        )
-        defaults.update(overrides)
-        return argparse.Namespace(**defaults)
-
-    saved: list[dict] = []
-    state = {"backend": "infera", "rayjob_id": "wid-old", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k"}
-    monkeypatch.setattr(inf._mn_cli, "_load_state", lambda: saved[-1] if saved else dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
-    monkeypatch.setattr(inf._mn_cli, "_infera_ssh_dir", lambda: tmp_path / "ssh")
-    monkeypatch.setattr(
-        inf.ssh_client, "generate_session_keypair", lambda _d: (tmp_path / "id_ed25519", "ssh-ed25519 pub")
-    )
-    monkeypatch.setattr(inf.workload_spec, "build_infera_workload_body", lambda **kw: {"body": kw})
-    monkeypatch.setattr(inf.ssh_client, "probe_ssh", lambda *a, **kw: False)
-    monkeypatch.setattr(
-        inf._mn_cli, "_refresh_infera_known_hosts", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("keyscan"))
-    )
-
-    class _ReuseSafe(_FakeSafe):
-        def delete_workload(self, wid: str) -> None:
-            return None
-
-        def get_workload(self, wid: str) -> dict:
-            return {"phase": "Running", "pods": []}
-
-        def get_workload_service(self, wid: str) -> dict:
-            raise inf.safe_client.SafeApiError(500, "svc down", endpoint="GET /service")
-
-    monkeypatch.setattr(inf.safe_client, "from_env", lambda: _ReuseSafe())
-    assert inf.cmd_create_infera(_args()) == 0
-    assert saved[-1]["rayjob_id"] == "wid-old"
-    assert saved[-1]["worker_pod_ips"] == []
-
-    class _GoneSafe(_FakeSafe):
-        def delete_workload(self, wid: str) -> None:
-            return None
-
-        def get_workload(self, wid: str) -> dict:
-            raise inf.safe_client.SafeApiError(404, "gone", endpoint="GET /api/v1/workloads/wid-old")
-
-    saved.clear()
-    monkeypatch.setattr(inf.safe_client, "from_env", lambda: _GoneSafe(workload={"phase": "Running", "pods": []}))
-    assert inf.cmd_create_infera(_args()) == 0
-    assert saved[-1]["rayjob_id"] == "wid-test"
-
-    monkeypatch.setattr(
-        inf._mn_cli, "_load_state", lambda: {"backend": "infera", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"}
-    )
-    with pytest.raises(RuntimeError, match="no GPU pod IPs"):
-        inf._infera_require_state()
-
-    monkeypatch.setattr(
-        inf,
-        "_infera_require_state",
-        lambda: {"backend": "infera", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k", "framework": "bad"},
-    )
-    with pytest.raises(RuntimeError, match="unsupported framework"):
-        inf._infera_restart_server(_restart_args())
-
-    monkeypatch.setattr(
-        inf,
-        "_infera_require_state",
-        lambda: {"backend": "infera", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k", "framework": "sglang"},
-    )
-    monkeypatch.setattr(
-        inf, "validate_server_args", lambda *a, **kw: (_ for _ in ()).throw(inf.ServerArgsRejected("denied"))
-    )
-    assert inf._infera_restart_server(_restart_args(extra_args="--bad")) == inf.EXIT_CONFIG_ERROR
-
-    monkeypatch.setattr(
-        inf, "_infera_require_state", lambda: {"backend": "infera", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"}
-    )
-    assert (
-        inf._infera_apply_tracelens_patch(
-            argparse.Namespace(tracelens_root="/tl", sglang_version_pin="", poll_timeout=1)
-        )
-        == inf.EXIT_CONFIG_ERROR
-    )
-
-    monkeypatch.delenv("HYPERLOOM_GEAK_SRC", raising=False)
-    monkeypatch.setenv("HYPERLOOM_ROOT", "/root/hyperloom")
-    assert inf._resolve_geak_src(None) == "/root/hyperloom/geak"
-
-
-def test_cli_multi_node_remaining_error_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
-    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn_env
-
-    root = tmp_path / "gc"
-    root.mkdir()
-    (root / "not-a-dir").write_text("x", encoding="utf-8")
-    old = root / "old"
-    old.mkdir()
-    monkeypatch.setattr(opt_mn.time, "time", lambda: 10_000_000.0)
-    os.utime(old, (10_000_000.0 - 10 * 86400, 10_000_000.0 - 10 * 86400))
-    monkeypatch.setattr(opt_mn.shutil, "rmtree", lambda _p: (_ for _ in ()).throw(OSError("rm failed")))
-    opt_mn._gc_old_profile_traces(str(root), retention_days=7)
-
-    real_iterdir = Path.iterdir
-
-    def _bad_iterdir(self):
-        if self == root:
-            raise OSError("scan failed")
-        return real_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", _bad_iterdir)
-    opt_mn._gc_old_profile_traces(str(root), retention_days=7)
-    monkeypatch.setattr(Path, "iterdir", real_iterdir)
-
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
-    state_file.write_text(json.dumps({"last_create_request": {"image": "dyn:old"}}), encoding="utf-8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "bad")
-    monkeypatch.setattr(mn_cli, "cmd_create_infera", lambda ns: 6)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_infera_stack(
-            argparse.Namespace(
-                nodes=2,
-                mn_image="",
-                model="/models/m",
-                gpus_per_node=None,
-                rayjob_extra_env=[],
-                framework="sglang",
-                pd_transfer_backend="",
-                pd_mode="aggregated",
-                pd_prefill_nodes=0,
-                pd_decode_nodes=0,
-                pd_prefill_tp=0,
-                pd_decode_tp=0,
-                no_kernel=True,
-            )
-        )
-    assert exc.value.code == 6
-
-    state_file.write_text("{bad", encoding="utf-8")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_IMAGE", raising=False)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_rayjob_stack(
-            argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="", gpus_per_node=None, rayjob_extra_env=[])
-        )
-    assert exc.value.code == 2
-
-    loads = iter(
-        [
-            {"last_bootstrap_submission_id": "boot", "rayjob_id": "wid"},
-            {"last_bootstrap_submission_id": "boot", "rayjob_id": "wid"},
-        ]
-    )
-    monkeypatch.setattr(mn_cli, "cmd_create_rayjob", lambda ns: 0)
-    monkeypatch.setattr(mn_cli, "_load_state", lambda: next(loads))
-    monkeypatch.setattr(mn_env, "export_ray_address_to_os", lambda: None)
-    monkeypatch.setattr(opt_mn, "_replay_kernel_patches_for_multi_node", lambda args: None)
-
-    class _BadTracePath:
-        def __init__(self, value: Path) -> None:
-            self.value = value
-
-        def __truediv__(self, child: str) -> "_BadTracePath":
-            return _BadTracePath(self.value / child)
-
-        def __str__(self) -> str:
-            return str(self.value)
-
-        def mkdir(self, *args, **kwargs):
-            raise OSError("readonly")
-
-    trace_root = _BadTracePath(tmp_path / "traces")
-    monkeypatch.setattr(opt_mn, "mn_profile_trace_root", lambda: trace_root)
-    opt_mn._provision_multi_node_rayjob_stack(
-        argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="ray:tag", gpus_per_node=8, rayjob_extra_env=[])
-    )
-
-
 def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as opt_mn
     import hyperloom.inference_optimizer.multi_node._internal.external_state as ext_state
@@ -1729,25 +1243,6 @@ def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(Path, "iterdir", _iterdir_with_bad_stat)
     opt_mn._gc_old_profile_traces(str(root), retention_days=7)
-
-    state_file = tmp_path / "mn-state.json"
-    monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_infera_stack(argparse.Namespace(nodes=2, mn_image="img:new", model=""))
-    assert exc.value.code == 2
-
-    monkeypatch.setattr(ext_state, "external_service_url", lambda: "http://frontend")
-    monkeypatch.setattr(ext_state, "external_has_ssh_control", lambda: True)
-    monkeypatch.setattr(
-        ext_state,
-        "build_external_state_from_env",
-        lambda: {"service_url": "http://frontend", "prefill_pod_ips": [], "decode_pod_ips": [], "worker_pod_ips": []},
-    )
-    monkeypatch.setattr(mn_cli, "_save_state", lambda _state: (_ for _ in ()).throw(OSError("readonly")))
-    with pytest.raises(SystemExit) as exc:
-        opt_mn._provision_multi_node_rayjob_stack(argparse.Namespace(nodes=2, mn_backend="rayjob"))
-    assert exc.value.code == 2
 
 
 def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

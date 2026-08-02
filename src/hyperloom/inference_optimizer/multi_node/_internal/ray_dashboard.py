@@ -5,7 +5,7 @@
 
 The sandbox->inference-RayJob control channel is Dashboard REST (HTTP/JSON),
 never ``import ray`` / ``ray.init(address=...)``. Reachable at
-``http://<head_pod_ip>:8265`` (fixed port; pod IP from SaFE GetWorkload).
+``http://<head_pod_ip>:8265`` (fixed port; host from the cluster hand-off env).
 """
 
 from __future__ import annotations
@@ -62,6 +62,21 @@ class RayDashboardError(RuntimeError):
         self.status = status
         self.body = body
         self.endpoint = endpoint
+
+
+def ray_gcs_address(head_pod_ip: str) -> str:
+    """Ray driver address for ``ray.init(address=...)`` (GCS on head, default port).
+
+    Args:
+        head_pod_ip (str): The head pod IP or host.
+
+    Returns:
+        str: ``<host>:6379`` for a non-empty input, otherwise an empty string.
+    """
+    ip = (head_pod_ip or "").strip()
+    if not ip:
+        return ""
+    return f"{ip}:6379"
 
 
 def dashboard_url(head_pod_ip: str) -> str:

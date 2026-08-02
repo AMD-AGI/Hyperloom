@@ -2492,7 +2492,19 @@ class BaselineExecutor:
                 # cuda-graph eager-fallback flag when armed) so the MN per-round
                 # restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
-                _mn_server_args = merge_server_args(_mn_ref_args, _mn_task_args) if _mn_ref_args else _mn_task_args
+                # Fold in the operator ``--server-args``
+                # (``INFERENCE_OPTIMIZER_SERVER_ARGS``). Single-node and explore
+                # variants apply it via the materialized YAML's ``EXTRA_*_ARGS``,
+                # but the multi-node baseline server is launched by
+                # launch_multinode (Magpie runs client-only) and never sees the
+                # YAML, so without this the baseline runs a near-default server
+                # while explore variants get the tuned flags — an unfair, skewed
+                # baseline. Priority low->high: reference < operator < per-task.
+                _mn_operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+                _mn_base = _mn_ref_args
+                if _mn_operator_args:
+                    _mn_base = merge_server_args(_mn_base, _mn_operator_args) if _mn_base else _mn_operator_args
+                _mn_server_args = merge_server_args(_mn_base, _mn_task_args) if _mn_base else _mn_task_args
                 _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
                 # PD knobs auto-resolved by the helper from $PD_* env, falling
                 # back to state.json.

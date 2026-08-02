@@ -22,6 +22,19 @@ def _load_module():
     return mod
 
 
+def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
+    # The pod-side copy must mirror server_args_safety: exempt the flag by name,
+    # but still constrain its value. Divergence silently blocks the sandbox-side
+    # exemption at the pod boundary.
+    mod = _load_module()
+    assert mod._denied_extra_args("--speculative-draft-model-path /wekafs/models/draft") == []
+    assert mod._denied_extra_args("--speculative-draft-model-path=/wekafs/models/draft") == []
+    for bad in ("Qwen/draft", "hf://org/draft", "/wekafs/../etc/passwd"):
+        assert mod._denied_extra_args(f"--speculative-draft-model-path {bad}")
+    assert mod._denied_extra_args("--speculative-draft-model-path --speculative-num-steps 3")
+    assert mod._denied_extra_args("--model-path /evil") == ["--model-path"]
+
+
 def test_build_sglang_cmd_uses_infera_engine():
     mod = _load_module()
     ns = type(

@@ -24,6 +24,7 @@ from typing import Any
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,
     load_multi_node_state,
+    reachable_service_url,
 )
 from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
@@ -88,7 +89,7 @@ def is_multi_node() -> bool:
     return env_n >= 2
 
 
-def resolve_kb_topology() -> dict[str, int]:
+def resolve_kb_topology() -> dict[str, Any]:
     """Resolve ``(nodes, gpus_per_node)`` for the KB hardware topology suffix.
 
     Mirrors :func:`is_multi_node`'s source priority so the recipe KB key stays
@@ -101,9 +102,11 @@ def resolve_kb_topology() -> dict[str, int]:
 
     Returns:
         A ``{"nodes", "gpus_per_node", "pd_mode", "pd_prefill_nodes",
-        "pd_decode_nodes"}`` mapping ready to splat into
+        "pd_decode_nodes", "tp", "ep", "backend"}`` mapping ready to splat into
         :func:`kb_hardware_slug`. Single-node returns ``nodes=1`` so the KB key
-        is left unchanged (the PD fields are then ignored downstream).
+        is left unchanged (the remaining fields are then ignored downstream).
+        ``tp`` / ``ep`` are ``0`` when neither env nor state resolved them,
+        which :func:`kb_hardware_slug` renders as an omitted suffix.
     """
     state = _read_state()
     try:
@@ -152,12 +155,47 @@ def resolve_kb_topology() -> dict[str, int]:
     pn = _pd_nodes("PD_PREFILL_NODES", "pd_prefill_nodes", "last_restart_pd_prefill_nodes")
     dn = _pd_nodes("PD_DECODE_NODES", "pd_decode_nodes", "last_restart_pd_decode_nodes")
 
+    # Parallel formation (tp / ep) is fixed at launch, not explored, so it
+    # belongs in the KB key: a best_config tuned at one split is invalid at
+    # another. The CLI exports TP / EP before T0 (stable across --resume), so
+    # env wins; state fields are the resume fallback.
+    def _int_pref_env(env_key: str, *state_keys: str, default: int = 1) -> int:
+        raw = (os.environ.get(env_key, "") or "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        for sk in state_keys:
+            try:
+                v = int(state.get(sk) or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v:
+                return v
+        return default
+
+    # Default 0, not 1: kb_hardware_slug reads tp/ep <= 0 as "unspecified" and
+    # omits the suffix. Substituting 1 would instead assert a formation nobody
+    # measured, keying the run as TP1 whenever TP could not be resolved.
+    tp = _int_pref_env("TP", "tp", "last_restart_tp", default=0)
+    ep = _int_pref_env("EP", "ep", "last_restart_ep", default=0)
+
+    # Multi-node backend (rayjob / infera): the CLI exports the resolved value;
+    # state is the resume fallback; default to the CLI's own multi-node default.
+    backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "").strip().lower()
+    if not backend:
+        backend = str(state.get("backend") or "").strip().lower() or "rayjob"
+
     return {
         "nodes": max(1, nodes),
         "gpus_per_node": max(1, gpn),
         "pd_mode": pd_mode or "aggregated",
         "pd_prefill_nodes": pn,
         "pd_decode_nodes": dn,
+        "tp": tp,
+        "ep": ep,
+        "backend": backend,
     }
 
 
@@ -297,14 +335,35 @@ def export_ray_address_to_os() -> None:
         os.environ["RAY_ADDRESS"] = addr
 
 
+def _remote_client_env(service_url: str) -> dict[str, str]:
+    """Build the multi-node Magpie client env for ``service_url``.
+
+    ``MAGPIE_EVAL_PYTHON`` pins the accuracy gate to the interpreter preflight
+    installed ``lm_eval`` into. Magpie's ``magpie_run_eval_remote_direct`` runs
+    ``${MAGPIE_EVAL_PYTHON:-python3}`` and, unlike the single-node path, has no
+    InferenceX shim to install the harness for itself, so leaving it on a PATH
+    ``python3`` that differs from the benchmark interpreter puts the import in a
+    different interpreter than the install and fails the gate on a box that
+    preflight just reported as ready.
+    """
+    from .benchmark_backend import resolve_benchmark_interpreter
+
+    return {
+        "MAGPIE_RUN_PHASE": "client",
+        "BENCHMARK_BASE_URL": service_url,
+        "MAGPIE_EVAL_PYTHON": resolve_benchmark_interpreter(),
+    }
+
+
 def magpie_remote_env() -> dict[str, str]:
     """Return env vars to inject into a Magpie ``benchmark`` subprocess.
 
     Single-node: ``{}`` (Magpie's ``--run-mode local`` untouched). Multi-node
-    with a ``service_url``: ``{"MAGPIE_RUN_PHASE": "client",
-    "BENCHMARK_BASE_URL": "<service_url>"}`` so Magpie skips its local server
-    launch and points ``benchmark_serving`` at the head pod. Multi-node without
-    a state file: ``{}`` + WARN (the local-launch failure surfaces clearly).
+    with a ``service_url``: ``MAGPIE_RUN_PHASE=client`` + ``BENCHMARK_BASE_URL``
+    so Magpie skips its local server launch and points ``benchmark_serving`` at
+    the head pod, plus ``MAGPIE_EVAL_PYTHON`` (see :func:`_remote_client_env`).
+    Multi-node without a state file: ``{}`` + WARN (the local-launch failure
+    surfaces clearly).
 
     Returns:
         Env vars to inject into the Magpie subprocess, or ``{}`` for the
@@ -313,35 +372,25 @@ def magpie_remote_env() -> dict[str, str]:
     # External mode: point benchmarks at the env-provided endpoint when multi-node.
     ext = external_service_url()
     if ext and is_multi_node():
-        return {"MAGPIE_RUN_PHASE": "client", "BENCHMARK_BASE_URL": ext}
+        return _remote_client_env(ext)
     if not is_multi_node():
         return {}
 
     state = _read_state()
-    service_url = str(state.get("service_url") or "").strip()
-    # Prefer head_pod_ip:port over ClusterIP (sandbox may not reach ClusterIP).
-    head_ip = str(state.get("head_pod_ip") or "").strip()
-    if head_ip and ".svc.cluster.local" in service_url:
-        import re
-
-        port = re.search(r":(\d+)$", service_url)
-        port = port.group(1) if port else "8888"
-        service_url = f"http://{head_ip}:{port}"
+    service_url = reachable_service_url(state)
     if not service_url:
         log.warning(
             "INFERENCE_OPTIMIZER_NODES=%s but %s has no service_url; "
             "Magpie will try to launch a local server and likely fail. "
-            "Run `python3 -m hyperloom.inference_optimizer.multi_node create-rayjob` "
-            "before `python -m hyperloom.inference_optimizer.cli optimize` in multi-node mode.",
+            "Multi-node needs the platform's cluster hand-off: check "
+            "HYPERLOOM_MN_EXT_SERVICE_URL (or _HEAD_IP for rayjob) is set in the "
+            "environment `python -m hyperloom.inference_optimizer.cli optimize` runs in.",
             os.environ.get("INFERENCE_OPTIMIZER_NODES"),
             _state_path(),
         )
         return {}
 
-    return {
-        "MAGPIE_RUN_PHASE": "client",
-        "BENCHMARK_BASE_URL": service_url,
-    }
+    return _remote_client_env(service_url)
 
 
 def log_mn_banner(

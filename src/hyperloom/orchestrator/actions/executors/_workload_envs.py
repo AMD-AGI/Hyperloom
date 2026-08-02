@@ -44,6 +44,7 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._grid_server_args import remove_server_args
+from ._grid_server_args import strip_aiter_args_for_unaligned_moe
 from ._grid_server_args import validate_server_args_shell_safe
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -414,6 +415,15 @@ def _finalize_framework_server_args(
             bench.get("model"),
             gpu_type=gpu_type or bench.get("runner_type"),
         )
+    # 4b. aiter shape gate: an unaligned MoE shape faults inside aiter's asm
+    #     MoE path regardless of the runner backend picked above, so remove the
+    #     flags that route work there.
+    resolved_server_args = strip_aiter_args_for_unaligned_moe(
+        resolved_server_args,
+        bench.get("framework"),
+        bench.get("model"),
+        envs.get("TP"),
+    )
     resolved_server_args = inject_vllm_expert_parallel(
         resolved_server_args,
         bench.get("framework"),

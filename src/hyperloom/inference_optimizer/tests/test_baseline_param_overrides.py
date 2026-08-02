@@ -33,6 +33,9 @@ _CLI_STUB = SimpleNamespace(
     _model_is_moe=lambda _model: False,
     _model_moe_runner_requires_aiter=lambda _model: False,
     _resolve_amd_gpu_type=lambda gpu: str(gpu or "").lower(),
+    # Supported, i.e. leave the server args alone: these tests assert what the
+    # trust/tokenizer path writes, not what the aiter MoE shape gate strips.
+    model_supports_aiter_ck_fused_moe=lambda _model, _tp: True,
 )
 
 

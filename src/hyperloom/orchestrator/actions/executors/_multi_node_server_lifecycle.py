@@ -214,7 +214,7 @@ def _resolve_pd_args(
     # persists the raw arg (often 0), so a --resume that also lost the
     # ``$PD_*_NODES`` env would leave pn/dn at 0 and wrongly fail the
     # disaggregated gate below (e.g. auto-roofline after resume). Recover the
-    # group sizes from the discovered per-role pod lists that create-infera
+    # group sizes from the discovered per-role pod lists the hand-off
     # persisted (``prefill_pod_ips`` / ``decode_pod_ips``), which are the
     # authoritative pod counts for the running deployment.
     if pn <= 0:
@@ -869,10 +869,8 @@ async def trigger_infera_engine_profile(
 def _probe_generated_tokens(data: object) -> int:
     """Best-effort count of tokens a /v1/completions probe actually generated.
 
-    Prefers ``usage.completion_tokens``; falls back to a non-empty
-    ``choices[0].text`` (counts as 1). Returns 0 when nothing was generated —
-    e.g. a broken PD KV handoff returns HTTP 200 with an empty completion, so a
-    status-only probe would wrongly declare the decode leg ready.
+    Shared with the resume-time serving probe so the wait and the decision that
+    precedes it cannot drift on what counts as a served token.
 
     Args:
         data: Parsed JSON body of a /v1/completions response.
@@ -880,20 +878,9 @@ def _probe_generated_tokens(data: object) -> int:
     Returns:
         int: Generated token count (0 when none / unparseable).
     """
-    if not isinstance(data, dict):
-        return 0
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        try:
-            ct = int(usage.get("completion_tokens") or 0)
-        except (TypeError, ValueError):
-            ct = 0
-        if ct > 0:
-            return ct
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        return 1 if str(choices[0].get("text") or "").strip() else 0
-    return 0
+    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
+
+    return generated_tokens(data)
 
 
 def _models_empty_too_long(
@@ -1267,7 +1254,6 @@ async def _wait_for_server_health_async(
             ``timeout_s``.
     """
     import time as _time
-    import re as _re
 
     try:
         import httpx as _httpx
@@ -1275,14 +1261,11 @@ async def _wait_for_server_health_async(
         log.warning("httpx not available; skipping post-restart /health wait")
         return
 
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
+
     state = _read_state() or {}
-    service_url = str(state.get("service_url") or "").strip()
+    service_url = reachable_service_url(state)
     backend = str(state.get("backend") or "").strip().lower()
-    head_ip = str(state.get("head_pod_ip") or "").strip()
-    if head_ip and ".svc.cluster.local" in service_url:
-        m = _re.search(r":(\d+)$", service_url)
-        port = m.group(1) if m else "8888"
-        service_url = f"http://{head_ip}:{port}"
 
     if not service_url:
         log.warning("no service_url in state; skipping post-restart /health wait")
