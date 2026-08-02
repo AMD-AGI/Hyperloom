@@ -177,6 +177,27 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    # The mirror image, and the one that used to pass. --mn-backend defaults to
+    # rayjob, so an infera-shaped hand-off whose operator forgot the flag was
+    # rewritten to rayjob here and reported server_control=yes -- SSH control is
+    # real, it is simply not the control this backend uses. The run then died
+    # minutes later inside a per-round restart, on a head_pod_ip nobody asked
+    # for. Say it now, and name the flag that was meant.
+    if ext_state["backend"] == "rayjob" and not ext_state.get("head_pod_ip"):
+        if external_has_ssh_control():
+            print(
+                "ERROR: --mn-backend rayjob (the default) needs "
+                "HYPERLOOM_MN_EXT_HEAD_IP, but this hand-off carries SSH "
+                "credentials and GPU pod IPs instead -- it is an infera "
+                "cluster. Pass --mn-backend infera.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            "multi-node: rayjob with no HYPERLOOM_MN_EXT_HEAD_IP -- this cluster cannot be "
+            "restarted, so the run is benchmark-only (see the warning below).",
+            file=sys.stderr,
+        )
     try:
         _save_state(ext_state)
     except OSError as exc:

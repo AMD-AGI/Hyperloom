@@ -921,6 +921,61 @@ def test_resume_needs_a_cluster_that_still_serves(
     assert probed == ([] if no_wait_health else ["probe"])
 
 
+def test_an_infera_handoff_left_on_the_default_backend_is_rejected(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Forgetting --mn-backend infera must fail here, not minutes later.
+
+    --mn-backend defaults to rayjob and overwrites whatever the hand-off's shape
+    implies, so an infera cluster whose operator omitted the flag was adopted as
+    rayjob. Nothing caught it: server_control reads yes, because SSH control is
+    real -- it is simply not the control this backend uses. The run then died
+    inside a per-round restart on a head_pod_ip nobody had asked for, well after
+    the adoption line said the cluster was fine.
+    """
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+
+    args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
+    with pytest.raises(SystemExit) as excinfo:
+        _prepare_multi_node_state(args)
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "it is an infera cluster" in err
+    assert "--mn-backend infera" in err
+
+
+def test_a_genuine_benchmark_only_handoff_still_proceeds(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No HEAD_IP and no SSH is the documented benchmark-only mode, not an error.
+
+    The new guard keys on the hand-off carrying SSH control instead, so it
+    separates "you meant infera" from "this cluster genuinely cannot be
+    restarted".
+    """
+    from hyperloom.inference_optimizer.cli import multi_node as mn
+    from hyperloom.inference_optimizer.multi_node import cli as mncli
+
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
+    for role in ("PREFILL", "DECODE", "WORKER"):
+        monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
+    monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
+    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
+
+    args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
+    _prepare_multi_node_state(args)
+
+    assert "benchmark-only" in capsys.readouterr().out
+
+
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,

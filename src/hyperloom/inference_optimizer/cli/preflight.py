@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -612,6 +613,56 @@ _LM_EVAL_PINNED_SPECS = (
     ("git", f"lm_eval[api] @ git+https://{_LM_EVAL_REPO}.git@{_LM_EVAL_PINNED_REF}"),
     ("archive", f"lm_eval[api] @ https://{_LM_EVAL_REPO}/archive/{_LM_EVAL_PINNED_REF}.tar.gz"),
 )
+# Settled by install.sh (or the image) and load-bearing elsewhere in the stack:
+# pandas for rocprof-compute's CSV converter, torch/triton for the ROCm build
+# PyPI has no equivalent of, numpy because both pin against it.
+_LM_EVAL_FROZEN_DEPS = ("torch", "pandas", "numpy", "triton")
+
+
+def _frozen_constraints(python_exe: str) -> list[str]:
+    """Pin the packages this install must not move, as ``pip -c`` arguments.
+
+    ``install.sh`` orders itself so the ``pandas<3`` pin is the last pip step,
+    on the stated grounds that "no later pip install can re-pull pandas>=3".
+    This install runs at ``optimize`` time, which is after that last word, in
+    the same interpreter, and resolves a dependency closure that reaches pandas
+    through ``datasets`` and torch directly. Left free, pip may satisfy those
+    from PyPI: pandas>=3 makes rocprof-compute drop every counter so forge
+    degrades to PMC with no roofline, and a PyPI torch is a CUDA build on a ROCm
+    box.
+
+    Constraining rather than passing ``--no-deps`` keeps the rest of the closure
+    resolvable -- lm_eval needs far more than the bench-serving set already
+    installed -- while making an incompatible requirement a loud pip failure
+    instead of a silently broken profiler.
+
+    Args:
+        python_exe (str): The interpreter being installed into.
+
+    Returns:
+        list[str]: ``["-c", <path>]``, or ``[]`` when nothing could be read.
+    """
+    pins: list[str] = []
+    for name in _LM_EVAL_FROZEN_DEPS:
+        probe = subprocess.run(
+            [python_exe, "-c", f"import importlib.metadata as m; print(m.version({name!r}))"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        version = probe.stdout.strip()
+        if probe.returncode == 0 and version:
+            pins.append(f"{name}=={version}")
+    if not pins:
+        print("Preflight: WARNING — could not read installed versions; lm_eval install is unconstrained")
+        return []
+    # The name deliberately carries no package name: this path is spliced into a
+    # pip command line that callers assert does not mention a package spec.
+    handle, path = tempfile.mkstemp(prefix="hyperloom_pip_constraints_", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(pins) + "\n")
+    print(f"Preflight: constraining the lm_eval install to {' '.join(pins)}")
+    return ["-c", path]
 
 
 def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
@@ -620,10 +671,11 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
     Raises:
         subprocess.CalledProcessError: If every spec fails; the last error wins.
     """
+    constraints = _frozen_constraints(python_exe)
     for i, (source, spec) in enumerate(_LM_EVAL_PINNED_SPECS):
         is_last = i == len(_LM_EVAL_PINNED_SPECS) - 1
         proc = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, spec],
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, spec],
             check=is_last,
         )
         if proc.returncode == 0:
@@ -695,7 +747,17 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     targets = missing
     print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
     subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *targets],
+        [
+            python_exe,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--no-cache-dir",
+            *_frozen_constraints(python_exe),
+            *pip_extra,
+            *targets,
+        ],
         check=True,
     )
     print(f"Preflight: {' '.join(targets)} installed OK")

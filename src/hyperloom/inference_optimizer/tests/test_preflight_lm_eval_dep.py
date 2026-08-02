@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -19,11 +20,22 @@ class _FakeRun:
     makes even the ``pass`` liveness probe fail.
     """
 
-    def __init__(self, missing, *, dead_interpreter: bool = False, install_rc: int = 0, failing_specs=()):
+    def __init__(
+        self,
+        missing,
+        *,
+        dead_interpreter: bool = False,
+        install_rc: int = 0,
+        failing_specs=(),
+        versions=None,
+    ):
         self.missing = list(missing)
         self.dead_interpreter = dead_interpreter
         self.install_rc = install_rc
         self.failing_specs = list(failing_specs)
+        self.versions = {"torch": "2.6.0", "pandas": "2.2.3", "numpy": "1.26.4", "triton": "3.2.0"}
+        if versions is not None:
+            self.versions = dict(versions)
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd, **kwargs):
@@ -38,6 +50,13 @@ class _FakeRun:
         r = _R()
         if cmd[1:3] == ["-c", "pass"]:  # liveness probe
             r.returncode = 1 if self.dead_interpreter else 0
+            return r
+        if cmd[1:2] == ["-c"] and "importlib.metadata" in cmd[2]:  # installed-version probe
+            name = cmd[2].rsplit("'", 2)[-2]
+            if name in self.versions:
+                r.stdout = f"{self.versions[name]}\n"
+            else:
+                r.returncode = 1
             return r
         if cmd[1:2] == ["-c"]:  # per-module import probe
             module = cmd[2].removeprefix("import ")
@@ -59,7 +78,11 @@ class _FakeRun:
 
     @property
     def probed_modules(self) -> list[str]:
-        return [c[2].removeprefix("import ") for c in self.calls if c[1:2] == ["-c"] and c[2] != "pass"]
+        return [
+            c[2].removeprefix("import ")
+            for c in self.calls
+            if c[1:2] == ["-c"] and c[2] != "pass" and "importlib.metadata" not in c[2]
+        ]
 
 
 def _patch(monkeypatch, runner):
@@ -84,6 +107,53 @@ def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     # so both paths measure accuracy with the same harness.
     assert preflight._LM_EVAL_PINNED_SPECS[0][1] in runner.installs[0]
     assert preflight._LM_EVAL_PINNED_REF in runner.installs[0][-1]
+
+
+def _constraint_lines(install_cmd: list[str]) -> list[str]:
+    """Read back the constraints file a pip invocation was handed."""
+    assert "-c" in install_cmd, f"install ran unconstrained: {install_cmd}"
+    return Path(install_cmd[install_cmd.index("-c") + 1]).read_text(encoding="utf-8").split()
+
+
+def test_lm_eval_install_cannot_move_the_packages_install_sh_settled(monkeypatch):
+    """This install runs after install.sh's deliberately-last pandas pin.
+
+    install.sh orders ``ensure_rocprof_compute`` after every pip step precisely
+    so "no later pip install can re-pull pandas>=3"; pandas>=3 makes
+    rocprof-compute drop every counter and forge degrade to PMC with no
+    roofline. This install happens at optimize time -- after that last word, in
+    the same interpreter -- and its closure reaches pandas through datasets and
+    torch directly, where a PyPI torch would be a CUDA build on a ROCm box.
+    """
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun(["lm_eval"]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    pins = _constraint_lines(runner.installs[0])
+    assert "pandas==2.2.3" in pins
+    assert "torch==2.6.0" in pins
+
+
+def test_a_missing_extra_is_installed_under_the_same_constraints(monkeypatch):
+    """The second install path resolves a closure too, so it carries them too."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun(["tenacity"]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert "pandas==2.2.3" in _constraint_lines(runner.installs[0])
+
+
+def test_unreadable_versions_warn_and_install_anyway(monkeypatch, capsys):
+    """A pin that cannot be read must not block the accuracy gate outright."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun(["lm_eval"], versions={}))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert "-c" not in runner.installs[0]
+    assert "unconstrained" in capsys.readouterr().out
 
 
 def test_lm_eval_skipped_when_present(monkeypatch):

@@ -252,8 +252,13 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   (server GPU mem stays near 0) → the pods lack a usable RDMA device
   (`ibv_devices` empty, no `/dev/infiniband`) while NCCL is forced onto IB
   (`NCCL_IB_HCA` set). This is a **platform provisioning** issue — the pods must
-  request `rdma/hca` (a partial-GPU multi-node task must still get RDMA). Quick
-  confirm/unblock: `--extra-env NCCL_IB_DISABLE=1` forces TCP (slow but works).
+  request `rdma/hca` (a partial-GPU multi-node task must still get RDMA). To
+  confirm/unblock, force TCP by exporting
+  `HYPERLOOM_MN_EXTRA_FWD_ENV='{"NCCL_IB_DISABLE":"1"}'` before `optimize`: that
+  is the channel both backends forward to the pods (rayjob via the job
+  `runtime_env`, infera via the SSH fan-out). Slow but works. **Not**
+  `--extra-env` — that reaches the variant filter only and never leaves the
+  sandbox, so using it here looks like a clean result and rules nothing out.
 * **Variant aborts with no benchmark output** → read `failed_variants` in the
   round's `<action>_attempts.extras`, or the per-variant `abort_reason.json`
   under `${USER_DATA_PATH}/runs/<action>/<task>/<variant>/` (`error_class` +
