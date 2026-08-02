@@ -1332,6 +1332,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
+    # Operator --extra-env pins, serialized for downstream executors (e.g. the
+    # explore aiter-MoE filter honours a pinned SGLANG_USE_AITER=0 against
+    # variants that would flip it back on). Internal handoff, not a public API.
+    _operator_extra_env: dict[str, str] = {}
+    for _item in getattr(args, "extra_env", None) or []:
+        _k, _sep, _v = str(_item).partition("=")
+        if _sep and _k.strip():
+            _operator_extra_env[_k.strip()] = _v
+    if _operator_extra_env:
+        os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_operator_extra_env)
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the
