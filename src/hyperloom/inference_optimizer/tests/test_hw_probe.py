@@ -28,7 +28,6 @@ from hyperloom.orchestrator.kernel.hw_probe import (
     DeviceInfo,
     MfmaRate,
     ProbeResult,
-    detect_arch,
     load_cached,
     normalize_arch,
     probe_compute_peak_tflops,
