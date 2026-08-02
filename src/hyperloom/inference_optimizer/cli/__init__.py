@@ -1721,11 +1721,27 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # and the --gpu-type / $GPU_TYPE hint wins.
         user_specified = (args.gpu_type or os.environ.get("GPU_TYPE", "")).strip().lower()
         if _should_remote_probe_gpu(args):
-            from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
+            from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type, remote_read_env
 
             probed = remote_autodetect_gpu_type() or ""
             if probed:
                 print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
+            # The operator's server-behavior env (e.g. SGLANG_USE_AITER) is baked
+            # into the inference pods, not this sandbox nor necessarily this CLI's
+            # --extra-env. Read it off the pods so the explore aiter-MoE filter
+            # can honour a pinned SGLANG_USE_AITER=0. An explicit --extra-env
+            # (already in INFERENCE_OPTIMIZER_EXTRA_ENV) wins; this only fills the gap.
+            _pins_raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
+            try:
+                _pins = json.loads(_pins_raw) if _pins_raw else {}
+            except (ValueError, TypeError):
+                _pins = {}
+            if isinstance(_pins, dict) and "SGLANG_USE_AITER" not in _pins:
+                _cluster_aiter = remote_read_env("SGLANG_USE_AITER")
+                if _cluster_aiter is not None:
+                    _pins["SGLANG_USE_AITER"] = _cluster_aiter
+                    os.environ["INFERENCE_OPTIMIZER_EXTRA_ENV"] = json.dumps(_pins)
+                    print(f"Cluster env     : SGLANG_USE_AITER={_cluster_aiter} (read from pods)")
         else:
             probed = _autodetect_gpu_type() or ""
         gpu_type, gpu_warnings = _resolve_gpu_type(
