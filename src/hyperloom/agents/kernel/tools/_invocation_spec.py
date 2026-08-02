@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from _io_utils import atomic_write_json
-from _task_group_contract import CASE_SELECTOR_KEY, task_group_shape_cases
+from _task_group_contract import (
+    CASE_SELECTOR_KEY,
+    logical_operator_name,
+    task_group_shape_cases,
+)
 
 
 SCHEMA_VERSION = 2
@@ -51,6 +55,12 @@ _MODEL_EXECUTION_KEYS = (
     "num_experts_per_tok",
 )
 _OMIT = object()
+_SOURCE_FRAMEWORK_ALIASES = {
+    "vllm": "vllm",
+    "sglang": "sglang",
+    "aiter": "aiter",
+    "aiter_meta": "aiter",
+}
 
 
 def _normalize_dtype(value: Any) -> str:
@@ -729,6 +739,75 @@ def invocation_spec_filename(candidate: dict[str, Any]) -> str:
     return f"invocation_spec_{safe_identity}.json"
 
 
+def _logical_operator(candidate: dict[str, Any]) -> str:
+    """Return the logical operator shared with the Forge handoff."""
+    return logical_operator_name(candidate)
+
+
+def _source_framework(candidate: dict[str, Any], sources: list[str]) -> str:
+    """Resolve source ownership independently of the serving framework."""
+    explicit = str(candidate.get("source_framework") or "").strip().lower()
+    if explicit in _SOURCE_FRAMEWORK_ALIASES:
+        return _SOURCE_FRAMEWORK_ALIASES[explicit]
+    for source in sources:
+        for component in Path(source).parts:
+            framework = _SOURCE_FRAMEWORK_ALIASES.get(component.lower())
+            if framework:
+                return framework
+    return ""
+
+
+def _effective_kernel_kind(candidate: dict[str, Any]) -> str:
+    """Return explicit kind or one proven by source classification."""
+    explicit = str(candidate.get("kernel_kind") or "").strip().lower()
+    if explicit:
+        return explicit.replace("-", "_")
+    source_type = str(candidate.get("source_type") or "").strip().lower()
+    return source_type if source_type in {"triton", "flydsl", "ck"} else ""
+
+
+def _source_level_symbols(source_files: list[str]) -> list[str]:
+    """Parse stable editable definitions without using runtime-specialized names."""
+    symbols: list[str] = []
+    for source_file in source_files:
+        path = Path(source_file)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if path.suffix.lower() in {".py", ".pyi"}:
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                decorators: list[str] = []
+                for decorator in node.decorator_list:
+                    target = (
+                        decorator.func
+                        if isinstance(decorator, ast.Call)
+                        else decorator
+                    )
+                    if isinstance(target, ast.Name):
+                        decorators.append(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        decorators.append(target.attr)
+                if "jit" in decorators and node.name not in symbols:
+                    symbols.append(node.name)
+            continue
+        for match in re.finditer(
+            r"\b(?:__global__|__device__)\b[^;{}]*?\b"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            text,
+        ):
+            symbol = match.group(1)
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return symbols
+
+
 def build_invocation_spec(
     candidate: dict[str, Any],
     *,
@@ -809,6 +888,32 @@ def build_invocation_spec(
             raw_device_symbols.insert(0, primary_raw_symbol)
     source_symbol = _source_symbol(source, raw_device_symbols)
     runtime_symbols = _runtime_symbols(candidate, raw_device_symbols)
+    raw_target_symbols = candidate.get("target_functions") or []
+    if isinstance(raw_target_symbols, str):
+        raw_target_symbols = [
+            value.strip()
+            for value in raw_target_symbols.split(",")
+            if value.strip()
+        ]
+    elif not isinstance(raw_target_symbols, list):
+        raw_target_symbols = []
+    parsed_source_symbols = _source_level_symbols(
+        list(dict.fromkeys([source, *kernel_sources]))
+    )
+    curated_source_symbol = str(candidate.get("source_symbol") or "").strip()
+    if not curated_source_symbol and not parsed_source_symbols:
+        curated_source_symbol = source_symbol
+    implementation_symbols = list(
+        dict.fromkeys(
+            symbol
+            for symbol in (
+                curated_source_symbol,
+                *[str(item) for item in raw_target_symbols],
+                *parsed_source_symbols,
+            )
+            if symbol and not symbol.endswith("...")
+        )
+    )
     unresolved_prefixes = [
         symbol.removesuffix("...")
         for symbol in raw_device_symbols
@@ -833,6 +938,16 @@ def build_invocation_spec(
         "schema_version": SCHEMA_VERSION,
         "status": "complete" if not missing else "partial",
         "missing_fields": missing,
+        "logical_operator": _logical_operator(candidate),
+        "source_framework": _source_framework(
+            candidate,
+            [*kernel_sources, source],
+        ),
+        "implementation": {
+            "sources": list(dict.fromkeys([source, *kernel_sources])),
+            "kernel_kind": _effective_kernel_kind(candidate),
+            "symbols": implementation_symbols,
+        },
         "kernel": {
             "kernel_id": str(candidate.get("kernel_id") or ""),
             "name": str(candidate.get("name") or ""),
@@ -840,7 +955,7 @@ def build_invocation_spec(
             "kernel_category": str(candidate.get("kernel_category") or ""),
             "tracelens_category": str(candidate.get("tracelens_category") or ""),
             "source_type": str(candidate.get("source_type") or ""),
-            "kernel_kind": str(candidate.get("kernel_kind") or ""),
+            "kernel_kind": _effective_kernel_kind(candidate),
         },
         "edit_target": {
             "source_file": source,

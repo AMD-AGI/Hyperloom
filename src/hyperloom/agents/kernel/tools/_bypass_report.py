@@ -38,6 +38,9 @@ from _task_group_contract import (
     legacy_operator_identity_keys,
     operator_identity_key,
 )
+from hyperloom.common.kernel_shape_contract import (
+    DISPATCHABLE_SHAPE_PROVENANCE as _DISPATCHABLE_SHAPE_PROVENANCE,
+)
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
 _ACTION_BY_CATEGORY: dict[str, str] = {
@@ -58,8 +61,6 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak"]
-
-from hyperloom.common.kernel_shape_contract import DISPATCHABLE_SHAPE_PROVENANCE as _DISPATCHABLE_SHAPE_PROVENANCE
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
 _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound": "Memory-bound"}
@@ -369,6 +370,28 @@ def _source_type_from_path(path: str) -> str:
     return ""
 
 
+def _implementation_contract(
+    *,
+    op_name: str,
+    source_file: str,
+    trace_kernel_kind: str,
+) -> tuple[str, str]:
+    """Derive source type and kind only from explicit trace/source evidence."""
+    traced_kind = str(trace_kernel_kind or "").strip().lower().replace("-", "_")
+    normalized_op = str(op_name or "").strip().lower()
+    if "flydsl" in traced_kind or (
+        normalized_op.startswith("pseudo_op::")
+        and "flydsl" in normalized_op
+    ):
+        return "flydsl", "flydsl"
+    if "triton" in traced_kind:
+        return "triton", "triton"
+    source_type = _source_type_from_path(source_file) or _source_type_for_op(op_name)
+    if source_type in {"triton", "flydsl", "ck"}:
+        return source_type, source_type
+    return source_type, ""
+
+
 def _short_name(kernel_name: str) -> str:
     """Shorten a mangled device-kernel name for candidate identity display."""
     n = kernel_name or ""
@@ -459,6 +482,11 @@ def build_candidates(
         if discover_benchmarks and kc.reusable and source_file:
             kernel_repo = repo_root_from_source(source_file)
             bench_files = find_benchmark_files(op_name, source_file)
+        source_type, kernel_kind = _implementation_contract(
+            op_name=op_name,
+            source_file=source_file,
+            trace_kernel_kind=str(k.get("op_kernel_backend") or ""),
+        )
 
         cand: dict[str, Any] = {
             "kernel_id": kernel_id,
@@ -488,8 +516,8 @@ def build_candidates(
             "framework": framework,
             "source_file": source_file,
             "source_resolution_method": source_method,
-            # Prefer the resolved source's extension; fall back to the op-name heuristic.
-            "source_type": _source_type_from_path(source_file) or _source_type_for_op(op_name),
+            "source_type": source_type,
+            "kernel_kind": kernel_kind,
             "reusable_native_kernel": kc.reusable,
             # Non-reusable keeps the classifier reason; a reusable kernel with no
             # resolved source is not dispatchable.

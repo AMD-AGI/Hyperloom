@@ -1,0 +1,134 @@
+"""Tests for KB framework resolution + its fault tolerance (soft slug input)."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
+sys.path.insert(0, str(_BACKENDS_DIR))
+import forge_submit  # noqa: E402
+
+
+def test_resolve_framework_from_explicit_source_owner_field():
+    assert forge_submit._resolve_framework({"source_framework": "vLLM"}) == "vllm"
+    assert forge_submit._resolve_framework({"source_framework": "aiter_meta"}) == "aiter"
+
+
+def test_resolve_framework_ignores_serving_and_language_backends():
+    assert forge_submit._resolve_framework({"backend": "triton"}) == ""
+    assert forge_submit._resolve_framework({"framework": "vllm"}) == ""
+
+
+def test_resolve_framework_from_kernel_path_when_candidate_silent():
+    fw = forge_submit._resolve_framework(
+        {}, "/ws/worktree/vllm/model_executor/layers/fused_moe/x.py")
+    assert fw == "vllm"
+
+
+def test_resolve_framework_owning_package_not_deep_subdir():
+    # Kernel lives directly in vllm; the owning package (shallowest) wins, not a
+    # deep dir. Mirrors the arena side for the same operator.
+    fw = forge_submit._resolve_framework(
+        {}, "/ws/worktree/vllm/v1/attention/ops/paged.py")
+    assert fw == "vllm"
+
+
+def test_resolve_framework_aiter_meta_maps_to_aiter():
+    assert forge_submit._resolve_framework(
+        {}, "/ws/worktree/aiter_meta/csrc/gemm.cu") == "aiter"
+
+
+def test_logical_operator_priority_and_namespace_normalization():
+    assert forge_submit._logical_operator(
+        {
+            "task_group": {
+                "operator_identity": {"operation": "vllm :: unified_attention"}
+            },
+            "operation": "fallback_operation",
+            "name": "fallback_name",
+        }
+    ) == "vllm::unified_attention"
+    assert forge_submit._logical_operator(
+        {"operation": "aiter::fused_moe", "name": "fallback"}
+    ) == "aiter::fused_moe"
+    assert forge_submit._logical_operator(
+        {"operation": "aiter::Attention<ck::Tile<64, 128>>::forward"}
+    ) == "aiter::Attention::forward"
+    assert forge_submit._logical_operator({"name": "direct_triton"}) == "direct_triton"
+
+
+def test_resolve_framework_follows_kernel_sources_across_packages():
+    # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but
+    # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'
+    # to match the arena producer, not 'vllm' (the caller).
+    candidate = {
+        "kernel_sources": [
+            "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/unified.py"
+        ],
+    }
+    anchor = "/ws/worktree/vllm/attention/ops/entry.py"
+    assert forge_submit._resolve_framework(candidate, anchor) == "aiter"
+
+
+def test_resolve_framework_returns_empty_when_unknown():
+    # Unresolvable -> "" so the caller OMITS --framework and forge-loop infers.
+    # Fault tolerance: never raises, never guesses a wrong framework.
+    assert forge_submit._resolve_framework({}, "/tmp/scratch/kernel.py") == ""
+    assert forge_submit._resolve_framework(None, "") == ""
+    assert forge_submit._resolve_framework({"framework": None, "backend": None}) == ""
+
+
+def test_resolve_source_framework_explicit_beats_path():
+    fw = forge_submit._resolve_framework(
+        {"source_framework": "sglang"},
+        "/x/vllm/y/k.py",
+    )
+    assert fw == "sglang"
+
+
+def test_resolve_framework_uses_aiter_source_not_vllm_serving_wrapper():
+    candidate = {
+        "framework": "vllm",
+        "backend": "vllm",
+        "source_file": "/repo/vllm/attention.py",
+        "kernel_sources": ["/repo/aiter/ops/triton/attention.py"],
+    }
+    assert forge_submit._resolve_framework(candidate, "/repo/vllm/attention.py") == "aiter"
+
+
+def test_fellow_resolution_uses_kernel_kind_for_ck_and_flydsl():
+    assert forge_submit._resolve_fellow("hip_cpp", "aiter_ck") == "ck-fellow"
+    assert forge_submit._resolve_fellow("python", "flydsl") == "flydsl-fellow"
+    assert forge_submit._resolve_fellow("flydsl", "") == "flydsl-fellow"
+
+
+def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):
+    source = tmp_path / "kernel.py"
+    source.write_text(
+        "@triton.jit\ndef attention_kernel(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    candidate = {
+        "operation": "vllm::logical_attention",
+        "source_file": str(source),
+        "device_kernel_names": [
+            "attention_kernel_BLOCK_M_64...",
+            "_ZN4impl24attention_kernel_specialILi64EEEvT_",
+        ],
+    }
+    symbols = forge_submit._stable_implementation_symbols(
+        candidate,
+        source_files=[str(source)],
+    )
+    assert symbols == [
+        "attention_kernel"
+    ]
+    assert forge_submit._logical_operator(candidate) not in (
+        symbols
+    )
+
+
+def test_gpu_target_normalization_extracts_canonical_gfx_arch():
+    assert forge_submit._normalize_gpu_target("GFX942:sramecc+:xnack-") == "gfx942"
+    assert forge_submit._normalize_gpu_target("MI355X") == "gfx950"
