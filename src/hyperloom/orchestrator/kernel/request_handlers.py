@@ -1264,8 +1264,19 @@ def _fill_integrate_defaults_from_state(
             str(pending_record.get("identity_route") or ""),
         )
 
+    current_best = getattr(state, "current_best", None) or {}
+
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
-        bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        # Judge the candidate against the CURRENT BEST recipe it stacks onto,
+        # not the raw baseline. ``extra_server_args`` below is filled from
+        # current_best, so the candidate is re-benched on top of that recipe;
+        # comparing the result to the raw baseline lets a kernel/fusion that
+        # beats baseline but REGRESSES vs the established best (e.g. a
+        # warm-replay recipe) get KEEP'd and drag the recipe down. Mirrors
+        # integrate_patch's rebind to current_best. Baseline is the fallback
+        # only before any current_best exists.
+        cb_tput = float(current_best.get("tput") or 0.0) if isinstance(current_best, dict) else 0.0
+        bt = cb_tput if cb_tput > 0 else float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if bt > 0:
             resolved["base_tput"] = bt
 
@@ -1274,7 +1285,6 @@ def _fill_integrate_defaults_from_state(
         if cfg:
             resolved["config_path"] = cfg
 
-    current_best = getattr(state, "current_best", None) or {}
     if not resolved.get("extra_server_args") and isinstance(current_best, dict):
         cb_args = current_best.get("extra_server_args") or ""
         if cb_args:

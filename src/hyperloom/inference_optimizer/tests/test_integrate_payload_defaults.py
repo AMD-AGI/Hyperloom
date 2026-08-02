@@ -54,7 +54,9 @@ class TestFillIntegrateDefaultsFromState:
             session_dir=session_dir,
         )
 
-        assert out["base_tput"] == 800.0
+        # base_tput prefers current_best.tput (900) over the raw baseline (800):
+        # the candidate must beat the recipe it stacks onto, not just baseline.
+        assert out["base_tput"] == 900.0
         assert out["config_path"] == "/tmp/base.yaml"
         assert out["extra_server_args"] == "--page-size 16"
         assert out["kernel_id"] == "k_abc"
@@ -136,6 +138,40 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         assert out["base_tput"] == 750.0
+
+    def test_base_tput_prefers_current_best_over_baseline(self, session_dir):
+        """A candidate must be judged against the CURRENT BEST recipe it stacks
+        onto (current_best.tput), not the raw baseline.
+
+        Otherwise a kernel/fusion that beats baseline but regresses vs the
+        established best (e.g. a warm-replay recipe) is wrongly KEEP'd instead of
+        REVERT'd (observed: forge_fusion adopted at negative gain vs current_best
+        while still positive vs baseline, dragging the final recipe down).
+        """
+        _seed_state(
+            session_dir,
+            baseline_tput=800.0,
+            current_best_args="--page-size 16",  # _seed_state sets current_best.tput=900
+        )
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
+        )
+
+        assert out["base_tput"] == 900.0  # current_best, NOT baseline 800
+
+    def test_base_tput_falls_back_to_baseline_without_current_best(self, session_dir):
+        # No current_best recorded yet (early kernel phase) -> baseline is the
+        # only reference available.
+        _seed_state(session_dir, baseline_tput=800.0)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
+        )
+
+        assert out["base_tput"] == 800.0
 
 
 class TestIntegrateHandlerHonoursStateDefault:
