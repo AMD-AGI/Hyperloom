@@ -1411,18 +1411,55 @@ def kernel_opt_attempts_count(state) -> int:
     return len(state.kernel_opt_task_attempts or {})
 
 
+def _kernel_optimization_roi(row: dict[str, Any], gpu_pct: float) -> float:
+    """GPU-time share weighted by how far the kernel sits below its roofline.
+
+    Ranking candidates on ``gpu_pct`` alone spends the attempt budget on
+    whatever owns the most trace time, including kernels already running at
+    their roofline that have nothing left to give. Weighting by
+    ``1 - efficiency`` puts attempts where measured headroom actually is: a
+    kernel at 11% of GPU time and 30% efficiency outranks one at 12% and 90%.
+
+    The bypass report already computes this as ``optimization_priority``, so
+    prefer that value and keep one definition of the ROI. Recompute only for
+    the TraceLens path, which carries ``efficiency_percent`` but no ROI, and
+    degrade to the raw share when efficiency was never measured -- that
+    reproduces the previous ordering rather than inventing headroom.
+
+    Args:
+        row: A ``hot_kernels`` entry.
+        gpu_pct: The kernel's already-parsed GPU-time share.
+
+    Returns:
+        The ROI to rank by; equals ``gpu_pct`` when no efficiency is known.
+    """
+    precomputed = row.get("optimization_priority")
+    if isinstance(precomputed, (int, float)) and not isinstance(precomputed, bool):
+        return float(precomputed)
+    eff = row.get("efficiency_percent")
+    if not isinstance(eff, (int, float)) or isinstance(eff, bool):
+        return gpu_pct
+    headroom = 1.0 - min(max(float(eff), 0.0), 100.0) / 100.0
+    return gpu_pct * headroom
+
+
 def untried_hot_reusable_kernels(
     state,
     *,
     min_gpu_pct: float | None = None,
     top_n: int | None = None,
 ) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group.
+    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by optimization ROI, one kernel_id per task_group.
+
+    ROI is the GPU-time share weighted by roofline headroom (see
+    :func:`_kernel_optimization_roi`), so the cap keeps kernels that can still
+    move rather than the largest ones. Kernels whose efficiency was never
+    measured rank on their raw share, as before.
 
     Args:
         min_gpu_pct (float | None): Minimum GPU-share threshold; when
             ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``.
-        top_n (int | None): Cap on enforced kernels by gpu_pct; when
+        top_n (int | None): Cap on enforced kernels by ROI; when
             ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``.
 
     Returns:
@@ -1486,8 +1523,11 @@ def untried_hot_reusable_kernels(
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
 
-    # Sort by gpu_pct desc so dedup picks the strongest member of each
-    # task_group.
+    # Sort by optimization ROI desc so dedup picks the strongest member of each
+    # task_group, and so the top_n cut keeps the kernels with headroom rather
+    # than merely the largest ones. The min_gpu_pct floor below stays on the
+    # raw share: it answers "is this kernel big enough to bother with", which
+    # headroom must not be able to talk it out of.
     rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
     for k in hot:
         if not isinstance(k, dict):
@@ -1516,7 +1556,9 @@ def untried_hot_reusable_kernels(
         # Identity of the underlying kernel, independent of the synthetic
         # per-row kernel_id. Used only as a dedup fallback (see below).
         identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
-        rows.append((gpu_pct, kid, src, members, group_key, identity))
+        rows.append(
+            (_kernel_optimization_roi(k, gpu_pct), kid, src, members, group_key, identity)
+        )
     rows.sort(key=lambda x: x[0], reverse=True)
 
     ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
@@ -1600,7 +1642,7 @@ def untried_hot_reusable_kernels(
         recorded_source = str(attempt.get("last_source_file") or "")
         return not source or not recorded_source or source == recorded_source
 
-    for _pct, kid, src, members, group_key, _identity in ranked:
+    for _roi, kid, src, members, group_key, _identity in ranked:
         if members and all(
             _member_is_rejected(member)
             and _matches_current_task(member, group_key, src)
