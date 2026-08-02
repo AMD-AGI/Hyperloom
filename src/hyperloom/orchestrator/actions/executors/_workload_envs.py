@@ -1125,6 +1125,22 @@ def materialize_config_with_envs(
     _eval_limit_env = os.environ.get("MAGPIE_EVAL_LIMIT", "").strip()
     if _eval_limit_env and "MAGPIE_EVAL_LIMIT" not in envs:
         envs["MAGPIE_EVAL_LIMIT"] = _eval_limit_env
+    # PD (router-fronted): lm_eval's default token-id prompts are rejected by the
+    # sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
+    # accuracy eval. Force string prompts so the gate works. Explicit env /
+    # extra_envs win; only disaggregated runs are touched (aggregated hits the
+    # sglang server directly, which accepts token-id prompts).
+    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    if not _eval_tok_env:
+        try:
+            from ._multi_node_env import resolve_kb_topology
+
+            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+                _eval_tok_env = "false"
+        except Exception:  # noqa: BLE001 - best-effort; never block config materialization
+            _eval_tok_env = ""
+    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
+        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
     if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:

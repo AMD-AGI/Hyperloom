@@ -404,6 +404,67 @@ def _strip_eval_concurrency_flag(text: str) -> str | None:
     return patched
 
 
+# magpie_bench_remote_compat.sh hardcodes the lm_eval model_args with
+# ``tokenizer_backend=huggingface`` and no ``tokenized_requests``, so lm_eval
+# sends token-id-array prompts. A direct sglang server accepts those, but the PD
+# ``sglang_router``'s /v1/completions only accepts StringOrArray and rejects
+# them with HTTP 422 — collapsing the whole accuracy eval ("Session is closed").
+# Teach the line to honor ``$MAGPIE_EVAL_TOKENIZED_REQUESTS`` so Hyperloom can
+# force string prompts (``tokenized_requests=false``) on router-fronted (PD)
+# runs. Absent env ⇒ unchanged behaviour.
+_LM_EVAL_TOKENIZED_MARKER = "MAGPIE_EVAL_TOKENIZED_REQUESTS"
+_LM_EVAL_TOKENIZED_SUFFIX = "${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
+_LM_EVAL_MODEL_ARGS_RE = re.compile(
+    r'(local model_args="model=\$\{MODEL\},base_url=\$\{base_url\},'
+    r"num_concurrent=\$\{conc\},tokenizer_backend=huggingface,trust_remote_code=true)\""
+)
+
+
+def _apply_lm_eval_tokenized_requests_patch_atomic(scripts_dir: Path) -> bool:
+    """Make the remote-compat lm_eval ``model_args`` honor ``$MAGPIE_EVAL_TOKENIZED_REQUESTS``.
+
+    Idempotent: a script already carrying the env marker, or lacking the exact
+    ``model_args`` line, is left untouched. Never fatal — a shape miss is a
+    silent no-op (the PD accuracy gate simply keeps its current behaviour).
+
+    Args:
+        scripts_dir: Magpie ``scripts/benchmark`` (or InferenceX ``benchmarks``)
+            directory to scan.
+
+    Returns:
+        ``True`` unless an IO step failed.
+    """
+    ok = True
+    for script in sorted(scripts_dir.glob("*.sh")):
+        try:
+            original = script.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning("_magpie_patcher: cannot read %s: %s", script, e)
+            ok = False
+            continue
+        if _LM_EVAL_TOKENIZED_MARKER in original:
+            continue  # already honors the env
+        patched, n = _LM_EVAL_MODEL_ARGS_RE.subn(
+            lambda m: f'{m.group(1)}{_LM_EVAL_TOKENIZED_SUFFIX}"', original
+        )
+        if n == 0:
+            continue  # not the remote-compat eval script / shape changed
+        if not atomic_write_text(
+            script,
+            patched,
+            tmp_prefix=f".{script.name}.hyperloom_",
+            log_prefix="_magpie_patcher",
+        ):
+            ok = False
+            continue
+        log.info(
+            "_magpie_patcher: taught %s lm_eval model_args to honor $MAGPIE_EVAL_TOKENIZED_REQUESTS "
+            "(PD sglang_router rejects token-id prompts with HTTP 422)",
+            script,
+        )
+    return ok
+
+
 def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
     """Strip the redundant ``--concurrent-requests`` eval flag from every
     generic Magpie benchmark script under ``scripts_dir``.
@@ -622,6 +683,8 @@ def _apply_eval_concurrency_fixes(
             continue
         scanned.add(scripts_dir)
         if not _apply_eval_flag_patch_atomic(scripts_dir):
+            ok = False
+        if not _apply_lm_eval_tokenized_requests_patch_atomic(scripts_dir):
             ok = False
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
     if benchmark_lib is not None and not _apply_run_lm_eval_arg_patch_atomic(benchmark_lib):

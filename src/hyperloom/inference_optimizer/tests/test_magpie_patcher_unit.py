@@ -55,6 +55,43 @@ def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: s
     return root
 
 
+_REMOTE_COMPAT_MODEL_ARGS = (
+    '  local model_args="model=${MODEL},base_url=${base_url},'
+    'num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true"\n'
+)
+
+
+def test_lm_eval_tokenized_patch_adds_env_hook(tmp_path):
+    # The remote-compat model_args line gains the $MAGPIE_EVAL_TOKENIZED_REQUESTS hook.
+    d = tmp_path / "benchmark"
+    d.mkdir()
+    script = d / "magpie_bench_remote_compat.sh"
+    script.write_text("#!/bin/bash\n" + _REMOTE_COMPAT_MODEL_ARGS, encoding="utf-8")
+
+    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
+    patched = script.read_text(encoding="utf-8")
+    assert "${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}" in patched
+    # tokenizer_backend line stays otherwise intact.
+    assert "tokenizer_backend=huggingface,trust_remote_code=true" in patched
+
+    # Idempotent: a second pass is a no-op (marker already present).
+    before = patched
+    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
+    assert script.read_text(encoding="utf-8") == before
+
+
+def test_lm_eval_tokenized_patch_noop_for_unrelated_script(tmp_path):
+    # A script without the exact model_args line is left byte-for-byte unchanged.
+    d = tmp_path / "benchmark"
+    d.mkdir()
+    other = d / "sglang_mi300x.sh"
+    body = "#!/bin/bash\necho hello\nrun_eval --framework lm-eval\n"
+    other.write_text(body, encoding="utf-8")
+
+    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
+    assert other.read_text(encoding="utf-8") == body
+
+
 # ---- path resolution ------------------------------------------------------
 def test_resolve_benchmarker_none(monkeypatch):
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
