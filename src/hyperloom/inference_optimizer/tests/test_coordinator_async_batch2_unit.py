@@ -225,6 +225,9 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
     assert replay["appended"] is True
     assert coord.shared_state.pending_integrate == {}
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-pending"
+    assert "source_phase" not in coord.shared_state.optimization_stack[-1]
+    assert "domain" not in coord.shared_state.optimization_stack[-1]
+    assert "framework_agent_authoring" not in coord.shared_state.optimization_stack[-1]
     assert coord.shared_state.resume_pending_revalidation is True
 
 

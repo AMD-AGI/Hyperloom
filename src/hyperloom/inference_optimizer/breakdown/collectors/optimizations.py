@@ -149,7 +149,7 @@ def _resolve_source(
         raw.get("tuned_file"),
         raw.get("final_overlay"),
     )
-    if (
+    if not action.startswith("integrate_patch") and (
         any(value not in (None, "", [], {}) for value in kernel_markers)
         or action in {"geak_e2e", "gemm_tuning", "fusion", "integrate"}
         or action.startswith("kernel_opt")
@@ -177,19 +177,13 @@ def _resolve_source(
             or gain.get("domain")
             or provenance.startswith("specialist:")
         )
-        if explicit == "kernel_agent":
-            # KERNEL_AGENT is only the completion context for integrate_patch.
-            # Genuine kernel adoption uses action=integrate and was handled by
-            # the kernel action/marker branch above.
-            return (
-                ("explore", "recorded")
-                if specialist_owned
-                else ("unattributed", "unknown")
-            )
-        if explicit:
+        if explicit in {"framework_agent", "explore"}:
             return explicit, "recorded"
         if specialist_owned:
             return "explore", "recorded"
+        # integrate_patch ownership must be explicit. Never infer it from the
+        # phase active when the delayed application happened.
+        return "unattributed", "unknown"
     if explicit:
         return explicit, "recorded"
 

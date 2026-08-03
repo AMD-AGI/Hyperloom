@@ -487,6 +487,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
             "domain": "serving_specialist",
             "gap_canonical_id": "gap.framework.fp8",
             "gap_layer": "framework",
+            "framework": "other-framework",
             "framework_agent_authoring": True,
         },
         idempotency_key="k3",
@@ -506,6 +507,7 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
     assert params["domain"] == "serving_specialist"
     assert params["provenance"] == "specialist:serving_specialist"
     assert params["gap_canonical_id"] == "gap.framework.fp8"
+    assert "framework" not in params
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,8 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
             },
             {
                 "action": "integrate_patch",
+                "source_phase": "FRAMEWORK_AGENT",
+                "framework_agent_authoring": True,
                 "variant_name": "framework-patch",
                 "tput": 160.0,
                 "ts": "1970-01-01T00:00:20+00:00",
@@ -35,6 +37,8 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
             },
             {
                 "action": "integrate_patch",
+                "source_phase": "EXPLORE",
+                "domain": "serving_specialist",
                 "variant_name": "explore-config",
                 "tput": 170.0,
                 "ts": "1970-01-01T00:00:30+00:00",
@@ -133,6 +137,7 @@ def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
             },
         ],
         "gain_per_stack_entry": [10.0],
+        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
     }
     warnings: list[str] = []
 
@@ -147,8 +152,12 @@ def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
         "keeps": 1,
         "total_gain_pct": 10.0,
     }
+    assert result["entries"][0]["source_method"] == "unknown"
+    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
     assert result["validation"]["attributed_total_gain_pct"] == 0.0
     assert result["validation"]["attribution_gap_pct"] == 10.0
+    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
 
 
 def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
@@ -161,6 +170,9 @@ def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
             {
                 "action": "integrate_patch",
                 "source_phase": "KERNEL_AGENT",
+                "backend": "forge",
+                "engine": "forge",
+                "final_overlay": "/tmp/not-kernel-ownership.patch",
                 "variant_name": "unknown-owner",
                 "tput": 110.0,
                 "ts": "1970-01-01T00:00:10+00:00",
@@ -176,11 +188,15 @@ def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
     assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 0.0
     assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
     assert result["entries"][0]["source"] == "unattributed"
+    assert result["entries"][0]["source_method"] == "unknown"
+    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
     assert result["validation"]["attributed_total_gain_pct"] == 0.0
     assert result["validation"]["attribution_gap_pct"] == 10.0
+    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
 
 
-def test_serving_specialist_integrate_patch_ignores_kernel_completion_phase():
+def test_integrate_patch_domain_survives_legacy_ledger_and_owns_all_breakdowns():
     state = {
         "session_id": "cross-phase-serving-config",
         "baseline_tput": 100.0,
@@ -190,7 +206,6 @@ def test_serving_specialist_integrate_patch_ignores_kernel_completion_phase():
             {
                 "action": "integrate_patch",
                 "source_phase": "KERNEL_AGENT",
-                "provenance": "specialist:serving_specialist",
                 "domain": "serving_specialist",
                 "operation_kind": "param",
                 "variant_name": "fp8-per-channel-int4-quickreduce-stack",
@@ -212,6 +227,11 @@ def test_serving_specialist_integrate_patch_ignores_kernel_completion_phase():
     assert result["entries"][0]["source"] == "explore"
     assert result["entries"][0]["optimization_kind"] == "param"
     assert result["entries"][0]["kernel_id"] is None
+    assert attribution["phase_breakdown"]["explore"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["explore"]["by_domain"] == {
+        "serving_specialist": 10.0,
+    }
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
 
 
 def test_framework_proposal_integrate_patch_overrides_kernel_completion_phase():

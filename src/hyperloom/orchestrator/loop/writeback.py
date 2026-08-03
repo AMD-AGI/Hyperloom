@@ -2079,17 +2079,17 @@ class WritebackCollaborator:
             }
             key = (task_kind, str(variant_name or ""))
             if key not in existing:
+                source_phase = str(
+                    (bv.get("source_phase") if isinstance(bv, dict) else "")
+                    or (
+                        getattr(self.shared_state, "phase", "")
+                        if task_kind != "integrate_patch"
+                        else ""
+                    )
+                    or ""
+                ).strip()
                 stack_entry: dict[str, Any] = {
                     "action": task_kind,
-                    "source_phase": str(
-                        (bv.get("source_phase") if isinstance(bv, dict) else "")
-                        or (
-                            getattr(self.shared_state, "phase", "")
-                            if task_kind != "integrate_patch"
-                            else ""
-                        )
-                        or ""
-                    ),
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
@@ -2098,6 +2098,8 @@ class WritebackCollaborator:
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
+                if source_phase:
+                    stack_entry["source_phase"] = source_phase
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
                 # Stamp the variant's stable join key (and source) so breakdown
@@ -3708,12 +3710,6 @@ class WritebackCollaborator:
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
-                "source_phase": str(result.get("source_phase") or ""),
-                "domain": domain,
-                "gap_layer": str(result.get("gap_layer") or ""),
-                "framework_agent_authoring": bool(
-                    result.get("framework_agent_authoring")
-                ),
                 # Same durable source-layer handles as the primary KEEP lift so a
                 # source_patch recovered on THIS path is equally reproducible in
                 # the GEAK baseline (no path is left snapshot-less).
@@ -3721,6 +3717,16 @@ class WritebackCollaborator:
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
+            source_phase = str(result.get("source_phase") or "").strip()
+            gap_layer = str(result.get("gap_layer") or "").strip()
+            if source_phase:
+                bv["source_phase"] = source_phase
+            if domain:
+                bv["domain"] = domain
+            if gap_layer:
+                bv["gap_layer"] = gap_layer
+            if result.get("framework_agent_authoring"):
+                bv["framework_agent_authoring"] = True
         else:
             return False
         before = len(self.shared_state.optimization_stack or [])

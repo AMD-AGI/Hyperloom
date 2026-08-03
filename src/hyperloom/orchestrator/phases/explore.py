@@ -83,7 +83,10 @@ def _forward_integrate_source(
     if domain:
         dst["domain"] = domain
         dst["provenance"] = f"specialist:{domain}"
-    for key in ("gap_canonical_id", "gap_layer", "framework"):
+    # ``framework`` is intentionally not forwarded: integrate_patch consumes
+    # that parameter when selecting accuracy parsing/gating behavior, whereas
+    # proposal ownership only needs the gap metadata below.
+    for key in ("gap_canonical_id", "gap_layer"):
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
