@@ -772,6 +772,22 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
             {"X": "1"},
             True,
         ),
+        # accepted_config MISSING while prev best is non-empty -> non-material
+        # (a bare mismatch must not promote and wipe the existing config).
+        (
+            {"status": "ok", "accepted_kernels": []},
+            "--max-num-batched-tokens 24576",
+            {"VLLM_ROCM_USE_AITER": "1"},
+            False,
+        ),
+        # accepted_config present but all-empty while prev best is non-empty ->
+        # non-material (same wipe hazard).
+        (
+            {"status": "ok", "accepted_config": {"flags": "", "env": ""}},
+            "--max-num-batched-tokens 24576",
+            {"VLLM_ROCM_USE_AITER": "1"},
+            False,
+        ),
     ],
 )
 def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expected) -> None:
@@ -779,3 +795,107 @@ def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expe
         _geak_result_has_material(result, prev_best_flags=prev_flags, prev_best_envs=prev_envs)
         is expected
     )
+
+
+@pytest.mark.asyncio
+async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -> None:
+    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and
+    tag it with the no-material reason (not the beat-current_best reason)."""
+    base, current_best, measured = 8668.5946, 8900.0, 9025.191
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
+    coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
+    ]
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
+    journey_path = tmp_path / "kernel_journey.json"
+    journey_path.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": "provisional-kernel",
+                        "e2e": {
+                            "integrated": True,
+                            "e2e_gain_pct": 2.0,
+                            "validated": True,
+                            "decision": "KEEP",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # No material product; accepted_config is the pre-KERNEL best verbatim.
+    geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=1"},
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "final_overlay": "",
+        "final_patch": "",
+        "kernel_journey_path": str(journey_path),
+    }
+    coord.shared_state.geak_result = geak_result
+    coord._record_geak_kernel_journey(geak_result)
+    provisional_rows = {
+        row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    }
+    assert provisional_rows["provisional-kernel"]["e2e"]["decision"] == "KEEP"
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run for a no-material drop")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    assert ss.current_best["tput"] == pytest.approx(current_best)
+    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    assert ss.geak_result["revalidation_status"] == "no_material"
+    rejected_rows = {
+        row["kernel_id"]: row for row in assemble_parts(tmp_path)["kernel_journey"]["kernels"]
+    }
+    e2e = rejected_rows["provisional-kernel"]["e2e"]
+    assert e2e["decision"] == "REVERT"
+    assert e2e["validated"] is False
+    assert e2e["rejection_reason"] == "geak_no_material_product"
+
+
+@pytest.mark.asyncio
+async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path) -> None:
+    """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack
+    entry already recorded the win. The 2b validated decision must still promote
+    (the material was proven in the original KERNEL cycle)."""
+    base, current_best, measured = 8668.5946, 8900.0, 9600.0
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": current_best}]
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_result = {}  # lost on resume
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run when 2b validates a resume win")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    expected_pct = (measured - base) / base * 100.0
+    assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
+    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
+    assert ss.resume_pending_revalidation is False

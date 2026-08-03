@@ -778,7 +778,16 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded():
+        # Tombstone: a result already dropped by 2b as no-material must not be
+        # re-recovered from the stale (still status=ok) result.json, else each
+        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        prev_geak = (
+            self.shared_state.geak_result
+            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+            else {}
+        )
+        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1364,6 +1373,7 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         current_best_tput: float,
         provenance: str,
+        rejection_reason: str = "rebench_did_not_beat_current_best",
     ) -> None:
         """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
 
@@ -1402,7 +1412,7 @@ class KernelPhase(PhaseHandler):
                     "revalidation_measured_tput": measured_tput,
                     "revalidation_current_best_tput": current_best_tput,
                     "revalidation_provenance": provenance,
-                    "rejection_reason": "rebench_did_not_beat_current_best",
+                    "rejection_reason": rejection_reason,
                 }
             )
             try:

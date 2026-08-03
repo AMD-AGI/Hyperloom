@@ -633,6 +633,7 @@ def _geak_result_has_material(
 ) -> bool:
     """Decide whether a GEAK result carries a material optimization product.
 
+    FOR THE 2b REVALIDATION CALL SITE ONLY (writeback ``geak_fallback`` path).
     Guards the 2b promote path against pure passthrough noise: when GEAK ships
     no kernel/head/overlay/patch AND echoes the pre-KERNEL current_best config
     back unchanged, a rebench that beats current_best is measurement variance,
@@ -643,8 +644,12 @@ def _geak_result_has_material(
       * ``accepted_heads`` has a non-empty entry (attention-head optimizations);
       * ``final_overlay`` non-empty (authored-kernel overlay dir);
       * ``final_patch`` non-empty (source patch);
-      * ``accepted_config`` differs from the pre-KERNEL current_best config
-        (a kernel enabled via a config switch, e.g. an ASM-GEMM env flag).
+      * ``accepted_config`` is present with a non-empty flags/env that differs
+        from the pre-KERNEL current_best config (a kernel enabled via a config
+        switch, e.g. an ASM-GEMM env flag). A missing or all-empty
+        ``accepted_config`` is NEVER material: an empty config that merely
+        differs from a non-empty current_best would otherwise promote and wipe
+        the existing config.
 
     An empty/absent result cannot be judged here and returns ``True``; the sole
     2b call site disambiguates it (a pre-existing ``geak_e2e`` stack entry means
@@ -684,6 +689,11 @@ def _geak_result_has_material(
     parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
     if extra_flags:
         accepted_flags = (accepted_flags + " " + extra_flags).strip()
+    # A missing / all-empty accepted_config carries no config optimization; a
+    # bare fingerprint mismatch against a non-empty current_best is NOT material
+    # (promoting it would wipe the existing config to empty).
+    if not accepted_flags and not parsed_envs:
+        return False
     got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
     prev_fp = canonical_fingerprint(
         str(prev_best_flags or ""),

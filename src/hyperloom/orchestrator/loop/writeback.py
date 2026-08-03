@@ -2873,24 +2873,28 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak no_material: observation emit failed")
-                    # Stamp the drop on geak_result and reject any provisional
-                    # KEEP in kernel_journey so a session audit does not read a
-                    # dropped candidate as an accepted kernel (no-op when the
-                    # journey has no KEEP / the file is absent).
-                    if isinstance(ps, dict) and ps:
-                        ps["revalidation_status"] = "no_material"
-                        self.shared_state.geak_result = ps
-                        try:
-                            self.phase_kernel._reject_geak_kernel_journey(
-                                ps,
-                                measured_tput=float(measured),
-                                current_best_tput=(
-                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
-                                ),
-                                provenance="geak_no_material",
-                            )
-                        except Exception:  # noqa: BLE001 - journey reject is best-effort
-                            log.exception("geak no_material: journey rejection failed")
+                    # Stamp the drop on geak_result (always, so an empty {} is
+                    # distinguishable from never-populated on resume/debug and
+                    # acts as a tombstone against KERNEL crash-recovery
+                    # re-enqueue) and reject any provisional KEEP in
+                    # kernel_journey so a session audit does not read a dropped
+                    # candidate as an accepted kernel (no-op when the journey
+                    # has no KEEP / the file is absent).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_material"
+                    self.shared_state.geak_result = ps_stamped
+                    try:
+                        self.phase_kernel._reject_geak_kernel_journey(
+                            ps_stamped,
+                            measured_tput=float(measured),
+                            current_best_tput=(
+                                float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
+                            ),
+                            provenance="geak_no_material",
+                            rejection_reason="geak_no_material_product",
+                        )
+                    except Exception:  # noqa: BLE001 - journey reject is best-effort
+                        log.exception("geak no_material: journey rejection failed")
                     self.shared_state.geak_pending = {}
                     self.shared_state.resume_pending_revalidation = False
                 elif decision == "no_promote":
