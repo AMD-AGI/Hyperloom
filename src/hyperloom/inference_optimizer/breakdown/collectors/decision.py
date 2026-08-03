@@ -326,7 +326,8 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
 
 
 def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
-    """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
+    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and
+    ``cache_hit_rate``.
 
     Handles both bucket shapes: the rollup view (split
     ``total_cache_creation`` / ``total_cache_read``) and the per-decision view
@@ -338,8 +339,10 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
             ``None``.
 
     Returns:
-        dict[str, int]: A copy of the bucket with added ``total_in_out`` and
-        ``grand_total`` figures.
+        dict[str, Any]: A copy of the bucket with added ``total_in_out``,
+        ``grand_total`` and ``cache_hit_rate`` figures (``cache_hit_rate`` is
+        the float ratio of cache-read over cache-read + cache-creation tokens,
+        0.0 when neither is present).
     """
     b = dict(bucket or {})
     ti = int(b.get("total_in", 0) or 0)
@@ -370,9 +373,11 @@ def collect_token_usage(
 
     * ``session_total`` / ``by_component`` / ``by_phase`` — every call, with
       ``total_in_out`` + ``grand_total`` convenience figures.
-    * ``attribution`` — decision-attributed vs unattributed split (most
-      orchestration / kernel / critic / proposal_scorer turns carry no
-      decision key, so they land in ``unattributed``).
+    * ``attribution`` — three-way split: ``attributed_to_decisions`` /
+      ``overhead`` (orchestration / critic / robustness turns, inherently
+      cross-decision) / ``unattributed`` (turns such as kernel /
+      proposal_scorer that carry no decision key), plus
+      ``attributed_calls_pct`` and ``overhead_calls_pct``.
     * ``timeline`` — each ``action_timeline`` row annotated with the tokens
       that join to it on ``task_id`` (``None`` when an action has no LLM spend).
 
@@ -601,7 +606,10 @@ def collect_decision_trace(
     lost to a disk error.
 
     Returns ``{"decision_trace": [...], "token_rollup": {...},
-    "unattributed_tokens": {...}}``. All-empty (zeroed rollup) when no
+    "unattributed_tokens": {...}, "overhead_tokens": {...}}``.
+    ``unattributed_tokens`` holds calls that could not be joined to a
+    decision; ``overhead_tokens`` holds ``_OVERHEAD_COMPONENTS`` calls that
+    are legitimately cross-decision spend. All-empty (zeroed rollup) when no
     trace files exist, so a session that ran before the trace subsystem
     landed degrades cleanly.
 
@@ -612,7 +620,8 @@ def collect_decision_trace(
 
     Returns:
         dict[str, Any]: ``{"decision_trace", "token_rollup",
-        "unattributed_tokens"}`` — the joined timeline plus token rollups.
+        "unattributed_tokens", "overhead_tokens"}`` — the joined timeline plus
+        token rollups.
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)

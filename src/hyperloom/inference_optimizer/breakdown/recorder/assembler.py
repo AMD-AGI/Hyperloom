@@ -8,11 +8,18 @@ into a ``{section: value}`` mapping ready to drop into the
 ``session_breakdown.json`` envelope:
 
 * ``singleton`` sections -> the payload of the latest fragment (by ``ts``).
-* ``item`` sections      -> payloads concatenated into a list, ordered by
+* plain ``item`` sections -> payloads concatenated into a list, ordered by
   ``seq`` then ``ts``.
+* v4 entity streams (``_V4_ENTITY_IDS``) -> partial updates ordered by ``ts``
+  then ``seq`` and deep-merged by stable id, so the result carries one entry
+  per entity rather than one per fragment.
 
-There is no cross-producer conflict resolution because each section has a
-single owner. Bad/partial fragments are skipped and noted in ``warnings``.
+A compose/normalize pass runs last and reconciles across fragments:
+``versions`` collapses to a ``{tool: meta}`` map (last write per tool wins),
+``critic_iterations`` / ``robustness_signals`` and the ``kernel_*``
+substreams are folded into their composed sections, and competing kernel
+route operations are rewritten to ``status="superseded"``. Bad/partial
+fragments are skipped and noted in ``warnings``.
 """
 
 from __future__ import annotations

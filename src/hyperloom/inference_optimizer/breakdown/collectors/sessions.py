@@ -1026,7 +1026,8 @@ def collect_final(
     Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
     builds the ordered ``action_path`` from ``optimization_stack``, and — when
     ``current_best`` lacks ttft / e2el — reconstructs them from disk (latest
-    ``validate_stack`` report first, then the top stack entry's report),
+    ``validate_stack`` report first, then ``current_best``'s own workspace,
+    then the top stack entry's report),
     recording the provenance in ``ttft_e2el_source`` and a ``warnings`` note.
     Also assembles the replayable launch ``invocation``.
 
