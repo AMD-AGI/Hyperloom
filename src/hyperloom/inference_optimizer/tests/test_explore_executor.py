@@ -740,17 +740,22 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "expected_base_tput", "expected_outcome", "has_winner"),
+    [
+        (None, 2358.80, "REVERT", False),
+        ("resume_stack_revalidate", 2192.52, "KEEP", True),
+    ],
+)
 async def test_explore_executor_supersedes_stale_params_base_tput(
     sub_agent_runner,
     tmp_path,
+    source,
+    expected_base_tput,
+    expected_outcome,
+    has_winner,
 ):
-    """A queued task's stale ``base_tput`` is superseded by the live anchor.
-
-    Reproduces MiniMax-M3-MXFP8 session 96879: the task was queued against the
-    bare baseline (2192.5) while a warm replay had already lifted current_best
-    to 2358.8, so a 2355.5 variant read as +7.4% and was KEEP'd even though it
-    regressed the recipe by 0.14%.
-    """
+    """Use the live anchor except when revalidating the complete stack."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 2195.86
@@ -789,6 +794,7 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
             "base_tput": 2192.52,
             "grid": grid,
             "variant_timeout_sec": 10,
+            **({"source": source} if source else {}),
         },
         idempotency_key="ex-stale-anchor",
     )
@@ -801,11 +807,11 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
 
     out = res.result
     assert out["status"] == "succeeded"
-    assert out["winners"] == []
+    assert bool(out["winners"]) is has_winner
     fp = canonical_fingerprint("--fused-flag", {})
     tested = out["explore_search_update"]["tested"][fp]
-    assert tested["base_tput"] == 2358.80
-    assert tested["outcome"] == "REVERT"
+    assert tested["base_tput"] == expected_base_tput
+    assert tested["outcome"] == expected_outcome
 
 
 @pytest.mark.asyncio

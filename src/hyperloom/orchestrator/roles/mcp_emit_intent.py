@@ -49,7 +49,7 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 "approve|reject|redirect|advise|needs_review}, "
                 "kill_task:{task_id,reason}, "
                 "extend_lease:{task_id,extra_sec,reason}, "
-                "prune_branch:{family,reason,scope ∈ family|queued}, "
+                "prune_branch:{family, optional reason, scope ∈ family|queued}, "
                 "escalate_strategy_change:"
                 "{reason,next_action_hint}, update_state:{changes}, "
                 "alert:{severity,summary}."

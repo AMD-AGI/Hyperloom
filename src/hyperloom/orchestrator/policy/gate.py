@@ -34,7 +34,6 @@ from ..phases.machine_state import (
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
-    SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     domain_for_tag,
     get_domain,
@@ -731,7 +730,7 @@ class PolicyGate:
         # conc_sweep against itself and surface as a spurious conc_sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        tracked_revalidation = (
+        skip_baseline_singleton = (
             kind == BASELINE_ACTION_NAME
             and bool(task_id)
             and str(task_id) == str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "")
@@ -740,7 +739,7 @@ class PolicyGate:
             role,
             payload,
             check_phase=False,
-            skip_baseline_singleton=tracked_revalidation,
+            skip_baseline_singleton=skip_baseline_singleton,
         )
 
     def _closing_phase_denial(
@@ -879,7 +878,7 @@ class PolicyGate:
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
-            self._validate_baseline_singleton(payload, intent_kind="delegate")
+            self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -977,10 +976,7 @@ class PolicyGate:
                 intent_kind="propose_action",
             )
         if action_name == BASELINE_ACTION_NAME:
-            self._validate_baseline_singleton(
-                payload,
-                intent_kind="propose_action",
-            )
+            self._validate_baseline_singleton(payload)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -1443,13 +1439,8 @@ class PolicyGate:
     def _validate_baseline_singleton(
         self,
         payload: dict[str, Any],
-        *,
-        intent_kind: str,
     ) -> None:
         """Deny a repeat baseline once the session has an anchor."""
-        params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_baseline_singleton"):
-            return
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
@@ -1464,13 +1455,8 @@ class PolicyGate:
             ),
             rule="baseline_phase_singleton",
             hint=(
-                "PRELUDE is done with baseline; let the phase advance. "
-                "A measurement you distrust is a reason to re-measure the "
-                "candidate, not the reference. "
-                f"If you genuinely need a fresh anchor, set "
-                f"params.bypass_baseline_singleton=True on the "
-                f"{intent_kind} payload (the override is recorded "
-                f"on the audit trail)."
+                "PRELUDE is done with baseline; let the phase advance and "
+                "re-measure the candidate rather than the reference."
             ),
         )
 

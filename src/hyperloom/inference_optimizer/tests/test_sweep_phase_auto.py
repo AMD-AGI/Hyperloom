@@ -1227,8 +1227,7 @@ class _BaselineSingletonState:
         self.baseline_tput = baseline_tput
 
 
-@pytest.mark.parametrize("intent_kind", ["delegate", "propose_action"])
-def test_baseline_singleton_denies_once_anchor_is_established(intent_kind):
+def test_baseline_singleton_denies_once_anchor_is_established():
     """Both channels refuse a repeat baseline after baseline_tput turns positive."""
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
@@ -1237,10 +1236,9 @@ def test_baseline_singleton_denies_once_anchor_is_established(intent_kind):
     with pytest.raises(PolicyDenied) as excinfo:
         gate._validate_baseline_singleton(
             payload={"action_name": "baseline", "params": {}},
-            intent_kind=intent_kind,
         )
     assert excinfo.value.rule == "baseline_phase_singleton"
-    assert "bypass_baseline_singleton" in (excinfo.value.hint or "")
+    assert "PRELUDE is done with baseline" in (excinfo.value.hint or "")
 
 
 def test_baseline_singleton_inert_before_the_anchor_exists():
@@ -1248,7 +1246,6 @@ def test_baseline_singleton_inert_before_the_anchor_exists():
     gate = _make_policy_gate(shared_state=_BaselineSingletonState(0.0))
     gate._validate_baseline_singleton(
         payload={"action_name": "baseline", "params": {}},
-        intent_kind="propose_action",
     )
 
 
@@ -1256,19 +1253,20 @@ def test_baseline_singleton_inert_when_shared_state_is_none():
     gate = _make_policy_gate(shared_state=None)
     gate._validate_baseline_singleton(
         payload={"action_name": "baseline"},
-        intent_kind="delegate",
     )
 
 
-def test_baseline_singleton_bypass_flag_lets_operator_force_a_fresh_anchor():
+def test_baseline_singleton_bypass_flag_is_rejected():
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
     gate = _make_policy_gate(shared_state=_BaselineSingletonState(2195.86))
-    gate._validate_baseline_singleton(
-        payload={
-            "action_name": "baseline",
-            "params": {"bypass_baseline_singleton": True},
-        },
-        intent_kind="delegate",
-    )
+    with pytest.raises(PolicyDenied):
+        gate._validate_baseline_singleton(
+            payload={
+                "action_name": "baseline",
+                "params": {"bypass_baseline_singleton": True},
+            },
+        )
 
 
 # 6b. End-to-end through full validate_intent (delegate / propose_action)

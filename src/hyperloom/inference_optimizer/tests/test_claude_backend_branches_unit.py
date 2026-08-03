@@ -246,7 +246,7 @@ async def test_run_conversational_session_capture(monkeypatch):
 # ---- run(): no-intent raises ----------------------------------------------
 async def test_run_no_intent_raises():
     msg = _Msg(content=[TextBlock("just text")], result="hi")
-    b = _backend()
+    b = _backend(capture_turn_diagnostics=True)
     b.sdk_query_factory = _query([msg])
     with pytest.raises(NoIntentEmitted):
         await b.run("hi")
@@ -254,6 +254,14 @@ async def test_run_no_intent_raises():
     assert diag["outcome"] == "no_intent"
     assert diag["raw_text"] == "hi"
     assert diag["messages"] == [{"type": "_Msg", "result": "hi"}]
+
+
+async def test_run_skips_diagnostics_when_not_requested():
+    msg = _Msg(content=[TextBlock("just text")], result="hi")
+    b = _backend()
+    b.sdk_query_factory = _query([msg])
+    await b.run("hi", allow_no_intent=True)
+    assert b.get_turn_diagnostic() == {}
 
 
 # ---- _invoke_and_collect: error-result-success tolerance ------------------

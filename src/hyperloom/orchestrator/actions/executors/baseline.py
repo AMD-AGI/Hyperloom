@@ -1780,7 +1780,7 @@ class BaselineExecutor:
             framework: Framework name threaded into the eval parser.
 
         Returns:
-            The parsed eval dict when a positive accuracy is found, else
+            The parsed eval dict when a finite accuracy is found, else
             ``None``.
         """
         out = result.get("output_dir")

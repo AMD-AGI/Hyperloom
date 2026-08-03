@@ -1756,7 +1756,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tools=tools,
                 outcome="backend_error",
                 error=exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
             )
             await self._record_observation(
                 "coordinator",
@@ -1774,7 +1773,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tools=tools,
                 outcome="no_intent",
                 error=exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
             )
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_observation(
@@ -1792,7 +1790,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tools=tools,
                 outcome="exception",
                 error=exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
             )
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
@@ -1821,7 +1818,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             tools=tools,
             outcome="succeeded",
             result=result,
-            latency_ms=latency_ms,
         )
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
@@ -1858,7 +1854,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         outcome: str,
         result: BackendTurnResult | None = None,
         error: BaseException | None = None,
-        latency_ms: int | None = None,
     ) -> None:
         """Append one orchestration diagnostic row."""
         if agent_name != "orchestration":

@@ -250,6 +250,31 @@ async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_sing
     assert executed["ran"] is True
 
 
+@pytest.mark.asyncio
+async def test_dispatched_baseline_singleton_bypass_is_denied(tmp_path, monkeypatch):
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.baseline_tput = 1000.0
+    executed = {"ran": False}
+
+    async def _stub(_ctx) -> dict:
+        executed["ran"] = True
+        return {"status": "ok"}
+
+    sub.register_executor("baseline", _stub)
+    task = await sub.tasks.create(
+        kind="baseline",
+        params={"bypass_baseline_singleton": True},
+        idempotency_key="rejected-rebaseline",
+    )
+
+    result = await sub.run_task(task)
+
+    assert result.state == "failed"
+    assert executed["ran"] is False
+
+
 def test_validate_dispatched_task_skips_phase_incompatible(tmp_path, monkeypatch):
     gate, _sd = _gate(tmp_path, monkeypatch, strict_phase=True)
     state = gate.shared_state

@@ -2030,13 +2030,7 @@ class WritebackCollaborator:
         *,
         gap_canonical_id: str = "",
     ) -> bool:
-        """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name.
-
-        ``current_best`` never moves down: a winner that does not beat the
-        anchor it was composed on top of is refused here even if its own
-        executor called it a KEEP, so a stale task-level ``base_tput`` cannot
-        regress the recipe. Revalidation flows confirm the existing stack and
-        never reach this method.
+        """Lift a winner only when it improves the current throughput anchor.
 
         Args:
             task_kind: The action kind that produced the winner (stamped on the
@@ -2558,13 +2552,7 @@ class WritebackCollaborator:
         outcome.audit_extras = audit_extras
 
     async def _drain_queued_baselines(self, *, reason: str) -> list[str]:
-        """Cancel queued baselines that the established anchor has made redundant.
-
-        Baseline is LLM-proposable and nothing stopped a run from queueing more
-        of them while the first was still measuring, so a succeeded baseline can
-        leave a backlog that re-measures a number the session already has. The
-        enablement revalidation baseline is spared: it re-anchors a stack the
-        specialist changed, so it is not redundant work.
+        """Cancel redundant queued baselines, preserving enablement revalidation.
 
         Args:
             reason: Stamped onto the cancellation history and the observation.
@@ -2603,11 +2591,7 @@ class WritebackCollaborator:
         return cancelled
 
     async def _enablement_revalidation_task_ids(self) -> set[str]:
-        """Queued baseline task ids that re-anchor an enablement-changed stack.
-
-        Matches the identity ``_promote_baseline`` uses: the tracked task id, or
-        a params reason recorded before the id was persisted.
-        """
+        """Return queued enablement-revalidation baseline task IDs."""
         spared: set[str] = set()
         tracked = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
         if tracked:

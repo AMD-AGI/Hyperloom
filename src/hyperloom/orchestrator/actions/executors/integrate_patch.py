@@ -54,7 +54,6 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._grid_server_args import merge_server_args, split_config_changes
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -1420,7 +1419,6 @@ class IntegratePatchExecutor:
         # _stage_resolve populates these onto ctx for stage communication.
         specialist_task_id: str = ctx._ip_specialist_task_id  # type: ignore[attr-defined]
         shared_state = ctx._ip_shared_state  # type: ignore[attr-defined]
-        specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         done_payload: dict[str, Any] = ctx._ip_done_payload  # type: ignore[attr-defined]
 
         # Provision an attempt-scoped runtime AFTER the Critic gate (in
@@ -2657,8 +2655,7 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Throughput KEEP / REVERT decision with optional stack rebench."""
         base_tput = float(params.get("base_tput") or 0.0)
-        # Same stale-snapshot hazard as explore: prefer the live anchor whenever
-        # it is higher than whatever the task was queued with.
+        # Grade against the current live anchor, not a stale task snapshot.
         live_anchor = resolve_grading_anchor_tput(shared_state)
         if live_anchor > base_tput:
             if base_tput > 0:

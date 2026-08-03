@@ -204,12 +204,7 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
 
 
 def _extract_envs(text: str) -> dict[str, str]:
-    """Pull whitelisted ``export KEY=VALUE`` lines that resolve to a literal.
-
-    ``export FOO=${FOO:-1}`` is the idiomatic overridable-default form in every
-    InferenceX recipe, so its literal default is lifted too; any other ``$``
-    reference is unresolvable here and the line is skipped.
-    """
+    """Pull whitelisted literal exports, including self-referential defaults."""
     envs: dict[str, str] = {}
     pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
     for line in text.splitlines():

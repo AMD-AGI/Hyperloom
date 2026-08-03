@@ -157,6 +157,8 @@ class ClaudeBackend:
         max_turns_default: agent-loop budget when caller doesn't override.
         enable_mcp_emit_intent: if True (default), registers the
             in-process MCP ``emit_intent`` tool.
+        capture_turn_diagnostics: Capture full turn diagnostics for durable
+            orchestration tracing.
     """
 
     model: str | None = None
@@ -167,6 +169,7 @@ class ClaudeBackend:
     # feeding only a per-tick delta. kernel / critic / robustness stay stateless.
     conversational: bool = False
     enable_mcp_emit_intent: bool = True
+    capture_turn_diagnostics: bool = False
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
     # disallows all tools, and returns ``raw_text`` without an emitted intent.
     raw_completion: bool = False
@@ -541,6 +544,8 @@ class ClaudeBackend:
         system_prompt: str | None,
         tools: list[str],
     ) -> None:
+        if not self.capture_turn_diagnostics:
+            return
         previous_session = self._session_id if self.conversational else None
         self._active_stderr = []
         self._active_turn_diagnostic = {
@@ -745,7 +750,8 @@ class ClaudeBackend:
         text = line.strip()
         if text:
             self.calls.append({"stderr": text})
-            self._active_stderr.append(text)
+            if self._active_turn_diagnostic is not None:
+                self._active_stderr.append(text)
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
