@@ -3,11 +3,12 @@
 
 """KB writeback adapters for specialist outcomes.
 
-Appends structured records as JSON-Lines under
-``framework-agent/kb/framework_optimization/lessons.jsonl`` (the ``fa`` CLI
-reads them to skip already-integrated PRs). :data:`KB_ROOT` is
-monkeypatchable in tests. This module only appends locally; a separate worker
-mirrors the file into gbrain.
+Appends structured records as JSON-Lines to ``<KB_ROOT>/lessons.jsonl``
+(the ``fa`` CLI reads them to skip already-integrated PRs). :data:`KB_ROOT`
+resolves at import to ``$INFERENCE_OPTIMIZER_FA_KB_PATH/framework_optimization``
+when set, else ``$USER_DATA_PATH/kb/framework_optimization`` (default
+``/workspace/hyperloom/kb/framework_optimization``); it is monkeypatchable in
+tests. Local append only.
 """
 
 from __future__ import annotations
@@ -195,6 +196,15 @@ async def write_framework_record(
     * ``accuracy_delta_pct`` — optional accuracy delta.
     * ``changed_files`` — PR file paths used for fuzzy association.
     * ``source_framework`` / ``target_framework`` — cross-framework context.
+    * ``session_dir`` — when set, the KB write is additionally instrumented
+      into the session breakdown; telemetry failures are swallowed and never
+      fail the write.
+
+    Returns:
+        Path: The ``lessons.jsonl`` file the record was appended to.
+
+    Raises:
+        ValueError: If ``outcome`` is not in :data:`ALLOWED_OUTCOMES`.
     """
     if outcome not in ALLOWED_OUTCOMES:
         raise ValueError(f"write_framework_record: outcome={outcome!r} must be one of {sorted(ALLOWED_OUTCOMES)!r}")

@@ -95,7 +95,9 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
         "Edit",
         "Write",
         "MultiEdit",
-        # Restricted Bash — runners may further filter via a callback.
+        # Bash is granted unfiltered — there is no per-call filter. Safety rests
+        # on the isolated git worktree, this allowlist, and Critic + PolicyGate
+        # review of everything the specialist emits.
         "Bash",
         # Scratch planning surface (no side effects).
         "TodoWrite",
@@ -538,7 +540,8 @@ class SpecialistRunner:
                 )
             )
 
-        # Post-M5 domains still dispatch but use the generic prompt template.
+        # Domains outside the catalogue (today only the synthetic freeform
+        # domain) still dispatch, just without a per-domain focus block.
         notes: list[str] = []
         if domain.key not in SPECIALIST_DOMAIN_KEYS:
             notes.append(
