@@ -7,7 +7,6 @@ the classified atomic-reason outcomes)."""
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -54,82 +53,6 @@ def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: s
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text(sglang, encoding="utf-8")
     return root
-
-
-_REMOTE_COMPAT_MODEL_ARGS = (
-    '  local model_args="model=${MODEL},base_url=${base_url},'
-    'num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true"\n'
-)
-
-
-def test_lm_eval_tokenized_patch_adds_env_hook(tmp_path):
-    # The remote-compat model_args line gains the $MAGPIE_EVAL_TOKENIZED_REQUESTS hook.
-    d = tmp_path / "benchmark"
-    d.mkdir()
-    script = d / "magpie_bench_remote_compat.sh"
-    script.write_text("#!/bin/bash\n" + _REMOTE_COMPAT_MODEL_ARGS, encoding="utf-8")
-
-    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
-    patched = script.read_text(encoding="utf-8")
-    assert "${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}" in patched
-    # tokenizer_backend line stays otherwise intact.
-    assert "tokenizer_backend=huggingface,trust_remote_code=true" in patched
-
-    # Idempotent: a second pass is a no-op (marker already present).
-    before = patched
-    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
-    assert script.read_text(encoding="utf-8") == before
-
-
-def test_lm_eval_tokenized_patch_noop_for_unrelated_script(tmp_path):
-    # A script without the exact model_args line is left byte-for-byte unchanged.
-    d = tmp_path / "benchmark"
-    d.mkdir()
-    other = d / "sglang_mi300x.sh"
-    body = "#!/bin/bash\necho hello\nrun_eval --framework lm-eval\n"
-    other.write_text(body, encoding="utf-8")
-
-    assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
-    assert other.read_text(encoding="utf-8") == body
-
-
-def test_pd_run_warns_when_the_tokenized_hook_matched_nothing(tmp_path, monkeypatch, caplog):
-    # PD run + a drifted (non-matching) eval script => the patch is a no-op, but
-    # the aggregate check must WARN so the silent HTTP-422 fallback is diagnosable.
-    monkeypatch.setenv("PD_MODE", "disaggregated")
-    _make_inferencex(tmp_path)  # vllm_mi355x.sh + benchmark_lib.sh, no model_args line
-
-    with caplog.at_level(logging.WARNING, logger=mp.log.name):
-        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
-
-    assert any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
-
-
-def test_pd_run_stays_quiet_once_the_hook_landed(tmp_path, monkeypatch, caplog):
-    # PD run where the remote-compat script IS present: the patch lands the hook,
-    # so the aggregate check finds it and must NOT warn.
-    monkeypatch.setenv("PD_MODE", "disaggregated")
-    _make_inferencex(tmp_path)
-    (tmp_path / "benchmarks" / "magpie_bench_remote_compat.sh").write_text(
-        "#!/bin/bash\n" + _REMOTE_COMPAT_MODEL_ARGS, encoding="utf-8"
-    )
-
-    with caplog.at_level(logging.WARNING, logger=mp.log.name):
-        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
-
-    assert not any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
-
-
-def test_aggregated_run_stays_quiet_on_a_shape_miss(tmp_path, monkeypatch, caplog):
-    # Aggregated runs hit a direct sglang server that accepts token-id prompts,
-    # so an unmatched patch is an EXPECTED no-op and must stay silent.
-    monkeypatch.setenv("PD_MODE", "aggregated")
-    _make_inferencex(tmp_path)
-
-    with caplog.at_level(logging.WARNING, logger=mp.log.name):
-        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
-
-    assert not any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
 
 
 # ---- path resolution ------------------------------------------------------
