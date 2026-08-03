@@ -33,7 +33,6 @@ from hyperloom.common.env_safety import (
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
-    AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
@@ -104,11 +103,17 @@ from ._grid_variant_filter import (
     _mn_priority_index as _mn_priority_index,
     reorder_grid_for_multi_node as reorder_grid_for_multi_node,
     apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
-    apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
     _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
     _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
     _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
     xdit_blacklist_reason as xdit_blacklist_reason,
+    _WORLDPLAY_ENV_BLACKLIST as _WORLDPLAY_ENV_BLACKLIST,
+    _WORLDPLAY_ENV_COMBO_BLACKLIST as _WORLDPLAY_ENV_COMBO_BLACKLIST,
+    _WORLDPLAY_ENV_MEASUREMENT_LOCK as _WORLDPLAY_ENV_MEASUREMENT_LOCK,
+    _WORLDPLAY_ACCEPTED_SERVER_FLAGS as _WORLDPLAY_ACCEPTED_SERVER_FLAGS,
+    _WORLDPLAY_FORBIDDEN_SERVER_FLAGS as _WORLDPLAY_FORBIDDEN_SERVER_FLAGS,
+    worldplay_blacklist_reason as worldplay_blacklist_reason,
+    worldplay_server_args_reason as worldplay_server_args_reason,
     _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
     _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
     _probe_server_help_text as _probe_server_help_text,
@@ -935,18 +940,6 @@ def _run_magpie(
                 inferencex_path,
                 exc,
             )
-    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
-    # aiperf right before Magpie runs it, via the shared helper (also used by the
-    # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
-    # helper keeps the agentx package import lazy for the OFF path, A2). A failed
-    # preflight becomes a structured nonzero rc so the grid records a failed
-    # benchmark instead of crashing.
-    from ._workload_envs import prepare_agentx_runtime
-
-    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    if _agx_err:
-        log.error("%s; failing this benchmark", _agx_err)
-        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
@@ -1022,30 +1015,6 @@ def _num_gpus_for_config(config_path: Path) -> float:
         return float(int(envs.get("TP", 1) or 1))
     except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
         return 1.0
-
-
-def _mn_restart_env(
-    reference_envs: dict[str, str],
-    variant: Any,
-    unset_envs: list[str],
-) -> dict[str, str]:
-    """Merge the reference server envs under one variant's own overrides.
-
-    Priority reference < variant, matching how the args side layers reference <
-    operator < per-task. Keys the variant unsets are dropped rather than
-    re-added, so an unset still means unset once the reference carries the key.
-
-    Args:
-        reference_envs: Reference-recipe server envs for the whole grid.
-        variant: The grid variant supplying ``extra_envs``.
-        unset_envs: Env names this variant removes.
-
-    Returns:
-        The env mapping to forward to the multi-node server restart.
-    """
-    merged = {k: v for k, v in reference_envs.items() if k not in unset_envs}
-    merged.update({str(k): str(v) for k, v in (variant.extra_envs or {}).items()})
-    return merged
 
 
 def _resolve_mn_effective_server_args(
@@ -1163,24 +1132,6 @@ async def run_grid(
             )
     except Exception as exc:  # noqa: BLE001 — best-effort hygiene, never blocks the grid
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
-
-    # Reference-recipe server envs, resolved once for the whole grid. Single-node
-    # gets these from the materialized YAML (materialize_config_with_envs seeds
-    # them) because Magpie launches the server from that YAML; multi-node launches
-    # through restart_server_for_round, which never reads it. The baseline already
-    # forwards them explicitly, so without this every variant runs on a server
-    # missing the envs the baseline was measured with and the gain is misattributed
-    # -- the env twin of the skewed-baseline bug the operator-args folding fixed.
-    from ._multi_node_env import is_multi_node as _mn_is_multi_node
-
-    _mn_ref_envs: dict[str, str] = {}
-    if _mn_is_multi_node():
-        try:
-            from .baseline import _resolve_reference_base
-
-            _, _mn_ref_envs = _resolve_reference_base(Path("."), model_path=str(model_path or ""))
-        except Exception as exc:  # noqa: BLE001 - reference base is additive; never block the grid
-            log.debug("grid_runner: reference env resolve swallowed: %r", exc)
 
     # Variant-boundary robustness pulse: a bounded tick after every variant so
     # a mid-grid leak/crash surfaces between variants. Best-effort.
@@ -1546,16 +1497,14 @@ async def run_grid(
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
-            _variant_unset = [str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()]
-            _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
             await restart_server_for_round(
                 extra_server_args=_mn_effective_args,
                 # Per-variant env overrides (e.g. MORI_* MoE-dispatch
                 # tuning) so server-side env knobs proposed by specialists
                 # actually take effect on the restarted sglang. Empty dict
                 # for arg-only variants → forwarded as a no-op.
-                extra_env=_restart_env,
-                unset_env=_variant_unset,
+                extra_env=dict(variant.extra_envs),
+                unset_env=[str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()],
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
@@ -1748,29 +1697,6 @@ async def run_grid(
                 break
             continue
 
-        # AgentX preflight failed at the execution boundary (aiperf missing or
-        # not weka-trace capable) before any benchmark launched. Fail this
-        # variant with a dedicated error_class so the operator sees the guidance;
-        # the grid is not crashed.
-        if rc == AGENTX_PREFLIGHT_RETURNCODE:
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    runtime_sec=round(max(0.0, time.time() - variant_started_unix), 2),
-                    error=(stderr or stdout or "AgentX preflight failed")[-2000:],
-                    error_class="agentx_preflight",
-                    note=variant.note,
-                )
-            )
-            await _pulse_after_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
         # Detokenizer-stall watchdog fired: the server came up healthy but then
         # went silent (hung engine / wedged detokenizer). Fast-prune with a
         # distinct ``error_class`` and harvest leaks for RCA.
@@ -1948,6 +1874,14 @@ async def run_grid(
         if not measurement.get("valid_measurement"):
             if rc != 0:
                 error = (stderr or stdout)[-2000:]
+                # The bypass/scriptable path runs the customer body in a child
+                # whose stderr is redirected to benchmark_stderr.log, not the
+                # parent pipe — so `stderr`/`stdout` here are often empty and the
+                # real diagnostic (e.g. argparse "unrecognized arguments") is
+                # only on disk. Fall back to it so abort_reason.json carries the
+                # actual failure instead of a blank `error`.
+                if not error.strip():
+                    error = _on_disk_stderr_tail(workspace, slot)
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = "benchmark_report missing"
@@ -2072,6 +2006,61 @@ def _write_variant_abort_marker(
 
     Lets final-report / post-mortem tools distinguish "tested-but-failed" from
     "untested" and find an explicit reason. Failure to write it is non-fatal.
+    """
+    _write_variant_abort_marker_impl(
+        slot,
+        variant_name=variant_name,
+        error_class=error_class,
+        error_summary=error_summary,
+        extra_args=extra_args,
+    )
+
+
+def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
+    """Return the tail of the first non-empty on-disk benchmark log.
+
+    The piped ``stderr``/``stdout`` from :func:`run_with_session_kill` is empty
+    for the bypass/scriptable path — the customer body (torchrun/bench_fps.py)
+    writes its own stderr (e.g. an argparse ``unrecognized arguments`` error)
+    to ``benchmark_stderr.log`` in the workspace, NOT the parent's pipe. Without
+    this, ``magpie_nonzero_invalid_measurement`` aborts land in
+    ``abort_reason.json`` with an empty ``error`` and the real diagnostic is
+    only discoverable by hand. Scans the given dirs for
+    ``benchmark_stderr.log`` then ``benchmark_stdout.log`` and returns the tail
+    of the first with content.
+
+    Args:
+        *dirs (Path): Directories to search (workspace, slot), in order.
+        limit (int): Max characters returned (tail).
+
+    Returns:
+        str: The log tail, or ``""`` if none found / all empty.
+    """
+    for d in dirs:
+        if not d:
+            continue
+        for name in ("benchmark_stderr.log", "benchmark_stdout.log"):
+            try:
+                p = d / name
+                if not p.is_file():
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace").strip()
+                if text:
+                    return f"[{name}] {text[-limit:]}"
+            except OSError:
+                continue
+    return ""
+
+
+def _write_variant_abort_marker_impl(
+    slot: Path,
+    *,
+    variant_name: str,
+    error_class: str,
+    error_summary: str,
+    extra_args: str,
+) -> None:
+    """Implementation body for :func:`_write_variant_abort_marker`.
 
     Args:
         slot (Path): Variant slot directory the marker is written into.
@@ -2112,7 +2101,6 @@ __all__ = [
     "SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT",
     "VariantResult",
     "apply_multi_node_invalid_variants",
-    "apply_aiter_moe_pin_filter",
     "apply_runtime_benchmark_overrides",
     "reorder_grid_for_multi_node",
     "inject_sglang_attention_backend",

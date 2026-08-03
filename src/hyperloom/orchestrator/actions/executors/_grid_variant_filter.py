@@ -11,7 +11,6 @@ returns the winners.
 from __future__ import annotations
 
 import fnmatch as _fnmatch
-import json
 import logging
 import os
 import re
@@ -212,86 +211,6 @@ def apply_multi_node_invalid_variants(
     return kept, dropped
 
 
-# Matches ``--moe-runner-backend aiter`` and ``--moe_runner_backend=aiter``.
-_RE_AITER_MOE_RUNNER = re.compile(r"--moe[-_]runner[-_]backend[= ]+aiter\b")
-
-
-def _operator_pinned_envs() -> dict[str, str]:
-    """Return the operator's ``--extra-env`` pins from the CLI handoff env.
-
-    The CLI serializes ``--extra-env NAME=VALUE`` pairs into
-    ``$INFERENCE_OPTIMIZER_EXTRA_ENV`` (JSON object). Any parse failure yields
-    an empty dict so the caller degrades to "no pin".
-
-    Returns:
-        dict[str, str]: The operator-pinned env, or ``{}`` when unset/invalid.
-    """
-    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
-    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-
-
-def apply_aiter_moe_pin_filter(
-    grid: list["GridVariant"],
-) -> tuple[list["GridVariant"], list[dict]]:
-    """Drop variants that re-enable the aiter MoE runner when it is pinned off.
-
-    When the operator pins ``SGLANG_USE_AITER=0`` (via ``--extra-env``), the
-    aiter fused-MoE runner is deliberately disabled (it hangs/crashes server
-    launch on some ROCm images). Explore variants that flip it back on —
-    ``SGLANG_USE_AITER=1`` in ``extra_envs`` (the master switch also gates the
-    aiter MoE runner) or ``--moe-runner-backend aiter`` in ``extra_server_args``
-    — would re-trigger that failure and burn the budget, so they are dropped.
-    Aiter *attention* / allreduce / rmsnorm variants (which do NOT select the
-    aiter MoE runner) are kept, since those are stable and can still win.
-
-    A STRICT no-op when ``SGLANG_USE_AITER`` is not operator-pinned off.
-
-    Args:
-        grid (list[GridVariant]): The candidate variants to filter.
-
-    Returns:
-        tuple[list[GridVariant], list[dict]]: ``(kept, dropped)`` where dropped
-        entries carry ``name``/``source``/``reason`` (``source`` is
-        ``"aiter_moe_pinned_off"``).
-    """
-    pins = _operator_pinned_envs()
-    aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(
-        pins["SGLANG_USE_AITER"], default=True
-    )
-    if not aiter_pinned_off:
-        return list(grid), []
-
-    kept: list[GridVariant] = []
-    dropped: list[dict] = []
-    for v in grid:
-        envs = {str(k): str(val) for k, val in (getattr(v, "extra_envs", None) or {}).items()}
-        reenables_master = "SGLANG_USE_AITER" in envs and is_truthy(
-            envs["SGLANG_USE_AITER"], default=False
-        )
-        selects_aiter_moe = bool(_RE_AITER_MOE_RUNNER.search(v.extra_server_args or ""))
-        if not (reenables_master or selects_aiter_moe):
-            kept.append(v)
-            continue
-        trigger = "SGLANG_USE_AITER=1" if reenables_master else "--moe-runner-backend aiter"
-        dropped.append(
-            {
-                "name": v.name,
-                "source": "aiter_moe_pinned_off",
-                "reason": (
-                    f"variant re-enables the aiter MoE runner ({trigger}) while the "
-                    "operator pinned SGLANG_USE_AITER off"
-                ),
-            }
-        )
-    return kept, dropped
-
-
 # Framework / hardware compatibility filter: each entry maps an
 # ``extra_server_args`` substring to a required model class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
@@ -350,6 +269,239 @@ def xdit_blacklist_reason(
     for keys, reason in _XDIT_ENV_COMBO_BLACKLIST:
         if all(k in envs and is_truthy(envs[k], default=True) for k in keys):
             return reason
+    return None
+
+
+# HY-WorldPlay (AR video) do-not-set blacklist — env knobs that change the model
+# (precision / attention math / resolution) or are known to crash on MI355X
+# (gfx950). Enforced for the ``worldplay`` framework only, in
+# :func:`apply_compatibility_filter`. The vendored body already forces FP8 GEMMs
+# OFF; blacklisting here stops explore from ever proposing the variant.
+_WORLDPLAY_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
+    "WORLDPLAY_USE_FP8_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
+    "WORLDPLAY_USE_FP4_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP4 = different model)"),
+    "WORLDPLAY_USE_SAGEATTN": (frozenset({"*"}), "approximate attention alters the output distribution (different model)"),
+    "WORLDPLAY_HEIGHT": (frozenset({"*"}), "resolution is part of the workload spec — not an optimization knob"),
+    "WORLDPLAY_WIDTH": (frozenset({"*"}), "resolution is part of the workload spec — not an optimization knob"),
+    "WORLDPLAY_NUM_FRAMES": (frozenset({"*"}), "frame count is part of the workload spec — not an optimization knob"),
+    "WORLDPLAY_NUM_STEPS": (frozenset({"*"}), "step count is part of the workload spec — not an optimization knob"),
+    "WORLDPLAY_FEW_STEP": (frozenset({"*"}), "step-distillation changes the model — not a BF16-safe knob"),
+    "TRITON_HIP_USE_ASYNC_COPY": (frozenset({"*"}), "crashes on MI355X (gfx950)"),
+    # Session 20260730T135601Z: "Memory access fault by GPU node-2" on this
+    # pipeline, raised after MIOpen fails to find a grouped-conv solver. The
+    # fault path is MIOpen, not torch.compile, so ENABLED alone is unsafe too.
+    # A GPU memory fault outlives the variant that caused it and poisons every
+    # later measurement, so this is refused rather than merely deprioritised.
+    "PYTORCH_TUNABLEOP_ENABLED": (frozenset({"*"}), "faults the GPU on gfx950 with this pipeline (MIOpen grouped-conv solver miss)"),
+    "PYTORCH_TUNABLEOP_TUNING": (frozenset({"*"}), "TunableOp tuning faults the GPU on gfx950 with this pipeline"),
+}
+
+# Measurement-contract keys: these set HOW the fps is sampled — ``--warmup``
+# discarded full generations and ``--repeats`` timed generations aggregated into
+# mean/std — not what runs. A variant that shrinks either still emits a
+# legal-looking steady-state fps, but sampled differently from the 5-repeat
+# baseline it is ranked against. Unlike ``_WORLDPLAY_ENV_BLACKLIST`` (which only
+# fires on a truthy value) ANY override is a violation here, including ``0``:
+# ``WORLDPLAY_WARMUP_CHUNKS=0`` is precisely the harmful setting, since it folds
+# cold-start cost into the timed runs.
+_WORLDPLAY_ENV_MEASUREMENT_LOCK: dict[str, str] = {
+    "WORLDPLAY_REPEATS": "timed-repeat count is part of the baseline measurement contract (locked at 5)",
+    "WORLDPLAY_WARMUP_CHUNKS": "warmup-generation count is part of the baseline measurement contract (locked at 1)",
+}
+
+# Known crash combinations (all keys present + truthy → drop).
+_WORLDPLAY_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("AMD_DIRECT_DISPATCH", "AMDGCN_USE_BUFFER_OPS"),
+        "AMD_DIRECT_DISPATCH=1 + AMDGCN_USE_BUFFER_OPS=1 is a known crash",
+    ),
+)
+
+# The customer's byte-identical ``bench_fps.py`` accepts ONLY this CLI surface;
+# any other ``--flag`` makes argparse error out and the leg dies as
+# ``no_measurement``. The explore LLM proposer keys off the *model's* native
+# HunyuanVideo CLI (``--use_cache teacache``/``fbcache``/``magcache``,
+# ``--attention_backend``, ``--enable_step_distill``, ``--cfg_distilled``,
+# ``--enable_tiling`` …) — none of which the customer wrapper exposes — so those
+# variants waste a full ~10-min leg for nothing. We drop them before dispatch and
+# steer the proposer to ``WORLDPLAY_*`` env knobs + the accepted tunables.
+_WORLDPLAY_ACCEPTED_SERVER_FLAGS: frozenset[str] = frozenset(
+    {
+        "--action_ckpt",
+        "--aspect_ratio",
+        "--dtype",
+        "--enable_torch_compile",
+        "--few_step",
+        "--group_offloading",
+        "--height",
+        "--image_path",
+        "--model_path",
+        "--model_type",
+        "--negative_prompt",
+        "--num_inference_steps",
+        "--offloading",
+        "--out",
+        "--pose",
+        "--profile_steps",
+        "--prompt",
+        "--quality-calib-eps",
+        "--quality-calib-margin",
+        "--quality-calib-samples",
+        "--quality-calibrate",
+        "--quality-frames",
+        "--quality-lpips-max",
+        "--quality-mse-max",
+        "--quality-ref",
+        "--quality-ref-write",
+        "--quality-ssim-min",
+        "--repeats",
+        "--resolution",
+        "--seed",
+        "--tag",
+        "--torch_profiler_dir",
+        "--transformer_resident_ar_rollout",
+        "--video_length",
+        "--warmup",
+        "--width",
+        "--worldplay-dir",
+    }
+)
+
+# Accepted-but-forbidden: ``bench_fps.py`` takes these, but each changes the
+# workload operating point (steps / frames / resolution) or the model
+# (precision / step-distillation). ``_WORLDPLAY_ENV_BLACKLIST`` locks the
+# env-keyed forms; this locks the equivalent CLI flags, which the env blacklist
+# never sees when a variant passes them via ``extra_server_args``.
+_WORLDPLAY_FORBIDDEN_SERVER_FLAGS: dict[str, str] = {
+    "--num_inference_steps": "step count is part of the workload spec (locked at 50)",
+    "--few_step": "step-distillation changes the model — out of scope (locked at 50 steps)",
+    "--dtype": "precision locked to BF16 (dtype change = different model)",
+    "--resolution": "resolution is part of the workload spec — not a tunable",
+    "--height": "resolution is part of the workload spec — not a tunable",
+    "--width": "resolution is part of the workload spec — not a tunable",
+    "--video_length": "frame count is part of the workload spec (locked at 125)",
+    "--aspect_ratio": "resolution/aspect is part of the workload spec — not a tunable",
+    "--repeats": "timed-repeat count is part of the baseline measurement contract (locked at 5)",
+    "--warmup": "warmup-generation count is part of the baseline measurement contract (locked at 1)",
+}
+
+# Matches a long option token (``--enable_torch_compile``, ``--quality-ref``),
+# ignoring any ``=value`` suffix and short flags.
+_RE_LONG_FLAG = re.compile(r"(--[A-Za-z][A-Za-z0-9_-]*)")
+
+# Value markers that identify a step-distilled / few-step action checkpoint
+# (e.g. ``ar_distilled_action_model``). The 50-step AR spec locks the action
+# ckpt to the stock ``ar_model``; a distilled ckpt is a *different model* and is
+# forbidden regardless of how many steps the same variant declares (a variant
+# could pass ONLY the distilled ckpt and otherwise look 50-step-legit).
+_WORLDPLAY_DISTILLED_CKPT_MARKERS: tuple[str, ...] = (
+    "distill",
+    "few_step",
+    "fewstep",
+    "few-step",
+    "4step",
+    "4-step",
+)
+# Captures the value after ``--action_ckpt`` (space- or ``=``-separated).
+_RE_ACTION_CKPT = re.compile(r"--action_ckpt[=\s]+(\S+)")
+
+
+def _ckpt_is_distilled(value: str | None) -> bool:
+    """Whether an action-ckpt path names a distilled / few-step checkpoint.
+
+    Args:
+        value (str | None): The ``WORLDPLAY_ACTION_CKPT`` env value or the
+            ``--action_ckpt`` CLI value.
+
+    Returns:
+        bool: ``True`` if the path contains any distillation marker.
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return False
+    return any(m in v for m in _WORLDPLAY_DISTILLED_CKPT_MARKERS)
+
+
+def worldplay_server_args_reason(
+    extra_server_args: str | None,
+) -> str | None:
+    """Return a drop reason if a WorldPlay variant's CLI flags are unusable.
+
+    Two independent checks against ``extra_server_args``: (1) any flag in
+    :data:`_WORLDPLAY_FORBIDDEN_SERVER_FLAGS` (accepted by the wrapper but
+    workload/precision-locked) is dropped with the lock reason; (2) any
+    ``--flag`` outside :data:`_WORLDPLAY_ACCEPTED_SERVER_FLAGS` is dropped
+    because the customer ``bench_fps.py`` would argparse-error → ``no_measurement``.
+
+    Args:
+        extra_server_args (str | None): The variant's ``EXTRA_WORLDPLAY_ARGS``
+            payload (raw CLI string).
+
+    Returns:
+        str | None: A human-readable reason when droppable, else ``None``.
+    """
+    args = extra_server_args or ""
+    if not args.strip():
+        return None
+    flags = _RE_LONG_FLAG.findall(args)
+    # Forbidden-but-accepted first — the clearer, more specific message.
+    for f in flags:
+        if f in _WORLDPLAY_FORBIDDEN_SERVER_FLAGS:
+            return f"{f}: {_WORLDPLAY_FORBIDDEN_SERVER_FLAGS[f]}"
+    # Value-level: ``--action_ckpt`` is accepted by the wrapper, but a
+    # distilled/few-step ckpt value is a different model (50-step ar_model lock).
+    _ckpt_m = _RE_ACTION_CKPT.search(args)
+    if _ckpt_m and _ckpt_is_distilled(_ckpt_m.group(1)):
+        return (
+            f"--action_ckpt {_ckpt_m.group(1)}: distilled/few-step checkpoint is "
+            "a different model (50-step ar_model is the locked workload spec)"
+        )
+    unknown = sorted({f for f in flags if f not in _WORLDPLAY_ACCEPTED_SERVER_FLAGS})
+    if unknown:
+        return (
+            f"{', '.join(unknown)} not accepted by the customer bench_fps.py CLI "
+            "(unknown flag → argparse error → no_measurement); propose WORLDPLAY_* "
+            "env knobs or the accepted tunables (--enable_torch_compile / "
+            "--group_offloading / --offloading / --transformer_resident_ar_rollout)"
+        )
+    return None
+
+
+def worldplay_blacklist_reason(
+    extra_envs: dict[str, str] | None,
+) -> str | None:
+    """Return a drop reason if a variant trips the WorldPlay do-not-set blacklist.
+
+    Args:
+        extra_envs (dict[str, str] | None): The variant's env overrides.
+
+    Returns:
+        str | None: A human-readable reason when blacklisted, else ``None``.
+    """
+    envs = {str(k): str(v) for k, v in (extra_envs or {}).items()}
+    for key, (bad_values, reason) in _WORLDPLAY_ENV_BLACKLIST.items():
+        if key not in envs:
+            continue
+        val = envs[key]
+        if "*" in bad_values:
+            if is_truthy(val, default=True):
+                return f"{key}={val}: {reason}"
+        elif val.strip().lower() in {b.lower() for b in bad_values}:
+            return f"{key}={val}: {reason}"
+    for key, reason in _WORLDPLAY_ENV_MEASUREMENT_LOCK.items():
+        if key in envs:
+            return f"{key}={envs[key]}: {reason}"
+    for keys, reason in _WORLDPLAY_ENV_COMBO_BLACKLIST:
+        if all(k in envs and is_truthy(envs[k], default=True) for k in keys):
+            return reason
+    # Value-level action-ckpt lock: a distilled/few-step checkpoint is a
+    # different model even if the variant declares 50 steps.
+    ckpt = envs.get("WORLDPLAY_ACTION_CKPT", "")
+    if _ckpt_is_distilled(ckpt):
+        return (
+            f"WORLDPLAY_ACTION_CKPT={ckpt}: distilled/few-step checkpoint is a "
+            "different model (50-step ar_model is the locked workload spec)"
+        )
     return None
 
 
@@ -480,6 +632,7 @@ def apply_compatibility_filter(
     help_available = bool(help_text)
 
     is_xdit = fw == "xdit"
+    is_worldplay = fw == "worldplay"
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
@@ -489,11 +642,17 @@ def apply_compatibility_filter(
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
+        # WorldPlay do-not-set blacklist (precision / workload-spec / crash lock),
+        # checked on BOTH surfaces: env overrides and the raw CLI (extra_server_args).
+        elif is_worldplay:
+            skip_reason = worldplay_blacklist_reason(
+                getattr(v, "extra_envs", None)
+            ) or worldplay_server_args_reason(getattr(v, "extra_server_args", None))
         if skip_reason:
             dropped.append(
                 {
                     "name": v.name,
-                    "source": "xdit_blacklist",
+                    "source": "worldplay_blacklist" if is_worldplay else "xdit_blacklist",
                     "reason": skip_reason,
                 }
             )
