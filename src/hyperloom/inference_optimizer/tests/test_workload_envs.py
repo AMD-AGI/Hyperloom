@@ -36,6 +36,10 @@ def _clear_env(monkeypatch):
         "WORLDPLAY_REPO_URL",
         "WORLDPLAY_BENCH",
         "WORLDPLAY_ACTION_CKPT",
+        "WORLDMIRROR_REPO_PATH",
+        "WORLDMIRROR_REPO_URL",
+        "WORLDMIRROR_DIR",
+        "WORLDMIRROR_BENCH",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
         "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
@@ -128,6 +132,8 @@ def test_default_baseline_config(monkeypatch):
     assert we.default_baseline_config().name == "baseline_atom.yaml"
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert we.default_baseline_config().name == "baseline_vllm.yaml"
+    monkeypatch.setenv("FRAMEWORK", "worldmirror")
+    assert we.default_baseline_config().name == "baseline_worldmirror.yaml"
     monkeypatch.setenv("FRAMEWORK", "weird")
     assert we.default_baseline_config().name == "baseline_sglang.yaml"
 
@@ -267,6 +273,44 @@ def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
     )
 
     assert resolved == script
+
+
+def test_worldmirror_materialize_configures_github_repo_fallback(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    src = _write(tmp_path / "worldmirror.yaml", framework="worldmirror", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        model_path="/models/HY-World-2.0",
+        gpu_type="mi355x",
+    )
+
+    envs = bench["envs"]
+    assert envs["WORLDMIRROR_REPO_URL"] == "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
+    assert envs["WORLDMIRROR_REPO_PATH"] == str(tmp_path / "cache" / "HY-World-2.0")
+    assert envs["WORLDMIRROR_DIR"] == str(tmp_path / "cache" / "HY-World-2.0")
+    assert envs["WORLDMIRROR_BENCH"].endswith("/assets/benchmark_scripts/worldmirror_bench.py")
+    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldmirror_mi355x.sh")
+
+
+def test_worldmirror_extra_env_dir_updates_runtime_alias(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "worldmirror.yaml", framework="worldmirror", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        extra_envs={"WORLDMIRROR_DIR": "/custom/HY-World-2.0"},
+    )
+
+    envs = bench["envs"]
+    assert envs["WORLDMIRROR_REPO_PATH"] == "/custom/HY-World-2.0"
+    assert envs["WORLDMIRROR_DIR"] == "/custom/HY-World-2.0"
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):

@@ -488,6 +488,8 @@ def _default_profile_config() -> Path:
         name = "profile_hunyuan_image3.yaml"
     elif fw == "worldplay":
         name = "profile_worldplay.yaml"
+    elif fw == "worldmirror":
+        name = "profile_worldmirror.yaml"
     else:
         name = "profile_sglang.yaml"
     return asset_root() / "assets" / "configs" / name

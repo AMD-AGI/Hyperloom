@@ -113,10 +113,20 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         name="worldplay",
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_WORLDPLAY_ARGS",
-        # No framework-agent source repo; repo_url stays None.
-        repo_url=None,
+        repo_url="https://github.com/Tencent-Hunyuan/HY-WorldPlay.git",
         supports_server_reuse=False,
         throughput_unit="fps",
+    ),
+    # WorldMirror (HunyuanWorld-Mirror 2.0): feed-forward 3D reconstruction
+    # from multi-view images/video. The scriptable wrapper measures one
+    # reconstruction pass per scene and gates geometry by per-head relative L1.
+    "worldmirror": FrameworkSpec(
+        name="worldmirror",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_WORLDMIRROR_ARGS",
+        repo_url="https://github.com/Tencent-Hunyuan/HY-World-2.0.git",
+        supports_server_reuse=False,
+        throughput_unit="recon/s",
     ),
 }
 

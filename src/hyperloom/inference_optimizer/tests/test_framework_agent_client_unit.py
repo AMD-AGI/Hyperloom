@@ -24,7 +24,24 @@ _FA_MODULE = fac._FA_MODULE
 # -- repo_url_for_framework -----------------------------------------------
 def test_repo_url_for_framework_known_and_unknown() -> None:
     assert fac.repo_url_for_framework("sglang").endswith("sglang.git")
+    assert fac.repo_url_for_framework("worldplay") == "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
+    assert fac.repo_url_for_framework("worldmirror") == "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
     assert fac.repo_url_for_framework("nope") == ""
+
+
+def test_hunyuan_scriptable_framework_registry_specs() -> None:
+    from hyperloom.inference_optimizer import framework_registry
+
+    assert (
+        framework_registry.FRAMEWORKS["worldplay"].repo_url
+        == "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
+    )
+    worldmirror = framework_registry.FRAMEWORKS["worldmirror"]
+    assert worldmirror.kind == framework_registry.SCRIPTABLE
+    assert worldmirror.extra_args_env == "EXTRA_WORLDMIRROR_ARGS"
+    assert worldmirror.repo_url == "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
+    assert worldmirror.throughput_unit == "recon/s"
+    assert framework_registry.primary_metric_name("worldmirror") == "e2el_mean_ms"
 
 
 # -- _resolve_fa_command ---------------------------------------------------
