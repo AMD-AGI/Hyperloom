@@ -144,7 +144,10 @@ def test_register_executors_wires_full_set_and_kernel_noops():
         assert kind in reg
     assert "target_analysis" in reg
     assert "integrate_patch" in reg
-    assert "framework" in reg
+    # Must match the kind the FRAMEWORK phase enqueues; a stale "framework"
+    # key silently drops every discovered PR candidate.
+    assert "framework_agent" in reg
+    assert "framework" not in reg
     assert "roofline" in reg
     assert any(fn is _noop_prep for fn in reg.values())
 
