@@ -31,6 +31,11 @@ def _clear_env(monkeypatch):
         "PROFILE",
         "MODEL_PATH",
         "INFERENCEX_PATH",
+        "WORLDPLAY_REPO",
+        "WORLDPLAY_REPO_PATH",
+        "WORLDPLAY_REPO_URL",
+        "WORLDPLAY_BENCH",
+        "WORLDPLAY_ACTION_CKPT",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
         "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
@@ -139,6 +144,129 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x")
     assert bench["precision"] == "fp8"
     assert "benchmark_script" not in bench
+
+
+def test_worldplay_materialize_prefers_repo_path_env(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", "/repos/HY-WorldPlay")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        model_path="/models/HunyuanVideo-1.5",
+    )
+
+    envs = bench["envs"]
+    assert bench["model"] == "/models/HunyuanVideo-1.5"
+    assert envs["WORLDPLAY_REPO_PATH"] == "/repos/HY-WorldPlay"
+    assert envs["WORLDPLAY_DIR"] == "/repos/HY-WorldPlay"
+    assert envs["WORLDPLAY_BENCH"].endswith("/assets/benchmark_scripts/bench_fps.py")
+    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+    assert envs["WORLDPLAY_ACTION_CKPT"] == (
+        "/models/HY-WorldPlay/ar_model/diffusion_pytorch_model.safetensors"
+    )
+
+
+def test_worldplay_materialize_configures_github_repo_fallback(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x")
+
+    envs = bench["envs"]
+    assert envs["WORLDPLAY_REPO_URL"] == "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
+    assert envs["WORLDPLAY_REPO_PATH"] == str(tmp_path / "cache" / "HY-WorldPlay")
+    assert envs["WORLDPLAY_DIR"] == str(tmp_path / "cache" / "HY-WorldPlay")
+    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+
+
+def test_worldplay_extra_env_repo_path_updates_runtime_alias(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        extra_envs={"WORLDPLAY_REPO_PATH": "/custom/HY-WorldPlay"},
+    )
+
+    envs = bench["envs"]
+    assert envs["WORLDPLAY_REPO_PATH"] == "/custom/HY-WorldPlay"
+    assert envs["WORLDPLAY_DIR"] == "/custom/HY-WorldPlay"
+
+
+def test_worldplay_extra_env_dir_updates_runtime_alias(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        extra_envs={"WORLDPLAY_DIR": "/custom/HY-WorldPlay"},
+    )
+
+    envs = bench["envs"]
+    assert envs["WORLDPLAY_REPO_PATH"] == "/custom/HY-WorldPlay"
+    assert envs["WORLDPLAY_DIR"] == "/custom/HY-WorldPlay"
+
+
+def test_worldplay_extra_env_model_type_updates_default_action_ckpt(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        model_path="/models/HunyuanVideo-1.5",
+        extra_envs={"WORLDPLAY_MODEL_TYPE": "bi"},
+    )
+
+    assert bench["envs"]["WORLDPLAY_ACTION_CKPT"] == (
+        "/models/HY-WorldPlay/bidirectional_model/diffusion_pytorch_model.safetensors"
+    )
+
+
+def test_worldplay_action_ckpt_env_overrides_default(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("WORLDPLAY_ACTION_CKPT", "/operator/custom.safetensors")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        model_path="/models/HunyuanVideo-1.5",
+    )
+
+    assert bench["envs"]["WORLDPLAY_ACTION_CKPT"] == "/operator/custom.safetensors"
+
+
+def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable
+
+    script = tmp_path / "worldplay_mi355x.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    resolved = bypass_scriptable.resolve_scriptable_script(
+        "worldplay",
+        "mi355x",
+        "",
+        {"benchmark_script": str(script)},
+    )
+
+    assert resolved == script
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):

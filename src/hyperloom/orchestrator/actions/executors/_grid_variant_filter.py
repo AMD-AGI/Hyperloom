@@ -279,6 +279,7 @@ def xdit_blacklist_reason(
 # OFF; blacklisting here stops explore from ever proposing the variant.
 _WORLDPLAY_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "WORLDPLAY_USE_FP8_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
+    "WORLDPLAY_USE_FP8_GEMM": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
     "WORLDPLAY_USE_FP4_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP4 = different model)"),
     "WORLDPLAY_USE_SAGEATTN": (frozenset({"*"}), "approximate attention alters the output distribution (different model)"),
     "WORLDPLAY_HEIGHT": (frozenset({"*"}), "resolution is part of the workload spec — not an optimization knob"),

@@ -1738,6 +1738,15 @@ def test_worldplay_blacklist_reason_locks_tunableop(key):
     assert worldplay_blacklist_reason({key: "1"}), f"{key} must be blacklisted"
 
 
+@pytest.mark.parametrize("key", ["WORLDPLAY_USE_FP8_GEMMS", "WORLDPLAY_USE_FP8_GEMM"])
+def test_worldplay_blacklist_reason_locks_fp8_gemm_aliases(key):
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        worldplay_blacklist_reason,
+    )
+
+    assert worldplay_blacklist_reason({key: "1"}), f"{key} must be blacklisted"
+
+
 # -- WorldPlay measurement-contract lock (regression) -----------------------
 # `--warmup` (discarded full generations) and `--repeats` (timed generations
 # aggregated into mean/std) define HOW the fps is sampled, not what runs. A

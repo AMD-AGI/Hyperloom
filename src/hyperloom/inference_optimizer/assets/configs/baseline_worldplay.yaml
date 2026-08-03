@@ -10,11 +10,12 @@
 # steady-state GENERATED FRAMES PER SECOND (higher = better), surfaced as
 # output_throughput with unit "fps".
 #
-# Two fields are FALLBACK ONLY and overridden at run time by the executor:
-#   - `benchmark.model`       <- --model / $MODEL_PATH
-#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
-# benchmark_script is pinned to worldplay_{runner_type}.sh at materialize time,
-# so it is intentionally NOT set here.
+# Fallback-only fields are resolved at run time by the executor:
+#   - `benchmark.model`       <- --model / $MODEL_PATH / shared state
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / RUNNER_TYPE
+#   - WORLDPLAY_REPO_PATH     <- env override, else a GitHub-backed cache path
+# benchmark_script is pinned to Hyperloom's bundled WorldPlay entrypoint during
+# materialization, so it is intentionally NOT set here.
 #
 # PRECISION IS LOCKED to BF16: a precision change is a different model. The
 # customer body forces WORLDPLAY_USE_FP8_GEMMS OFF; it is also blacklisted in
@@ -27,7 +28,7 @@
 benchmark:
   framework: worldplay
   workload_kind: scriptable        # drives server-less branching in the loop
-  model: /primus/xiaofei/HY-WorldPlay/models/HunyuanVideo-1.5   # OVERRIDDEN at runtime; see header.
+  model: /models/HunyuanVideo-1.5  # placeholder; overridden at runtime.
   precision: bf16                  # LOCKED for worldplay sessions
   run_mode: local
 
@@ -70,10 +71,8 @@ benchmark:
     # XDIT_QUALITY_REF on every compare leg. The customer body reads both.
     XDIT_QUALITY_REF: ""
     # ── Local / offline weight resolution ─────────────────────────────────────
-    # The HF hub cache holds empty snapshot stubs on this node; the entrypoint
-    # shim supplies on-disk --model_path/--action_ckpt. Keep HF fully offline.
-    WORLDPLAY_REPO: /primus/xiaofei/HY-WorldPlay
-    HF_HOME: /primus/xiaofei/HY-WorldPlay/models/hf_cache
+    # WORLDPLAY_REPO_PATH is injected from env or a GitHub-backed cache path.
+    # Operators may still override HF_HOME through env/extra_envs when needed.
     HF_HUB_OFFLINE: 1
     TRANSFORMERS_OFFLINE: 1
     PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
