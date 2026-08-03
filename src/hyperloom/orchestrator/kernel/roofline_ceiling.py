@@ -1099,7 +1099,10 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 
 
 def _read_diffusion_num_steps(state: Any) -> int:
-    """Read the denoising step count (``XDIT_NUM_STEPS``) from the baseline yaml.
+    """Read the denoising step count from the baseline yaml.
+
+    Reads ``XDIT_NUM_STEPS`` (xDiT) with a ``WORLDPLAY_NUM_STEPS`` fallback
+    (HY-WorldPlay) so both scriptable diffusion workloads feed the roofline.
 
     Args:
         state: Shared run state carrying the materialized baseline yaml.
@@ -1108,14 +1111,16 @@ def _read_diffusion_num_steps(state: Any) -> int:
         The positive step count, or ``0`` when unavailable.
     """
     envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-    return _env_int(envs, "XDIT_NUM_STEPS")
+    return _env_int(envs, "XDIT_NUM_STEPS") or _env_int(envs, "WORLDPLAY_NUM_STEPS")
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
-    """Read the image resolution (``XDIT_HEIGHT``/``XDIT_WIDTH``) from the baseline yaml.
+    """Read the image/frame resolution from the baseline yaml.
 
-    Needed for models (e.g. FLUX, SD3) whose transformer config carries no
-    ``sample_size`` -- the DiT sequence length is set by the runtime resolution.
+    Reads ``XDIT_HEIGHT``/``XDIT_WIDTH`` (xDiT) with ``WORLDPLAY_HEIGHT``/
+    ``WORLDPLAY_WIDTH`` fallback (HY-WorldPlay). Needed for models (e.g. FLUX,
+    SD3) whose transformer config carries no ``sample_size`` -- the DiT sequence
+    length is set by the runtime resolution.
 
     Args:
         state: Shared run state carrying the materialized baseline yaml.
@@ -1125,7 +1130,9 @@ def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """
     try:
         envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-        return _env_int(envs, "XDIT_HEIGHT"), _env_int(envs, "XDIT_WIDTH")
+        height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "WORLDPLAY_HEIGHT")
+        width = _env_int(envs, "XDIT_WIDTH") or _env_int(envs, "WORLDPLAY_WIDTH")
+        return height, width
     except (AttributeError, TypeError, ValueError):
         return 0, 0
 

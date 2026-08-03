@@ -408,10 +408,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     #   attempt; cleared when the attempt REVERTs.
     # ``enablement_attempts``: number of dispatches (candidate rotation / idempotency).
     # ``enablement_succeeded``: terminal KEEP guard.
-    # Admission for both enablement lanes, from ``--enablement``: ``launch``,
-    # ``eval``, ``all`` (default) or ``off`` — with ``off`` a broken baseline
-    # fast-fails instead of opening an authoring loop.
-    enablement_mode: str = "all"
     enablement_launch_log: str = ""
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
@@ -2348,12 +2344,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload.
 
-        Diffusion (xDiT) ceilings are images/sec; text-gen is tokens/sec. The
-        numeric ``*_tok_per_sec`` fields keep their names for wire stability;
-        this unit tells consumers how to render them.
+        Delegates to the framework registry (xDiT = img/s, WorldPlay = fps,
+        text-gen = tok/s, …). The numeric ``*_tok_per_sec`` fields keep their
+        names for wire stability; this unit tells consumers how to render them.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         framework = str(getattr(self, "framework", "") or "").strip().lower()
-        return "img/s" if framework == "xdit" else "tok/s"
+        return framework_registry.throughput_unit(framework)
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it.

@@ -103,6 +103,21 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
+    # HY-WorldPlay (HunyuanVideo-1.5): a server-less autoregressive video
+    # diffusion pipeline. A "bench" is one `torchrun bench_fps.py` sequence-
+    # parallel rollout; the metric is steady-state GENERATED FRAMES PER SECOND
+    # (higher = better). Driven by the customer's vendored bench-kit via the
+    # worldplay_{runner_type}.sh entrypoint. BF16-locked; correctness is a
+    # self-calibrating SSIM/MSE/LPIPS quality band vs a BF16 reference clip.
+    "worldplay": FrameworkSpec(
+        name="worldplay",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_WORLDPLAY_ARGS",
+        # No framework-agent source repo; repo_url stays None.
+        repo_url=None,
+        supports_server_reuse=False,
+        throughput_unit="fps",
+    ),
 }
 
 DEFAULT_FRAMEWORK = "sglang"

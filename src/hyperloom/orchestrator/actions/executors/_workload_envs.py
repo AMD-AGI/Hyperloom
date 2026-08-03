@@ -44,7 +44,6 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._grid_server_args import remove_server_args
-from ._grid_server_args import strip_aiter_args_for_unaligned_moe
 from ._grid_server_args import validate_server_args_shell_safe
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -59,120 +58,6 @@ from hyperloom.inference_optimizer.model_config_utils import (
 )
 
 log = logging.getLogger(__name__)
-
-_AGENTX_TRUE = {"1", "true", "yes", "on"}
-_AGENTX_FALSE = {"", "0", "false", "no", "off"}
-
-
-def agentx_enabled(env: "dict[str, str] | None" = None) -> bool:
-    """Return whether ``HYPERLOOM_AGENTX`` selects the AgentX benchmark sub-path.
-
-    Defensive: any unrecognized value is treated as OFF (warned, not raised).
-    Shared by the config switch here and the run_grid execution hook so the two
-    parse the flag identically. Lives in this module (already imported on the
-    default path) so the OFF path never imports the ``agentx`` package.
-    """
-    e = os.environ if env is None else env
-    raw = str(e.get("HYPERLOOM_AGENTX", "")).strip()
-    low = raw.lower()
-    if low in _AGENTX_TRUE:
-        return True
-    if raw and low not in _AGENTX_FALSE:
-        log.warning("HYPERLOOM_AGENTX=%r not recognized; treating as OFF", raw)
-    return False
-
-
-_AGENTX_PASSTHROUGH_ENVS = (
-    "AGENTX_DATASET",
-    "AGENTX_MAX_CTX",
-    "AGENTX_NUM_ENTRIES",
-    "AGENTX_WARMUP_DURATION",
-    "AGENTX_NUM_WARMUP_SESSIONS",
-    "AGENTX_KEEP_SERVER",
-    "AGENTX_SERVER_SCRIPT",
-    "AGENTX_PROFILE_WARMUP_S",
-    "AGENTX_PROFILE_WINDOW_S",
-    "AIPERF_BIN",
-)
-
-
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> bool:
-    """Authoritatively swap a serving benchmark to the AgentX aiperf client.
-
-    When ``HYPERLOOM_AGENTX`` is on and ``bench``'s framework is a serving
-    framework (vllm/sglang, not a server-less scriptable one), overwrite
-    ``benchmark_script`` to ``aiperf_client.sh`` (whatever the gpu_type block
-    pinned) and inject the AgentX env knobs. No-op otherwise.
-
-    Shared by :func:`materialize_config_with_envs` AND
-    ``apply_runtime_benchmark_overrides`` (the per-variant/baseline/profile
-    rebuild) so EVERY executor path honors the switch — a materialize-only swap
-    was silently reverted to the synthetic script by the grid rebuild.
-
-    Returns:
-        True if the swap was applied, else False.
-    """
-    if not agentx_enabled():
-        return False
-    from hyperloom.inference_optimizer import framework_registry as _fw_reg
-
-    if _fw_reg.is_scriptable(bench.get("framework")):
-        return False
-    _prev_script = bench.get("benchmark_script")
-    bench["benchmark_script"] = "aiperf_client.sh"
-    envs = bench.setdefault("envs", {})
-    # Pass the resolved framework so aiperf_client.sh delegates to the correct
-    # builtin ({framework}_{gpu}.sh); without it the wrapper cannot tell vllm
-    # from sglang and would fall back to a default and boot the wrong server.
-    envs.setdefault("FRAMEWORK", str(bench.get("framework") or ""))
-    # AgentX is a DISTINCT benchmark mode (agentic-trace replay), not the
-    # synthetic InferenceX workload: RUN_EVAL defaults off (the GSM8K accuracy
-    # gate does not apply to trace replay; set RUN_EVAL=1 to force it), so Arbor
-    # compares throughput under the agentic workload -- not apples-to-apples
-    # with a synthetic-workload baseline.
-    envs.setdefault("RUN_EVAL", os.environ.get("RUN_EVAL", "false"))
-    envs.setdefault("MODEL", str(model_path or bench.get("model") or ""))
-    for _ax in _AGENTX_PASSTHROUGH_ENVS:
-        _axv = os.environ.get(_ax)
-        if _axv is not None:
-            envs.setdefault(_ax, _axv)
-    log.info(
-        "AgentX mode ON (HYPERLOOM_AGENTX): authoritatively set benchmark_script"
-        " -> aiperf_client.sh%s (dataset=%s); overrides any framework/gpu default."
-        " Unset HYPERLOOM_AGENTX to restore the synthetic path.",
-        f" (was {_prev_script})" if _prev_script and _prev_script != "aiperf_client.sh" else "",
-        envs.get("AGENTX_DATASET", "default-corpus"),
-    )
-    return True
-
-
-def prepare_agentx_runtime(*, env, inferencex_path: str, config_path) -> "str | None":
-    """Deploy the AgentX client + capability-preflight aiperf for a run.
-
-    Shared by EVERY Magpie launch path (grid via _run_magpie AND the
-    baseline/profile shell-out) so a materialize-time swap to
-    aiperf_client.sh is always backed by a deployed script + a preflighted
-    aiperf -- otherwise the first Arbor step (baseline) points at a script
-    that was never copied into InferenceX benchmarks/.
-
-    No-op (returns None) under pytest, without an InferenceX path, or when
-    HYPERLOOM_AGENTX is off -- so the OFF path never imports the agentx
-    package (A2). Returns None on success/no-op, or an error string when
-    the aiperf preflight fails (the caller decides how to surface it).
-    """
-    if os.environ.get("PYTEST_CURRENT_TEST") or not inferencex_path:
-        return None
-    if not agentx_enabled(os.environ):
-        return None
-    from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-    from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
-
-    try:
-        maybe_prepare_agentx(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    except AgentXPreflightError as exc:
-        return f"AgentX preflight failed: {exc}"
-    return None
-
 
 # gfx942 / CDNA3 dies (MI300X, MI308X, MI325X) that ship the aiter CK
 # gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
@@ -346,6 +231,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
+    "worldplay": Path("assets/configs/baseline_worldplay.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
@@ -415,15 +301,6 @@ def _finalize_framework_server_args(
             bench.get("model"),
             gpu_type=gpu_type or bench.get("runner_type"),
         )
-    # 4b. aiter shape gate: an unaligned MoE shape faults inside aiter's asm
-    #     MoE path regardless of the runner backend picked above, so remove the
-    #     flags that route work there.
-    resolved_server_args = strip_aiter_args_for_unaligned_moe(
-        resolved_server_args,
-        bench.get("framework"),
-        bench.get("model"),
-        envs.get("TP"),
-    )
     resolved_server_args = inject_vllm_expert_parallel(
         resolved_server_args,
         bench.get("framework"),
@@ -565,14 +442,6 @@ def materialize_config_with_envs(
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
     envs = bench.setdefault("envs", {})
-    # ── AgentX mode (HYPERLOOM_AGENTX) ───────────────────────────────────────
-    # Swap Magpie's synthetic InferenceX client for the agentic aiperf client on
-    # serving frameworks. Env-gated; default OFF leaves the synthetic path
-    # byte-for-byte unchanged. Parsing is defensive: any unrecognized value is
-    # treated as OFF and never raises (an unknown non-empty value warns).
-    # Asset deployment + AIPERF_BIN capability preflight run at the execution
-    # boundary (run_grid), not in this pure config materializer.
-    apply_agentx_switch(bench, model_path)
     for env_key in (
         "CONC",
         "ISL",
