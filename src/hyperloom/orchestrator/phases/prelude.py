@@ -144,8 +144,8 @@ class PreludePhase(PhaseHandler):
     ) -> list:
         """Filter replay patches using KG advisory blocks, expiry, conflicts.
 
-        Removes patches that are (a) advisory-blocked at/above the
-        configurable confidence threshold, (b) flagged ``expired`` by the
+        Removes patches that are (a) advisory-blocked at/above a fixed 0.75
+        confidence threshold, (b) flagged ``expired`` by the
         warm-start validity check, or (c) in a ``CONFLICTS_WITH`` relation
         with another patch in the set. Best-effort: any failure returns the
         input patches unchanged so replay never breaks on a KG hiccup.

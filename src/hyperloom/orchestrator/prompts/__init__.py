@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Persistent-agent system prompts.
+"""Agent system prompts.
 
-Markdown rule fragments plus :mod:`prompt_builder`, which composes the full
-Orchestration system prompt from :class:`ActionMetadata`, the rules fragment,
-and run-level parameters.
+Markdown rule fragments plus two independent assemblers: :mod:`prompt_builder`
+(the persistent Orchestration agent's system prompt, composed from
+:class:`ActionMetadata`, the rules fragment and run-level parameters) and
+:mod:`specialist_prompt_builder` (the ephemeral specialist sub-agent's
+system/user prompt pair).
 """
 
 from __future__ import annotations

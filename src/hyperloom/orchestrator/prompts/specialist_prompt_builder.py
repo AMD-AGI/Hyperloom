@@ -6,8 +6,12 @@
 Returns ``(system_prompt, user_prompt)``: the system prompt carries the
 immutable contract (identity / output protocol / iron rules) so the
 backend can cache it across specialists; the user prompt carries per-task
-context (hardware / gap / KB / recipe / PR / source hint). Each section is
-independently nullable, rendering ``(none)``. Pure function.
+context (hardware / gap / KB / recipe / PR / source hint). Most sections
+render a ``(none)`` placeholder when empty; the execution-budget and
+PD-disaggregation sections are omitted entirely. Not pure: the PD section
+reads multi-node state (env + on-disk ``multi_node_state.json``) and the
+enablement section builds the enablement mandate, which probes framework
+source roots on disk.
 """
 
 from __future__ import annotations
@@ -728,7 +732,8 @@ class SpecialistPromptInputs:
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Recipe summary from T0 ``find-recipe``
+    # Recipe summary from the T0 warm-start recipe search
+    # (``recipe_kb_t0._cascade_warm_start_search``)
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
     # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
@@ -1357,7 +1362,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 5 (warm-start recipe summary) of the prompt.
 
-    Dumps the ``find-recipe`` result as JSON, or a ``(none)`` placeholder
+    Dumps the T0 warm-start recipe as JSON, or a ``(none)`` placeholder
     when no warm-start recipe was supplied.
 
     Args:
@@ -1712,7 +1717,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs (source
-            of workspace path, gap id, domain, max proposals, and turns).
+            of workspace path, gap id, domain, and turn cap).
 
     Returns:
         list[str]: Markdown lines for the output-protocol section.
@@ -1983,7 +1988,7 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
-# Top-level assembler
+# Section 1a — PD-disaggregation
 def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
     """§1a — PD-disaggregation context (omitted unless pd_mode==disaggregated).
 
@@ -2039,14 +2044,16 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+# Top-level assembler
 def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     """Assemble the full specialist prompt from its section builders.
 
     The system prompt carries the immutable contract (identity, output
     protocol, iron rules) and the user prompt carries the per-task context
-    (hardware, gap, KB, roofline, recipe, lessons, pitfalls, PR feed,
-    source hint, optional session snapshot and orchestration notes). The
-    split lets the LLM backend cache the system prompt across specialists.
+    (hardware, optional PD-disaggregation, execution budget, gap, KB,
+    roofline, recipe, lessons, pitfalls, KG knobs, PR feed, source hint and
+    orchestration notes). The split lets the LLM backend cache the system
+    prompt across specialists.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.

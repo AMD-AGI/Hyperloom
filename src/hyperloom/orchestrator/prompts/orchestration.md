@@ -1,8 +1,5 @@
 > This file is the **rules fragment** consumed by
-> ``prompt_builder.build_orchestration_prompt`` as section 7. The earlier
-> hand-written DECISION FRAMEWORK / KERNEL-OPT PIPELINE / SESSION CONTEXT
-> content was replaced by builder-generated sections so the kernel-enabled
-> vs no-kernel split is a parameter, not two separate files.
+> ``prompt_builder.build_orchestration_prompt`` as section 7.
 
 ### Operating model — one continuous conversation
 
@@ -190,10 +187,11 @@ Per-phase goals (allowed action sets are in PHASE CONTRACT; `roofline` and
     authority. Rater identities are hidden; do NOT speculate which model a
     `rater_N` is. Cross-rater disagreement is an uncertainty signal.
 
-    **EXPLORE plateau**: when the Coordinator surfaces a `Plateau advisory`,
-    it has already deterministically advanced EXPLORE → KERNEL_AGENT
-    (`reason=explore_no_more_leverage`). KERNEL and FRAMEWORK plateaus
-    remain advisory only.
+    **EXPLORE plateau**: when the Coordinator surfaces a `Plateau advisory`, a
+    detected EXPLORE plateau will deterministically advance EXPLORE →
+    KERNEL_AGENT (`reason=explore_no_more_leverage`) at the next phase-compute
+    — you still have this tick, so drain / hand off first. KERNEL and FRAMEWORK
+    plateaus remain advisory only.
 
   - **KERNEL**: integrate KEEP'd kernel patches. Coordinator exits to SWEEP
     on REVERT streak or budget cap. Roofline is auto-managed.

@@ -156,11 +156,11 @@ class WritebackCollaborator:
         *,
         action_name: str | None = None,
     ) -> None:
-        """Record a PolicyGate denial and apply escalation side effects.
+        """Record a PolicyGate denial.
 
-        Publishes a ``policy_denied`` observation, records the denial streak,
-        auto-prunes the action family at streak >= 5, and sets the
-        ``policy_loop`` stop reason at streak >= 10.
+        Publishes a ``policy_denied`` observation and records the denial streak.
+        The streak is a fact for LLM self-correction only: there is no
+        auto-prune and no ``policy_loop`` stop triggered from it.
 
         Args:
             source (str): The agent whose intent was denied.
@@ -851,7 +851,13 @@ class WritebackCollaborator:
         self,
         result_dict: dict[str, Any] | None,
     ) -> str | None:
-        """Decide whether a failed result warrants a pitfall row (Threshold-B): crash/oom/hang → SEVERITY_CRASH; gain_pct ≤ -5% → SEVERITY_REGRESS; else None.
+        """Decide whether a failed result warrants a pitfall row.
+
+        ``crash`` / ``oom`` / ``hang`` / ``detokenizer_stall`` on ``error_class``,
+        or ``crash`` / ``oom`` / ``hang`` on ``status``, yield
+        ``SEVERITY_CRASH``; a ``gain_pct`` at or below
+        ``PITFALL_REGRESS_THRESHOLD_PCT`` (-5.0) yields ``SEVERITY_REGRESS``;
+        otherwise ``None``.
 
         Args:
             result_dict: The failed task's result dict; non-dict yields ``None``.
@@ -1810,12 +1816,9 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # route session_steward_specialist verdicts. Done payload
-        # carries extra fields beyond the standard schema; see
-        # ``actions/assess_remaining_gaps.md`` and the prompt builder
-        # focus template. Coerce out-of-vocab recommendations to
-        # ``stop_session`` (defense in depth — the LLM is allowed to
-        # write any string but we only honour the closed enum).
+        # Legacy session_steward routing: the steward was removed and
+        # ``_route_steward_verdict`` has no definition, so this branch cannot
+        # succeed — the except below swallows the AttributeError.
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
@@ -4109,10 +4112,13 @@ class WritebackCollaborator:
         winner kind (tuned-config / kernel / overlay / flag). Because the replay
         reproduces the optimized config from ``result.json`` directly, a
         ``succeeded`` status is itself the engagement proof. The validated gain
-        is the SAME-harness A/B ``hot_geak_speedup`` (numerator + denominator
-        both measured by GEAK), which is harness-internal and clean - recorded
-        under a distinct provenance because it is a same-harness MARGINAL, not an
-        over-raw total. Used only when 2b (orchestrator harness) is inconclusive.
+        is the MEASURED replay throughput over the orchestrator's raw baseline
+        (``(measured - baseline) / baseline``); GEAK's own ``throughput_speedup``
+        / ``hot_geak_speedup`` serves only as a ``> 1.0`` sanity gate, not as the
+        reported number. Recorded under a distinct provenance
+        (``geak_same_harness_geak``) because the measurement came from GEAK's
+        harness rather than the orchestrator's. Used only when 2b (orchestrator
+        harness) is inconclusive.
 
         Args:
             reason: Human-readable reason stamped in logs/return.
@@ -4137,12 +4143,11 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
-        # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
+        # Read GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
-        # else the hot within-GEAK ratio; see run_e2e final-basis selection). This
-        # makes Hyperloom's same-harness validated gain EQUAL to GEAK's headline
-        # number - using the raw hot A/B instead would report a higher figure than
-        # GEAK itself claims and reopen the alignment gap this path exists to close.
+        # else the hot within-GEAK ratio; see run_e2e final-basis selection). It is
+        # used solely to sanity-check that GEAK claimed a win on its promoted basis
+        # before the replay measurement is promoted as the headline.
         # Falls back to the explicit within-GEAK ratios when throughput_speedup is
         # missing (older result.json), preferring the promoted basis.
         try:

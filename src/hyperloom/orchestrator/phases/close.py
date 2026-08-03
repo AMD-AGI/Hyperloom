@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLOSE phase handler: the 5-step close sequencer, post-opt roofline, and the
+"""CLOSE phase handler: the close sequencer, post-opt roofline, and the
 closing-grace / report-terminal helpers used by ``Coordinator.run``."""
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class ClosePhase(PhaseHandler):
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
     async def _on_enter_close(self, *, from_phase: str) -> None:
-        """CLOSE 5-step sequencer (fixed order): report → session_breakdown → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs.
+        """CLOSE sequencer (fixed order): post-opt roofline → report → session_breakdown → langfuse flush → artifact_package → fact_finalize → ndjson_drain (no-op) → mark close_sequence_done + stop_reason. Best-effort steps; final done step always runs. The ``CLOSE step N`` log labels are non-contiguous (0, 1, 2, 2.5, 2.6, 4, 5) for historical reasons.
 
         Args:
             from_phase: The phase being left, used only for logging.

@@ -130,10 +130,10 @@ class IntentRouter:
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review.
 
-        Drops proposals for pruned families, applies the pending-roofline and
-        execution-order denials, then publishes a ``proposal`` message and
-        registers a :class:`PendingProposal` so the Critic gate can later
-        return a verdict.
+        Records an advisory observation for pruned families (the proposal still
+        queues), applies the execution-order denial, then publishes a
+        ``proposal`` message and registers a :class:`PendingProposal` so the
+        Critic gate can later return a verdict.
 
         Args:
             source (str): The agent proposing the action.
@@ -348,10 +348,11 @@ class IntentRouter:
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task.
 
-        Drops pruned families and execution-order violations, re-routes
-        ``explore`` grids through the Critic-review path, and otherwise
-        materialises the delegated action (specialist, dynamic action, etc.)
-        into a task with the appropriate lanes, tools and warmed params.
+        Records an advisory observation for pruned families (the delegate still
+        proceeds), denies execution-order violations, and materialises the
+        delegated action — including ``explore``, which runs its variants
+        directly with no Critic pre-review — into a task with the appropriate
+        lanes, TTL and warmed params.
 
         Args:
             source (str): The agent issuing the delegation.
