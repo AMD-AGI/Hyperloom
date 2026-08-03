@@ -20,6 +20,7 @@ benchmark:
     WM_TORCH_COMPILE_MODE: default
     XDIT_QUALITY_REF: ""
     WM_QUALITY_REL_MAX: 0.2
+    WM_METRIC_SCOPE: inference
     PROFILE: 1
     PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 

@@ -116,6 +116,82 @@ def _percentile(values: list[float], pct: float) -> float:
     return sorted(values)[idx]
 
 
+_METRIC_SCOPES = ("inference", "e2e")
+
+
+def metric_scope() -> str:
+    """Which slice of a reconstruction the reported latency covers.
+
+    ``inference`` (default) reports the model forward only. A reconstruction
+    also runs sky/edge masking on CPU and serialises point clouds to disk,
+    which together dwarf the forward (~1.9s vs ~0.11s) and are untouchable by
+    serving-side tuning -- measuring them would dilute a real GPU win below
+    run-to-run noise. ``e2e`` restores whole-pipeline wall-clock.
+    """
+    scope = os.environ.get("WM_METRIC_SCOPE", "inference").strip().lower()
+    return scope if scope in _METRIC_SCOPES else "inference"
+
+
+def read_stage_timings(run_output: Path | str) -> dict[str, float]:
+    """Read the per-stage timings the pipeline writes when log_time is on."""
+    path = Path(run_output) / "pipeline_timing.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+
+
+def _capture_profile_trace(pipeline, scene: Path, output_root: Path, target_size: int, profile_dir: str) -> None:
+    """Capture one reconstruction under torch.profiler for TraceLens.
+
+    Runs after the timed loop so profiling overhead never enters the
+    measurement. Best-effort throughout: roofline and the kernel agent need a
+    trace, but losing one must not sink results that already succeeded.
+    """
+    prof_dir = Path(profile_dir)
+    try:
+        prof_dir.mkdir(parents=True, exist_ok=True)
+        import torch
+        from torch.profiler import ProfilerActivity, profile
+    except Exception as exc:  # noqa: BLE001 - profiling is never load-bearing
+        print(f"[worldmirror][warn] torch.profiler unavailable: {type(exc).__name__}: {exc}")
+        return
+
+    # TraceLens resolves each kernel's editable source from the CPU-side Python
+    # stack, so with_stack must stay on for the kernel agent to find sources.
+    with_stack = os.environ.get("WM_PROFILER_WITH_STACK", "1") != "0"
+    prof = None
+    try:
+        torch.cuda.synchronize()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_stack=with_stack,
+            with_modules=with_stack,
+        ) as prof:
+            pipeline(
+                str(scene),
+                output_path=str(output_root),
+                strict_output_path=str(output_root / "profile_capture"),
+                target_size=target_size,
+                log_time=False,
+            )
+            torch.cuda.synchronize()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worldmirror][warn] profiled reconstruction failed: {type(exc).__name__}: {exc}")
+        return
+
+    out_trace = prof_dir / "worldmirror-TP-0.pt.trace.json.gz"
+    try:
+        prof.export_chrome_trace(str(out_trace))
+        print(f"[worldmirror] wrote torch profiler trace -> {out_trace}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worldmirror][warn] export_chrome_trace failed: {type(exc).__name__}: {exc}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="WorldMirror reconstruction benchmark")
     parser.add_argument("--worldmirror-dir", required=True)
@@ -171,7 +247,11 @@ def main(argv: list[str] | None = None) -> int:
             log_time=False,
         )
 
-    latencies_ms: list[float] = []
+    scope = metric_scope()
+    e2e_ms: list[float] = []
+    inference_ms: list[float] = []
+    stage_totals: dict[str, float] = {}
+    stage_counts: dict[str, int] = {}
     completed = 0
     last_output = output_root
     start = time.perf_counter()
@@ -184,15 +264,35 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=str(output_root),
                 strict_output_path=str(run_output),
                 target_size=args.target_size,
-                log_time=bool(args.profile_dir),
+                # Always on: the per-stage breakdown is what the reported
+                # latency is derived from, and it costs a few timestamps.
+                log_time=True,
             )
-            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+            e2e_ms.append((time.perf_counter() - t0) * 1000.0)
+            stages = read_stage_timings(run_output)
+            for key, value in stages.items():
+                stage_totals[key] = stage_totals.get(key, 0.0) + value
+                stage_counts[key] = stage_counts.get(key, 0) + 1
+            if "inference" in stages:
+                inference_ms.append(stages["inference"] * 1000.0)
             completed += 1
             last_output = run_output
     duration = time.perf_counter() - start
 
+    # Fall back to wall-clock rather than reporting a partial sample: a mix of
+    # the two scopes would be silently incomparable across variants.
+    if scope == "inference" and completed and len(inference_ms) == completed:
+        latencies_ms, scope_applied = inference_ms, "inference"
+    else:
+        latencies_ms = e2e_ms
+        scope_applied = "e2e" if scope == "e2e" else "e2e (pipeline_timing.json unavailable)"
+
     mean_ms = statistics.fmean(latencies_ms) if latencies_ms else 0.0
-    throughput = (completed / duration) if duration > 0 else 0.0
+    # Throughput must invert the reported latency, otherwise a scoped metric
+    # and a wall-clock rate would disagree about the same run.
+    throughput = (1000.0 / mean_ms) if mean_ms > 0 else 0.0
+    if args.profile_dir:
+        _capture_profile_trace(pipeline, scenes[0], output_root, args.target_size, args.profile_dir)
     quality_gate = evaluate_quality_gate(
         last_output,
         args.quality_ref,
@@ -215,6 +315,15 @@ def main(argv: list[str] | None = None) -> int:
         "p99_e2el_ms": round(_percentile(latencies_ms, 99), 6) if latencies_ms else 0.0,
         "std_e2el_ms": round(statistics.pstdev(latencies_ms), 6) if len(latencies_ms) > 1 else 0.0,
         "quality_gate": quality_gate,
+        # What the headline latency covers, plus the whole-pipeline number and
+        # the stage split, so a report can say "forward -X%, end-to-end -Y%"
+        # instead of implying the whole pipeline moved.
+        "metric_scope": scope_applied,
+        "e2e_mean_ms": round(statistics.fmean(e2e_ms), 6) if e2e_ms else 0.0,
+        "stage_timings_mean_s": {
+            key: round(total / stage_counts[key], 6)
+            for key, total in sorted(stage_totals.items())
+        },
         "bench_config": {
             "target_size": args.target_size,
             "warmup": args.warmup,
