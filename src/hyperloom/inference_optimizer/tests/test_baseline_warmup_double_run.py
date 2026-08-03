@@ -522,7 +522,8 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         (slot / "server.log").write_text(
             "(APIServer pid=42) RuntimeError: Engine core initialization "
-            "failed. See root cause above. Failed core proc(s): {}\n",
+            "failed. See root cause above. Failed core proc(s): {} "
+            "SAFE_API_KEY=ak-invalid-measurement-secret\n",
             encoding="utf-8",
         )
         # Classification must be driven by the server.log marker, not returncode.
@@ -546,6 +547,8 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     assert result["status"] == "failed"
     assert result["error_class"] == "server_init_dead", result
     assert "Engine core initialization failed" in result["error"]
+    assert "invalid-measurement-secret" not in result["error"]
+    assert "[REDACTED]" in result["error"]
 
 
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):

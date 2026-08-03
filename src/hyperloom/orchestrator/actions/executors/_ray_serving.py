@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperloom.common.env_safety import scrub_benchmark_process_env
+
 log = logging.getLogger(__name__)
 
 # Sentinel returncodes (distinct from -909..-912 watchdog sentinels).
@@ -188,8 +190,19 @@ def _serving_actor_body() -> Any:
         def __init__(self) -> None:
             self._mgr = ManagedServerProcess()
 
-        def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+        def start(
+            self,
+            cmd,
+            *,
+            env=None,
+            cwd=None,
+            log_path=None,
+            scrub_benchmark_env=False,
+        ) -> int:
             """Launch the serving subprocess; Ray has set visible devices.
+
+            GPU specialist actors retain control-plane credentials by default;
+            benchmark serving ranks opt into scrubbing at their call site.
 
             Returns:
                 The launched pid.
@@ -199,6 +212,8 @@ def _serving_actor_body() -> Any:
                 if key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
                     continue
                 merged[key] = value
+            if scrub_benchmark_env:
+                scrub_benchmark_process_env(merged)
             return self._mgr.start(cmd, env=merged, cwd=cwd, log_path=log_path)
 
         def run_blocking(
@@ -803,6 +818,7 @@ class ServingGroupManager:
                         env=(envs[i] if envs else None),
                         cwd=(cwds[i] if cwds else None),
                         log_path=(log_paths[i] if log_paths else None),
+                        scrub_benchmark_env=True,
                     )
                 )
             )

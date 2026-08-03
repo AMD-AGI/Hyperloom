@@ -106,3 +106,35 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     env = {"LD_PRELOAD": "evil.so", "PATH": "/bin", "SAFE": "1"}
     assert common_env_safety.scrub_child_process_env(env) is env
     assert env == {"PATH": "/bin", "SAFE": "1"}
+
+
+def test_scrub_benchmark_process_env_removes_control_plane_credentials():
+    env = {
+        "AMD_API_KEY": "amd-secret",
+        "AMD_LLM_API_KEY": "amd-llm-secret",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "LLM_GATEWAY_KEY": "gateway-secret",
+        "LLM_PROXY_API_KEY": "proxy-secret",
+        "OPENAI_API_KEY": "openai-secret",
+        "SAFE_API_KEY": "safe-secret",
+        "HF_TOKEN": "model-download-token",
+        "PATH": "/bin",
+        "RUN_EVAL": "true",
+    }
+
+    assert common_env_safety.scrub_benchmark_process_env(env) is env
+    assert env == {
+        "HF_TOKEN": "model-download-token",
+        "PATH": "/bin",
+        "RUN_EVAL": "true",
+    }
+
+
+def test_redact_secret_values_masks_assignments_and_bearer_tokens():
+    text = "SAFE_API_KEY=ak-sensitive-value Authorization: Bearer sensitive-token"
+
+    redacted = common_env_safety.redact_secret_values(text)
+
+    assert "sensitive-value" not in redacted
+    assert "sensitive-token" not in redacted
+    assert redacted.count("[REDACTED]") == 2
