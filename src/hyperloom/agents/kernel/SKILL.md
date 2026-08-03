@@ -461,13 +461,14 @@ routes the stdout through `_extract_source_block` (which only returns an
 artifact when a real fenced code block is present) and never lets a
 transcript impersonate a `.cu` / `.py` source.
 
-Downstream consumers (`breakdown/collectors.py`, dashboards, etc.) should
-either:
+Downstream consumers (`breakdown/collectors/kernels.py`, dashboards, etc.)
+should either:
 1. read `attempt["optimized_path"]` from `optimization_attempts.jsonl`
    (already the canonical pointer — it tracks whichever name was used), or
 2. glob `runs/<session_id>/optimized/<attempt_id>*` to pick up both
    historical `_optimized.<suffix>` files and the new `_stdout.log`
-   (`breakdown/collectors.py` does this — older session dirs keep working).
+   (`breakdown/collectors/kernels.py` does this — older session dirs keep
+   working).
 
 Never assume a fixed `_optimized.cu` / `_optimized.py` suffix on
 real-backend runs after 2026-05.

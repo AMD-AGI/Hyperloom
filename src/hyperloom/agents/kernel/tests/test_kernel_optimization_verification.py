@@ -1176,7 +1176,7 @@ def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path)
         "geak-deadbeef_optimized.cu",
         "geak-deadbeef_stdout.log",
     }, (
-        'breakdown/collectors.py uses `glob(f"{attempt_id}*")` to discover '
+        'breakdown/collectors/kernels.py uses `glob(f"{attempt_id}*")` to discover '
         "per-attempt artefacts — both the legacy `_optimized.<suffix>` and "
         "the post-2026-05 `_stdout.log` names must remain discoverable so "
         "older session dirs and new ones render identically in the breakdown."
