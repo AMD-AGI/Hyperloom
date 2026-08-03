@@ -54,14 +54,16 @@ F_PV_DETAILS: Final[str] = "details"
 # Enum literals (strict server-side enums; unknown values -> 422).
 AUTHORITY_EXPERIENTIAL: Final[str] = "EXPERIENTIAL"
 
-# Search order_by whitelist — exactly 6 values per spec.
+# Search order_by values accepted by ``/recipes/search``.
 ORDER_BY_UPDATED_AT_DESC: Final[str] = "updated_at DESC"
 ORDER_BY_UPDATED_AT_ASC: Final[str] = "updated_at ASC"
 ORDER_BY_CREATED_AT_ASC: Final[str] = "created_at ASC"
 
 
-# Two timeout/retry profiles: foreground fails fast and falls through to
-# NDJSON; background (flusher / CLOSE drain) uses the larger budget.
+# Two HTTP timeout budgets (single attempt each; no retry). Foreground: gbrain
+# reads on the Coordinator main loop fail fast and fall back to the local
+# recipe store. Background: the best-effort gbrain write-side mirror
+# (gbrain_ingest.build_mirror_mcp_from_env) gets the larger budget.
 DEFAULT_HTTP_TIMEOUT_SEC: Final[float] = 10.0  # background / flusher
 FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0  # Coordinator main loop
 
@@ -265,12 +267,16 @@ def canonical_labels(
     Args:
         model: The model identifier.
         hardware: The hardware/GPU identifier.
-        framework_name: The serving framework_name name.
-        framework_version: The framework_name version.
+        framework_name: The serving framework name.
+        model_type: The model family/type identifier; defaults to
+            ``DEFAULT_MODEL_TYPE_SLUG`` when empty.
+        architectures: Model architectures as a str or list[str], slugged via
+            :func:`_architectures_slug`.
+        framework_version: The framework version.
         precision: The precision/quantization scheme.
 
     Returns:
-        The five-key labels dict mirroring the canonical id.
+        The 7-key labels dict mirroring the canonical id.
     """
     return {
         F_LABEL_MODEL: _slug(model, DEFAULT_MODEL_SLUG),
@@ -296,10 +302,10 @@ def detect_framework_version(framework_name: str) -> str:
     """Best-effort installed version of ``framework_name`` via importing its
     top-level package and reading ``__version__``. Failures degrade to
     :data:`DEFAULT_FRAMEWORK_VERSION_SLUG` (the optimizer must boot without
-    the framework_name importable).
+    the framework importable).
 
     Args:
-        framework_name: The serving framework_name name to probe.
+        framework_name: The serving framework name to probe.
 
     Returns:
         The detected version slug, or the default on any failure.

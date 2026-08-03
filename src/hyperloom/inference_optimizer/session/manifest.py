@@ -365,7 +365,7 @@ def build_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble the schema-v3 session manifest dictionary.
+    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``).
 
     Merges environment variables and (optional) parsed CLI args into the
     canonical resume tag, including workload, objective, dependency

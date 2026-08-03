@@ -20,8 +20,8 @@ Usage::
         --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
 
 When --output is omitted the report is written to
-``<session_dir>/session_report.md`` next to the input file. The LLM
-user prompt and raw response (when used) are persisted alongside as
+``<session_dir>/session_report.md`` next to the input file. Pass
+``--debug-dump`` to also persist the LLM user prompt and raw response as
 ``session_report_prompt.json`` / ``session_report_llm_raw.txt`` so
 hallucinations can be audited after the fact.
 """

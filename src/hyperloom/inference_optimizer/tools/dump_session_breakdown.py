@@ -16,7 +16,8 @@ Examples
 
 ::
 
-    # Live session in this sandbox (USER_DATA_PATH or /workspace/hyperloom)
+    # Live session in this sandbox ($INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR,
+    # else $USER_DATA_PATH / /workspace/hyperloom)
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
     # Historical session on a shared filesystem

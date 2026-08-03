@@ -69,8 +69,9 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     }
 )
 
-# Fallback used only when ActionRegistry can't load. Must stay in sync with the
-# _RUNS_WORKSPACE_PHASES union; tests/test_action_catalogue.py enforces this.
+# Fallback used only when ActionRegistry can't load. Must be kept in sync BY HAND
+# with the registry actions whose _meta pipeline_phase is in
+# _RUNS_WORKSPACE_PHASES (see _runs_actions below) — no test enforces this.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
     {
         "baseline",
@@ -288,8 +289,9 @@ def trace_dir(session_dir: Path) -> Path:
 
 def llm_calls_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every
-    in-process LLM call (orchestration / kernel / specialist
-    in-process fallback / codex / critic / proposal_scorer).
+    in-process LLM call; the ``component`` label is drawn from the closed set
+    :data:`hyperloom.orchestrator.trace.llm_trace.VALID_COMPONENTS`
+    (e.g. orchestration / kernel_agent / specialist / critic).
 
     Out-of-process child shards live under :func:`trace_ext_dir`; the collector
     merges both streams.
@@ -530,7 +532,8 @@ def recipe_kb_dir(session_dir: Path) -> Path:
 def recipe_kb_warm_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_warm.json``, the T0 ``find-recipe`` snapshot.
 
-    Read by specialist assembly.
+    Write-only debug snapshot; specialist assembly reads
+    ``shared_state.warm_start_recipe`` instead.
 
     Args:
         session_dir (Path): The session root directory.
@@ -545,7 +548,8 @@ def recipe_kb_warm_json(session_dir: Path) -> Path:
 def recipe_kb_pitfalls_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_pitfalls.json``, the T0 ``traps`` snapshot.
 
-    Read by specialist assembly.
+    Write-only debug snapshot; specialist assembly reads
+    ``shared_state.warm_start_pitfalls`` instead.
 
     Args:
         session_dir (Path): The session root directory.
@@ -571,9 +575,10 @@ def recipe_kb_lessons_json(session_dir: Path) -> Path:
 
 
 def recipe_kb_pending_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — append-only async write
-    queue for T2/T3 ops. Consumed by the recipe_kb_flusher daemon; drained at
-    T4 before ``session commit``.
+    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — legacy async KB write
+    queue. The flusher daemon that drained it was retired and nothing writes
+    rows today; ``cli/preflight`` and the breakdown telemetry collector only
+    report its (normally zero) depth.
 
     Args:
         session_dir: The session root directory.
@@ -602,8 +607,9 @@ def recipe_kb_flushed_ndjson(session_dir: Path) -> Path:
 def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
     """Compute the path to ``.kb_dead_letter.ndjson``, the permanent-failure rows.
 
-    Holds rows that failed permanently (HTTP 4xx business-logic rejects);
-    raises a robustness HIGH alert.
+    Holds rows that failed permanently (HTTP 4xx business-logic rejects).
+    Surfaced in preflight queue output and breakdown ``kb_provenance`` line
+    counts; no in-repo robustness alert is wired to it.
 
     Args:
         session_dir (Path): The session root directory.
@@ -616,8 +622,11 @@ def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
 
 
 def recipe_kb_audit_jsonl(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — append-only audit of every
-    direct Recipe KB CLI invocation. Source of truth for breakdown.kb_provenance.
+    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — reserved append-only audit
+    slot for Recipe KB CLI invocations; no producer writes it today, so
+    ``breakdown.kb_provenance.audit_tail_count`` / ``audit_status_counts`` stay
+    empty. The live KB audit channel is :func:`recipe_snapshot_audit_jsonl`,
+    written via ``RecipeKB.audit_hook`` in ``cli/kb.py``.
 
     Args:
         session_dir: The session root directory.
@@ -661,7 +670,7 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor
     reachability snapshot; breakdown reads it for pr_monitor:* warnings.
 
-    Schema: ``{enabled, url, reachable, mcp_url, window_days, status_text}``.
+    Schema: ``{enabled, reachable, mcp_url, status_text}``.
 
     Args:
         session_dir: The session root directory.
@@ -675,7 +684,9 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
 def recipe_kb_flusher_pid(session_dir: Path) -> Path:
     """Compute the path to ``.kb_flusher.pid``, the flusher daemon pid file.
 
-    The one-line file is read by robustness checks to detect a dead flusher.
+    Probed by the breakdown telemetry collector (``_collect_flusher_status``),
+    which reads the first line and ``os.kill(pid, 0)``s it to set
+    ``kb_provenance.flusher_status.alive``. No in-repo component writes it.
 
     Args:
         session_dir (Path): The session root directory.
