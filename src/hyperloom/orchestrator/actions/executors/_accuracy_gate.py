@@ -68,6 +68,14 @@ BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY = "baseline_eval_contract_fingerprint"
 EVAL_KIND_RUNTIME_FAILURE = "eval_runtime_failure"
 EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
 EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
+# The model never emitted EOS, so the eval was cut short and scored ~0.
+# Distinct from ``accuracy_below_floor``: a broken generation loop, not a model
+# that answered and got them wrong.
+EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
+
+# Sidecar the probe writes into ``$RESULT_DIR`` when it trips. Deliberately not
+# ``results*.json``: :func:`parse_eval_results` globs that name for the score.
+EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
 
 # stop_reason recorded when the baseline could not produce an accuracy result
 # even though the accuracy test was expected to run. A broken baseline accuracy
@@ -201,11 +209,15 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     bench = data.get("benchmark") or {}
     envs: dict = bench.get("envs") or {}
 
-    # Eval-contract keys in benchmark.envs; all others are excluded.
+    # Eval-contract keys in benchmark.envs; all others are excluded. The probe
+    # knobs belong here: they change how early an eval is cut short.
     _EVAL_CONTRACT_ENV_KEYS = (
         "RUN_EVAL",
         "MAGPIE_EVAL_TASKS",
         "MAGPIE_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_PROBE",
+        "HYPERLOOM_EVAL_PROBE_MIN_SAMPLES",
+        "HYPERLOOM_EVAL_PROBE_LENGTH_RATIO",
     )
     # Workload-shape keys that define what is being measured.
     _WORKLOAD_SHAPE_ENV_KEYS = (
@@ -555,6 +567,54 @@ def parse_eval_results(
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
 
 
+def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
+    """Read the generation-pathology probe sidecar, when the probe tripped.
+
+    The probe only writes :data:`EVAL_PROBE_FILENAME` when it cuts an eval
+    short, so ``None`` means the ordinary thing happened: the model terminated
+    its answers, or the InferenceX patch never applied. Searched recursively
+    because the baseline double-run evaluates in the warmup round, whose
+    ``$RESULT_DIR`` nests under the task workspace.
+
+    Args:
+        workspace (Path | str): Benchmark workspace to search recursively.
+
+    Returns:
+        dict[str, Any] | None: The probe record stamped with ``kind`` and
+        ``source_file``, or ``None`` when no readable sidecar exists.
+    """
+    matches = sorted(Path(workspace).rglob(EVAL_PROBE_FILENAME))
+    if not matches:
+        return None
+    latest = matches[-1]
+    try:
+        record = json.loads(latest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    record["kind"] = EVAL_KIND_GENERATION_PATHOLOGY
+    record["source_file"] = str(latest)
+    return record
+
+
+def eval_probe_summary(probe: dict[str, Any] | None) -> str:
+    """Render a one-line summary of a tripped probe for a log / journal reason.
+
+    Args:
+        probe (dict[str, Any] | None): A :func:`read_eval_probe` record.
+
+    Returns:
+        str: The summary, or ``""`` when ``probe`` is empty.
+    """
+    if not probe:
+        return ""
+    return (
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {probe.get('finish_reason_length', 0)}/"
+        f"{probe.get('observed_samples', 0)} sampled responses hit the max_tokens cap "
+        f"(up to {probe.get('max_completion_tokens_seen', 0)} tokens); the model never "
+        "emitted EOS, so the eval was cut short and scored ~0"
+    )
+
+
 def accuracy_passed(
     baseline_accuracy: float,
     new_accuracy: float,
@@ -598,7 +658,9 @@ __all__ = [
     "ENABLEMENT_MODE_OFF",
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
+    "EVAL_KIND_GENERATION_PATHOLOGY",
     "EVAL_KIND_RUNTIME_FAILURE",
+    "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
     "accuracy_keep_block",
     "accuracy_meets_floor",
@@ -606,9 +668,11 @@ __all__ = [
     "classify_accuracy_failure",
     "eval_contract_fingerprint",
     "eval_enablement_allowed",
+    "eval_probe_summary",
     "is_high_accuracy_risk",
     "launch_enablement_allowed",
     "parse_eval_results",
+    "read_eval_probe",
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
     "require_framework_accuracy_default",
