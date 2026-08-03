@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract test: keep envelope tables aligned with hyperloom.inference_optimizer. Skipped when it is not importable (soft dependency); add its path to PYTHONPATH to run."""
+"""Contract test: keep envelope tables aligned with hyperloom.inference_optimizer. Both ship in the same distribution, so the import guard only trips on a partial install."""
 
 from __future__ import annotations
 

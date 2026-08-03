@@ -52,7 +52,7 @@ _FAKE_PR_PATCHES = [
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
-    """Minimal handler routing the four endpoints framework-agent uses."""
+    """Minimal handler routing the five endpoints framework-agent uses."""
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003 - stdlib name
         """Silence the default access log so pytest output stays clean."""

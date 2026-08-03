@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.enablement (failure classifier + request model).
+"""Tests for hyperloom.agents.framework.enablement (failure classifier + request model).
 
 Pure-Python, GPU-free: canned log string in → structured
 :class:`FailureSignature` out.

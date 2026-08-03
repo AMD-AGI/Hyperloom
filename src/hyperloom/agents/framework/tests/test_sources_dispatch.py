@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.sources.enumerate_candidates dispatch. Hermetic - monkeypatches the backend functions directly."""
+"""Tests for hyperloom.agents.framework.sources.enumerate_candidates dispatch. Hermetic - monkeypatches the backend functions directly."""
 
 from __future__ import annotations
 
