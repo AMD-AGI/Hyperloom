@@ -42,7 +42,9 @@ def flash_attn_func(
     """Attention over (batch, seqlen, heads, head_dim) tensors, as flash-attn.
 
     SDPA wants (batch, heads, seqlen, head_dim), so transpose on the way in and
-    back out to keep the caller's layout contract intact.
+    back out to keep the caller's layout contract intact. ``deterministic`` is
+    accepted and ignored: it only selects flash-attn's backward implementation,
+    and reconstruction runs entirely under inference no_grad.
     """
     if return_attn_probs:
         raise NotImplementedError("flash_attn SDPA shim cannot return attention probabilities")
