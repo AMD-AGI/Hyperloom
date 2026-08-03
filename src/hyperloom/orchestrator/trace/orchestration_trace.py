@@ -142,7 +142,7 @@ class OrchestrationTurnRecord:
             "sdk_name": self.sdk_name,
             "sdk_version": self.sdk_version,
             "cli_version": self.cli_version,
-            "gateway_endpoint": self.gateway_endpoint,
+            "gateway_endpoint": _safe_value(self.gateway_endpoint),
             "request_id": self.request_id,
             "resume_requested": bool(self.resume_requested),
             "previous_session_id_hash": self.previous_session_id_hash,

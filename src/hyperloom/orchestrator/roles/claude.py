@@ -638,7 +638,8 @@ class ClaudeBackend:
         if not raw:
             return None
         parts = urlsplit(raw)
-        return parts.netloc or "configured"
+        # hostname, not netloc: netloc carries any ``user:secret@`` userinfo.
+        return parts.hostname or "configured"
 
     @staticmethod
     def _session_hash(session_id: str | None) -> str | None:
