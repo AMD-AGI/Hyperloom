@@ -39,7 +39,10 @@ if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -z "${HIP_VISIBLE_DEVICES:-}" ]; then
 fi
 export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export PYTHONPATH="${WORLDMIRROR_DIR}:${PYTHONPATH:-}"
+# ${VAR:+:$VAR} keeps the separator out when the inbound value is empty: a
+# trailing/empty segment puts the CWD on sys.path, where benchmark output can
+# shadow stdlib modules.
+export PYTHONPATH="${WORLDMIRROR_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 RESULT_DIR="${RESULT_DIR:?RESULT_DIR must be set by Magpie}"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
@@ -56,7 +59,7 @@ PYTHON_BIN="${WORLDMIRROR_PYTHON:-python3}"
 # flash-attn has no ROCm wheel; fall back to the SDPA shim. Appended last so a
 # real install always wins if one ever lands in this environment.
 if ! "${PYTHON_BIN}" -c "import flash_attn" >/dev/null 2>&1; then
-    export PYTHONPATH="${PYTHONPATH:-}:${_SCRIPT_DIR}/worldmirror_compat"
+    export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}${_SCRIPT_DIR}/worldmirror_compat"
 fi
 
 PROFILE_ARGS=()
