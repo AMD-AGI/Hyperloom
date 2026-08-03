@@ -327,6 +327,29 @@ def _apply_worldmirror_runtime_defaults(
     )
 
 
+def apply_scriptable_runtime_defaults(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    explicit_benchmark_script: bool,
+) -> None:
+    """Re-pin bundled scriptable entrypoints and their runtime paths.
+
+    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
+    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
+    replaces the bundled absolute path. Each per-framework helper is a no-op
+    for other frameworks, so a new scriptable framework is added here once.
+    """
+    for apply in (_apply_worldplay_runtime_defaults, _apply_worldmirror_runtime_defaults):
+        apply(
+            bench,
+            envs,
+            gpu_type=gpu_type,
+            explicit_benchmark_script=explicit_benchmark_script,
+        )
+
+
 def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
@@ -670,13 +693,7 @@ def materialize_config_with_envs(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
-    _apply_worldplay_runtime_defaults(
-        bench,
-        envs,
-        gpu_type=gpu_type,
-        explicit_benchmark_script=bool(benchmark_script),
-    )
-    _apply_worldmirror_runtime_defaults(
+    apply_scriptable_runtime_defaults(
         bench,
         envs,
         gpu_type=gpu_type,
