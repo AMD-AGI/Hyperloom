@@ -627,19 +627,22 @@ def _spawn_remote(
     return _detach_framework_launch(cmd, log_file, pid_file, sub_env, node_rank)
 
 
-def _rank0_pid_from_log(log_dir: str) -> int | None:
-    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort).
+def _rank0_pid_from_log(pid_dir: str) -> int | None:
+    """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort).
+
+    The PID dir is passed explicitly rather than derived from the log dir: the
+    two are no longer siblings once the logs move to a shared filesystem, and a
+    PID is only meaningful on its own node so its dir stays node-local ``/tmp``.
 
     Args:
-        log_dir (str): The log directory; its parent is probed for the
-            ``multi_node_pids/rank_0.pid`` file before falling back to the
-            default temp-directory location.
+        pid_dir (str): The rank PID directory; ``{pid_dir}/rank_0.pid`` is read
+            before falling back to the default temp-directory location.
 
     Returns:
         int | None: The rank-0 PID, or ``None`` if it cannot be read.
     """
     try:
-        pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
+        pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
         if not pid_path.is_file():
             pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
@@ -1216,7 +1219,7 @@ def main() -> int:
         return 0
 
     _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
-    _r0_pid = _rank0_pid_from_log(args.log_dir)
+    _r0_pid = _rank0_pid_from_log(args.pid_dir)
     if _wait_health(
         _HEALTH_PROBE_TIMEOUT_SEC,
         rank0_pid=_r0_pid,
