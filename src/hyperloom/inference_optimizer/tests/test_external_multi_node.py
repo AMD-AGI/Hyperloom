@@ -398,6 +398,39 @@ def test_bookkeeping_carries_over_within_the_same_handoff(_external_env: Path) -
     assert state["last_restart_framework"] == "sglang"
 
 
+def test_pd_leg_urls_carry_over_within_the_same_handoff(_external_env: Path) -> None:
+    """PD leg URLs lack the ``last_`` prefix but must survive a reload too.
+
+    They are read from the launcher summary and describe this cluster's legs.
+    Dropping them made the CLI's mid-restart checkpoint persist a state without
+    them, so a later launch failure wiped them on disk, and the PD serving/resume
+    probe then saw no legs and could never resume.
+    """
+    _write_disk_state(
+        pd_prefill_url="http://10.32.17.187:30000",
+        pd_decode_url="http://10.32.17.185:30001",
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert state["pd_prefill_url"] == "http://10.32.17.187:30000"
+    assert state["pd_decode_url"] == "http://10.32.17.185:30001"
+
+
+def test_pd_leg_urls_are_dropped_when_the_cluster_was_replaced(_external_env: Path) -> None:
+    """Same identity guard as the bookkeeping: a replacement cluster's legs differ."""
+    _write_disk_state(
+        service_url="http://other-frontend:8000",
+        pd_prefill_url="http://10.9.9.1:30000",
+        pd_decode_url="http://10.9.9.2:30001",
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert "pd_prefill_url" not in state
+    assert "pd_decode_url" not in state
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
