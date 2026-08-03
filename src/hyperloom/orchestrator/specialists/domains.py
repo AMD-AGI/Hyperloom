@@ -50,8 +50,8 @@ class SpecialistDomain:
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
-# ROCm/aiter and triton-lang/triton are excluded (source-editing targets, not
-# PR-query targets).
+# Entries are matched verbatim against the PR Monitor's indexed repo keys
+# (`pr_repos_list`), so the owner/name casing here must track the server's.
 PR_QUERY_REPOS: tuple[str, ...] = (
     "sgl-project/sglang",
     "ROCm/vllm",
@@ -59,8 +59,13 @@ PR_QUERY_REPOS: tuple[str, ...] = (
     "nvidia/nccl",
     "pytorch/pytorch",
     "ROCm/ROCm",
-    "ROCm/HIP",
+    "ROCm/hip",
     "NVIDIA/TensorRT-LLM",
+    "ROCm/aiter",
+    "ROCm/ATOM",
+    "ROCm/FlyDSL",
+    "triton-lang/triton",
+    "vllm-project/vllm",
 )
 
 
