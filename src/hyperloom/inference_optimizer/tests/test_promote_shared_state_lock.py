@@ -720,3 +720,69 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
     assert top.get("source_snapshot") == "/session/optimization_stack/src/abc123"
     assert top.get("framework_root") == "/opt/vllm"
     assert top.get("base_sha") == "deadbeef"
+
+
+def test_lift_refuses_winner_that_does_not_beat_current_best(session_dir):
+    """current_best never moves down, even for a winner its executor called a KEEP."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 2195.86
+    s.current_best = {
+        "action": "replay_warm_recipe",
+        "tput": 2358.80,
+        "extra_server_args": "--enable-aiter-allreduce-fusion",
+        "extra_envs": {"SGLANG_USE_AITER": "1"},
+    }
+    s.optimization_stack = [{"action": "replay_warm_recipe", "variant_name": "warm_replay"}]
+    s.gain_per_stack_entry = [7.908]
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        2355.46,
+        {
+            "name": "minimax-fused-swiglu+moe-combine",
+            "candidate_extra_server_args": "--trust-remote-code",
+            "extra_envs": {"SGLANG_MINIMAX_M3_FUSED_MOE_COMBINE": "1"},
+            "tput": 2355.46,
+        },
+    )
+
+    assert lifted is False
+    assert s.current_best["tput"] == 2358.80
+    assert len(s.optimization_stack) == 1
+    assert s.gain_per_stack_entry == [7.908]
+
+
+def test_lift_refuses_winner_below_baseline_when_stack_is_empty(session_dir):
+    """Before any validated layer the baseline is the anchor, and it holds too."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        900.0,
+        {"name": "regression", "candidate_extra_server_args": "--slow", "extra_envs": {}},
+    )
+
+    assert lifted is False
+    assert not s.current_best
+    assert s.optimization_stack == []
+
+
+def test_lift_accepts_winner_that_beats_current_best(session_dir):
+    """The guard only blocks regressions; a genuine win still lifts."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "real-win", "candidate_extra_server_args": "--fast", "extra_envs": {}},
+    )
+
+    assert lifted is True
+    assert s.current_best["tput"] == 1100.0
+    assert s.optimization_stack[-1]["variant_name"] == "real-win"
