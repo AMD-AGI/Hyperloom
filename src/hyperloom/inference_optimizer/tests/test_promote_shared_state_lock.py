@@ -515,6 +515,7 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.phase = "KERNEL_AGENT"
 
     await coord._promote_to_shared_state(
         "framework_agent",
@@ -538,6 +539,8 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     assert row["batch_id"] == "b1"
     assert s.current_best["action"] == "framework"
     assert s.current_best["tput"] == 130.0
+    assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
+    assert s.optimization_stack[-1]["provenance"] == "framework_agent"
     assert not hasattr(s, "last_framework_agent")
 
 

@@ -245,6 +245,32 @@ def test_framework_proposal_integrate_patch_overrides_kernel_completion_phase():
     assert result["entries"][0]["optimization_kind"] == "serving_config"
 
 
+def test_direct_framework_action_ignores_delayed_completion_phase():
+    state = {
+        "session_id": "cross-phase-direct-framework",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "framework",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "PR:123",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
+    assert result["entries"][0]["source"] == "framework_agent"
+    assert result["entries"][0]["source_method"] == "action_family"
+
+
 def test_integrate_with_kernel_evidence_remains_kernel_agent():
     state = {
         "session_id": "kernel-integrate-k001",

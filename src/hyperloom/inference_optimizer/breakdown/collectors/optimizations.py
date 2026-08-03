@@ -155,6 +155,8 @@ def _resolve_source(
         or action.startswith("kernel_opt")
     ):
         return "kernel_agent", "action_family"
+    if action in {"framework", "framework_agent"}:
+        return "framework_agent", "action_family"
 
     explicit = _normalized_phase(
         raw.get("source_phase")
@@ -200,8 +202,6 @@ def _resolve_source(
 
     if action in {"explore", "backends", "params"}:
         return "explore", "action_family"
-    if action == "framework_agent":
-        return "framework_agent", "action_family"
     return "unattributed", "unknown"
 
 

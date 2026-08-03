@@ -3259,6 +3259,10 @@ class WritebackCollaborator:
                 "candidate_extra_server_args": "",
                 "extra_envs": {},
                 "workspace": result.get("workspace"),
+                # Direct framework candidates are owned by FRAMEWORK_AGENT even
+                # if writeback runs after the state machine has advanced.
+                "source_phase": "FRAMEWORK_AGENT",
+                "provenance": "framework_agent",
             }
             self._lift_to_current_best("framework", float(new_tput), lift)
             if self.shared_state.baseline_tput > 0:
