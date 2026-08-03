@@ -160,6 +160,39 @@ def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
     assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
 
 
+def test_ownerless_integrate_patch_ignores_framework_and_explore_timeline():
+    for timeline_phase in ("EXPLORE", "FRAMEWORK_AGENT"):
+        state = {
+            "session_id": f"ownerless-{timeline_phase.lower()}",
+            "baseline_tput": 100.0,
+            "cumulative_gain_validated": 10.0,
+            "cumulative_gain_validated_stack_len": 1,
+            "optimization_stack": [
+                {
+                    "action": "integrate_patch",
+                    "variant_name": "ownerless",
+                    "tput": 110.0,
+                    "ts": "1970-01-01T00:00:10+00:00",
+                },
+            ],
+            "gain_per_stack_entry": [10.0],
+            "phase_history": [{"to_phase": timeline_phase, "ts_unix": 0.0}],
+        }
+        warnings: list[str] = []
+
+        attribution = collect_attribution(state, [], [], warnings)
+        result = collect_optimizations(state, attribution, [], [], warnings)
+
+        assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
+        assert attribution["source_breakdown"]["explore_pct_of_total"] == 0.0
+        assert attribution["source_breakdown"]["framework_pct_of_total"] == 0.0
+        assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+        assert result["entries"][0]["source"] == "unattributed"
+        assert result["validation"]["attribution_gap_pct"] == 10.0
+        assert result["validation"]["source_breakdown"]["unattributed_gain_pct"] == 10.0
+        assert any("reported as unattributed" in warning for warning in warnings)
+
+
 def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
     state = {
         "session_id": "kernel-integrate-owner",

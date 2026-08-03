@@ -147,7 +147,7 @@ def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
     return current
 
 
-def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
+def _entry_family(entry: dict[str, Any]) -> str:
     """Resolve attribution family using phase/ownership metadata when needed.
 
     ``integrate_patch`` is not intrinsically a Framework action. Framework
@@ -164,9 +164,7 @@ def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
         return "unattributed"
     if entry.get("framework_agent_authoring"):
         return "framework"
-    phase = str(
-        entry.get("source_phase") or entry.get("phase") or inferred_phase or ""
-    ).strip().upper()
+    phase = str(entry.get("source_phase") or entry.get("phase") or "").strip().upper()
     provenance = str(entry.get("provenance") or "").strip().lower()
     specialist_owned = bool(entry.get("domain")) or provenance.startswith(
         "specialist:"
@@ -312,7 +310,6 @@ def collect_attribution(
         "gemm_tuning": 0.0,
         "geak": 0.0,
     }
-    timeline = _phase_timeline(state)
     unattributed_actions: set[str] = set()
     for e in entries:
         if not isinstance(e, dict):
@@ -322,10 +319,7 @@ def collect_attribution(
         delta = _to_float(e.get("delta_pct"))
         if delta is None:
             continue
-        fam = _entry_family(
-            e,
-            inferred_phase=_phase_at(_entry_ts(e), timeline),
-        )
+        fam = _entry_family(e)
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
         if fam in {"other", "unattributed"} and delta > 0:
             unattributed_actions.add(str(e.get("action") or "<missing>"))
@@ -472,7 +466,7 @@ def _collect_phase_breakdown(
         if phase == "framework_agent":
             phase = "framework"
         action = str(e.get("action") or "").lower()
-        fam = _entry_family(e, inferred_phase=phase)
+        fam = _entry_family(e)
         if action.startswith("integrate_patch"):
             # For this delayed application mechanism, proposal ownership is the
             # attribution phase; the acceptance timestamp is only execution
