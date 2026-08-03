@@ -129,9 +129,7 @@ def test_role_md_files_carry_phase_awareness():
     root = asset_system_prompts_dir()
     for name in ("orchestration", "kernel_agent", "critic", "robustness"):
         body = (root / f"{name}.md").read_text(encoding="utf-8")
-        if name == "robustness":
-            assert "Phase & specialist awareness" in body
-        elif name == "critic":
+        if name == "critic":
             assert "Phase-specific rules" in body
         else:
             assert "Phase awareness" in body, f"{name}.md missing phase awareness"
