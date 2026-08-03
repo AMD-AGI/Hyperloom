@@ -31,8 +31,11 @@ from typing import Any
 # it can run. The ray fan-out path imports it on demand.
 
 
-# Sentinel markers (keep in sync with _server_patcher._discover_sglang_plan).
-# A pod counts as patched iff ALL markers are present.
+# Pod-side subset check: scheduler_profiler_mixin.py + io_struct.py only, and a
+# pod counts as patched iff ALL markers are present. Intentionally weaker than
+# _server_patcher._discover_sglang_plan, which uses a different mixin marker
+# tuple and also requires kernel_shape_profiler.py, scheduler.py and
+# http_server.py sentinels — a pod skipped here may still be partially patched.
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",

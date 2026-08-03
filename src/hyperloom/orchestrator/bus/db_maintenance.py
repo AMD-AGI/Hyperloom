@@ -74,8 +74,8 @@ async def _min_processed_seq(cursors: CursorStore) -> int | None:
 
 # A ``proposal`` event is semantically pending until a ``review_verdict`` targets
 # its ``msg_id``; pruning a pending proposal's row would lose the only durable
-# record a post-resume late verdict can attach to. Single SQL source of truth for
-# that set; keep in lockstep with ``replay_for_resume``.
+# record a post-resume late verdict can attach to. Canonical form of that set;
+# ``prune_events`` inlines a copy — keep both in lockstep with ``replay_for_resume``.
 # The inner SELECT must exclude NULL/empty targets, else ``msg_id NOT IN (..,
 # NULL)`` evaluates to NULL and every proposal would wrongly look decided.
 _PENDING_PROPOSAL_SEQS_SQL = """

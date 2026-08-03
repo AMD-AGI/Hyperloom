@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Objective abstraction — the goal driving early-stop, pressure scoring, and the Orchestration prompt.
+"""Objective abstraction — the goal driving early-stop and the Orchestration prompt header.
 
 Four implementations: TargetGain, TargetTput, TargetBaseline,
 TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
@@ -128,7 +128,7 @@ class TargetGainObjective(_RatioObjective):
         return "gain_pct"
 
     def _current(self, state: "SharedState") -> float:
-        """Return the cumulative validated gain percentage."""
+        """Return the per-round-sum cumulative gain percentage (``cumulative_gain``, not ``cumulative_gain_validated``)."""
         return state.cumulative_gain
 
     def _target(self) -> float:

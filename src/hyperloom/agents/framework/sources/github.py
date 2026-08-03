@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Anonymous GitHub Search backend for perf PR candidate discovery.
+"""GitHub Search backend for perf PR candidate discovery.
 
 Best-effort, zero-deps fallback when ``primus_cortex`` is unavailable.
 No hard-fail: rate-limits, transport errors, or a non-GitHub remote return
 ``[]``. Queries are keyword-driven from ``gap_description`` via
-:func:`framework_agent.keywords.extract_keywords`, falling back to PERF_TERMS.
-Anonymous (no token), so subject to GitHub's 60 req/h IP limit.
+:func:`hyperloom.agents.framework.keywords.extract_keywords`, falling back to
+PERF_TERMS. Anonymous by default (GitHub's 60 req/h IP limit); a bearer token
+is attached when ``GITHUB_TOKEN`` / ``GH_TOKEN`` is set.
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ def search_perf_prs(
     states: tuple[str, ...] = ("open",),
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Return open perf-ish PRs via anonymous GitHub Search API.
+    """Return perf-ish PRs via the GitHub Search API (open-only by default).
 
     Best-effort: rate-limits or non-GitHub remotes return an empty list
     rather than raising. Callers that need hard-fail behaviour should
@@ -110,10 +111,12 @@ def search_perf_prs(
         gap_description (str): Free-text gap description used to derive search
             keywords. Defaults to empty.
         limit (int): Maximum number of PRs to return. Defaults to 5.
+        states (tuple[str, ...]): PR states to include (``("open",)`` default;
+            merged/closed/all broadens beyond open).
         timeout_sec (float): Per-request HTTP timeout in seconds. Defaults to 10.
 
     Returns:
-        list[GitHubPr]: Matching open PRs (at most ``limit``), or an empty list
+        list[GitHubPr]: Matching PRs (at most ``limit``), or an empty list
             on any failure or non-GitHub remote.
     """
     try:

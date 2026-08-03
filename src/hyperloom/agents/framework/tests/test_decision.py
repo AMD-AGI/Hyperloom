@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.decision (winner_decision + candidate_score)."""
+"""Tests for hyperloom.agents.framework.decision (winner_decision + candidate_score)."""
 
 from __future__ import annotations
 

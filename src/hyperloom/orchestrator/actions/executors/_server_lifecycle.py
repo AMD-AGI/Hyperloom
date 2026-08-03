@@ -7,6 +7,10 @@ Magpie's ``server_lifecycle`` reuse protocol lets two benchmark rounds share
 one persistent server: round 1 boots it (``cleanup=false``) and round 2
 re-attaches as a client-only run (``cleanup=true``). Used by the baseline
 cold-start double-run guard and by the explore warm-rebench gate.
+
+Also hosts :func:`reap_orphaned_servers`, which scans this session's
+``runs/*.pid`` files at startup/resume and reaps serving processes orphaned by
+a prior monitor-process death.
 """
 
 from __future__ import annotations

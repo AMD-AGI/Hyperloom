@@ -11,14 +11,17 @@ JSON. These parsers fold those counts into the same ledger.
 All parsers are **tolerant**: a missing file, truncated JSON, or an absent
 ``usage`` block returns an empty / ``None`` result instead of raising.
 
-Output shape: every parser returns the canonical four-key token dict (or
-``None`` when nothing could be recovered):
+Output shape: the token parsers (:func:`normalize_usage`,
+:func:`parse_claude_stream_json_usage`, :func:`parse_forge_usage`) return the
+canonical four-key token dict, or ``None`` when nothing could be recovered:
 
     {"input_tokens", "output_tokens",
      "cache_creation_input_tokens", "cache_read_input_tokens"}
 
 Backends with no prompt-cache concept (OpenAI / GEAK) leave the two ``cache_*``
 values ``None`` so the collector can tell "no cache" from "zero cache hits".
+The remaining parsers recover other shapes — reply text, per-turn usage lists,
+tool-call lists, and the forge step timeline — see each parser's docstring.
 """
 
 from __future__ import annotations

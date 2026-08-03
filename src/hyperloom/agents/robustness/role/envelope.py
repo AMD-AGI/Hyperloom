@@ -215,8 +215,9 @@ class Intent:
 
     The shape matches upstream ``intent_parser.Intent``: a typed enum
     plus a free-form ``payload`` dict. Construction does not validate
-    payload contents; use :func:`assert_payload_valid` (see
-    ``decision.policy_aware``) before emitting.
+    payload contents; use
+    :meth:`~hyperloom.agents.robustness.decision.policy_aware.PolicyAware.assert_payload_complete`
+    before emitting.
     """
 
     type: IntentType

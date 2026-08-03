@@ -25,11 +25,15 @@ First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
 
 ## Auto-detection + timeout
 
-The baseline/profile executors count aiter `.so` files (**< 20 = COLD**) and
-pick a subprocess timeout accordingly: COLD → 3600s, WARM → 2400s
-(`task.params['timeout_sec']` always wins). Each launch logs a
+The baseline executor counts aiter `.so` files (**< 20 = COLD**) and
+picks a subprocess timeout accordingly: COLD → 9000s (150 min,
+`BASELINE_COLD_START_TIMEOUT_SEC`), WARM → 7800s (130 min,
+`BASELINE_DEFAULT_TIMEOUT_SEC`); `task.params['timeout_sec']` always wins. The
+profile executor inherits the same probe with a 14400s (4 h) warm default, so a
+COLD probe there lowers the cap to 9000s. Each launch logs a
 `baseline_executor: ...` marker and the cache state lands in the
 `Preflight diagnostics:` block. If COLD_START repeats across retries the JIT was
-killed mid-`hipcc` — bump `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400`
-(don't just relaunch). Override the probe dir via
+killed mid-`hipcc` — bump `INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` above the
+9000s default (e.g. `=12000`; it replaces the cold cap outright, so a smaller
+value shortens it). Override the probe dir via
 `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.

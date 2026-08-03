@@ -11,8 +11,8 @@ import os
 _AMD_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x", "mi355x"})
 
 _GFX_TO_RUNNER: dict[str, str] = {
-    # Mirror Magpie/modes/benchmark/image_selector.py:138-140 so launchers and
-    # runtime materializers agree on the selected benchmark script.
+    # gfx arch -> Magpie runner label, so launchers and runtime materializers
+    # agree on the selected benchmark script.
     "gfx942": "mi300x",
     "gfx950": "mi355x",
 }

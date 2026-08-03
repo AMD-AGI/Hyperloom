@@ -3,13 +3,13 @@
 
 """robustness-server client + Source adapter.
 
-The client wraps a small subset of the robustness-server REST API
-(``/healthz`` and the ``/api/v1/sessions/...`` pods/events/metrics/
-summary endpoints). Networking errors (timeout / connect refused / 5xx)
+The client wraps a small subset of the robustness-server REST API (the
+``/api/v1/sessions/{id}/{pods,events,summary}`` and ``/api/v1/cluster/*``
+endpoints). Networking errors (timeout / connect refused / 5xx)
 are translated to :class:`SourceUnavailable` so :class:`DegradeRouter`
-counts failures and degrades to the local fallback. 4xx responses are
-returned as parsed JSON since they usually mean "no data for this
-session" rather than an upstream outage.
+counts failures and degrades to the local fallback. 404 and other 4xx
+responses yield ``None`` without decoding the body, since they usually
+mean "no data for this session" rather than an upstream outage.
 """
 
 from __future__ import annotations
@@ -228,8 +228,8 @@ class RobustnessServerClient:
     ) -> dict[str, Any]:
         """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics``.
 
-        Single-pod metrics; the response shape mirrors
-        ``get_session_metrics`` (``{"data": {"pods": [...]}}``).
+        Single-pod metrics; the response nests results under ``data.pods``
+        (see :func:`cluster_decoder.decode_gpu_snapshot`).
 
         Args:
             namespace (str): Kubernetes namespace of the pod.
@@ -351,9 +351,9 @@ class RobustnessServerSource:
 
     Per tick fetches session-scoped data (``pods`` + ``events`` +
     ``summary``) for ``ctx.shared_state.session_id`` plus cluster
-    ``cluster_faults``. Cluster fetches are best-effort: a 4xx / 5xx
-    does not invalidate the session snapshot, but a transport failure
-    does (server unreachable → DegradeRouter switches to local probe).
+    ``cluster_faults``. Cluster fetches tolerate 404 / 4xx (treated as no
+    data); a 5xx or transport failure raises :class:`SourceUnavailable` and
+    fails the tick so the DegradeRouter degrades to the local probe.
     """
 
     name = "robustness-server"

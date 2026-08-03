@@ -218,7 +218,7 @@ class _MarkerPath:
 
 
 def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -> None:
-    """An OSError writing the pr_monitor status marker is swallowed (L290-291)."""
+    """An OSError writing the pr_monitor status marker is swallowed."""
     from hyperloom.inference_optimizer.session import session_paths as sp
 
     monkeypatch.setattr(sp, "pr_monitor_status_json", lambda _sd: _MarkerPath())
@@ -227,7 +227,7 @@ def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -
 
 
 def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
-    """A target lacking ``audit_hook`` is a no-op (L67-68)."""
+    """A target lacking ``audit_hook`` is a no-op."""
 
     class _NoHook:
         pass
@@ -238,7 +238,7 @@ def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
 
 
 def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch) -> None:
-    """A write failure inside the hook is swallowed, not raised (L90-91)."""
+    """A write failure inside the hook is swallowed, not raised."""
     from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
     from hyperloom.inference_optimizer.session import session_paths as sp
 

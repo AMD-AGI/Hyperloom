@@ -1,6 +1,6 @@
 # GitHub Search protocol used by framework-agent
 
-> Technical reference for the anonymous GitHub Search backend in
+> Technical reference for the GitHub Search backend in
 > `hyperloom.agents.framework.sources.github`. Distilled from the original Hyperloom
 > (Arbor, arXiv:2606.12563) `github_search.py` plus the live framework-agent
 > implementation.
@@ -18,19 +18,29 @@ Standard params used:
 | `q` | composed query (see below) |
 | `sort` | `updated` |
 | `order` | `desc` |
-| `per_page` | `min(limit, 100)` |
+| `per_page` | `limit`, sent unclamped (GitHub's own max is 100) |
 
 User-Agent: `framework-agent/0.1`.
 Accept: `application/vnd.github+json`.
 
-framework-agent always issues **anonymous** requests (no Authorization
-header). The 60 req/h IP rate limit therefore applies.
+Requests are **anonymous by default**, in which case the 60 req/h IP rate
+limit applies. When `GITHUB_TOKEN` or `GH_TOKEN` is set, `_auth_headers()`
+adds an `Authorization: Bearer <token>` header to every request (search, PR
+diff, raw-file fetch), lifting the limit to the token's quota.
 
 ## Query composition
 
 ```python
-"repo:<owner>/<repo> is:pr is:open (term1 OR term2 OR ...)"
+"repo:<owner>/<repo> is:pr [is:open] (term1 OR term2 OR ...)"
 ```
+
+The `is:open` qualifier is emitted only when `ExploreRequest.pr_states` is
+open-only (the model default). `_state_qualifier` omits the state qualifier
+entirely when any requested state is `merged`, `closed`, or `all`, broadening
+the search to every PR state so merged PRs are discoverable. The
+FRAMEWORK_AGENT phase requests `pr_states: ["all"]`, so the qualifier-less
+form is what production issues. Valid states are `open` / `merged` /
+`closed` / `all` (`models._VALID_PR_STATES`).
 
 `(term1 OR term2 OR ...)` is the OR-fold of either:
 
@@ -61,7 +71,7 @@ The github backend wraps `urllib.request.urlopen` in a blanket
 
 | Cause | Result |
 |---|---|
-| Anonymous rate-limit (HTTP 403) | `[]` |
+| Rate-limit (HTTP 403) | `[]` |
 | Validation error (HTTP 422) | `[]` |
 | Non-200 status | `[]` |
 | Timeout | `[]` |
@@ -71,7 +81,7 @@ The github backend wraps `urllib.request.urlopen` in a blanket
 The rationale is that github is a **secondary** source - primus_cortex
 remains the authority. A failed github call must not abort the run.
 Operators who want hard-fail behaviour for github must request the
-upgrade explicitly and bring an auth token.
+upgrade explicitly and set `GITHUB_TOKEN` / `GH_TOKEN`.
 
 ## Result mapping
 
@@ -109,7 +119,6 @@ combination:
 
 Not implemented today; tracked for a follow-up:
 
-* `--github-token-file` CLI flag to lift the 60 req/h cap.
 * Concurrency: the current loop is serial; long candidate lists may
   benefit from a small thread pool keyed on repo.
 * Stable cursoring for repos with > 100 perf-ish PRs.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Targeted-build observability in session_breakdown.json."""
+"""Enablement observability in session_breakdown.json."""
 
 from __future__ import annotations
 

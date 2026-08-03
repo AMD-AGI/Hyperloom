@@ -297,7 +297,9 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
-# Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
+# Specialist task identity prefix: the dispatcher stamps ``specialist:<task_id>`` as the
+# source of a specialist result (explore parses the task_id back out), and a send_message
+# addressed to ``specialist:<task_id>`` is delivered to that specialist's inbox.
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
@@ -321,10 +323,13 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: Web tools. R5 — specialist-only (other roles get ``tool_whitelist_role``); usable in any phase.
+#: Web tools. R5 — specialist-only in this map (other roles get ``tool_whitelist_role``);
+#: usable in any phase. Note :meth:`PolicyGate.allowed_tools_for_agent` separately grants
+#: ``WebSearch`` / ``WebFetch`` to the orchestration agent.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
-#: Role→allowed-toolset map (R5). Only the specialist sub-agent touches external knowledge tools.
+#: Role→allowed-toolset map (R5). Only the specialist sub-agent may invoke PR Monitor / web
+#: tools as an action name.
 TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
@@ -415,12 +420,12 @@ SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
-    """Multi-node profile trace path-prefix allowlist (runtime-resolved; trailing ``/`` is load-bearing for the startswith check).
+    """Multi-node profile trace path allowlist (runtime-resolved).
 
     Returns:
         tuple[str, ...]: a single-element tuple holding the multi-node profile
-            trace root with a trailing ``/`` so prefix ``startswith`` checks are
-            path-boundary safe.
+            trace root, normalized with a trailing ``/``. Boundary safety is
+            enforced by :func:`_resolved_within`, not by the trailing slash.
     """
     from hyperloom.inference_optimizer.session.paths import mn_profile_trace_root
 
@@ -542,7 +547,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "close_sequence_done",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
-        # structured gaps ledger; single writer (``_refresh_gaps``).
+        # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
+        # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
+        # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.
         "gaps",
         # Orchestration working-memory checkpoint; Coordinator-authored.
         "orchestration_memory",
@@ -778,13 +785,11 @@ class PolicyGate:
 
         Enforces, in order: the role's ``can_delegate_side_effects``
         capability, presence of ``action_name``, the
-        analysis/internal-only gate, the kernel_agent-owned-action guard, and
-        the per-action specialised paths (``specialist`` / ``dynamic_action``
-        / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
-        the GEMM-tuning ownership, gain-driven and explore-minimum kernel_opt gates, the
-        ActionRegistry unknown-action lookup, per-action source and
-        required-payload guards, the phase-compatibility check, and the
-        external-tool collision guard (R5).
+        kernel_agent-owned-action guard, the per-action specialised paths
+        (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
+        ownership gate, the ActionRegistry unknown-action lookup, per-action
+        source and required-payload guards, the phase-compatibility check,
+        and the external-tool collision guard (R5).
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -897,14 +902,12 @@ class PolicyGate:
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
-        Requires ``action_name`` and applies the internal-only gate. The
-        ActionRegistry lookup here is soft — unknown names are only
-        rejected when a registry is wired and the action is neither
-        registered nor kernel_agent-owned. Mirrors the delegate channel's
-        explore-grid, sweep-singleton, GEMM-tuning ownership, gain-driven /
-        explore-minimum kernel_opt, phase, and external-tool collision
-        gates so an LLM cannot sidestep them by proposing instead of
-        delegating.
+        Requires ``action_name``, then hard-rejects kernel_agent-owned
+        actions (REQUEST-only) before the ActionRegistry lookup, which is
+        soft — unknown names are rejected only when a registry is wired.
+        Mirrors the delegate channel's sweep-singleton, per-action source,
+        GEMM-tuning ownership, phase, and external-tool collision gates so
+        an LLM cannot sidestep them by proposing instead of delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -915,8 +918,8 @@ class PolicyGate:
             None: returns silently when the proposal is permitted.
 
         Raises:
-            PolicyDenied: if ``action_name`` is missing, unknown (with a
-                registry wired), internal-only, or fails one of the
+            PolicyDenied: if ``action_name`` is missing, kernel_agent-owned,
+                unknown (with a registry wired), or fails one of the
                 mirrored action gates.
         """
         action_name = str(payload.get("action_name", "")).strip()
@@ -970,10 +973,9 @@ class PolicyGate:
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate an ``UPDATE_STATE`` intent's ``changes`` against core fields.
 
-        Requires a non-empty ``changes`` dict. Roles with
-        ``can_mutate_core_state`` (the Coordinator) may write anything;
-        every other role is blocked from mutating any field in
-        :data:`CORE_STATE_FIELDS`.
+        Requires a non-empty ``changes`` dict. No role may mutate a field in
+        :data:`CORE_STATE_FIELDS` — those are Coordinator-owned and written
+        directly, not through UPDATE_STATE.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -984,8 +986,8 @@ class PolicyGate:
             None: returns silently when the state transition is permitted.
 
         Raises:
-            PolicyDenied: if ``changes`` is missing/empty, or a
-                non-privileged role attempts to mutate core state fields.
+            PolicyDenied: if ``changes`` is missing/empty, or any role
+                attempts to mutate core state fields.
         """
         changes = payload.get("changes")
         if not isinstance(changes, dict) or not changes:
@@ -1171,9 +1173,6 @@ class PolicyGate:
                     hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
                 )
 
-    # NOTE: no ``framework_atom_action_unsupported`` rule exists; the guards
-    # that enforce this live in ``tests/test_policy_atom_invariants.py``.
-
     # R1 phase_incompatible
     def _validate_phase_action(
         self,
@@ -1247,8 +1246,7 @@ class PolicyGate:
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
             f"action from that list, or wait for the Coordinator to "
-            f"advance the phase. See KB_design §3.2 for the per-phase "
-            f"action contract."
+            f"advance the phase."
         )
         if not self.strict_phase:
             # Warn-only: keep the run flowing but record the denial.
@@ -1302,7 +1300,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only).
+        """Reject an external tool name not on the caller's role whitelist (:data:`TOOL_WHITELIST_BY_ROLE` grants PR Monitor + web tools to ``specialist`` only).
 
         Args:
             role_name (str): the name of the emitting role.
@@ -1327,10 +1325,12 @@ class PolicyGate:
             rule="tool_whitelist_role",
             hint=(
                 f"Tool {action_name!r} is restricted to "
-                f"specialist sub-agents. The "
+                f"specialist sub-agents as an action name. The "
                 f"primary agents (orchestration / kernel / critic / "
-                f"robustness) consult KB / PR Monitor via the "
-                f"Coordinator-mediated KnowledgePlane facade instead."
+                f"robustness) reach KB / PR Monitor through the "
+                f"Coordinator-mediated KnowledgePlane facade instead; "
+                f"orchestration additionally holds WebSearch / WebFetch "
+                f"directly via allowed_tools_for_agent."
             ),
         )
 

@@ -1,10 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the Ray-managed GPU execution backend (P0).
+"""Unit tests for the Ray-managed GPU execution backend.
 
-Covers the flag gate, the visible-device merge invariant, and the
-ManagedServerProcess reap invariant (with a real subprocess, no Ray cluster
-required).
+Covers the flag gate and execution-route seam, the visible-device merge
+invariant and YAML device stripping, the ManagedServerProcess reap invariant,
+the ServingLease / GpuSpecialistLease / ServingGroupManager lifecycles, and the
+infeasible-cluster and dead-actor robustness paths. Fake ray modules plus a real
+subprocess; no Ray cluster required.
 """
 
 from __future__ import annotations
@@ -1239,7 +1241,7 @@ def test_make_serving_actor_slot_modes(monkeypatch: pytest.MonkeyPatch):
 def test_gpu_specialist_lease_stop_no_actor_noop():
     """stop()/close() on a never-started GpuSpecialistLease are safe no-ops."""
     lease = rs.GpuSpecialistLease(num_gpus=1)
-    lease.stop()  # 623-624: no actor -> return
+    lease.stop()  # no actor -> return
     lease.close()  # no actor -> return
     assert lease.pid() is None
 
@@ -1251,7 +1253,7 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
     lease = rs.GpuSpecialistLease(num_gpus=1)
     actor = _FakeGpuActor()
     lease._actor = actor
-    lease.close()  # 432-435: ray.kill path
+    lease.close()  # ray.kill path
     assert actor in fake.killed
     assert lease._actor is None
 
@@ -1262,7 +1264,7 @@ def test_should_use_ray_backend_unset_single_node_true(monkeypatch: pytest.Monke
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb._should_use_ray_backend() is True  # 80-82
+    assert rb._should_use_ray_backend() is True
 
 
 def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1280,7 +1282,7 @@ def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypat
         return real_open(self, *a, **k)
 
     monkeypatch.setattr(Path, "open", _boom_open)
-    assert rb.strip_visible_devices_from_config(cfg) == cfg  # 395-396
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
 
 
 def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch):
@@ -1288,7 +1290,7 @@ def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setitem(sys.modules, "ray", _RaisingRay())  # kill() raises
     lease = rs.ServingLease(num_gpus=1)
     lease._actor = object()
-    lease.close()  # 432-435: except path swallowed
+    lease.close()  # except path swallowed
     assert lease._actor is None
 
 
@@ -1296,7 +1298,7 @@ def test_managed_process_start_with_log_path(tmp_path: Path):
     """start(log_path=...) opens the log file (covers the log_path branch)."""
     log = tmp_path / "nested" / "server.log"
     mgr = ManagedServerProcess()
-    pid = mgr.start(["sh", "-c", "echo hi; sleep 0.2"], log_path=str(log))  # 98-100
+    pid = mgr.start(["sh", "-c", "echo hi; sleep 0.2"], log_path=str(log))
     try:
         assert pid > 0
         assert log.parent.is_dir()  # os.makedirs ran

@@ -251,9 +251,10 @@ _SERVER_READY_MARKERS: tuple[str, ...] = (
     "The server is fired up and ready to roll",
 )
 
-# Generation-progress markers: the periodic decode-throughput lines. Reported by
-# the scanner for diagnostics; the stall gate itself keys on raw log activity
-# (any new bytes) — see :func:`_communicate_with_soft_deadline`.
+# Generation-progress markers: the periodic decode-throughput lines. Scanned and
+# returned by ``_scan_logs_increment`` but currently unconsumed — the stall gate
+# keys on raw log activity (any new bytes); see
+# :func:`_communicate_with_soft_deadline`.
 _SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
     "gen throughput (token/s):",  # sglang
     "Avg generation throughput:",  # vLLM

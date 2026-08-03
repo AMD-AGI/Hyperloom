@@ -77,11 +77,12 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
 
 
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
-    """Resolve which KB path actually supplied the applied warm recipe.
+    """Tag the warm-recipe source by the dispatcher's active remote type.
 
     Args:
-        row (Mapping[str, Any] | None): The identity-match warm recipe row.
-        kb (Any): The RecipeKB dispatcher (for the remote-type fallback).
+        row (Mapping[str, Any] | None): The identity-match warm recipe row;
+            unused, retained for call-site compatibility.
+        kb (Any): The RecipeKB dispatcher whose remote type is inspected.
 
     Returns:
         str: A short source tag, e.g. ``gbrain`` / ``recipe-kb``.
@@ -327,10 +328,13 @@ def _find_config_donor(
 ) -> tuple[Mapping[str, Any] | None, str, float]:
     """Borrow a replayable champion config from the nearest same-arch sibling.
 
-    Used when the exact (L1) identity match has no replayable best_config:
-    the identity row still supplies priors, but the active warm-replay needs
-    a champion config to apply. Searches L2 (same arch class, cross-model,
-    conf 0.95) then L3 (same arch, any framework version, conf 0.5).
+    Used when no donor config has been established yet — the identity match
+    may have no replayable best_config, or it may have one at a non-exact
+    tier that failed :func:`_donor_is_trustworthy`, or the KG-native
+    cross-model lookup may have come up empty. The identity row still
+    supplies priors, but the active warm-replay needs a champion config to
+    apply. Searches L2 (same arch class, cross-model, conf 0.95) then L3
+    (same arch, any framework version, conf 0.5).
 
     Only same ``hw+framework+model_type+arch(+precision)(+fwv)`` siblings are
     searched, and each candidate must additionally clear
@@ -525,9 +529,10 @@ def _build_warm_start_context(
 def _kg_guided_enabled() -> bool:
     """Return ``True`` when journal-knob graph guidance is enabled.
 
-    Gated by ``GBRAIN_KG_GUIDED`` (default off) so emitting ``KNOB_*`` edges
-    and surfacing ``graph_guided_knobs`` is a deliberate opt-in that never
-    changes live behavior until explicitly turned on.
+    Gated by ``GBRAIN_KG_GUIDED`` (default off) so surfacing
+    ``graph_guided_knobs`` from journal-derived ``KNOB_IMPROVES`` edges is a
+    deliberate opt-in. Read-only: it adds a context key and never writes to
+    the KG.
     """
     return os.environ.get("GBRAIN_KG_GUIDED", "").strip().lower() in ("1", "true", "yes")
 
@@ -564,6 +569,8 @@ def _enhance_warm_start_with_kg(
       ``VARIANT_OF`` graph traversal.
     * ``recommended_knobs`` — ``IMPROVES`` candidates for the current
       arch+hw+fw (minus anything blocked).
+    * ``graph_guided_knobs`` — journal-derived ``KNOB_IMPROVES`` candidates
+      with runnable config (only when ``GBRAIN_KG_GUIDED`` is on).
     * ``expired`` markers on replay patches whose ``VALID_FOR`` window
       has lapsed.
 
@@ -575,8 +582,10 @@ def _enhance_warm_start_with_kg(
         model_architectures: The current model's architecture list.
         hardware: The current hardware/GPU identifier.
         framework: The current inference framework.
-        kg_client: Optional injected KG client (defaults to the env-built
-            singleton; ``None`` disables enhancement).
+        precision: Baseline precision, folded into the KG knob object node.
+        kg_client: Optional injected KG client; when ``None`` the env-built
+            singleton from ``get_kg_client()`` is used (enhancement is
+            skipped only when that also returns ``None`` or is unavailable).
     """
     archs = [a for a in (model_architectures or []) if str(a or "").strip()]
     if not archs:

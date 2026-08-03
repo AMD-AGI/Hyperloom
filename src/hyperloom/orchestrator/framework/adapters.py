@@ -153,7 +153,12 @@ def _installed_version(python_path: str, package: str, *, run: RunFn = _default_
 # Adapters
 # ---------------------------------------------------------------------------
 class BaseAdapter:
-    """Base enablement adapter. Subclasses override the four hooks."""
+    """Base enablement adapter.
+
+    Subclasses override the acquisition hooks (``supports`` /
+    ``build_stack_action`` / ``provision`` / ``probe``) and, where localization
+    is supported, ``build_localization_action`` / ``editable_refresh_argv``.
+    """
 
     framework: str = ""
 

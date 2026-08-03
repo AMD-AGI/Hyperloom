@@ -199,7 +199,7 @@ def test_pseudo_candidate_shape_when_enabled(tmp_path: Path):
     assert pseudo["kind"] == FrameworkPhase._LOCAL_EXPLORE_KIND
     assert pseudo["candidate_id"] == "local_explore:0"
     assert pseudo["framework"] == "sglang"
-    # Gap composed from workload taxonomy (fp8 / dense / attention keywords).
+    # Gap composed from workload taxonomy (framework / gpu / arch / precision).
     assert isinstance(pseudo["gap_keywords"], list)
     assert "sglang" in pseudo["gap_keywords"]
 

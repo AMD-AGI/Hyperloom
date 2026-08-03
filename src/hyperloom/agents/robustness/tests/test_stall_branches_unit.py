@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for robustness_agent.signals.stall."""
+"""Branch coverage for hyperloom.agents.robustness.signals.stall."""
 
 from __future__ import annotations
 

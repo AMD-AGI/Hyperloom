@@ -1,4 +1,4 @@
-"""Branch coverage for quantization_agent.driver.retry helpers."""
+"""Branch coverage for hyperloom.agents.quantization.driver.retry helpers."""
 
 from __future__ import annotations
 

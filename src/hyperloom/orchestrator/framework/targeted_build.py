@@ -12,6 +12,12 @@ poll never sleeps).
 The build command is argv-only (never a shell string). Each build gets a
 per-attempt ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` so it never shares the
 node-global aiter JIT cache.
+
+Alongside the spawn/poll/kill supervisor, this module holds the three build
+recipes -- :func:`run_aiter_build`, :func:`run_sgl_kernel_build`,
+:func:`run_vllm_source_build` -- plus ``_driver_main``. When an action carries
+no explicit ``build_command``, the detached subprocess re-enters this module as
+``__main__`` and the driver dispatches to the matching recipe.
 """
 
 from __future__ import annotations
@@ -93,15 +99,19 @@ def spawn_build(
     run: Callable[..., Any] = subprocess.Popen,
     now: Callable[[], float] = time.monotonic,
 ) -> BuildHandle:
-    """Spawn ``action.build_command`` as a detached process group.
+    """Spawn a targeted build as a detached process group.
 
     Creates ``attempt_root`` and a per-attempt ``aiter_jit`` dir, exports
     ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` for it, and starts the argv command in
     a new session (own process group) with output redirected to ``build.log``.
 
     Args:
-        action: The build to run; ``build_command`` must be a non-empty argv.
+        action: The build to run.
         attempt_root: Directory anchoring this attempt's logs and JIT cache.
+        command: Explicit argv to spawn; overrides ``action.build_command`` when
+            not None. The production caller
+            (``build_lifecycle._driver_command``) always passes this, using the
+            off-loop driver entrypoint when ``action.build_command`` is empty.
         run: Injectable process spawner (defaults to ``subprocess.Popen``).
         now: Injectable monotonic clock (defaults to ``time.monotonic``).
 
@@ -109,7 +119,8 @@ def spawn_build(
         BuildHandle: The in-flight handle (pid/pgid/deadline/log path).
 
     Raises:
-        ValueError: If ``build_command`` is empty.
+        ValueError: If neither ``command`` nor ``action.build_command`` yields a
+            non-empty argv.
     """
     argv = command if command is not None else list(action.build_command)
     if not argv:
@@ -797,8 +808,11 @@ def run_vllm_source_build(
 
     Clones ROCm/vllm into an isolated worktree, runs ``pip install -e``
     which triggers the CMake ``build_ext`` pass, then verifies ROCm platform
-    and fresh compiled artefacts.  ABI-match guard refuses silently loading the
-    wrong interpreter (requires same Python major.minor as the launcher).
+    and fresh compiled artefacts. A non-ROCm torch build is a hard failure
+    (``abi_mismatch``, raised by ``write_rocm_torch_constraints``); a Python
+    major.minor mismatch between the torch ABI and the launcher is logged as an
+    advisory only, and ``runtime_python_exe`` is set to the attempt-venv
+    interpreter so the server launches with the right Python.
     """
     import os as _os
     import sys as _sys

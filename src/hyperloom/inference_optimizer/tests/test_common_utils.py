@@ -9,7 +9,8 @@ orchestrator retry/backoff, orchestrator actions, orchestrator dispatcher,
 orchestrator state/objective, multi-node state paths, framework agent helpers,
 gpu_types, and CLI multi-node utilities.
 
-These tests were consolidated from several coverage-padding files:
+Nearly every case here is still duplicated in the coverage-padding files this
+one was consolidated from, all of which remain on disk:
   test_coverage_boost_unit.py, test_coverage_boost2_unit.py,
   test_coverage_gap_units.py, test_coverage_margin3_unit.py,
   test_coverage_margin_unit.py.
@@ -1464,7 +1465,7 @@ def test_baseline_objective_progress_zero_ref(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# orchestrator.knowledge.kb_writeback — quantization prompt
+# orchestrator.phases.quantization_schemes — quantization prompt
 # ---------------------------------------------------------------------------
 
 

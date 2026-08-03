@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``orchestrator.optimization_journal``."""
+"""Tests for ``orchestrator.state.optimization_journal``."""
 
 from __future__ import annotations
 

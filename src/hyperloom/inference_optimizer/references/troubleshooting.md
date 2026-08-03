@@ -93,11 +93,13 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   (Leverage exhaustion *within* a single phase is now the non-terminal
   phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)
-- `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied`
-  events for the same action/rule pair; all top actions may be locked or pruned.
-  Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials`
-  block. To recover: manually edit `state.json` to remove the action from
-  `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose
-  with fresh `params.grid` content (omit stale `idempotency_key`).
+- `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for
+  resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied`
+  for the same (action, rule) pair is advisory only — there is no auto-prune at
+  streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect
+  `SharedState.policy_denial_history` via the `why_denied` tool or the
+  `=== Recent policy denials ===` block, then change something substantive (a new
+  `params.grid` variant, a different `benchmark_script`, or a sibling action
+  family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume`); do not start
   fresh.

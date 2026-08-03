@@ -90,7 +90,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-explore`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
+- **Session / resume:** `--resume`, `--resume-from`, `--force-resume`,
   `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 

@@ -47,7 +47,9 @@ def _normalise_kernel_name(name: str) -> str:
 def kernel_name_implies_multigpu(name: str) -> bool:
     """Report whether a kernel name implies a multi-GPU collective op.
 
-    Matching uses the leaf name only against known collective-op patterns.
+    Patterns are applied to the entire normalized name (camel-split, non-word
+    chars collapsed to underscores, lowercased), so a namespace or prefix token
+    such as ``nccl::`` also matches; over-matching is intentional.
 
     Args:
         name: The kernel name to test.

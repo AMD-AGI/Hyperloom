@@ -33,8 +33,9 @@ typical_runtime_min: 12.0
 applicable_when:
   - "baseline_tput > 0"
 # Descriptive — variants inherit these knobs across the whole batch.
-# See KB_design/3.4_explore_consolidation/README.md for the full design
-# (Inv-4.1 single ledger, Inv-4.2 canonical fingerprint uniqueness).
+# See orchestrator/actions/executors/_canonical_fingerprint.py (Inv-4.1 single
+# ledger key, Inv-4.2 canonical fingerprint uniqueness — content-only over
+# sorted(extra_args) + sorted(extra_envs)) and _grid_runner.py (grid dedup).
 params_schema:
   grid:
     type: list

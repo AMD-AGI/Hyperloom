@@ -17,11 +17,16 @@ patch *files*; this action produces *outcomes*.
 
 ## When to delegate
 
-* Phase is `EXPLORE`.
+* Phase is `EXPLORE` or `FRAMEWORK_AGENT` (per `PHASE_ALLOWED_ACTIONS` in
+  `src/hyperloom/orchestrator/phases/machine_state.py`).
 * A specialist task has emitted `specialist_done.patches_written` with
   at least one patch path inside its worktree.
-* (Optional, PR-A7+) The Critic has emitted a `verdict_map` accepting
-  the patch.
+* **Required** — `params.specialist_task_id` is set and the Critic has
+  recorded a verdict in {`approve`, `advise`} for that specialist
+  (`SharedState.specialist_patch_verdicts`). Without it PolicyGate denies
+  the intent with `rule="integrate_patch_requires_critic_verdict"`. The sole
+  exemption is the Coordinator-internal `enablement_launch_only` build probe,
+  which applies no patch and is never LLM-proposable.
 
 ## Who delegates this action
 
@@ -36,7 +41,7 @@ patch *files*; this action produces *outcomes*.
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
 | `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput, default 1.0. |
-| `accuracy_baseline`  | object   | no       | Per-(task, metric) baseline scores; defaults to `$SESSION_DIR/baseline_accuracy.json`. |
+| `accuracy_baseline`  | float    | no       | Baseline accuracy score (0-1). Backfilled from `SharedState.baseline_accuracy` when omitted; `<= 0` skips the gate. |
 
 ## EMIT format
 
@@ -66,11 +71,12 @@ delegate{
    or sglang equivalents); wait for VRAM to drain.
 6. Launch via `$ARBOR_LAUNCH_SCRIPT` (or the installed scripts);
    health-check until ready (≤ 20min for large MoE models).
-7. Run the Magpie throughput benchmark + GSM8K accuracy eval via the
-   shared `_accuracy_gate.run_gate(...)` helper.
+7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via
+   the shared `_accuracy_gate.parse_eval_results(...)` +
+   `_accuracy_gate.accuracy_passed(...)` helpers.
 8. Decide:
    - KEEP — bench tput ≥ baseline * (1 + keep_threshold_pct/100) AND
-     accuracy did not drop > 1pp. Append the patch + config_changes to
+     accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
      `SharedState.optimization_stack`, update `current_best`, increment
      `cumulative_gain`.
    - REVERT — any gate failure. `git checkout` the framework source
@@ -106,5 +112,5 @@ hash and `optimization_stack` is the authoritative ledger.
 |---|---|---|
 | `git apply` rejects | base HEAD drifted under specialist | reject patch, record `apply_failed`, REVERT path |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
-| accuracy drops >1pp | semantic regression | REVERT, record into pitfalls KB |
+| accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |
 | throughput unchanged within keep_threshold | no-op patch | REVERT, log low-confidence specialist for the gap |

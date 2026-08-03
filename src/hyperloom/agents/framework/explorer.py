@@ -281,8 +281,9 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
 def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
     """Apply a :class:`PrFilter` to one candidate.
 
-    Metadata-dependent constraints fail when the required metadata is
-    missing (e.g. enrichment was skipped).
+    Label / author / path constraints fail when the required metadata is
+    missing (e.g. enrichment was skipped); the date constraints instead
+    pass, since each is guarded on a non-empty ``updated_at``.
 
     Args:
         c: The candidate to test.
@@ -735,11 +736,13 @@ async def _run_candidates_concurrent(
 
 
 def _maybe_disk_preflight(req: ExploreRequest, n_candidates: int, *, execute: bool) -> None:
-    """Run disk_preflight when execute mode is on and threshold is not 0.
+    """Run disk_preflight when execute mode is on, ``disk_min_free_gb`` is not 0,
+    and either it is set explicitly or ``prepare_candidate_env`` is True.
 
     Args:
         req (ExploreRequest): The explore request (work dir + threshold).
-        n_candidates (int): The number of candidates to size the check by.
+        n_candidates (int): The number of candidates to size the check by; a
+            non-positive count returns early with nothing to preflight.
         execute (bool): Whether the run is in execute mode; preflight is
             skipped entirely in plan mode.
     """
@@ -812,8 +815,10 @@ def explore(req: ExploreRequest, *, execute: bool = False) -> dict[str, Any]:
     * ``build_concurrency > 1`` — fan out build via ``asyncio.gather``;
       bench/accuracy stay serial within a candidate task.
 
-    Disk preflight (execute=True and ``disk_min_free_gb != 0``) runs first;
-    failure raises :class:`isolation.DiskPreflightError`.
+    Disk preflight runs first, but only when ``execute=True``,
+    ``disk_min_free_gb != 0``, and either ``disk_min_free_gb`` is set
+    explicitly or ``prepare_candidate_env`` is True; failure raises
+    :class:`isolation.DiskPreflightError`.
 
     Args:
         req: The explore request driving the run.

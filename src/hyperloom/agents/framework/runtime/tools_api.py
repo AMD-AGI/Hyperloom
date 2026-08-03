@@ -13,7 +13,9 @@ Three helpers wrapping framework-agent internals without a full
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-The CLI does not depend on this module and vice versa.
+The CLI reaches these helpers indirectly (``explorer`` uses ``_metric_float``;
+``phase-audit`` uses ``fetch_pr_audit_material``); this module never imports
+the CLI.
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ def find_relevant_prs_smart(
     """Discover candidate PRs across one or more repos.
 
     Plain-arg version of
-    :func:`framework_agent.sources.enumerate_candidates`. Each repo is
+    :func:`hyperloom.agents.framework.sources.enumerate_candidates`. Each repo is
     queried via primus_cortex (hard-fail) when ``primus_cortex_url`` is set;
     GitHub Search is a best-effort secondary when ``include_github=True``
     (returns ``[]``, never raises). Results are de-duped by

@@ -6,7 +6,7 @@
 The console script runs the symptom -> intent reactor standalone, polling
 sources every ``standalone_tick_interval_s`` and writing findings to disk.
 Production hosts drive the same reactor via
-:mod:`robustness_agent.runtime.cli` in a subprocess instead.
+:mod:`hyperloom.agents.robustness.runtime.cli` in a subprocess instead.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def _setup_logging() -> None:
     """Configure root logging for the daemon.
 
     Sets up a basic stderr handler at INFO level with a timestamped
-    format shared by both run modes.
+    format.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -106,15 +106,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             ``None``, which uses ``sys.argv``.
 
     Returns:
-        argparse.Namespace: Parsed arguments including the selected
-        ``mode``.
+        argparse.Namespace: Parsed arguments. The parser defines no options, so
+        the namespace is empty; the call exists to reject unknown argv and
+        provide ``--help``.
     """
     parser = argparse.ArgumentParser(prog="robustness-agent")
     return parser.parse_args(argv)
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
-    """Discover configuration and run the selected mode.
+    """Discover configuration and run the reactor loop.
 
     Args:
         argv (list[str] | None): Argument vector forwarded to

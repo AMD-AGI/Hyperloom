@@ -709,7 +709,7 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
 def test_core_state_fields_synced_with_robustness_envelope():
     # gate.CORE_STATE_FIELDS and the robustness
     # envelope copy must stay byte-identical. This direct assertion never skips
-    # (unlike tests/test_role_contract.py, which needs the optimizer on sys.path).
+    # (unlike the robustness test_role_contract, which needs the optimizer importable).
     from hyperloom.agents.robustness.role.envelope import (
         CORE_STATE_FIELDS as ENVELOPE_CORE_STATE_FIELDS,
     )

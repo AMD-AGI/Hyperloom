@@ -167,8 +167,11 @@ class BuildLifecycleCollaborator:
                 "failure_class": result.failure_class,
                 "failure_summary": result.failure_summary or result.error,
             }
-            # A killed build can wedge every later compile of a module; the
-            # per-attempt jit dir is swept so a resumed/next attempt is clean.
+            # A killed build can wedge every later compile of a module. Best-effort
+            # sweep of the per-attempt jit dir: skipped entirely while a compiler is
+            # still alive, and otherwise only reaps locks older than
+            # AITER_LOCK_STALE_MINUTES, so locks from a just-killed build survive
+            # until a later attempt.
             self._sweep_build_jit(result.attempt_root)
 
     @staticmethod

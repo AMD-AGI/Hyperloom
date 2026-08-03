@@ -214,7 +214,7 @@ async def test_state_json_corrupt_alert_only():
 
 
 async def test_coordinator_wal_bloat_high_alert_only():
-    """I2: HIGH (4 GiB+) alerts with the checkpoint hint in detail."""
+    """I2: HIGH (4 GiB+) WAL bloat surfaces alert(high) only."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -336,7 +336,7 @@ async def test_coordinator_zombie_alert_only():
 
 
 async def test_gateway_auth_outage_alert_only():
-    """J1: HIGH alert with the key-rotation hint in detail."""
+    """J1: HIGH alert — the operator has to rotate the gateway key."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -377,7 +377,7 @@ async def test_wekafs_degraded_alert_only():
 
 
 async def test_tracelens_cli_missing_alert_only():
-    """J3: HIGH alert — re-run install.sh hint in detail."""
+    """J3: HIGH alert — the operator has to re-run install.sh."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("tracelens_cli_missing", SymptomSeverity.HIGH, evidence={"cli_names": ["a", "b"]}, subject={})],

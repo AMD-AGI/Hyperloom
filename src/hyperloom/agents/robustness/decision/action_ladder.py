@@ -7,9 +7,12 @@ Three tiers by severity:
 
 1. **observe** (low) — ``send_message(topic="observation")``: visibility, no pause.
 2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
-3. **recommend** (high) — ``alert(severity="high")`` plus, for resource-safety
-   only, ``kill_task`` (stale_lease), ``delegate(recover)`` (gpu_memory_leaked),
-   ``delegate(report)`` (wall-clock deadline backstops).
+3. **recommend** (high) — ``alert(severity="high")`` plus, for some symptoms, a
+   symptom-specific remediation intent: ``kill_task`` (stale_lease),
+   ``delegate(recover)`` (gpu_memory_leaked), ``delegate(report)``
+   (``deadline_*`` wind-down and ``recover_unsuccessful`` finalization), or
+   ``prune_branch`` (stuck / no-lever families in ``_PRUNE_SYMPTOMS``). Every
+   other HIGH symptom is strategic: the alert alone, and Orchestration decides.
 
 Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
 cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
@@ -268,8 +271,8 @@ class ActionLadder:
         """Build high-severity intents, adding policing intents per symptom.
 
         Always emits a high-severity alert; depending on ``sym.name`` it may
-        append escalate / prune_branch / kill_task / delegate intents that
-        encode the concrete remediation for that symptom.
+        append a kill_task / delegate / prune_branch intent that encodes the
+        concrete remediation for that symptom.
 
         Args:
             sym (Symptom): The high-severity symptom.

@@ -326,6 +326,10 @@ def build_roofline_snapshot(
         mem_ceiling_tok_per_sec: Memory-side roofline ceiling (tok/s).
         cmp_ceiling_tok_per_sec: Compute-side roofline ceiling (tok/s).
         bound_kind: Which side dominated (e.g. ``memory`` / ``compute``).
+        throughput_unit: Unit for the ``*_tok_per_sec`` fields (``tok/s`` for
+            text generation, ``img/s`` for xDiT).
+        framework: Session framework tag persisted into the snapshot; the report
+            layer (``_fmt_tput``) uses it to pick the achieved-metric unit.
         e2e_mean_ms: Scriptable/diffusion primary metric — measured per-image
             end-to-end latency (ms). The compute-bound analogue of
             ``achieved_tok_per_sec`` (which is a memory-bound tok/s throughput);

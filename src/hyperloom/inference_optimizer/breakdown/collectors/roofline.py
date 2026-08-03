@@ -72,7 +72,6 @@ def collect_roofline(
     return [entry]
 
 
-# source_files map
 _KERNEL_ROOFLINE_REL_PATH = "reports/kernel_roofline.json"
 
 
@@ -286,7 +285,7 @@ def collect_kernel_roofline(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Mirror ``reports/kernel_roofline.json`` into the ``kernel_roofline`` section (spec §1).
+    """Mirror ``reports/kernel_roofline.json`` into the ``kernel_roofline`` section.
 
     Missing file → ``{}`` (quiet); malformed → ``{}`` + warning; non-list
     ``kernels`` → ``[]``. Entries are type-coerced so upstream drift

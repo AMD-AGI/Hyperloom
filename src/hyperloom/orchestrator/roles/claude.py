@@ -82,8 +82,8 @@ what changed. Match length to substance.
 # emitting, so it needs more turns + wall-clock budget.
 _CONVERSATIONAL_MIN_MAX_TURNS: int = 12
 _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
-# Raw-completion floor: Claude Code counts the single text message as a turn, so
-# a literal max_turns=1 trips before any output.
+# Global floor, applied by ``run()`` to every mode: Claude Code counts the
+# model's own text message as a turn, so a low max_turns trips before any output.
 _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow
@@ -150,14 +150,17 @@ class ClaudeBackend:
         api_key_env: env var checked at construction (``ANTHROPIC_API_KEY``
             by default). Missing key is recorded as a soft warning — SDK
             may still authenticate via Bedrock / Vertex.
-        max_turns_default: agent-loop budget when caller doesn't override.
+        max_turns_default: agent-loop budget when caller doesn't override;
+            ``run()`` floors it at 8 (12 conversational), so lower values
+            never reach the SDK.
         enable_mcp_emit_intent: if True (default), registers the
             in-process MCP ``emit_intent`` tool.
     """
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Covers tool_use → tool_result → final text; conversational mode raises it.
+    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
+    # (8), so values below 8 have no effect; conversational mode raises it to 12.
     max_turns_default: int = 4
     # Persistent-conversation mode: resume the SAME SDK session across ticks,
     # feeding only a per-tick delta. kernel / critic / robustness stay stateless.
@@ -487,6 +490,9 @@ class ClaudeBackend:
             tools (list[str]): Caller-provided allowed tool names.
             max_turns (int): Agent-loop budget to pass through to the SDK.
             system_prompt (str | None): Optional system prompt for the turn.
+            resume_session_id (str | None): SDK session token to resume; set
+                by the caller only in conversational mode, ``None`` starts a
+                fresh session.
 
         Returns:
             Any: A constructed ``ClaudeAgentOptions`` instance.

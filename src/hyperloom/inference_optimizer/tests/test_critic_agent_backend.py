@@ -1099,7 +1099,7 @@ async def test_required_context_surfaces_in_metadata(
 
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
 
-Shells out to the real ``critic-agent/runtime/cli.py`` (only Codex is faked).
+Shells out to the real ``hyperloom/agents/critic/runtime/cli.py`` (only Codex is faked).
 Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
@@ -1197,7 +1197,7 @@ def critic_agent_root() -> Path:
     root = _resolve_agent_root("critic")
     if root is None:
         pytest.skip(
-            "critic-agent runtime not found — set CRITIC_AGENT_ROOT or place critic-agent/ next to src/hyperloom/inference_optimizer/"
+            "critic-agent runtime not found — set CRITIC_AGENT_ROOT or check the src/hyperloom/agents/critic/ install"
         )
     return root
 

@@ -618,17 +618,14 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
     existing dir wins; counts ``.so`` recursively. Any IO error degrades
     to ``probe_status="error"`` (callers fall back to the WARM timeout).
 
-    Returns a dict with keys:
-        path           Path that was probed, or None if nothing found.
-        kernel_count   Number of `.so` files under `path` (recursive).
-        size_mb        Total size of those `.so` files, in MiB (int).
-        is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
-                       None when probe failed.
-        probe_status   "found" | "not_found" | "error".
-
     Returns:
-        dict[str, Any]: Probe info with keys ``path``, ``kernel_count``,
-            ``size_mb``, ``is_cold`` and ``probe_status``.
+        dict[str, Any]: Probe info with keys:
+            path           Path that was probed, or None if nothing found.
+            kernel_count   Number of `.so` files under `path` (recursive).
+            size_mb        Total size of those `.so` files, in MiB (int).
+            is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
+                           None when the probe found nothing or failed.
+            probe_status   "found" | "not_found" | "error".
     """
     info: dict[str, Any] = {
         "path": None,
@@ -727,7 +724,7 @@ def _apply_warm_patches(
     target_repo: str,
     output_dir: Path,
 ) -> list[dict[str, str]]:
-    """Apply warm-replay code patches (Phase 0+1) to InferenceX checkout.
+    """Apply warm-replay code patches to the InferenceX checkout.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
@@ -1126,8 +1123,9 @@ class BaselineExecutor:
         the fixes here — after materialization pins the exact checkout, before
         launch — closes that window without an install re-run.
 
-        ProfileExecutor overrides this to additionally validate the
-        NUM_PROMPTS / PROFILE_EXTRA_BODY patches (and short-circuit on failure).
+        ProfileExecutor fully REPLACES this hook (it does not call ``super()``)
+        with NUM_PROMPTS / PROFILE_EXTRA_BODY validation; the eval-start and
+        eval-concurrency fixes below therefore apply to the baseline path only.
 
         Args:
             config_path: The materialized Magpie YAML config path.
@@ -2234,7 +2232,8 @@ class BaselineExecutor:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
-        only ``cleanup`` differs (round 1 persists, round 2 tears down).
+        ``cleanup`` and ``run_eval`` differ (round 1 persists the server and
+        keeps lm-eval on; round 2 tears down and runs throughput-only).
 
         Args:
             base_config_path: Source materialized YAML to clone and patch.
@@ -2243,6 +2242,8 @@ class BaselineExecutor:
             pid_dir: Shared pid/metadata directory keying the persistent
                 server across both rounds.
             port: Server port shared across both rounds.
+            run_eval: When False, forces ``RUN_EVAL=false`` into the round's
+                ``benchmark.envs`` so accuracy is not measured a second time.
 
         Returns:
             Path to the written per-round lifecycle YAML.

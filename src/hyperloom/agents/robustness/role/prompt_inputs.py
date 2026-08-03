@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Parse Coordinator-rendered prompts and inbox.jsonl into ReactorContext.
+"""Parse Coordinator-rendered prompts into a ReactorContext.
 
 The Coordinator's ``_compose_prompt`` emits a
 deterministic two-section text:
@@ -245,9 +245,9 @@ def from_coordinator_prompt(
 def _split_sections(prompt: str) -> dict[str, str]:
     """Walk the prompt line-by-line and group lines by section.
 
-    Returns a dict with keys ``shared_state`` / ``inbox``; KB hints and
-    other sections are dropped because the robustness reactor does not
-    consume them.
+    Returns a dict keyed by ``shared_state`` / ``time_budget`` / ``inbox`` /
+    ``kb``. Only the first three are consumed downstream; the ``kb`` body is
+    collected but unused.
 
     Args:
         prompt (str): The full rendered Coordinator prompt text.
@@ -398,7 +398,7 @@ def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
     """Decode the ``=== Time budget ===`` section in place onto ``snapshot``.
 
     The Coordinator emits one body line below the header; an absent section
-    leaves defaults so BudgetMonitor / deadline_imminent signals
+    leaves defaults so ``evaluate_budget_signals`` / ``deadline_imminent``
     short-circuit.
 
     Args:

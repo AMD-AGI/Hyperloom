@@ -1628,14 +1628,18 @@ class FrameworkPhase(PhaseHandler):
         """True when an in-flight enablement round has ended without a rearm.
 
         A round is considered silently finished when ALL hold:
+        - ``_ENABLEMENT_WATCHDOG_GRACE_TICKS`` have elapsed since dispatch (so we
+          never race a just-completed specialist whose integrate proposal is
+          about to be emitted), and
         - the dispatched specialist has written its ``specialist_done.json``
           (authoring is over), and
-        - a grace period of ticks has elapsed since dispatch (so we never race a
-          just-completed specialist whose integrate proposal is about to be
-          emitted), and
         - no enablement ``integrate_patch`` proposal for this task is still
-          pending review, and
-        - no task is currently running.
+          pending review — checked only while still within
+          ``_ENABLEMENT_WATCHDOG_HARD_TICKS``, after which a stuck proposal no
+          longer defers the verdict.
+
+        When no ``enablement_inflight_task_id`` was recorded, the grace-tick
+        check alone decides and the last two conditions do not apply.
 
         This is the phase-independent backstop for every code path that finishes
         an enablement round without calling :meth:`_maybe_rearm_enablement`
@@ -2245,7 +2249,7 @@ class FrameworkPhase(PhaseHandler):
         """Canonical FRAMEWORK candidate dedup/progress key (see ``candidate_key``).
 
         Thin wrapper over
-        :func:`framework_agent_artifacts.candidate_key` so every candidate
+        :func:`~hyperloom.orchestrator.framework.artifacts.candidate_key` so every candidate
         selection / dedup / progress-row / idempotency site derives the key
         from one place (``candidate_id or pr_url or ref``). Prevents the
         asymmetry where a candidate carrying only a ``pr_url`` failed to dedup
@@ -4675,13 +4679,13 @@ class FrameworkPhase(PhaseHandler):
         task: "Task",
         result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped).
 
         Args:
             task: The integrate_patch task carrying the FRAMEWORK authoring
                 provenance markers.
-            result: The task result; only ``kept``/``reverted`` statuses are
-                recorded.
+            result: The task result; any non-empty terminal status is recorded
+                except ``apply_failed`` on a perf lane, which the retry loop owns.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
@@ -5298,8 +5302,9 @@ class FrameworkPhase(PhaseHandler):
         """Mark the FRAMEWORK config-exploration subphase done and persist.
 
         Args:
-            reason: Why the lane finished (``no_new_candidates`` / ``max_rounds``
-                / ``dispatch_skipped``).
+            reason: Why the lane finished (``no_candidates`` /
+                ``generation_empty`` / ``dispatch_skipped`` /
+                ``phase_budget_exhausted`` / ``max_rounds``).
         """
         state = self.shared_state
         state.framework_config_lane_state = "done"

@@ -73,9 +73,11 @@ fa kb search --domain framework_optimization --query "fp8 kv cache"
 ## Tests
 
 ```bash
-pytest -q                      # all 160+ unit tests
-pytest -q tests/test_logging_setup.py tests/test_isolation.py \
-          tests/test_decision.py tests/test_explorer.py
+pytest -q src/hyperloom/agents/framework/tests/   # all framework-agent unit tests
+pytest -q src/hyperloom/agents/framework/tests/test_logging_setup.py \
+          src/hyperloom/agents/framework/tests/test_isolation.py \
+          src/hyperloom/agents/framework/tests/test_decision.py \
+          src/hyperloom/agents/framework/tests/test_explorer.py
 ```
 
 ## Used by inference_optimizer
@@ -99,7 +101,7 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
     --max-hours 2
 ```
 
-See `src/hyperloom/inference_optimizer/SKILL.md` "Framework-Agent as Bandit Arm"
+See `src/hyperloom/inference_optimizer/SKILL.md` "FRAMEWORK_AGENT phase (Coordinator-internal)"
 and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references

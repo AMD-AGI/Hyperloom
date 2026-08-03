@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``framework_agent_client``: fa command resolution, the sync
+"""Coverage for ``orchestrator.framework.client``: fa command resolution, the sync
 subprocess wrapper (success / not-found / timeout), the async phase runner
 error branches, and the ``phase_discover`` request shaping."""
 

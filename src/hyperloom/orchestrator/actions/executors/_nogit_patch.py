@@ -432,8 +432,8 @@ def _apply_patch_no_git(
                     }
                 )
 
-    # Apply for real. --reject writes .rej files for failed hunks so we can
-    # collect them for reauthor feedback.
+    # Apply for real. ``--reject-file=-`` discards rejects, so the failure path's
+    # ``.rej`` sweep only picks up sidecars left by other tooling.
     rej_dir = backup_root / "rej"
     rej_dir.mkdir(parents=True, exist_ok=True)
     try:

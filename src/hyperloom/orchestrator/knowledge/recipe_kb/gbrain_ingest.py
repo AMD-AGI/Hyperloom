@@ -173,7 +173,7 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     preserves the champion config:
 
     * NESTED (authoritative local shape from
-      ``coordinator._build_recipe_payload``): launch args under the
+      ``coordinator._build_recipe_attrs_from_state``): launch args under the
       canonical key and the env map nested under ``extra_envs``.
       The nested dict MUST be unwrapped —
       treating ``extra_envs`` as a scalar env and ``str()``-ing it would

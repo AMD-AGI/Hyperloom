@@ -3,9 +3,11 @@
 
 """Canonical mapping from serving framework name to upstream git repo URL.
 
-Lives in ``framework_agent`` so the standalone ``fa`` CLI need not
-reverse-import ``inference_optimizer``. IO keeps an in-process copy in
-``framework_agent_client.repo_url_for_framework`` that must not drift.
+Lives in ``hyperloom.agents.framework`` so the ``fa`` CLI need not
+reverse-import the orchestrator. ``hyperloom.orchestrator.framework.client``
+imports and re-exports :func:`repo_url_for_framework` from here. Note
+``hyperloom.inference_optimizer.framework_registry`` carries the same URLs in
+``FrameworkSpec.repo_url``; the two tables must stay in sync.
 """
 
 from __future__ import annotations

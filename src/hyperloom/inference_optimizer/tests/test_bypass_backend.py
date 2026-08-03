@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 2a/3 tests for the bypass benchmark backend + Python engine.
+"""Tests for the bypass benchmark backend + Python engine.
 
 No real GPU/server: server launch, client subprocess, and HTTP readiness are
 all injected/monkeypatched. Verifies backend selection, argv construction, the
@@ -1304,9 +1304,9 @@ def test_server_env_injects_rocr_visible_devices(monkeypatch):
 def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
     """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
 
-    The client is identified by --result-dir (writes inferencex_result.json);
-    the lm_eval dep probe/install is a no-op passthrough; anything else is
-    treated as the eval subprocess.
+    The client is identified by --result-dir plus benchmark_serving.py (writes
+    inferencex_result.json); the lm_eval dep probe/install is a no-op
+    passthrough; anything else is treated as the eval subprocess.
     """
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):

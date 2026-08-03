@@ -377,6 +377,17 @@ def _finalize_framework_server_args(
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
 
+    1. --context-length cap: sglang sizes max_total_tokens off the model's
+       max_position_embeddings, so a huge native window balloons the aiter
+       workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
+       native window AND to the run's MAX_MODEL_LEN.
+    2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
+       first-request aiter JIT compile survives (the 300s default fires
+       SIGQUIT mid-warmup on a cold aiter cache).
+
+    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale.
+
     ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
     already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
     SERVER_ARGS``, the reference recipe, the YAML base), so stripping here is
@@ -1060,17 +1071,9 @@ def materialize_config_with_envs(
                     if _sp_existing
                     else f"--block-size {_sparse_bs}"
                 )
-    # sglang server-arg guards, applied at the FINAL framework env so any
-    # operator-pinned flag is honored and never doubled. No-ops for vllm/atom.
-    # Single choke point every benchmark path funnels through.
-    #
-    # 1. --context-length cap: sglang sizes max_total_tokens off the model's
-    #    max_position_embeddings, so a huge native window balloons the aiter
-    #    workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
-    #    native window AND to the run's MAX_MODEL_LEN.
-    # 2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
-    #    first-request aiter JIT compile survives (the 300s default fires
-    #    SIGQUIT mid-warmup on a cold aiter cache).
+    # Single choke point every benchmark path funnels through: the final
+    # server-arg guards, applied at the FINAL framework env so any
+    # operator-pinned flag is honored and never doubled.
     _finalize_framework_server_args(
         envs,
         bench,

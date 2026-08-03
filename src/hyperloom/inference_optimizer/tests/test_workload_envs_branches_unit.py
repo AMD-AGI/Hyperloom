@@ -225,7 +225,7 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "isl,osl,conc,factor",
     [
-        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 -> factor 3
+        (4000, 2000, 8, 3),  # 4096 < seq <= 16384 -> factor 3
         (3000, 1000, 8, 5),  # 1024 < seq <= 4096 -> factor 5
         (20000, 5000, 8, 2),  # > 16384 -> factor 2
     ],

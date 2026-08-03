@@ -11,7 +11,7 @@
   the local store implemented here is the read fallback.
 
 The on-disk layout maps the canonical id
-``inference:{model}:{hardware}:{framework}:{framework_version}:{precision}``
+``inference:{model}:{hardware}:{framework_name}:{model_type}:{architectures}:{framework_version}:{precision}``
 to a directory tree under :data:`LocalRecipeStore.root`. Each leaf directory
 holds ``recipe.json`` (live), ``history/v{N}.json`` (archived prior
 versions), ``attempts.ndjson`` (append-only attempts log), and ``.lock``

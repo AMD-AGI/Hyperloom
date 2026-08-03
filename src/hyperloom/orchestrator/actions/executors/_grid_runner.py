@@ -147,8 +147,6 @@ def _resolve_magpie_python() -> str:
         Returns:
             ``True`` if both imports succeed in the interpreter.
         """
-        # Probe Magpie AND ``yaml`` so an interpreter that resolves Magpie via a
-        # .pth but lacks PyYAML is skipped in favour of the canonical /opt/venv.
         try:
             # Probe with ``importlib.util.find_spec`` rather than a bare
             # ``import`` so a missing module returns a non-zero exit code
@@ -157,8 +155,7 @@ def _resolve_magpie_python() -> str:
             # stream, so a bare ``import Magpie`` on a candidate that lacks it
             # would leak an alarming traceback into the run log even though the
             # probe failing is an expected, benign step of interpreter
-            # resolution. ``find_spec`` still checks both Magpie and its
-            # top-level runtime dep ``yaml`` (see the note above).
+            # resolution.
             proc = run_with_session_kill(
                 [
                     py,
@@ -566,7 +563,9 @@ def _build_variant_yaml(
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
-    Injects the variant's flags via ``EXTRA_SGLANG_ARGS``. ``model_path``
+    Injects the variant's flags into the framework's ``EXTRA_*_ARGS`` env,
+    resolved by :func:`server_args_env_name` (``EXTRA_SGLANG_ARGS`` for sglang,
+    ``EXTRA_VLLM_ARGS`` for vllm, etc.). ``model_path``
     overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
     generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
     force-pins a script, applied last so the operator pick wins.

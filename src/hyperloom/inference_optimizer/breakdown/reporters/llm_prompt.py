@@ -57,9 +57,9 @@ You MUST:
 - Surface every entry in ``global_facts.data_quality_flags`` in the
   executive summary (concisely; users have been bitten by silent data
   issues like all-zero GPU monitoring readings).
-- Reflect the ``attribution_method`` honestly: if it is
-  ``"best-effort reconstructed"`` or ``"missing"``, say so in plain
-  language — do not present a reconstructed attribution as validated.
+- Reflect the ``attribution_method`` honestly: any value other than
+  ``"validated"`` (for example ``"unattributed"`` or ``"missing"``)
+  MUST be described in plain language as not validated.
 """
 
 

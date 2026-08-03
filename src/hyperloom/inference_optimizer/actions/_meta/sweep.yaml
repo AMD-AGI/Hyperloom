@@ -21,13 +21,28 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 25
 lease_ttl_sec: 7200
-description: "Workload sweep over (CONC,ISL,OSL) on top of current best to validate gains beyond smoke workload. Override via params.grid=[{conc,isl,osl},...] or params.conc_values/isl_osl_values."
+description: "Workload sweep over (CONC,ISL,OSL) on top of current best to validate gains beyond smoke workload. Override via params.conc_values=[int,...] and params.isl_osl_configs=[\"<ISL>:<OSL>\",...]."
 pipeline_phase: explore
 typical_runtime_min: 15.0
 applicable_when:
   - "baseline_tput > 0"
 # Descriptive — params_schema documents the optional sweep overrides.
 params_schema:
+  conc_values:
+    type: list
+    description: |
+      List of concurrency levels to fan out over. Defaults to the
+      executor's DEFAULT_CONC_VALUES.
+  isl_osl_configs:
+    type: list
+    description: |
+      List of "<ISL>:<OSL>" strings. Malformed entries are skipped with a
+      warning. Defaults to the executor's DEFAULT_ISL_OSL.
+  num_prompts_factor:
+    type: integer
+    description: |
+      Multiplier turning each CONC into the variant's prompt count
+      (num_prompts = max(conc * factor, conc)).
   benchmark_script:
     type: string
     description: |

@@ -266,7 +266,7 @@ class MachinePhase(PhaseHandler):
             log.exception("Coordinator: _on_phase_entered hook failed")
 
     async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
-        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 5-step sequencer (sets close_sequence_done).
+        """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done).
 
         Args:
             from_phase: The phase being left.

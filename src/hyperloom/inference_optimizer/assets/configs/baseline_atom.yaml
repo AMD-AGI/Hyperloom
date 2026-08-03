@@ -1,7 +1,8 @@
 # Magpie baseline benchmark config for Atom.
-# Used by hyperloom.orchestrator.actions.executors.baseline /
-# sweep / backends / params as the default benchmark config when
-# $FRAMEWORK=atom.
+# Used by hyperloom.orchestrator.actions.executors.{baseline, sweep, explore,
+# integrate_patch, framework_agent} via default_baseline_config() as the
+# default benchmark config when $FRAMEWORK=atom (also orchestrator/
+# specialists/rebench.py and orchestrator/kernel/conc_sweep.py).
 #
 # Two fields are FALLBACK ONLY and overridden at run time by the executor:
 #   - `benchmark.model`     <- --model / $MODEL_PATH
@@ -14,8 +15,7 @@
 # in at run time, Magpie's resolver picks `atom_{runner_type}.sh`
 # (e.g. atom_mi355x.sh).
 #
-# IMPORTANT — atom-specific constraints (see atom_boost_tutorials.md
-# and SKILL.md IR-8):
+# IMPORTANT — atom-specific constraints (see SKILL.md IR-8):
 #   - precision is fp8 by default (DeepSeek-R1 / GLM5 are shipped FP8).
 #   - EXTRA_ATOM_ARGS includes --trust-remote-code because most production
 #     atom-served models ship their modeling code in the model dir
@@ -30,9 +30,8 @@
 #   - Multi-node is unsupported; cli.py rejects --framework atom + --nodes>=2.
 #   - Kernel-agent + framework-agent + profile / roofline / TraceLens
 #     all run on atom. The only remaining auto-tighten in cli.py is the
-#     --nodes>=2 fail-fast guard (_apply_atom_auto_tighten /
-#     _assert_atom_single_node); --no-kernel and --no-framework-agent are not
-#     auto-flipped.
+#     --nodes>=2 fail-fast guard (_apply_atom_auto_tighten);
+#     --no-kernel and --no-framework-agent are not auto-flipped.
 
 benchmark:
   framework: atom

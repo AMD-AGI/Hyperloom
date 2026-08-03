@@ -629,7 +629,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
     assert p1.msg_id not in coord.state.pending_proposals
 
 
-# -- _format_analysis_md fallback (path read) -------------------------------
+# -- _context_analysis_reader fallback (path read) --------------------------
 def test_context_analysis_reader_path_fallback_on_format_error(
     coord: Coordinator,
     tmp_path,
@@ -1411,7 +1411,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert "roofline_evidence" in params
 
 
-# -- _record_fact_per_task (recipe KB KB path) ---------------------------------
+# -- _record_fact_per_task (recipe KB amend path) ------------------------------
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
@@ -2025,7 +2025,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
 
 
-# -- _on_enter_close 5-step sequencer ---------------------------------------
+# -- _on_enter_close 7-step sequencer ---------------------------------------
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):

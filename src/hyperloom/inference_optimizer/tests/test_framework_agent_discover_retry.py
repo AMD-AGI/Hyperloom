@@ -4,8 +4,10 @@
 """Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
 
 Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
-on success) and ``_pump_framework_agent_phase`` (flips done after the retry limit
-or a clean empty payload) by binding them to a minimal Coordinator stub.
+on success), ``_enqueue_framework_agent_task`` and
+``_record_framework_agent_phase_done`` (the give-up summary row, whether the
+reason is the retry limit or a clean empty payload) by binding them to a
+minimal Coordinator stub.
 """
 
 from __future__ import annotations
