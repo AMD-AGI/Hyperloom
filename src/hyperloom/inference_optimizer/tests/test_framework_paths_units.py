@@ -644,3 +644,42 @@ def test_apply_and_bench_aiter_source_root(apply_bench_tool) -> None:
         Path("/sgl-workspace/aiter/csrc/kernels/q.cu")
     ) == Path("/sgl-workspace/aiter")
     assert ab._aiter_source_root(Path("/x/vllm/a.py")) is None
+
+
+def test_reconstruct_sources_from_diff_nongit_repo(apply_bench_tool, tmp_path) -> None:
+    """A unified diff must reconstruct against a NON-git repo_root (the aiter_meta
+    split wheel under dist-packages is not a git repo).
+
+    Previously _reconstruct_sources_from_diff unconditionally ran
+    `git worktree add`, which fails on a non-git tree -> apply_failed, so a
+    diff-shaped aiter_meta kernel patch could never deploy. It now seeds a temp
+    tree from the on-disk base and `git apply`s there.
+    """
+    ab = apply_bench_tool
+    # a NON-git aiter_meta layout with a real base source file
+    repo = tmp_path / "site-packages" / "aiter_meta"
+    src = repo / "csrc" / "kernels" / "quant_kernels.cu"
+    src.parent.mkdir(parents=True)
+    src.write_text("old line\nkeep\n", encoding="utf-8")
+    assert ab._is_git_tree(repo) is False  # precondition: not a git repo
+
+    diff = tmp_path / "forge.patch"
+    diff.write_text(
+        "--- a/csrc/kernels/quant_kernels.cu\n"
+        "+++ b/csrc/kernels/quant_kernels.cu\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-old line\n"
+        "+new line\n"
+        " keep\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    rec = ab._reconstruct_sources_from_diff(diff, repo, out)
+    assert rec["status"] == "ok", rec
+    rel = "csrc/kernels/quant_kernels.cu"
+    assert rel in rec["files"], rec
+    assert Path(rec["files"][rel]).read_text(encoding="utf-8") == "new line\nkeep\n"
+    # the live on-disk base must be untouched (reconstruction is hermetic)
+    assert src.read_text(encoding="utf-8") == "old line\nkeep\n"
