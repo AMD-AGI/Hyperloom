@@ -868,6 +868,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_aggregate_research_evidence": "writeback",
         "_harvest_research_scout": "writeback",
         "_record_specialist_result": "writeback",
+        "_drain_queued_baselines": "writeback",
         # Phase handlers, grouped in the same call-chain order as
         # _COLLAB_MODULES/the @property block above:
         # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->

@@ -51,6 +51,10 @@ ENABLEMENT_MODES: tuple[str, ...] = (
     ENABLEMENT_MODE_ALL,
 )
 
+# params.reason marking a baseline that re-anchors a stack the enablement
+# specialist changed, rather than re-measuring the established one.
+ENABLEMENT_REVALIDATION_REASON = "enablement_eval_revalidation"
+
 # Result-dict keys stamped by the baseline executor on an eval-rooted failure and
 # read by writeback promotion/persistence.
 BASELINE_EVAL_FAILED_KEY = "baseline_eval_failed"
@@ -588,6 +592,7 @@ __all__ = [
     "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
+    "ENABLEMENT_REVALIDATION_REASON",
     "ENABLEMENT_MODE_EVAL",
     "ENABLEMENT_MODE_LAUNCH",
     "ENABLEMENT_MODE_OFF",

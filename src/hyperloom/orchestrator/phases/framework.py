@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -4596,7 +4597,7 @@ class FrameworkPhase(PhaseHandler):
                 pass
         params: dict[str, Any] = {
             "source": "coordinator_internal",
-            "reason": "enablement_eval_revalidation",
+            "reason": ENABLEMENT_REVALIDATION_REASON,
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }

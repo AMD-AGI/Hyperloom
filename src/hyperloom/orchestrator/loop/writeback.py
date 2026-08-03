@@ -22,6 +22,7 @@ from ..state.optimization_journal import (
     operation_kind_for,
     summarize_change,
 )
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -646,7 +647,7 @@ class WritebackCollaborator:
             # pending state, preserve the frozen trigger identity, increment stall.
             reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
             is_revalidation = bool(
-                (task.params or {}).get("reason") == "enablement_eval_revalidation"
+                (task.params or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
@@ -2337,7 +2338,7 @@ class WritebackCollaborator:
         promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         is_revalidation = bool(
-            task_params.get("reason") == "enablement_eval_revalidation"
+            task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
         # The anchor is the best measurement of the unmodified stack. A later,
@@ -2501,7 +2502,7 @@ class WritebackCollaborator:
             # Stamp canonical params fingerprint for the self-loop denial helper.
             "fingerprint": _baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
-            "is_revalidation": bool(task_params.get("reason") == "enablement_eval_revalidation"),
+            "is_revalidation": bool(task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON),
             "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
             "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
@@ -2509,6 +2510,8 @@ class WritebackCollaborator:
             audit_extras["anchor_kept_tput"] = prior_anchor
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
+        if self.shared_state.baseline_tput > 0:
+            await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
         # snapshot ceiling in case the later roofline step fails.
         if isinstance(tput, (int, float)) and tput > 0:
@@ -2553,6 +2556,71 @@ class WritebackCollaborator:
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+
+    async def _drain_queued_baselines(self, *, reason: str) -> list[str]:
+        """Cancel queued baselines that the established anchor has made redundant.
+
+        Baseline is LLM-proposable and nothing stopped a run from queueing more
+        of them while the first was still measuring, so a succeeded baseline can
+        leave a backlog that re-measures a number the session already has. The
+        enablement revalidation baseline is spared: it re-anchors a stack the
+        specialist changed, so it is not redundant work.
+
+        Args:
+            reason: Stamped onto the cancellation history and the observation.
+
+        Returns:
+            The cancelled task ids (empty when the queue held none).
+        """
+        spared = await self._enablement_revalidation_task_ids()
+        try:
+            cancelled = await self.tasks.cancel_family(
+                ["baseline"],
+                reason=reason,
+                exclude_task_ids=spared,
+            )
+        except Exception:  # noqa: BLE001 — draining is best-effort
+            log.exception("baseline drain: cancel_family failed")
+            return []
+        if not cancelled:
+            return []
+        log.info(
+            "baseline drain: cancelled %d queued baseline task(s) (reason=%s, spared=%d)",
+            len(cancelled),
+            reason,
+            len(spared),
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "baseline_drain",
+                "reason": reason,
+                "cancelled_task_ids": cancelled,
+                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+            },
+        )
+        return cancelled
+
+    async def _enablement_revalidation_task_ids(self) -> set[str]:
+        """Queued baseline task ids that re-anchor an enablement-changed stack.
+
+        Matches the identity ``_promote_baseline`` uses: the tracked task id, or
+        a params reason recorded before the id was persisted.
+        """
+        spared: set[str] = set()
+        tracked = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        if tracked:
+            spared.add(tracked)
+        try:
+            for task in await self.tasks.queued():
+                if str(getattr(task, "kind", "") or "") != "baseline":
+                    continue
+                if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
+                    spared.add(str(getattr(task, "task_id", "") or ""))
+        except Exception:  # noqa: BLE001 — fall back to the tracked id alone
+            log.exception("baseline drain: queued-task scan failed")
+        return {t for t in spared if t}
 
     async def _promote_replay_warm_recipe(
         self,
