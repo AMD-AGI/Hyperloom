@@ -126,9 +126,9 @@ class RedactingArgumentParser(argparse.ArgumentParser):
 def _default_pr_monitor_mcp_url() -> str | None:
     """Derive the PR Monitor MCP URL from ``$PRIMUS_CORTEX_PR_API``.
 
-    Follows the same ``<base>/mcp`` convention the gbrain ``cortex_kb`` server
-    uses, so one env var wires both the REST client and the specialist MCP
-    server instead of silently leaving the MCP half disabled. The trailing
+    Appends ``/mcp/`` so the one env var that already defaults
+    ``--pr-monitor-url`` also configures the specialist PR-Monitor MCP server,
+    instead of silently leaving the MCP half disabled. The trailing
     slash is kept because the bare ``/mcp`` form answers 307 and MCP clients do
     not re-POST across the redirect.
 

@@ -50,10 +50,16 @@ benchmark:
     # record_shapes / with_memory / with_flops / use_gzip); we add the
     # TraceLens-relevant knobs that map to upstream ProfilerConfig in
     # the validation vLLM build (0.19+). delay_iterations and
-    # max_iterations are overridden by _materialize_config_with_envs
-    # using the TraceLens magpie skill formulas (issue #194):
-    #   max_iters   = min(1024, max(256, OSL * 16 / CONC))
-    #   delay_iters = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2
+    # max_iterations are overridden by materialize_config_with_envs (see
+    # orchestrator/actions/executors/_workload_envs.py):
+    #   max_iters    = HYPERLOOM_PROFILE_MAX_STEPS_CAP, default 128
+    #                  (serialization-safe cap; hard override via
+    #                  HYPERLOOM_PROFILE_MAX_ITERS)
+    #   steady_floor = ceil(OSL * (1 + RANDOM_RANGE_RATIO) / (2 * CONC))
+    #                  must be <= max_iters, else the profile OSL is
+    #                  auto-lowered
+    #   delay_iters  = OSL * (RANDOM_RANGE_RATIO + 1) * 3 - max_iters / 2,
+    #                  clamped at 0
     EXTRA_VLLM_ARGS: "--profiler-config.ignore_frontend True"
     # vLLM timeout must be extended during profiling (graph capture is slow)
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"

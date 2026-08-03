@@ -75,8 +75,8 @@ async def _noop_prep(ctx) -> dict:
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
-# Declarative action_kind -> ExecutorFn map (test_action_catalogue enforces
-# consistency with session_paths._runs_actions()).
+# Declarative action_kind -> ExecutorFn map. Keep in sync with
+# session_paths._runs_actions() (not enforced by a test).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
