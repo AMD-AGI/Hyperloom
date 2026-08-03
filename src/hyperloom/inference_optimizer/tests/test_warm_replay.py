@@ -415,6 +415,39 @@ def test_promote_warm_replay_reproduced_pushes_stack_and_updates_gain(
     assert coord.shared_state.current_best["tput"] == 738.0
 
 
+def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
+    tmp_path,
+):
+    """A PRELUDE enablement config stays reproducible but contributes no gain."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.optimization_stack = [
+        {
+            "action": "integrate_patch",
+            "baseline_enablement": True,
+            "attribution_eligible": False,
+            "tput": 600.0,
+        }
+    ]
+    coord.shared_state.gain_per_stack_entry = [None]
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+    }
+
+    coord._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 738.0},
+        task=_StubTask(params={"extra_server_args": "--attention-backend AITER"}),
+    )
+
+    assert [entry["action"] for entry in coord.shared_state.optimization_stack] == [
+        "integrate_patch",
+        "replay_warm_recipe",
+    ]
+    assert coord.shared_state.gain_per_stack_entry == [None, 23.0]
+    assert coord.shared_state.cumulative_gain == 23.0
+    assert coord.shared_state.cumulative_gain_validated_stack_len == 2
+
+
 def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
     """A faster warm config that FAILS the image-quality gate vs the baseline
     reference must NOT be promoted (no stack push, no current_best), even though

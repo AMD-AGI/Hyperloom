@@ -627,19 +627,22 @@ def _spawn_remote(
     return _detach_framework_launch(cmd, log_file, pid_file, sub_env, node_rank)
 
 
-def _rank0_pid_from_log(log_dir: str) -> int | None:
-    """Read rank 0 PID from /tmp/multi_node_pids/rank_0.pid (best-effort).
+def _rank0_pid_from_log(pid_dir: str) -> int | None:
+    """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort).
+
+    The PID dir is passed explicitly rather than derived from the log dir: the
+    two are no longer siblings once the logs move to a shared filesystem, and a
+    PID is only meaningful on its own node so its dir stays node-local ``/tmp``.
 
     Args:
-        log_dir (str): The log directory; its parent is probed for the
-            ``multi_node_pids/rank_0.pid`` file before falling back to the
-            default temp-directory location.
+        pid_dir (str): The rank PID directory; ``{pid_dir}/rank_0.pid`` is read
+            before falling back to the default temp-directory location.
 
     Returns:
         int | None: The rank-0 PID, or ``None`` if it cannot be read.
     """
     try:
-        pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
+        pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
         if not pid_path.is_file():
             pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
@@ -675,24 +678,23 @@ _FATAL_LOG_PATTERNS: tuple[str, ...] = (
 _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
-def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error.
+def _scan_log_for_fatal(log_file: Path) -> str | None:
+    """Scan a log file's tail for a fatal traceback / framework error.
 
     Args:
-        log_dir: Directory containing ``rank_0.log``.
+        log_file: Path to the log file to scan.
 
     Returns:
         str | None: The first matched fatal line, or ``None`` if none found
         or the log cannot be read.
     """
     try:
-        lf = Path(log_dir) / "rank_0.log"
-        if not lf.is_file():
+        if not log_file.is_file():
             return None
-        size = lf.stat().st_size
+        size = log_file.stat().st_size
         if size == 0:
             return None
-        with lf.open("rb") as f:
+        with log_file.open("rb") as f:
             if size > _FATAL_SCAN_TAIL_BYTES:
                 f.seek(size - _FATAL_SCAN_TAIL_BYTES)
                 f.readline()  # discard partial first line
@@ -707,6 +709,19 @@ def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
         return None
     except OSError:
         return None
+
+
+def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
+    """Scan rank_0.log tail for a fatal traceback / framework error.
+
+    Args:
+        log_dir: Directory containing ``rank_0.log``.
+
+    Returns:
+        str | None: The first matched fatal line, or ``None`` if none found
+        or the log cannot be read.
+    """
+    return _scan_log_for_fatal(Path(log_dir) / "rank_0.log")
 
 
 def _wait_health(
@@ -766,7 +781,7 @@ def _wait_pd_legs_health(
     prefill_url: str,
     decode_url: str,
     timeout_s: int,
-    leg_pids: dict[str, int],
+    log_dir: str | None = None,
 ) -> bool | None:
     """Poll both PD legs' own ``/health`` until each answers, within one budget.
 
@@ -779,19 +794,31 @@ def _wait_pd_legs_health(
     had tens of minutes to run, so a caller retrying mid-boot could not tell a
     booting cluster from a dead one.
 
+    Liveness is decided by ``/health`` (reachable over the network) and each
+    leg's own log, never by a PID. This driver runs on the head, but the decode
+    group's leader runs on a *different* node, so its PID lives in that node's
+    namespace: ``os.kill`` here would raise ``ProcessLookupError`` for a
+    perfectly healthy remote leg and false-fail the launch. The aggregated path
+    keeps its PID check only because rank 0 is co-located with this driver.
+
     Args:
         prefill_url: Base URL of the prefill group's rank 0.
         decode_url: Base URL of the decode group's rank 0.
         timeout_s: Shared budget for both legs.
-        leg_pids: Spawned PIDs by tag, for the ``prefill_0`` / ``decode_0``
-            early abort.
+        log_dir: Optional directory holding ``{role}_0.log``; each leg's own log
+            is scanned for a fatal error to abort early, and its tail is emitted
+            on that abort so the caller can see why the leg died.
 
     Returns:
-        bool | None: True once both legs answer, False when a leg's leader is
-        confirmed dead, None on timeout (undetermined, as for rank 0).
+        bool | None: True once both legs answer, False when a leg's log shows a
+        fatal crash, None on timeout (undetermined, as for rank 0).
     """
     import urllib.error
     import urllib.request
+
+    def _leg_log(role: str) -> Path | None:
+        # Legs log to {pid_file_name stem}.log, e.g. decode_0.log / prefill_0.log.
+        return Path(log_dir) / f"{role}_0.log" if log_dir else None
 
     pending = {"prefill": prefill_url, "decode": decode_url}
     started = time.monotonic()
@@ -808,16 +835,15 @@ def _wait_pd_legs_health(
                         continue
             except (urllib.error.URLError, OSError):
                 pass
-            # Bail on a dead leader rather than wait out the budget on a corpse.
-            pid = leg_pids.get(f"{role}_0") or 0
-            if pid > 0:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    _log(f"ERROR {role} leg leader pid={pid} died while waiting for /health")
+            # A remote leg's PID is not ours to os.kill; a fatal in its own log is
+            # the cross-node-safe proof of death (the nohup wrapper hides crashes).
+            leg_log = _leg_log(role)
+            if leg_log is not None:
+                fatal_line = _scan_log_for_fatal(leg_log)
+                if fatal_line:
+                    _log(f"ERROR {role} leg fatal in {leg_log.name}: {fatal_line[:300]}; aborting health wait")
+                    _emit_log_tail(leg_log)
                     return False
-                except OSError:
-                    pass
         if pending:
             time.sleep(5)
     if pending:
@@ -826,20 +852,41 @@ def _wait_pd_legs_health(
     return True
 
 
+_LOG_TAIL_BYTES = 8192
+
+
+def _emit_log_tail(log_file: Path) -> None:
+    """Append the tail of a log file to stderr if it exists.
+
+    Seeks to the last ``_LOG_TAIL_BYTES`` rather than reading the whole file:
+    the logs now live on a shared filesystem, and slurping a multi-hundred-MB
+    server log over the network on the failure path (both PD legs) would be a
+    heavy read for an 8 KiB tail.
+
+    Args:
+        log_file (Path): Path to the log file to tail.
+    """
+    name = log_file.name
+    try:
+        sz = log_file.stat().st_size if log_file.is_file() else 0
+        _log(f"(tail probe) {name} bytes={sz} path={log_file}")
+        if sz > 0:
+            with log_file.open("rb") as f:
+                if sz > _LOG_TAIL_BYTES:
+                    f.seek(sz - _LOG_TAIL_BYTES)
+                tail = f.read().decode("utf-8", errors="replace")
+            _log(f"{name} tail (last 8kiB):\n" + tail)
+    except OSError as exc:
+        _log(f"(tail probe) cannot read {name}: {exc}")
+
+
 def _emit_rank0_log_tail(log_dir: Path) -> None:
     """Append the tail of ``rank_0.log`` to stderr if the file exists.
 
     Args:
         log_dir (Path): Directory containing ``rank_0.log``.
     """
-    lf = log_dir / "rank_0.log"
-    try:
-        sz = lf.stat().st_size if lf.is_file() else 0
-        _log(f"(tail probe) rank_0.log bytes={sz} path={lf}")
-        if sz > 0:
-            _log("rank_0.log tail (last 8kiB):\n" + lf.read_text(encoding="utf-8", errors="replace")[-8192:])
-    except OSError as exc:
-        _log(f"(tail probe) cannot read rank_0.log: {exc}")
+    _emit_log_tail(log_dir / "rank_0.log")
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
@@ -1168,21 +1215,23 @@ def main() -> int:
             summary["pd_prefill_url"],
             summary["pd_decode_url"],
             _HEALTH_PROBE_TIMEOUT_SEC,
-            pids,
+            log_dir=args.log_dir,
         )
         if _legs_ready:
             _log("both PD legs /health OK")
             return 0
-        _emit_rank0_log_tail(Path(args.log_dir))
+        # PD has no rank_0.log; tail each leg's own log so the caller sees why.
+        _emit_log_tail(Path(args.log_dir) / "prefill_0.log")
+        _emit_log_tail(Path(args.log_dir) / "decode_0.log")
         if _legs_ready is False:
-            _log("ERROR a PD leg leader died before serving; marking the launch failed")
+            _log("ERROR a PD leg logged a fatal crash before serving; marking the launch failed")
             return 2
         # Undetermined, as for rank 0: warn rather than fail a slow-but-live boot.
         _log("WARN PD legs unconfirmed; the caller's serving probe decides from here")
         return 0
 
     _log(f"polling rank 0 /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
-    _r0_pid = _rank0_pid_from_log(args.log_dir)
+    _r0_pid = _rank0_pid_from_log(args.pid_dir)
     if _wait_health(
         _HEALTH_PROBE_TIMEOUT_SEC,
         rank0_pid=_r0_pid,

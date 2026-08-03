@@ -28,7 +28,8 @@ from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     _ENV_KEY_RE,
     is_python_package_root,
-    scrub_child_process_env,
+    redact_secret_values,
+    scrub_benchmark_process_env,
 )
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
@@ -910,7 +911,7 @@ def _run_magpie(
     if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
-    env = scrub_child_process_env(os.environ.copy())
+    env = scrub_benchmark_process_env(os.environ.copy())
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
@@ -1478,7 +1479,7 @@ async def run_grid(
                     port=int(lifecycle.get("port") or 0),
                 )
                 warmup_error = (
-                    (warmup_stderr or warmup_stdout)[-2000:]
+                    redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
                     if warmup_rc != 0
                     else "warmup benchmark_report missing valid throughput/completed requests"
                 )
@@ -1908,7 +1909,11 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = (stderr or stdout)[-2000:] if rc != 0 else "no benchmark_* workspace produced"
+            no_ws_error_summary = (
+                redact_secret_values((stderr or stdout)[-2000:])
+                if rc != 0
+                else "no benchmark_* workspace produced"
+            )
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
                 i + 1,
@@ -1959,7 +1964,7 @@ async def run_grid(
 
         if not measurement.get("valid_measurement"):
             if rc != 0:
-                error = (stderr or stdout)[-2000:]
+                error = redact_secret_values((stderr or stdout)[-2000:])
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = "benchmark_report missing"
@@ -2025,7 +2030,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
-                error=(stderr or stdout)[-2000:] if rc != 0 else None,
+                error=redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),

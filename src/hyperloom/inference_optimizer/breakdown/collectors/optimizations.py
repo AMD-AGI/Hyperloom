@@ -397,6 +397,7 @@ def _validation_summary(
         _to_float(entry.get("gain_pct")) or 0.0
         for entry in entries
         if entry.get("validated") is True
+        and entry.get("source") != "unattributed"
     )
     phase_breakdown = attribution.get("phase_breakdown")
     if not isinstance(phase_breakdown, dict):
@@ -423,6 +424,10 @@ def _validation_summary(
         ),
         "gemm_tuning_gain_pct": round(
             _to_float(source_breakdown.get("gemm_tuning_pct_of_total")) or 0.0,
+            6,
+        ),
+        "unattributed_gain_pct": round(
+            _to_float(source_breakdown.get("unattributed_pct_of_total")) or 0.0,
             6,
         ),
     }
@@ -502,6 +507,12 @@ def collect_optimizations(
             warnings.append(f"optimizations: stack entry {stack_index} is not an object")
             continue
         raw = dict(raw_value)
+        # A pre-baseline enablement patch is part of the reproducible launch
+        # configuration, not a measured optimization. Keep it in SharedState's
+        # stack, but omit it from the canonical optimization projection and do
+        # not advance the throughput chain used by the next attributable entry.
+        if raw.get("baseline_enablement") or raw.get("attribution_eligible") is False:
+            continue
         if str(raw.get("action") or "").strip().lower() in _NON_OPTIMIZATION_ACTIONS:
             anchor_tput = _to_float(raw.get("tput"))
             if anchor_tput is not None:

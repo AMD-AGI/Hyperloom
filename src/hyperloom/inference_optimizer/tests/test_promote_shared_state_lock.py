@@ -407,6 +407,42 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
 
 @pytest.mark.asyncio
+async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir):
+    """A patch required to establish baseline stays reproducible but has no gain."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 0.0
+    s.pending_integrate = {"task_id": "t-enable"}
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "enablement": True,
+            "output_throughput": 140.0,
+            "specialist_task_id": "spec-enable",
+            "extra_server_args_applied": "--mem-fraction-static 0.95",
+            "workspace": "/w",
+        },
+        task=_task(
+            "integrate_patch",
+            task_id="t-enable",
+            params={"enablement": True},
+        ),
+    )
+
+    assert len(s.optimization_stack) == 1
+    entry = s.optimization_stack[0]
+    assert entry["action"] == "integrate_patch"
+    assert entry["baseline_enablement"] is True
+    assert entry["attribution_eligible"] is False
+    assert s.gain_per_stack_entry == [None]
+    assert s.cumulative_gain == 0.0
+    assert s.cumulative_gain_validated == 0.0
+    assert s.pending_integrate == {}
+
+
+@pytest.mark.asyncio
 async def test_promote_integrate_patch_reverted_keeps_current_best(session_dir):
     coord = _coord(session_dir)
     s = coord.shared_state

@@ -30,6 +30,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
+    filter_benchmark_env_mapping,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -1125,6 +1126,32 @@ def materialize_config_with_envs(
     _eval_limit_env = os.environ.get("MAGPIE_EVAL_LIMIT", "").strip()
     if _eval_limit_env and "MAGPIE_EVAL_LIMIT" not in envs:
         envs["MAGPIE_EVAL_LIMIT"] = _eval_limit_env
+    # PD (router-fronted): lm_eval's default token-id prompts are rejected by the
+    # sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
+    # accuracy eval. Force string prompts so the gate works. Explicit env /
+    # extra_envs win; only disaggregated runs are touched (aggregated hits the
+    # sglang server directly, which accepts token-id prompts).
+    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    if not _eval_tok_env:
+        try:
+            from ._multi_node_env import resolve_kb_topology
+
+            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+                _eval_tok_env = "false"
+        except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
+            # Don't degrade silently: if this IS a PD run, failing to resolve the
+            # topology leaves MAGPIE_EVAL_TOKENIZED_REQUESTS unset, lm_eval keeps
+            # sending token-id prompts, and the sglang_router 422s every request
+            # -> accuracy reads 0 with no other clue pointing back here.
+            log.warning(
+                "_workload_envs: could not resolve PD topology to gate the lm_eval prompt format (%s); "
+                "if this is a disaggregated run, MAGPIE_EVAL_TOKENIZED_REQUESTS stays unset and the "
+                "sglang_router may reject token-id prompts with HTTP 422 (accuracy eval would read 0)",
+                exc,
+            )
+            _eval_tok_env = ""
+    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
+        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
     if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
@@ -1173,6 +1200,15 @@ def materialize_config_with_envs(
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
             envs[str(key)] = str(extra_envs[key])
+    filtered_envs = filter_benchmark_env_mapping(envs)
+    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    if dropped_credentials:
+        log.warning(
+            "Dropping control-plane credentials from benchmark envs: %s",
+            ", ".join(dropped_credentials),
+        )
+        envs.clear()
+        envs.update(filtered_envs)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

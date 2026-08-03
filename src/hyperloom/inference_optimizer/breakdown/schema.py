@@ -1207,6 +1207,9 @@ class SourceBreakdown(TypedDict, total=False):
         kernel_unattributed_pct_of_total (float): Kernel-lane gain that could
             not be tied to any backend KEEP (e.g. no Forge/GEAK KEEP evidence);
             kept unattributed rather than credited to a backend.
+        unattributed_pct_of_total (float): Gain whose owning source could not
+            be resolved from explicit ownership, recorded phase, or phase
+            history.
         backends_pct_of_total (float): Gain share from backend exploration.
         params_pct_of_total (float): Gain share from param exploration.
         sweep_pct_of_total (float): Gain share attributed to the sweep.
@@ -1224,6 +1227,8 @@ class SourceBreakdown(TypedDict, total=False):
     gemm_tuning_pct_of_total: float
     # Kernel-lane gain with no backend KEEP evidence; unattributed on purpose.
     kernel_unattributed_pct_of_total: float
+    # Gain whose owning source could not be resolved.
+    unattributed_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float

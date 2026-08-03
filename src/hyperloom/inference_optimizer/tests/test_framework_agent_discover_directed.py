@@ -94,7 +94,9 @@ def test_discover_merges_candidates_across_repos(
     async def _spy(**kwargs: Any) -> dict[str, Any]:
         repo_url = kwargs["repo_url"]
         seen_repo_urls.append(repo_url)
-        tag = repo_url.rsplit("/", 1)[-1].replace(".git", "")
+        # owner/name, not just name: the allowlist holds same-named repos
+        # under different owners (ROCm/vllm vs vllm-project/vllm).
+        tag = "/".join(repo_url.replace(".git", "").rsplit("/", 2)[-2:])
         return {
             "batch_id": "b-merge",
             "candidates": [{"pr_url": f"https://example.com/{tag}/pr/1"}],

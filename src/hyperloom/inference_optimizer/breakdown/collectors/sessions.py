@@ -76,6 +76,19 @@ _ENV_DENY_PATTERN = re.compile(
 )
 
 
+# Non-secret keys kept verbatim even when the deny pattern matches a substring.
+# ``MAGPIE_EVAL_TOKENIZED_REQUESTS`` records the accuracy eval's prompt wire
+# format (``false`` => string prompts, forced on PD so the sglang_router does
+# not 422; absent => lm_eval's default token-id prompts). Recording it lets a
+# reader tell a PD run's accuracy from an aggregated one's -- but "TOKENIZED"
+# contains "TOKEN", so the credential denylist would otherwise drop it.
+_ENV_ALLOWLIST_FORCE: frozenset[str] = frozenset(
+    {
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    }
+)
+
+
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
     """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` with stringified values.
 
@@ -93,10 +106,13 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
     for k, v in envs.items():
         if not isinstance(k, str):
             continue
-        keep = (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
+        forced = k in _ENV_ALLOWLIST_FORCE
+        keep = forced or (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
         if not keep:
             continue
-        if _ENV_DENY_PATTERN.search(k):
+        # Force-listed keys are known non-secret; skip the substring denylist
+        # (it would otherwise strip e.g. TOKENIZED for containing "TOKEN").
+        if not forced and _ENV_DENY_PATTERN.search(k):
             continue
         out[k] = "" if v is None else str(v)
     return out

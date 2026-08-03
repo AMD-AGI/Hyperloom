@@ -14,6 +14,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.env_safety import scrub_benchmark_process_env
+
 log = logging.getLogger(__name__)
 
 # Env vars Ray owns inside its workers; never let a caller override them.
@@ -169,7 +171,7 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
         if key in _RAY_OWNED_VISIBLE_DEVICE_VARS:
             continue
         merged[key] = value
-    return merged
+    return scrub_benchmark_process_env(merged)
 
 
 def _run_subprocess_worker(

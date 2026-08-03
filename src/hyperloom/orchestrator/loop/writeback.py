@@ -2157,6 +2157,9 @@ class WritebackCollaborator:
                         val = bv.get(_src_key)
                         if val:
                             stack_entry[_src_key] = str(val)
+                    for _attr_key in ("baseline_enablement", "attribution_eligible"):
+                        if _attr_key in bv:
+                            stack_entry[_attr_key] = bool(bv.get(_attr_key))
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -3101,6 +3104,16 @@ class WritebackCollaborator:
         status = str(result.get("status") or "")
         new_tput = result.get("output_throughput")
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        task_params = (getattr(task, "params", None) or {}) if task is not None else {}
+        prebaseline_enablement = bool(
+            kept_flag
+            and float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0) <= 0.0
+            and (
+                result.get("enablement")
+                or task_params.get("enablement")
+                or task_params.get("enablement_landing")
+            )
+        )
         lifted = False
         if kept_flag:
             specialist_task_id = str(result.get("specialist_task_id") or "")
@@ -3123,13 +3136,29 @@ class WritebackCollaborator:
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
-            lifted = self._lift_to_current_best("integrate_patch", float(new_tput), lift)
-            if lifted and self.shared_state.baseline_tput > 0:
-                self._update_cumulative_gain_validated(new_tput)
-                self.shared_state.resume_pending_revalidation = False
-                await self._maybe_enqueue_watermark_roofline(
-                    reason="integrate_keep_watermark",
+            if prebaseline_enablement:
+                lift["baseline_enablement"] = True
+                lift["attribution_eligible"] = False
+                # This patch establishes the runnable baseline environment. Keep
+                # it in the configuration stack for reproducibility, but mark it
+                # ineligible for gain attribution because no runnable before
+                # measurement exists.
+                lifted = self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                log.info(
+                    "integrate_patch KEEP accepted as pre-baseline enablement; "
+                    "retained in config stack without gain attribution "
+                    "(task=%s specialist=%s)",
+                    str(getattr(task, "task_id", "") or ""),
+                    specialist_task_id,
                 )
+            else:
+                lifted = self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                if lifted and self.shared_state.baseline_tput > 0:
+                    self._update_cumulative_gain_validated(new_tput)
+                    self.shared_state.resume_pending_revalidation = False
+                    await self._maybe_enqueue_watermark_roofline(
+                        reason="integrate_keep_watermark",
+                    )
             changed = True
         # Clear the pending_integrate sentinel after the task outcome is observed.
         if isinstance(getattr(self.shared_state, "pending_integrate", None), dict):
@@ -3140,7 +3169,9 @@ class WritebackCollaborator:
             }:
                 self.shared_state.pending_integrate = {}
                 changed = True
-        if lifted:
+        if prebaseline_enablement:
+            audit_decision = "enablement_accepted" if lifted else "no_promote"
+        elif lifted:
             audit_decision = "promoted"
         elif kept_flag:
             audit_decision = "no_promote"
@@ -3151,6 +3182,7 @@ class WritebackCollaborator:
             "specialist_task_id": result.get("specialist_task_id"),
             "output_throughput": new_tput,
             "delta_pct": result.get("delta_pct"),
+            "prebaseline_enablement": prebaseline_enablement,
             "accuracy_pass": result.get("accuracy_pass"),
             "patches_applied": result.get("patches_applied") or [],
             "patches_reverted": result.get("patches_reverted") or [],

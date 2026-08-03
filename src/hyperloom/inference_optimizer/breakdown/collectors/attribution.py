@@ -12,6 +12,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 
@@ -61,12 +62,10 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # instead of vanishing into the non-emitted ``other`` family. The label may
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
-    # FRAMEWORK: own headline row so per-source totals reconcile against
-    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    # Framework-PR integration is emitted as ``integrate_patch`` (distinct from
-    # the legacy kernel ``integrate`` above), so credit it to ``framework``
-    # rather than letting it fall through to ``other``/``unattributed``.
-    (lambda s: s == "framework" or s.startswith("integrate_patch"), "framework"),
+    # FRAMEWORK: exact legacy action label. ``integrate_patch`` is phase-generic
+    # (FRAMEWORK_AGENT, EXPLORE, and pre-baseline enablement), so it is resolved
+    # from entry metadata by ``_entry_family`` rather than blanket-credited here.
+    (lambda s: s == "framework", "framework"),
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     (lambda s: s == "gemm_tuning", "gemm_tuning"),
@@ -93,6 +92,87 @@ def _action_family(action: str) -> str:
         if predicate(s):
             return family
     return "other"
+
+
+def _phase_timeline(state: dict[str, Any]) -> list[tuple[float, str]]:
+    """Return normalized phase boundaries ordered by timestamp."""
+
+    history = state.get("phase_history") or []
+    if not isinstance(history, list):
+        return []
+    timeline: list[tuple[float, str]] = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = float(row.get("ts_unix") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        phase = str(row.get("to_phase") or "").strip().upper()
+        if phase:
+            timeline.append((ts, phase))
+    timeline.sort(key=lambda item: item[0])
+    return timeline
+
+
+def _entry_ts(entry: dict[str, Any]) -> float | None:
+    """Return an entry timestamp suitable for phase-history lookup."""
+
+    value = entry.get("ts_unix")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    text = str(entry.get("ts") or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
+    """Return the phase active at ``ts_unix``, if one can be inferred."""
+
+    if ts_unix is None:
+        return ""
+    current = ""
+    for ts, phase in timeline:
+        if ts <= ts_unix:
+            current = phase
+        else:
+            break
+    return current
+
+
+def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
+    """Resolve attribution family using phase/ownership metadata when needed.
+
+    ``integrate_patch`` is not intrinsically a Framework action. Framework
+    authoring owns explicitly marked or FRAMEWORK_AGENT entries; EXPLORE owns
+    its own patch applications; PRELUDE baseline-enablement entries are
+    configuration prerequisites and remain non-attributable.
+    """
+
+    action = str(entry.get("action") or "").strip().lower()
+    if not action.startswith("integrate_patch"):
+        return _action_family(action)
+    if entry.get("attribution_eligible") is False or entry.get("baseline_enablement"):
+        return "unattributed"
+    if entry.get("framework_agent_authoring"):
+        return "framework"
+    phase = str(
+        entry.get("source_phase") or entry.get("phase") or inferred_phase or ""
+    ).strip().upper()
+    return {
+        "FRAMEWORK": "framework",
+        "FRAMEWORK_AGENT": "framework",
+        "EXPLORE": "explore",
+        "KERNEL": "kernel_agent",
+        "KERNEL_AGENT": "kernel_agent",
+    }.get(phase, "unattributed")
 
 
 def _promote_legacy_gain_entries(
@@ -142,6 +222,15 @@ def _promote_legacy_gain_entries(
         prov = str(se.get("provenance") or "").strip()
         if prov:
             promoted["provenance"] = prov
+        for key in (
+            "source_phase",
+            "phase",
+            "framework_agent_authoring",
+            "baseline_enablement",
+            "attribution_eligible",
+        ):
+            if key in se:
+                promoted[key] = se.get(key)
         out.append(promoted)
         if cum_after is not None:
             prev_cum = cum_after
@@ -207,6 +296,7 @@ def collect_attribution(
         "kernel_agent": 0.0,
         "sweep": 0.0,
         "other": 0.0,
+        "unattributed": 0.0,
         # Legacy buckets for archived (pre-merge) sessions.
         "backends": 0.0,
         "params": 0.0,
@@ -217,14 +307,23 @@ def collect_attribution(
         "gemm_tuning": 0.0,
         "geak": 0.0,
     }
+    timeline = _phase_timeline(state)
+    unattributed_actions: set[str] = set()
     for e in entries:
         if not isinstance(e, dict):
+            continue
+        if e.get("attribution_eligible") is False or e.get("baseline_enablement"):
             continue
         delta = _to_float(e.get("delta_pct"))
         if delta is None:
             continue
-        fam = _action_family(str(e.get("action") or ""))
+        fam = _entry_family(
+            e,
+            inferred_phase=_phase_at(_entry_ts(e), timeline),
+        )
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
+        if fam in {"other", "unattributed"} and delta > 0:
+            unattributed_actions.add(str(e.get("action") or "<missing>"))
 
     # Split "kernel_agent" between backends based on adopted KEEP entries.
     forge_kept_kids = {inv.get("kernel_id") for inv in forge_invocations if inv.get("decision") == "KEEP"}
@@ -239,6 +338,10 @@ def collect_attribution(
     # not tied to a Forge KEEP stays unattributed instead of being reverse-
     # inferred onto Forge (which may not have run at all this session).
     kernel_unattributed = max(kernel_total - forge_total, 0.0)
+    unattributed_total = (
+        family_totals.get("unattributed", 0.0)
+        + family_totals.get("other", 0.0)
+    )
 
     notes: list[str] = []
     if not state_provided:
@@ -253,6 +356,15 @@ def collect_attribution(
             "optimization_stack (delta_pct computed as diff vs prior entry's "
             "cum_gain_after)."
         )
+    if unattributed_total > 0:
+        actions = ", ".join(sorted(unattributed_actions))
+        note = (
+            f"{unattributed_total:.2f}% validated gain could not be assigned "
+            f"to a known source family (actions: {actions}); reported as "
+            "unattributed."
+        )
+        notes.append(note)
+        warnings.append(f"attribution: {note}")
 
     # Per-phase gain breakdown (buckets each KEEP by its active phase).
     phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
@@ -265,6 +377,7 @@ def collect_attribution(
             # Kernel-lane gain with no Forge KEEP evidence; surfaced honestly
             # instead of being credited to a backend that produced no KEEP.
             "kernel_unattributed_pct_of_total": round(kernel_unattributed, 2),
+            "unattributed_pct_of_total": round(unattributed_total, 2),
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
             "replay_warm_recipe_pct_of_total": round(family_totals.get("replay_warm_recipe", 0.0), 2),
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
@@ -305,41 +418,7 @@ def _collect_phase_breakdown(
         sub-breakdowns.
     """
     # Phase timeline: for an entry ts, pick the latest row with ts_unix <= ts.
-    history = state.get("phase_history") or []
-    if not isinstance(history, list):
-        history = []
-    timeline: list[tuple[float, str]] = []
-    for row in history:
-        if not isinstance(row, dict):
-            continue
-        try:
-            ts = float(row.get("ts_unix") or 0.0)
-        except (TypeError, ValueError):
-            ts = 0.0
-        phase = str(row.get("to_phase") or "").strip().upper()
-        if phase:
-            timeline.append((ts, phase))
-    timeline.sort(key=lambda r: r[0])
-
-    def _phase_for(ts_unix: float) -> str:
-        """Resolve which phase owned a given timestamp.
-
-        Args:
-            ts_unix (float): Unix timestamp of a gain-ledger entry.
-
-        Returns:
-            str: The latest phase whose boundary is ``<= ts_unix``, or ``""``
-            when the timeline is empty.
-        """
-        if not timeline:
-            return ""
-        current = ""
-        for ts, ph in timeline:
-            if ts <= ts_unix:
-                current = ph
-            else:
-                break
-        return current
+    timeline = _phase_timeline(state)
 
     # Explore provenance: map fingerprint -> provenance from winners_history.
     # ``scope_by_fp`` carries the specialist dial as an additive analytics tag.
@@ -374,24 +453,12 @@ def _collect_phase_breakdown(
     for e in entries:
         if not isinstance(e, dict):
             continue
+        if e.get("attribution_eligible") is False or e.get("baseline_enablement"):
+            continue
         delta = _to_float(e.get("delta_pct"))
         if delta is None or delta <= 0:
             continue
-        ts = e.get("ts_unix")
-        if ts is None:
-            ts_str = str(e.get("ts") or "")
-            if ts_str:
-                try:
-                    from datetime import datetime as _dt
-
-                    ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-                except (TypeError, ValueError):
-                    ts = 0.0
-        try:
-            ts_f = float(ts or 0.0)
-        except (TypeError, ValueError):
-            ts_f = 0.0
-        phase = _phase_for(ts_f).lower()
+        phase = _phase_at(_entry_ts(e), timeline).lower()
         # ``phase_history`` records the phase as ``FRAMEWORK_AGENT`` but the
         # attribution bucket is named ``framework``; normalize so framework-phase
         # KEEPs land in the framework bucket instead of missing the bucket key and
@@ -399,7 +466,7 @@ def _collect_phase_breakdown(
         if phase == "framework_agent":
             phase = "framework"
         action = str(e.get("action") or "").lower()
-        fam = _action_family(action)
+        fam = _entry_family(e, inferred_phase=phase)
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"

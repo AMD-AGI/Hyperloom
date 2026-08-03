@@ -719,6 +719,34 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
 
 
+def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-benchmark")
+    captured: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run_magpie(
+            magpie_python="/opt/venv/bin/python",
+            config_path=tmp_path / "config.yaml",
+            output_dir=tmp_path / "slot",
+            timeout_sec=5,
+            cwd=str(tmp_path),
+        )
+
+    assert "SAFE_API_KEY" not in captured["env"]
+    assert "OPENAI_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+
+
 def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
