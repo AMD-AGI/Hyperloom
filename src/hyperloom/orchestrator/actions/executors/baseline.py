@@ -1554,7 +1554,7 @@ class BaselineExecutor:
             result (dict): The failed baseline result dict, mutated in place
                 when a sibling accuracy is salvaged.
         """
-        from ._accuracy_gate import request_baseline_accuracy_stop
+        from ._accuracy_gate import accuracy_meets_floor, request_baseline_accuracy_stop
 
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
@@ -1562,26 +1562,26 @@ class BaselineExecutor:
         shared_state = extra.get("shared_state") or self.shared_state
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = float(salvaged["accuracy"])
-            result["accuracy"] = acc_val
-            result["accuracy_task"] = salvaged.get("task", "gsm8k")
-            result["accuracy_metric"] = salvaged.get("metric", "")
-            result["accuracy_source"] = salvaged.get("source_file", "")
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
-            if shared_state is not None:
-                try:
-                    shared_state.baseline_accuracy = acc_val
-                except Exception:  # noqa: BLE001 — salvage must never break baseline
-                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
+            # ``accuracy_meets_floor`` already means "finite, strictly positive
+            # and >= floor", so floor 0.0 is the legacy "any usable accuracy".
+            if accuracy_meets_floor(acc_val, 0.0):
+                log.warning(
+                    "baseline_executor: eval-rooted baseline failure, but salvaged "
+                    "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
+                    "not stopping the run",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
+                return
+            # A measured zero is a broken baseline, not a usable reference: it
+            # must still reach the stop below, now with the score on record.
             log.warning(
-                "baseline_executor: eval-rooted baseline failure, but salvaged "
-                "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
-                "not stopping the run",
+                "baseline_executor: eval-rooted baseline failure and the sibling "
+                "attempt measured accuracy=%.4f (%s); stopping the run",
                 acc_val,
                 salvaged.get("source_file", ""),
             )
-            return
         request_baseline_accuracy_stop(
             shared_state,
             context=f"baseline:{framework or 'unknown'}:eval_aborted",
@@ -1677,29 +1677,21 @@ class BaselineExecutor:
         # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = float(salvaged["accuracy"])
-            result["accuracy"] = acc_val
-            result["accuracy_task"] = salvaged.get("task", "gsm8k")
-            result["accuracy_metric"] = salvaged.get("metric", "")
-            result["accuracy_source"] = salvaged.get("source_file", "")
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
-            if shared_state is not None:
-                try:
-                    shared_state.baseline_accuracy = acc_val
-                except Exception:  # noqa: BLE001 — salvage must never break baseline
-                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
             log.warning(
                 "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
-                "but salvaged a valid baseline accuracy=%.4f from a sibling "
-                "attempt (%s); not stopping the run",
+                "but salvaged a measured baseline accuracy=%.4f from a sibling "
+                "attempt (%s)",
                 acc_val,
                 salvaged.get("source_file", ""),
             )
-            if not eval_enablement or accuracy_meets_floor(acc_val, floor):
+            # Floor 0.0 reproduces the non-enablement "any positive accuracy is
+            # usable" rule; ``accuracy_meets_floor`` rejects zero either way.
+            if accuracy_meets_floor(acc_val, floor if eval_enablement else 0.0):
                 return
-            # Salvaged, but still under the floor: that is a real quality
-            # signal, so fall through to enablement with the observed value.
+            # Salvaged, but unusable (zero or still under the floor): that is a
+            # real quality signal, so fall through with the observed value
+            # rather than reporting it as a missing measurement.
             acc = acc_val
 
         # No opt-out: a genuine baseline exists to establish the accuracy
@@ -1732,12 +1724,51 @@ class BaselineExecutor:
             context=f"baseline:{framework or 'unknown'}",
         )
 
+    def _apply_salvaged_accuracy(
+        self,
+        result: dict[str, Any],
+        salvaged: dict[str, Any],
+        shared_state: Any,
+    ) -> float:
+        """Record a salvaged sibling accuracy on the result and SharedState.
+
+        Records the score whatever its value; deciding whether it is *usable*
+        belongs to the caller, which knows the applicable floor.
+
+        Args:
+            result: The baseline result dict, mutated in place.
+            salvaged: The parsed eval dict from
+                :meth:`_salvage_sibling_baseline_accuracy`.
+            shared_state: The live SharedState, or ``None``.
+
+        Returns:
+            float: The salvaged accuracy.
+        """
+        acc_val = float(salvaged["accuracy"])
+        result["accuracy"] = acc_val
+        result["accuracy_task"] = salvaged.get("task", "gsm8k")
+        result["accuracy_metric"] = salvaged.get("metric", "")
+        result["accuracy_source"] = salvaged.get("source_file", "")
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+        if shared_state is not None:
+            try:
+                shared_state.baseline_accuracy = acc_val
+            except Exception:  # noqa: BLE001 — salvage must never break baseline
+                log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+        return acc_val
+
     def _salvage_sibling_baseline_accuracy(
         self,
         result: dict[str, Any],
         framework: str | None,
     ) -> dict[str, Any] | None:
-        """Return a positive accuracy from a sibling baseline attempt, if any.
+        """Return a measured accuracy from a sibling baseline attempt, if any.
+
+        A measured ``0.0`` is returned like any other score: it is evidence,
+        not an absent measurement. The caller decides whether the value is
+        usable; filtering zeros here would make a real quality failure
+        indistinguishable from "the eval never ran".
 
         Scans the shared ``runs/baseline`` root (the parent of this attempt's
         ``output_dir``) so eval output written by any sibling attempt is seen.
@@ -1759,16 +1790,15 @@ class BaselineExecutor:
         if not runs_root.exists():
             return None
         try:
-            from ._accuracy_gate import parse_eval_results
+            from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except Exception:  # noqa: BLE001 — salvage must never break the stop path
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        acc = eval_data.get("accuracy")
-        if acc is not None and float(acc) > 0.0:
-            return eval_data
-        return None
+        if _finite_score(eval_data.get("accuracy")) is None:
+            return None
+        return eval_data
 
     async def _run_once(
         self,
