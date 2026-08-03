@@ -478,7 +478,19 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
     wt = spec_root / "worktree"
     wt.mkdir(parents=True, exist_ok=True)
     (wt / "kernel.py").write_text("# patched\n", encoding="utf-8")
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="k3")
+    coord.shared_state.phase = "KERNEL_AGENT"
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.framework.fp8",
+            "gap_layer": "framework",
+            "framework_agent_authoring": True,
+        },
+        idempotency_key="k3",
+    )
     n_before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
@@ -488,6 +500,12 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
         },
     )
     assert len(coord.state.pending_proposals) == n_before + 1
+    pending = list(coord.state.pending_proposals.values())[-1]
+    params = pending.payload["params"]
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
+    assert params["domain"] == "serving_specialist"
+    assert params["provenance"] == "specialist:serving_specialist"
+    assert params["gap_canonical_id"] == "gap.framework.fp8"
 
 
 @pytest.mark.asyncio

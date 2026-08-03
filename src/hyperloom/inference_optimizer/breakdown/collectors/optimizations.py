@@ -162,6 +162,32 @@ def _resolve_source(
         or raw.get("phase")
         or gain.get("phase")
     )
+    if action.startswith("integrate_patch"):
+        if raw.get("framework_agent_authoring") or gain.get(
+            "framework_agent_authoring"
+        ):
+            return "framework_agent", "recorded"
+        provenance = str(
+            raw.get("provenance") or gain.get("provenance") or ""
+        ).strip().lower()
+        specialist_owned = bool(
+            raw.get("domain")
+            or gain.get("domain")
+            or provenance.startswith("specialist:")
+        )
+        if explicit == "kernel_agent":
+            # KERNEL_AGENT is only the completion context for integrate_patch.
+            # Genuine kernel adoption uses action=integrate and was handled by
+            # the kernel action/marker branch above.
+            return (
+                ("explore", "recorded")
+                if specialist_owned
+                else ("unattributed", "unknown")
+            )
+        if explicit:
+            return explicit, "recorded"
+        if specialist_owned:
+            return "explore", "recorded"
     if explicit:
         return explicit, "recorded"
 

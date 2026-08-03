@@ -407,6 +407,48 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
 
 @pytest.mark.asyncio
+async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
+    session_dir,
+):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.phase = "KERNEL_AGENT"
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 110.0,
+            "specialist_task_id": "spec-framework",
+            "delta_pct": 10.0,
+            "extra_server_args_applied": "--quantization fp8_per_channel",
+            "workspace": "/w",
+        },
+        task=_task(
+            "integrate_patch",
+            task_id="t-cross-phase",
+            params={
+                "specialist_task_id": "spec-framework",
+                "source_phase": "FRAMEWORK_AGENT",
+                "domain": "serving_specialist",
+                "provenance": "specialist:serving_specialist",
+                "gap_canonical_id": "gap.framework.fp8",
+                "gap_layer": "framework",
+                "framework_agent_authoring": True,
+            },
+        ),
+    )
+
+    entry = s.optimization_stack[0]
+    assert entry["source_phase"] == "FRAMEWORK_AGENT"
+    assert entry["domain"] == "serving_specialist"
+    assert entry["provenance"] == "specialist:serving_specialist"
+    assert entry["gap_canonical_id"] == "gap.framework.fp8"
+    assert entry["framework_agent_authoring"] is True
+
+
+@pytest.mark.asyncio
 async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir):
     """A patch required to establish baseline stays reproducible but has no gain."""
     coord = _coord(session_dir)

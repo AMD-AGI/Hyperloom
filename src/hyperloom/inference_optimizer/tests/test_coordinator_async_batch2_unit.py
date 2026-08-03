@@ -173,6 +173,10 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
                     "status": "kept",
                     "specialist_task_id": "spec-orphan",
                     "output_throughput": 123.0,
+                    "source_phase": "FRAMEWORK_AGENT",
+                    "domain": "serving_specialist",
+                    "provenance": "specialist:serving_specialist",
+                    "framework_agent_authoring": True,
                 },
             },
         )
@@ -185,6 +189,10 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
     assert replay["variant"] == "spec-orphan"
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
+    assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
+    assert coord.shared_state.optimization_stack[-1]["provenance"] == (
+        "specialist:serving_specialist"
+    )
     assert coord.shared_state.resume_pending_revalidation is True
 
 

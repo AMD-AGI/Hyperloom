@@ -2081,7 +2081,15 @@ class WritebackCollaborator:
             if key not in existing:
                 stack_entry: dict[str, Any] = {
                     "action": task_kind,
-                    "source_phase": str(getattr(self.shared_state, "phase", "") or ""),
+                    "source_phase": str(
+                        (bv.get("source_phase") if isinstance(bv, dict) else "")
+                        or (
+                            getattr(self.shared_state, "phase", "")
+                            if task_kind != "integrate_patch"
+                            else ""
+                        )
+                        or ""
+                    ),
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
                     "extra_server_args": full_args,
@@ -2146,6 +2154,13 @@ class WritebackCollaborator:
                     for _attr_key in ("baseline_enablement", "attribution_eligible"):
                         if _attr_key in bv:
                             stack_entry[_attr_key] = bool(bv.get(_attr_key))
+                    if "framework_agent_authoring" in bv:
+                        stack_entry["framework_agent_authoring"] = bool(
+                            bv.get("framework_agent_authoring")
+                        )
+                    for _origin_key in ("domain", "gap_layer"):
+                        if bv.get(_origin_key):
+                            stack_entry[_origin_key] = str(bv.get(_origin_key))
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -3036,7 +3051,34 @@ class WritebackCollaborator:
             )
         )
         if kept_flag:
-            specialist_task_id = str(result.get("specialist_task_id") or "")
+            specialist_task_id = str(
+                result.get("specialist_task_id")
+                or task_params.get("specialist_task_id")
+                or ""
+            )
+            origin_domain = str(
+                task_params.get("domain")
+                or task_params.get("source_domain")
+                or result.get("domain")
+                or ""
+            ).strip()
+            origin_provenance = str(
+                task_params.get("provenance")
+                or result.get("provenance")
+                or ""
+            ).strip()
+            if origin_domain and not origin_provenance.startswith("specialist:"):
+                origin_provenance = f"specialist:{origin_domain}"
+            source_phase = str(
+                task_params.get("source_phase")
+                or result.get("source_phase")
+                or ""
+            ).strip()
+            gap_canonical_id = str(
+                task_params.get("gap_canonical_id")
+                or result.get("gap_canonical_id")
+                or ""
+            ).strip()
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
@@ -3048,7 +3090,7 @@ class WritebackCollaborator:
                 ),
                 "tput": float(new_tput),
                 "workspace": result.get("workspace"),
-                "provenance": "integrate_patch",
+                "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
@@ -3056,6 +3098,14 @@ class WritebackCollaborator:
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
+            if source_phase:
+                lift["source_phase"] = source_phase
+            if origin_domain:
+                lift["domain"] = origin_domain
+            if task_params.get("gap_layer"):
+                lift["gap_layer"] = str(task_params.get("gap_layer"))
+            if task_params.get("framework_agent_authoring"):
+                lift["framework_agent_authoring"] = True
             if prebaseline_enablement:
                 lift["baseline_enablement"] = True
                 lift["attribution_eligible"] = False
@@ -3064,7 +3114,12 @@ class WritebackCollaborator:
                 # it in the configuration stack for reproducibility, but mark it
                 # ineligible for gain attribution because no runnable before
                 # measurement exists.
-                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                self._lift_to_current_best(
+                    "integrate_patch",
+                    float(new_tput),
+                    lift,
+                    gap_canonical_id=gap_canonical_id,
+                )
                 log.info(
                     "integrate_patch KEEP accepted as pre-baseline enablement; "
                     "retained in config stack without gain attribution "
@@ -3073,7 +3128,12 @@ class WritebackCollaborator:
                     specialist_task_id,
                 )
             else:
-                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                self._lift_to_current_best(
+                    "integrate_patch",
+                    float(new_tput),
+                    lift,
+                    gap_canonical_id=gap_canonical_id,
+                )
                 if self.shared_state.baseline_tput > 0:
                     self._update_cumulative_gain_validated(new_tput)
                     self.shared_state.resume_pending_revalidation = False
@@ -3626,6 +3686,12 @@ class WritebackCollaborator:
             sid = str(result.get("specialist_task_id") or "")
             if not sid:
                 return False
+            domain = str(
+                result.get("domain") or result.get("source_domain") or ""
+            ).strip()
+            provenance = str(result.get("provenance") or "").strip()
+            if domain and not provenance.startswith("specialist:"):
+                provenance = f"specialist:{domain}"
             bv = {
                 "name": sid,
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
@@ -3636,8 +3702,14 @@ class WritebackCollaborator:
                 ),
                 "tput": float(tput),
                 "workspace": result.get("workspace"),
-                "provenance": "integrate_patch",
+                "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
+                "source_phase": str(result.get("source_phase") or ""),
+                "domain": domain,
+                "gap_layer": str(result.get("gap_layer") or ""),
+                "framework_agent_authoring": bool(
+                    result.get("framework_agent_authoring")
+                ),
                 # Same durable source-layer handles as the primary KEEP lift so a
                 # source_patch recovered on THIS path is equally reproducible in
                 # the GEAK baseline (no path is left snapshot-less).
@@ -3648,7 +3720,12 @@ class WritebackCollaborator:
         else:
             return False
         before = len(self.shared_state.optimization_stack or [])
-        self._lift_to_current_best(kind, float(tput), bv)
+        self._lift_to_current_best(
+            kind,
+            float(tput),
+            bv,
+            gap_canonical_id=str(result.get("gap_canonical_id") or ""),
+        )
         return len(self.shared_state.optimization_stack or []) > before
 
     def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:

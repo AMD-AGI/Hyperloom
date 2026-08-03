@@ -166,12 +166,19 @@ def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
     phase = str(
         entry.get("source_phase") or entry.get("phase") or inferred_phase or ""
     ).strip().upper()
+    provenance = str(entry.get("provenance") or "").strip().lower()
+    specialist_owned = bool(entry.get("domain")) or provenance.startswith(
+        "specialist:"
+    )
+    if phase in {"KERNEL", "KERNEL_AGENT"}:
+        # ``integrate_patch`` is the framework/explore application path. True
+        # kernel adoption is recorded as action=integrate with kernel evidence;
+        # never let a delayed specialist patch inherit its completion phase.
+        return "explore" if specialist_owned else "unattributed"
     return {
         "FRAMEWORK": "framework",
         "FRAMEWORK_AGENT": "framework",
         "EXPLORE": "explore",
-        "KERNEL": "kernel_agent",
-        "KERNEL_AGENT": "kernel_agent",
     }.get(phase, "unattributed")
 
 

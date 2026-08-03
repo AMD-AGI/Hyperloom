@@ -2885,6 +2885,18 @@ class IntegratePatchExecutor:
             {
                 "status": "kept",
                 "specialist_task_id": specialist_task_id,
+                # Proposal ownership must survive delegated-result persistence
+                # so resume replay cannot replace it with the then-current phase.
+                "source_phase": str(params.get("source_phase") or ""),
+                "domain": str(
+                    params.get("domain") or params.get("source_domain") or ""
+                ),
+                "provenance": str(params.get("provenance") or ""),
+                "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
+                "gap_layer": str(params.get("gap_layer") or ""),
+                "framework_agent_authoring": bool(
+                    params.get("framework_agent_authoring")
+                ),
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
