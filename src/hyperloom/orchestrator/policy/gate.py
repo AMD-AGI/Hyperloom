@@ -147,6 +147,9 @@ EXPLORE_ACTION_NAME: str = "explore"
 # action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
 SWEEP_ACTION_NAME: str = "sweep"
 
+# Reference measurement action; named constant for the ``baseline_phase_singleton`` rule.
+BASELINE_ACTION_NAME: str = "baseline"
+
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
@@ -849,6 +852,8 @@ class PolicyGate:
         # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
+        if action_name == BASELINE_ACTION_NAME:
+            self._validate_baseline_singleton(payload, intent_kind="delegate")
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -942,6 +947,11 @@ class PolicyGate:
         # below rejects any LLM conc_sweep as Coordinator-managed (phase_incompatible).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(
+                payload,
+                intent_kind="propose_action",
+            )
+        if action_name == BASELINE_ACTION_NAME:
+            self._validate_baseline_singleton(
                 payload,
                 intent_kind="propose_action",
             )
@@ -1398,6 +1408,58 @@ class PolicyGate:
                 "needed. Wait for SWEEP→CLOSE. "
                 "If you genuinely need a second grid for debug, "
                 f"set params.bypass_sweep_singleton=True on the "
+                f"{intent_kind} payload (the override is recorded "
+                f"on the audit trail)."
+            ),
+        )
+
+    # ``baseline_phase_singleton``
+    def _validate_baseline_singleton(
+        self,
+        payload: dict[str, Any],
+        *,
+        intent_kind: str,
+    ) -> None:
+        """Deny an LLM ``baseline`` once the session has an anchor.
+
+        PRELUDE allows ``baseline`` so the run can reach ``baseline_tput > 0``,
+        and nothing retired it afterwards: a run could keep re-measuring a
+        reference it already had, at roughly twenty GPU-minutes a turn, while
+        the newest measurement silently redefined every later gain. Escape:
+        ``params.bypass_baseline_singleton=True``.
+
+        Args:
+            payload (dict[str, Any]): the intent payload;
+                ``params.bypass_baseline_singleton`` opts out of the guard.
+            intent_kind (str): the channel the action arrived on, used in the
+                error hint.
+
+        Raises:
+            PolicyDenied: when ``baseline_tput`` is already positive and no
+                bypass flag is set.
+        """
+        params = payload.get("params") or {}
+        if isinstance(params, dict) and params.get("bypass_baseline_singleton"):
+            return
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        anchor = getattr(ss, "baseline_tput", 0.0)
+        if not isinstance(anchor, (int, float)) or anchor <= 0:
+            return
+        raise PolicyDenied(
+            (
+                f"baseline: the session anchor is already established "
+                f"(baseline_tput={float(anchor):.1f}); a repeat baseline "
+                f"re-measures a reference the run already has."
+            ),
+            rule="baseline_phase_singleton",
+            hint=(
+                "PRELUDE is done with baseline; let the phase advance. "
+                "A measurement you distrust is a reason to re-measure the "
+                "candidate, not the reference. "
+                f"If you genuinely need a fresh anchor, set "
+                f"params.bypass_baseline_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
                 f"on the audit trail)."
             ),
@@ -2184,6 +2246,7 @@ __all__ = [
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
+    "BASELINE_ACTION_NAME",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",

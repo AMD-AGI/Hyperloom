@@ -1219,6 +1219,58 @@ def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
     )
 
 
+# 6a. PolicyGate baseline_phase_singleton rule
+class _BaselineSingletonState:
+    """SharedState stand-in carrying just the field the ``baseline_phase_singleton`` rule reads."""
+
+    def __init__(self, baseline_tput: float = 0.0):
+        self.baseline_tput = baseline_tput
+
+
+@pytest.mark.parametrize("intent_kind", ["delegate", "propose_action"])
+def test_baseline_singleton_denies_once_anchor_is_established(intent_kind):
+    """Both channels refuse a repeat baseline after baseline_tput turns positive."""
+    from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(2195.86))
+
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_baseline_singleton(
+            payload={"action_name": "baseline", "params": {}},
+            intent_kind=intent_kind,
+        )
+    assert excinfo.value.rule == "baseline_phase_singleton"
+    assert "bypass_baseline_singleton" in (excinfo.value.hint or "")
+
+
+def test_baseline_singleton_inert_before_the_anchor_exists():
+    """PRELUDE must still be able to reach baseline_tput > 0."""
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(0.0))
+    gate._validate_baseline_singleton(
+        payload={"action_name": "baseline", "params": {}},
+        intent_kind="propose_action",
+    )
+
+
+def test_baseline_singleton_inert_when_shared_state_is_none():
+    gate = _make_policy_gate(shared_state=None)
+    gate._validate_baseline_singleton(
+        payload={"action_name": "baseline"},
+        intent_kind="delegate",
+    )
+
+
+def test_baseline_singleton_bypass_flag_lets_operator_force_a_fresh_anchor():
+    gate = _make_policy_gate(shared_state=_BaselineSingletonState(2195.86))
+    gate._validate_baseline_singleton(
+        payload={
+            "action_name": "baseline",
+            "params": {"bypass_baseline_singleton": True},
+        },
+        intent_kind="delegate",
+    )
+
+
 # 6b. End-to-end through full validate_intent (delegate / propose_action)
 def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
     """Through full ``validate_intent``: a sweep delegate in active SWEEP fires the singleton rule before ``_validate_phase_action``."""
