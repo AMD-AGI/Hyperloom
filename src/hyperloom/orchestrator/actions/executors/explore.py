@@ -40,6 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.shared_state import resolve_grading_anchor_tput
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -598,18 +599,20 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Backstop: recover the comparison anchor from live SharedState when
-        # params carries no positive ``base_tput``. Prefer running best, fall
-        # back to the original baseline.
-        if base_tput <= 0:
-            ss = extra.get("shared_state") or extra.get("state")
-            if ss is not None:
-                cb = getattr(ss, "current_best", None) or {}
-                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                    base_tput = float(cb_tput)
-                else:
-                    base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        # ``base_tput`` is snapshotted when the task is queued, so it goes stale
+        # whenever current_best advances before the task runs. Grading against
+        # the stale value lets a regression read as a win, so always take the
+        # live anchor when it is higher (this also covers an absent param).
+        ss = extra.get("shared_state") or extra.get("state")
+        live_anchor = resolve_grading_anchor_tput(ss)
+        if live_anchor > base_tput:
+            if base_tput > 0:
+                log.warning(
+                    "explore: anchor drift, params base_tput=%.1f but live anchor is %.1f; grading against live",
+                    base_tput,
+                    live_anchor,
+                )
+            base_tput = live_anchor
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )

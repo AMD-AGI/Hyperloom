@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...state.shared_state import resolve_grading_anchor_tput
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -2656,15 +2657,17 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Throughput KEEP / REVERT decision with optional stack rebench."""
         base_tput = float(params.get("base_tput") or 0.0)
-        if base_tput <= 0 and shared_state is not None:
-            cb = getattr(shared_state, "current_best", None)
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                base_tput = float(cb_tput)
-            else:
-                ss_base = getattr(shared_state, "baseline_tput", 0.0)
-                if isinstance(ss_base, (int, float)) and ss_base > 0:
-                    base_tput = float(ss_base)
+        # Same stale-snapshot hazard as explore: prefer the live anchor whenever
+        # it is higher than whatever the task was queued with.
+        live_anchor = resolve_grading_anchor_tput(shared_state)
+        if live_anchor > base_tput:
+            if base_tput > 0:
+                log.warning(
+                    "integrate_patch: anchor drift, params base_tput=%.1f but live anchor is %.1f; using live",
+                    base_tput,
+                    live_anchor,
+                )
+            base_tput = live_anchor
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
         new_tput = bench_result.get("output_throughput")

@@ -740,6 +740,75 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_supersedes_stale_params_base_tput(
+    sub_agent_runner,
+    tmp_path,
+):
+    """A queued task's stale ``base_tput`` is superseded by the live anchor.
+
+    Reproduces MiniMax-M3-MXFP8 session 96879: the task was queued against the
+    bare baseline (2192.5) while a warm replay had already lifted current_best
+    to 2358.8, so a 2355.5 variant read as +7.4% and was KEEP'd even though it
+    regressed the recipe by 0.14%.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 2195.86
+    state.current_best = {"action": "replay_warm_recipe", "tput": 2358.80}
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-stale-anchor"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=2355.46)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    grid = [
+        {
+            "name": "minimax-fused-swiglu+moe-combine",
+            "extra_args": "--fused-flag",
+            "extra_envs": {},
+            "provenance": "specialist:research_scout",
+        }
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            # Snapshotted when the task was queued, before the warm replay landed.
+            "base_tput": 2192.52,
+            "grid": grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-stale-anchor",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    assert out["winners"] == []
+    fp = canonical_fingerprint("--fused-flag", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    assert tested["base_tput"] == 2358.80
+    assert tested["outcome"] == "REVERT"
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
