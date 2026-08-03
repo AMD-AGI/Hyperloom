@@ -204,7 +204,12 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
 
 
 def _extract_envs(text: str) -> dict[str, str]:
-    """Pull whitelisted ``export KEY=VALUE`` lines whose value has no ``$``."""
+    """Pull whitelisted ``export KEY=VALUE`` lines that resolve to a literal.
+
+    ``export FOO=${FOO:-1}`` is the idiomatic overridable-default form in every
+    InferenceX recipe, so its literal default is lifted too; any other ``$``
+    reference is unresolvable here and the line is skipped.
+    """
     envs: dict[str, str] = {}
     pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
     for line in text.splitlines():
@@ -214,13 +219,33 @@ def _extract_envs(text: str) -> dict[str, str]:
         key, val = m.group(1), m.group(2)
         if key not in _ENV_WHITELIST:
             continue
-        if _has_var(val):
-            continue
         # strip surrounding quotes if present
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
             val = val[1:-1]
+        if _has_var(val):
+            resolved = _resolve_self_default(key, val)
+            if resolved is None:
+                continue
+            val = resolved
         envs[key] = val
     return envs
+
+
+# ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
+_SELF_DEFAULT_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
+
+
+def _resolve_self_default(key: str, val: str) -> str | None:
+    """Return the literal default of ``${key:-default}``, else ``None``.
+
+    Only the *self*-referential form counts: ``export FOO=${BAR:-1}`` depends on
+    an unrelated variable, so its default is not FOO's effective value here.
+    """
+    m = _SELF_DEFAULT_RE.match(val)
+    if not m or m.group(1) != key:
+        return None
+    default = m.group(2)
+    return None if _has_var(default) else default
 
 
 def _extract_server_args(
