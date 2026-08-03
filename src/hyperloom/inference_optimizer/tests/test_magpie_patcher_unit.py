@@ -7,6 +7,7 @@ the classified atomic-reason outcomes)."""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,45 @@ def test_lm_eval_tokenized_patch_noop_for_unrelated_script(tmp_path):
 
     assert mp._apply_lm_eval_tokenized_requests_patch_atomic(d) is True
     assert other.read_text(encoding="utf-8") == body
+
+
+def test_pd_run_warns_when_the_tokenized_hook_matched_nothing(tmp_path, monkeypatch, caplog):
+    # PD run + a drifted (non-matching) eval script => the patch is a no-op, but
+    # the aggregate check must WARN so the silent HTTP-422 fallback is diagnosable.
+    monkeypatch.setenv("PD_MODE", "disaggregated")
+    _make_inferencex(tmp_path)  # vllm_mi355x.sh + benchmark_lib.sh, no model_args line
+
+    with caplog.at_level(logging.WARNING, logger=mp.log.name):
+        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+
+    assert any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
+
+
+def test_pd_run_stays_quiet_once_the_hook_landed(tmp_path, monkeypatch, caplog):
+    # PD run where the remote-compat script IS present: the patch lands the hook,
+    # so the aggregate check finds it and must NOT warn.
+    monkeypatch.setenv("PD_MODE", "disaggregated")
+    _make_inferencex(tmp_path)
+    (tmp_path / "benchmarks" / "magpie_bench_remote_compat.sh").write_text(
+        "#!/bin/bash\n" + _REMOTE_COMPAT_MODEL_ARGS, encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mp.log.name):
+        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+
+    assert not any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
+
+
+def test_aggregated_run_stays_quiet_on_a_shape_miss(tmp_path, monkeypatch, caplog):
+    # Aggregated runs hit a direct sglang server that accepts token-id prompts,
+    # so an unmatched patch is an EXPECTED no-op and must stay silent.
+    monkeypatch.setenv("PD_MODE", "aggregated")
+    _make_inferencex(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger=mp.log.name):
+        assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+
+    assert not any(mp._LM_EVAL_TOKENIZED_MARKER in r.message and "HTTP 422" in r.message for r in caplog.records)
 
 
 # ---- path resolution ------------------------------------------------------

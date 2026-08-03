@@ -412,6 +412,20 @@ def _strip_eval_concurrency_flag(text: str) -> str | None:
 # Teach the line to honor ``$MAGPIE_EVAL_TOKENIZED_REQUESTS`` so Hyperloom can
 # force string prompts (``tokenized_requests=false``) on router-fronted (PD)
 # runs. Absent env ⇒ unchanged behaviour.
+def _pd_disaggregated_run() -> bool:
+    """Whether this run is PD-disaggregated, per the shared ``PD_MODE`` env.
+
+    ``optimize`` exports ``PD_MODE`` from ``--pd-mode`` (cli/__init__.py), the
+    same signal external_state / the server lifecycle read. Only PD runs route
+    lm_eval through the ``sglang_router`` that rejects token-id prompts, so the
+    tokenized-requests hook is required there and optional everywhere else.
+
+    Returns:
+        bool: True when ``PD_MODE`` is ``disaggregated``.
+    """
+    return (os.environ.get("PD_MODE", "") or "").strip().lower() == "disaggregated"
+
+
 _LM_EVAL_TOKENIZED_MARKER = "MAGPIE_EVAL_TOKENIZED_REQUESTS"
 _LM_EVAL_TOKENIZED_SUFFIX = "${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
 _LM_EVAL_MODEL_ARGS_RE = re.compile(
@@ -463,6 +477,30 @@ def _apply_lm_eval_tokenized_requests_patch_atomic(scripts_dir: Path) -> bool:
             script,
         )
     return ok
+
+
+def _lm_eval_tokenized_hook_present(scripts_dir: Path) -> bool:
+    """Whether any script under ``scripts_dir`` carries the tokenized-requests hook.
+
+    Read-only probe of the post-patch state: a script that was patched (or
+    already honored the env) contains the marker, while a drifted ``model_args``
+    line that nothing matched does not. Lets the caller warn -- without altering
+    the patch above -- when a PD run would silently keep sending the token-id
+    prompts the router rejects.
+
+    Args:
+        scripts_dir: Directory whose ``*.sh`` scripts are scanned.
+
+    Returns:
+        bool: True when at least one script carries the env marker.
+    """
+    for script in sorted(scripts_dir.glob("*.sh")):
+        try:
+            if _LM_EVAL_TOKENIZED_MARKER in script.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
@@ -675,6 +713,7 @@ def _apply_eval_concurrency_fixes(
     """
     ok = True
     scanned: set[Path] = set()
+    lm_eval_hook_present = False
     for scripts_dir in (
         _resolve_benchmark_scripts_dir(magpie_dir),
         _resolve_inferencex_benchmarks_dir(inferencex_dir),
@@ -686,9 +725,29 @@ def _apply_eval_concurrency_fixes(
             ok = False
         if not _apply_lm_eval_tokenized_requests_patch_atomic(scripts_dir):
             ok = False
+        if not lm_eval_hook_present and _lm_eval_tokenized_hook_present(scripts_dir):
+            lm_eval_hook_present = True
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
     if benchmark_lib is not None and not _apply_run_lm_eval_arg_patch_atomic(benchmark_lib):
         ok = False
+    # PD accuracy eval depends on the tokenized_requests hook; the patch above is
+    # a silent no-op on a shape miss. If NOTHING carried the hook across every
+    # scanned dir on a PD run, the upstream model_args line has drifted and lm_eval
+    # will keep sending the token-id prompts the router rejects (HTTP 422) --
+    # surfacing as baseline_accuracy_failed, indistinguishable from the bug this
+    # patch fixes. Warn (not fatal) so the drift is diagnosable. Aggregated runs
+    # send to a direct sglang server that accepts token-id prompts, so a miss
+    # there is an expected no-op and stays quiet.
+    if scanned and not lm_eval_hook_present and _pd_disaggregated_run():
+        log.warning(
+            "_magpie_patcher: no benchmark script carries the %s hook after patching "
+            "(scanned %d dir(s)); on this PD run lm_eval will send token-id prompts the "
+            "sglang_router rejects with HTTP 422 (accuracy eval will fail). The upstream "
+            "remote-compat model_args line likely drifted from the patched shape; review "
+            "magpie_bench_remote_compat.sh.",
+            _LM_EVAL_TOKENIZED_MARKER,
+            len(scanned),
+        )
     return ok
 
 
