@@ -53,6 +53,12 @@ INPUT_PATH="${WM_INPUT_PATH:-}"
 REL_MAX="${WM_QUALITY_REL_MAX:-0.2}"
 PYTHON_BIN="${WORLDMIRROR_PYTHON:-python3}"
 
+# flash-attn has no ROCm wheel; fall back to the SDPA shim. Appended last so a
+# real install always wins if one ever lands in this environment.
+if ! "${PYTHON_BIN}" -c "import flash_attn" >/dev/null 2>&1; then
+    export PYTHONPATH="${PYTHONPATH:-}:${_SCRIPT_DIR}/worldmirror_compat"
+fi
+
 PROFILE_ARGS=()
 if [ "${PROFILE:-0}" = "1" ]; then
     PROFILE_DIR="${VLLM_TORCH_PROFILER_DIR:-${RESULT_DIR}/torch_trace}"
