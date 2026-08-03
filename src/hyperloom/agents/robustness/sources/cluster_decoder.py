@@ -131,8 +131,10 @@ def merge_gpu_snapshots(
 ) -> dict[str, Any]:
     """Combine multiple per-pod snapshots into a single ``local_gpu``.
 
-    Later writes win on field clashes per (pod, gpu_id); distinct pods
-    stay distinct so signal evidence keeps the GPU's namespace / name.
+    Rows from every snapshot are concatenated and sorted by
+    (pod_namespace, pod_name, gpu_id); no per-key merge or field-clash
+    resolution happens, so callers must pass at most one snapshot per pod
+    (see ``server_client._unique_pod_refs``).
 
     Args:
         snapshots: Per-pod GPU snapshot mappings.
