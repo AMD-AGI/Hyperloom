@@ -899,3 +899,54 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
     assert ss.resume_pending_revalidation is False
+
+
+@pytest.mark.asyncio
+async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: Path) -> None:
+    """Regression: a resume revalidation of an ALREADY-promoted GEAK win must
+    not be judged no_material. On resume geak_result is persisted (non-empty)
+    and current_best already holds the GEAK accepted_config, so the fingerprint
+    matches by construction; the pre-existing geak_e2e stack entry is the escape
+    hatch and must short-circuit the material check."""
+    base, measured = 8668.5946, 9800.0
+    current_best = 9600.0  # current_best already holds the promoted GEAK win
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    # current_best carries the GEAK accepted_config (a later kernel integrate
+    # did not change server args), so a real revalidation fingerprint matches.
+    coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
+    coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": 8900.0},
+        {"action": "geak_e2e", "tput": current_best},
+        {"action": "integrate_patch", "variant_name": "kernel-x", "tput": current_best},
+    ]
+    coord.shared_state.resume_pending_revalidation = True
+    # geak_result survives the resume (persisted field) and echoes the config.
+    geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=1"},
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "final_overlay": "",
+        "final_patch": "",
+    }
+    coord.shared_state.geak_result = geak_result
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run when re-verifying a promoted win")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    expected_pct = (measured - base) / base * 100.0
+    assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
+    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
+    assert ss.resume_pending_revalidation is False
+    assert ss.geak_result.get("revalidation_status") != "no_material"

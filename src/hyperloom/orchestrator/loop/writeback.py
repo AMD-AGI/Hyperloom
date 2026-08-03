@@ -2907,14 +2907,24 @@ class WritebackCollaborator:
                     has_prior_geak_e2e = any(
                         isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now
                     )
-                    if not ps and not has_prior_geak_e2e:
-                        decision = "no_material"
-                    elif ps and not _geak_result_has_material(
-                        ps,
-                        prev_best_flags=str(cb_now.get("extra_server_args") or ""),
-                        prev_best_envs=cb_now.get("extra_envs") or {},
-                    ):
-                        decision = "no_material"
+                    # Escape hatch first: a pre-existing geak_e2e stack entry is
+                    # an already-proven win, so this is a resume revalidation.
+                    # It must short-circuit the material check regardless of
+                    # geak_result (which is persisted and thus non-empty on
+                    # resume) — by now current_best already carries the GEAK
+                    # accepted_config, so the fingerprint would match and be
+                    # mis-judged no_material, reverting a real win. Only apply
+                    # the material gate on the FIRST validation (no prior entry),
+                    # where current_best is still the pre-KERNEL config.
+                    if not has_prior_geak_e2e:
+                        if not ps:
+                            decision = "no_material"
+                        elif not _geak_result_has_material(
+                            ps,
+                            prev_best_flags=str(cb_now.get("extra_server_args") or ""),
+                            prev_best_envs=cb_now.get("extra_envs") or {},
+                        ):
+                            decision = "no_material"
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
