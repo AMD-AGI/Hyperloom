@@ -56,7 +56,7 @@ PR_QUERY_REPOS: tuple[str, ...] = (
     "sgl-project/sglang",
     "ROCm/vllm",
     "ROCm/rccl",
-    "nvidia/nccl",
+    "NVIDIA/nccl",
     "pytorch/pytorch",
     "ROCm/ROCm",
     "ROCm/hip",
