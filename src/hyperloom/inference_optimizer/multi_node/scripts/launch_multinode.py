@@ -10,6 +10,12 @@ pinned actor per rank that launches the framework detached via
 bash+nohup+setsid (avoiding zombie PIDs / empty logs) and records
 ``<pid_dir>/rank_<K>.pid``. Optionally waits on rank-0 ``/health``
 (``--no-wait-health`` to skip). Single-node restarts use the bash path.
+
+In ``--pd-mode disaggregated`` two groups are spawned instead — prefill over
+``nodes[0:pn]`` and decode over ``nodes[pn:]`` — recording
+``prefill_<K>.pid`` / ``decode_<K>.pid`` on internal ports 30000 / 30001. The
+rank-0 probe is replaced by a wait on both legs' ``/health``; the caller fronts
+them with ``launch_router.py`` on 8888 using the endpoints in the JSON summary.
 """
 
 from __future__ import annotations

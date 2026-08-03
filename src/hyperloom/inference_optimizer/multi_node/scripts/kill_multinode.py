@@ -4,10 +4,14 @@
 
 """Multi-node sglang / vllm server killer (counterpart to ``launch_multinode.py``).
 
-Per alive node, a node-pinned actor SIGTERMs each ``rank_*.pid`` process
-group under ``--pid-dir``, waits ``GRACE``, then SIGKILLs. Idempotent
-(missing/dead PIDs = success). Only kills PIDs from ``--pid-dir``, never
-``pkill -f sglang`` (IR-5). Returns 0 on success.
+Per alive node, a node-pinned actor SIGTERMs each
+``rank_*``/``prefill_*``/``decode_*``/``router*`` PID-file process group under
+``--pid-dir``, waits ``GRACE``, then SIGKILLs, then blocks (per-stage timeouts,
+best-effort) until those pids exit, the rendezvous/serving ports drain and GPU
+VRAM is reclaimed; overruns are reported as ``still_alive`` / ``ports_busy`` /
+``gpu_busy`` rather than raising. Idempotent (missing/dead PIDs = success).
+Only kills PIDs from ``--pid-dir``, never ``pkill -f sglang`` (IR-5). Returns 0
+on success.
 """
 
 from __future__ import annotations
