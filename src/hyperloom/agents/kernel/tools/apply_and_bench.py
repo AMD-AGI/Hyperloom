@@ -169,6 +169,33 @@ def _aiter_prebuilt_so(aiter_root: Path) -> list[Path]:
     return list(aiter_root.rglob("module_aiter_core*.so"))
 
 
+# aiter device sources live in-tree (``/aiter/``) or in the sibling split
+# wheel (``/aiter_meta/``); both must trigger the aiter re-JIT path.
+_AITER_PATH_MARKERS = ("/aiter/", "/aiter_meta/")
+
+
+def _is_aiter_cu(target: Path) -> bool:
+    """Whether ``target`` is an aiter device source (``.cu``/``.cuh``).
+
+    Recognises both the in-tree ``/aiter/`` layout and the split-wheel
+    ``/aiter_meta/`` layout so patched aiter kernels always force a rebuild.
+    """
+    if target.suffix not in {".cu", ".cuh"}:
+        return False
+    norm = str(target).replace(os.sep, "/")
+    return any(marker in norm for marker in _AITER_PATH_MARKERS)
+
+
+def _aiter_source_root(target: Path) -> Path | None:
+    """Return the aiter/aiter_meta package root a source resides under, if any."""
+    parts = target.parts
+    for name in ("aiter_meta", "aiter"):
+        if name in parts:
+            idx = len(parts) - 1 - parts[::-1].index(name)
+            return Path(*parts[: idx + 1])
+    return None
+
+
 def _launch_server(
     backend: str, model: str, tp: int, port: int, gpu: str, extra_env: dict[str, str], log_path: Path
 ) -> subprocess.Popen:
@@ -661,7 +688,7 @@ def apply_and_bench(
             return {"status": "error", "error": "need pairs=[(patch,target),...] or patch_path+target_file"}
         pairs = [(patch_path, target_file)]
     targets = [Path(t) for _, t in pairs]
-    any_aiter_cu = any("/aiter/" in str(t) and t.suffix in {".cu", ".cuh"} for t in targets)
+    any_aiter_cu = any(_is_aiter_cu(t) for t in targets)
     patched_env: dict[str, str] = {}
     if aiter_rebuild or any_aiter_cu:
         patched_env["AITER_REBUILD"] = "1"
@@ -705,7 +732,12 @@ def apply_and_bench(
     for i, (pp, tf) in enumerate(pairs):
         if _looks_like_diff(Path(pp)):
             # Reconstruct byte-exact source for every file the diff touches, then deploy each.
-            repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
+            if "/aiter/" in str(tf):
+                repo_root = Path("/sgl-workspace/aiter")
+            elif "/aiter_meta/" in str(tf):
+                repo_root = _aiter_source_root(Path(tf)) or Path(tf).parents[2]
+            else:
+                repo_root = Path(tf).parents[2]
             rec = _reconstruct_sources_from_diff(Path(pp), repo_root, out)
             if rec.get("status") != "ok":
                 _revert_all()
@@ -746,7 +778,7 @@ def apply_and_bench(
         engagement = [
             dict(
                 target=str(t),
-                **_engagement_proof(out / "server_patched.log", t, "/aiter/" in str(t) and t.suffix in {".cu", ".cuh"}),
+                **_engagement_proof(out / "server_patched.log", t, _is_aiter_cu(t)),
             )
             for t in targets
         ]
