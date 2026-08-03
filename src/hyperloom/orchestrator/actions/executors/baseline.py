@@ -1649,8 +1649,10 @@ class BaselineExecutor:
         eval_enablement = self._eval_enablement_active(ctx)
         from ._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            EVAL_KIND_GENERATION_PATHOLOGY,
             accuracy_meets_floor,
             classify_accuracy_failure,
+            eval_probe_summary,
         )
 
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
@@ -1718,14 +1720,26 @@ class BaselineExecutor:
                 f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
                 f"source={result.get('accuracy_source')}"
             )
+            # A tripped probe changes what the score means: the eval was cut
+            # short because the model never stopped generating, so the ~0 is a
+            # broken generation loop and not a model that answered and got them
+            # wrong. ``classify_accuracy_failure`` cannot see this -- it only
+            # gets a number -- and an authoring specialist told nothing but
+            # "accuracy=0.0" goes looking for a quality regression that never
+            # happened.
+            probe = result.get("eval_probe")
+            if probe:
+                kind = EVAL_KIND_GENERATION_PATHOLOGY
+                evidence = f"{evidence}; {eval_probe_summary(probe)}"
             self._stamp_eval_failure_contract(
                 ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
             )
             log.warning(
-                "baseline_executor: accuracy %s below floor %.4f; routing to "
+                "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
                 "enablement instead of stopping the run.",
                 acc,
                 floor,
+                kind or "unclassified",
             )
             return
         request_baseline_accuracy_stop(
