@@ -3,8 +3,9 @@
 
 """Coverage for Coordinator async/stateful methods invoked directly against a
 real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt
-composition per agent, advisory blocks, research-scout harvest, and the
-orchestration checkpoint guard."""
+composition per agent, advisory blocks, research-scout harvest, the
+orchestration checkpoint guard, strategy-change escalation, specialist
+autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
 
 from __future__ import annotations
 

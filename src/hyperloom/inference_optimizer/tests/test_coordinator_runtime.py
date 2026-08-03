@@ -164,7 +164,7 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
         await c.stop()
 
 
-# Backend-error streak (K4 — robustness/critic subprocess health)
+# Backend-error streak (robustness/critic subprocess health)
 class _AlwaysFailingBackend(Backend):
     """Backend that always raises BackendError."""
 

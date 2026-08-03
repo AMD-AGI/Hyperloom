@@ -329,7 +329,7 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     # recurring failure folded into one gap with two attempts
     fail_gap = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]][0]
     assert len(fail_gap["attempts"]) == 2
-    # explore plateau gap fired at streak >= 6 -> high severity
+    # explore plateau gap fires at streak >= 3; >= 6 escalates it to high
     plateau = [g for g in gaps if g["canonical_id"].endswith("explore_plateau")][0]
     assert plateau["severity"] == "high"
     assert cids

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for specialist_subprocess helpers: worktree pick/setup/teardown,
+"""Coverage for ``specialists.subprocess_`` helpers: worktree pick/setup,
 claude argv assembly, patch discovery, and done-file parse/unwrap."""
 
 from __future__ import annotations

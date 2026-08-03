@@ -389,7 +389,7 @@ def test_materialize_config_with_envs_clamp_respects_env_override(
     tmp_path,
     monkeypatch,
 ):
-    """When the operator sets ``$TP`` the clamp still fires; ``DISABLE_TP_CLAMP=1`` is the documented bypass for a deliberate oversubscribed launch."""
+    """When the operator sets ``$TP`` the clamp still fires; ``INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1`` is the documented bypass for a deliberate oversubscribed launch."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_tp(base, tp=1)
     out = tmp_path / "out"

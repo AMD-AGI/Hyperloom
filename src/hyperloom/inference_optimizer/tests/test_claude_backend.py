@@ -261,7 +261,7 @@ def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
 
 
 def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
-    """P0.1 compat: the pinned SDK must accept the kwargs _build_options sends."""
+    """SDK compat: the pinned SDK must accept the kwargs _build_options sends."""
     _clear_effort_env(monkeypatch)
     sdk = pytest.importorskip("claude_agent_sdk")
     b = ClaudeBackend(

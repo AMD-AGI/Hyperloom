@@ -3,9 +3,8 @@
 
 """Coverage-gap unit tests for the external baseline comparison layer.
 
-Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
-``to_inferencex_name``, the optional-field/all-concurrencies rendering in
-``_format_report_md``, and the fail-soft branches in ``_row_to_point``.
+Covers the fail-soft branches in ``_row_to_point``: a non-positive throughput
+or a missing ``metrics`` block yields no point rather than raising.
 """
 
 from __future__ import annotations
