@@ -11,8 +11,11 @@ logs, and return structured results.
 
 All tool-call artefacts (TraceLens runs, optimization_attempts.jsonl,
 verification JSON, per-tool logs) live under
-`$USER_DATA_PATH/kernel-agent/runs/<session_id>/` — the per-session output
-namespace. The sibling `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`
+`<workspace_path>/kernel-agent/runs/<session_id>/` — the per-session output
+namespace. `<workspace_path>` is whatever `--workspace-path` names: the
+Coordinator request handlers pass the active session dir, while the bare CLI
+defaults to `$USER_DATA_PATH`. The sibling
+`<workspace_path>/kernel-agent-workspace/<kernel_id>/`
 tree (created by Coordinator) holds cross-task GEAK work artefacts
 keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
@@ -92,25 +95,31 @@ and `--dry-run` to print planned actions:
 bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh" --check-only
 ```
 
-### Step 2 — Start Ray with all visible GPUs
+### Step 2 — Ray head (automatic, do not start one by hand)
 
-GEAK submits Ray tasks with `num_gpus>=1`. If Ray is started with
-`--num-gpus=0`, tasks stay pending forever even when the node has idle GPUs:
+Ray head startup is handled for you in two places:
 
-```bash
-RAY_NUM_GPUS="${RAY_NUM_GPUS:-$(python3 -c 'import torch; print(torch.cuda.device_count() or 1)')}"
-ray stop --force || true
-# issue #433: raise the soft open-files limit before `ray start` so the
-# raylet does not abort / zombie at the container default (1024). Needs a
-# container launched with `--ulimit nofile=1048576` (>= 65536) for the hard
-# cap; `install.sh` and the Python backends apply the same preflight.
-ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
-ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
-ray status
-```
+- `install.sh` brings one up via `ensure_ray_started`, which reuses a live head
+  only when it already declares `serving_slot` and otherwise force-restarts it.
+- At runtime `ensure_ray_cluster()`
+  (`src/hyperloom/agents/kernel/tools/backends/ray_runtime.py`) starts a head
+  when none is reachable.
 
-`hyperloom.inference_optimizer.cli` does NOT auto-start ray, so this step is required
-both standalone and under the inference-optimizer entry point.
+Both declare `--resources='{"serving_slot": 1}'` (the whole-machine mutex
+serving-family tasks request), advertise all visible GPUs, bind the dashboard to
+loopback, and probe free GCS/client ports so host-network co-located sessions do
+not collide on Ray's defaults. They also raise the soft open-files limit first —
+the container still has to be launched with `--ulimit nofile=1048576` (>= 65536)
+for the hard cap, or the raylet aborts at the default 1024 (issue #433).
+
+Operator knobs: `SKIP_RAY_START=1` suppresses the install-time start,
+`RAY_NUM_GPUS` overrides the advertised GPU count, `HL_RAY_HEAD_PORT` pins the
+GCS port.
+
+Do NOT run `ray stop --force` + a hand-rolled `ray start`. A head without
+`serving_slot` leaves every serving-family task PENDING forever, and
+`install.sh` will tear it down and restart it. If you must start one manually it
+MUST carry `--resources='{"serving_slot": 1}'` and `--num-gpus` >= 1.
 
 ### Recovery
 
@@ -189,26 +198,30 @@ python "$REPO_ROOT/src/hyperloom/agents/kernel/tools/kernel_optimization.py" \
 
 The tool returns optimization attempts, verification, and a proposal in one
 response. Do not split proposal generation into a third tool.
-The response always includes `rag_hits` and `xs_memory_hits` arrays for
-observability. They may be empty when GEAK does not emit structured retrieval
-metadata.
+The response always includes `rag_hits` and `xs_memory_hits` arrays. Both are
+always empty — reserved placeholders for future GEAK retrieval metadata, with
+no producer today.
 
 If a requested backend is missing after `install.sh` succeeded, this is a
 real bug; record the missing backend attempt in `optimization_attempts.jsonl`
 and report it instead of crashing the resident session.
 
-#### Pre-GEAK Unittest Harness (unittest skill)
+#### Pre-Forge Unittest Harness (unittest skill)
 
-Before `backend=geak` attempts, the main agent generates a GEAK-compatible
+This applies only on the opt-in per-kernel Forge path (exact
+`KERNEL_OPT_BACKEND_ORDER=forge`). On the default path GEAK owns the whole
+KERNEL phase as an e2e delegate and no harness or `test_command` reaches it.
+
+Before a forge attempt, the main agent generates a
 test harness by following `src/hyperloom/agents/kernel/skills/unittest/SKILL.md`. The skill
 searches for existing tests, collects shapes/dtypes from TraceLens, and
 generates a 4-mode harness (`--correctness`/`--profile`/`--benchmark`/`--full-benchmark`).
 
 The resulting `test_command` is passed via `--test-command` to
-`kernel_optimization.py`, which forwards it to GEAK's `--test-command`.
+`kernel_optimization.py`, which forwards it to the Forge submitter.
 
 If the skill fails to produce a valid harness, omit `--test-command` and
-GEAK falls back to its own test discovery.
+Forge falls back to its own autogen / task-preparer driver generation.
 
 Validation uses `src/hyperloom/agents/kernel/skills/unittest/validate_harness.py` for
 static checks (argparse + 4 flags + output markers) and runtime verification
@@ -222,46 +235,22 @@ called at different shapes** — e.g. `aiter::rmsnorm` shows up as `k006`,
 and `(64,4096)`. These all resolve to the same `source_file` and the same
 underlying op.
 
-**Default (do-not-merge) behavior**: dispatch each `kernel_id` as a
-separate `run_optimization` request. The orchestrator picks them off
-`reusable_native_kernel_ids` one by one, GEAK runs its full
-preprocessing pipeline (`~4 min`) per task, and each task generates
-patches for one shape.
+**Merging is automatic, not a manual step.** TraceLens and the bypass backend
+emit `task_groups` (`build_task_groups` in `tools/tracelens_analysis.py`), and
+`_batch_kernel_candidates` (`orchestrator/kernel/request_handlers.py`) collapses
+the kernels sharing a source function into one `task_group` dispatch, falling
+back to a per-kernel pass only for ungrouped kernels. Those ungrouped rows are
+then collapsed a second time under `HL_KERNEL_OPFANOUT_DEDUP` (honest-E2E
+umbrella, default ON): same-`source_file` rows fold into the highest-GPU%
+representative carrying the summed GPU%, and the siblings are recorded as
+`opfanout_merged_into=<rep_kid>`.
 
-**Merge optimization** (preferred when the candidates share
-`(name, source_file)`): batch them into a single `run_optimization`
-request whose harness covers all shapes. Concrete benefits:
-- **Preprocessing amortization**: GEAK preprocessing (discovery →
-  resolution → testcase selection → baseline/profile collection) takes
-  ~4 min regardless of shape count. Merging 3 candidates skips 8 min of
-  duplicated work.
-- **Better patch quality**: the sub-agent sees ALL shapes when reasoning
-  about the optimization, so it can pick a strategy that wins on
-  small-and-large shapes simultaneously instead of overfitting to one.
-- **Cross-shape correctness gate**: a patch that breaks any shape fails
-  `--correctness` immediately rather than being merged later and
-  discovered to regress.
+Per-kernel dispatch is reachable only under exact
+`KERNEL_OPT_BACKEND_ORDER=forge` (`_forge_explicitly_enabled`); by default
+`_backend_order()` returns an empty ladder and GEAK owns the whole phase.
 
-Mechanically:
-1. Group `reusable_native_kernel_ids` by `(candidate.name,
-   candidate.source_file)`.
-2. For each group with size > 1, build a synthetic merged candidate:
-   - `kernel_id`: `<name>_merged` (or any unique id)
-   - `name`, `source_file`, `kernel_repo`, `benchmark_files`: copied
-     from any member (they're equal within the group)
-   - `input_shapes`: concatenation of all members' `input_shapes`
-     (the unittest skill will dedupe by ndim + dtype when building
-     `ALL_CONFIGS`)
-   - `call_count`: sum of members' `call_count`
-   - `gpu_pct`: sum of members' `gpu_pct`
-   - `kernel_params` / `env_vars`: copied from the member with the
-     highest `call_count`
-3. Write the merged candidate(s) to a new `candidates_path` (do not
-   mutate the original `kernel_candidates.json`) and dispatch
-   `kernel_optimization.py --candidates-path <merged>.json
-   --kernel-id <merged_id>`.
-
-When **not** to merge:
+The rules below still apply when you are deciding whether a group *should*
+hold together. When **not** to merge:
 - Candidates share a `source_file` but resolve to different functions
   inside it (different `kernel_params.kernel_name`).
 - Shapes span ndim or dtype boundaries that would force the harness
@@ -333,8 +322,11 @@ cd "$TRACELENS_ROOT" && pip install -e .
 ```
 
 If the CLI is not on PATH, stop and fix installation before analysis.
-`tools/tracelens_analysis.py` picks the right CLI at runtime (preferring
-`_inference`, falling back to the legacy name) — see `select_perf_report_cli`.
+`tools/tracelens_analysis.py` picks the report module by framework class (see
+`_is_scriptable_framework`): scriptable image frameworks (xDiT) use
+`TraceLens.Reporting.generate_perf_report_pytorch`; serving frameworks
+(sglang/vllm/atom) use `..._pytorch_inference`. There is no fallback — the
+`_inference` CLI is hard-required (Hyperloom is inference-only since v0.4).
 
 When running TraceLens analysis, read this skill file and strictly follow
 its order:
@@ -350,7 +342,7 @@ TraceLens CLI output, or artifacts written by subagents.
 The final report is the TraceLens v0.3 SDK orchestrator's `analysis.md`,
 written by the upstream skill to:
 
-`$USER_DATA_PATH/kernel-agent/runs/<session_id>/tracelens/analysis.md`
+`<workspace_path>/kernel-agent/runs/<session_id>/tracelens/analysis.md`
 
 Hyperloom does not alias, copy, or wrap this file (#203 removed the
 legacy `standalone_analysis.md` / `tracelens_report.md` copies and the
@@ -393,18 +385,18 @@ in place first.
 
 ## Optimization Goals & Time Budget
 
-- **Target speedup**: `>= 1.05x` on the dominant inference shape(s). Below this
+- **Target speedup**: `>= 1.10x` on the dominant inference shape(s). Below this
   threshold an attempt is `NEEDS_REVIEW` (marginal / shape-specific / risky),
   not `KEEP`. (Prompt still tells agents to aim for `>= 1.50x` to incentivise
-  ambitious optimization, but the KEEP gate is 1.05x (issue #442) because real
+  ambitious optimization, but the KEEP gate is the hardcoded `KEEP_THRESHOLD =
+  1.10` in `kernel_optimization.py`, with no env override, because real
   inference wins are often shape-specific 1.18-1.32x — see r19 GEMM 1.32x, r39
-  GEAK rms_norm 1.18x — and even smaller wins are worth keeping.)
-- **Default budget**:
-  - GEAK: tracks `$GEAK_RUN_MODE` (set by `install.sh`, exported via
-    `kernel-agent.env.sh`). `full` (default) → **130 min**, `quick` → **70 min**.
-    Both `kernel_optimization.py` and `parallel_e2e_runner.py` read
-    `$GEAK_RUN_MODE` to pick the `--geak-budget-min` default; override by
-    passing the flag explicitly.
+  GEAK rms_norm 1.18x.)
+- **Default budget**: a flat **60 min** on both entry points —
+  `kernel_optimization.py --budget-minutes` (default `60.0`) and
+  `parallel_e2e_runner.py --backend-budget-min` (default `60`, forwarded as
+  `--budget-minutes`). Neither tool reads `$GEAK_RUN_MODE`; override by passing
+  the flag explicitly.
 - **GEAK task parameters** (prompt-injected, align with GEAK team defaults):
   - `max_rounds`: **5** for full / **2** for quick (driven by yaml
     `run.presets.<mode>.orchestrator.max_rounds`).
@@ -415,24 +407,22 @@ in place first.
   runner SIGTERMs at 100%. `parallel_e2e_runner` will still extract whatever
   `optimization_report.md` / `optimized_versions/*` were on disk at SIGTERM
   time and promote the attempt to `partial` (see Proposal Rules).
-- **Why GEAK budget tracks $GEAK_RUN_MODE**: GEAK yaml ships two
+- **Why the budget decides GEAK run mode**: GEAK yaml ships two
   presets — `run.budgets.quick.total_s=3600` (1 h, 2 rounds) and
-  `run.budgets.full.total_s=7200` (2 h, 5 rounds). GEAK's mini.py:435
-  resolves mode by LLM-parsing the prompt-quoted budget: <120 min → quick,
-  >=120 min → full. 130 min ≥ full.total_s (7200s) + finalize_grace_s (300s)
-  + kill_buffer_s (60s) + safety, and 70 min ≥ quick.total_s (3600s) + the
-  same finalize_grace + kill_buffer + safety. Defaults sit one tier above
-  their respective yaml total_s so the matching mode's last round +
-  select_patch can complete (vs the old uniform 90 min default which fell
-  between GEAK quick (60) and full (120) and silently downgraded every run
-  to mode=quick). 60 min is still the floor — do not drop GEAK budget below
-  it; r38/r39 SIGTERM'd the select_patch round and had to fall back to
-  per-task `best_results.json` salvage.
+  `run.budgets.full.total_s=7200` (2 h, 5 rounds). The prompt states the mode
+  directly from the budget (`kernel_optimization.py`: `full` when
+  `budget_min >= 120`, else `quick`), so the 60-min default always runs
+  `quick`. To get `full`, pass a budget at or above 120 min — ideally one tier
+  above `full.total_s` (7200s) + finalize_grace_s (300s) + kill_buffer_s (60s)
+  + safety, so the last round + select_patch can complete. 60 min is the floor
+  — do not drop GEAK budget below it; r38/r39 SIGTERM'd the select_patch round
+  and had to fall back to per-task `best_results.json` salvage.
 
 ## Artifacts
 
-Every path below is relative to `$USER_DATA_PATH/kernel-agent/` (the
-per-session tool-output namespace). Each request creates a `run_id` and
+Every path below is relative to `<workspace_path>/kernel-agent/` (the
+per-session tool-output namespace; the session dir under Coordinator,
+`$USER_DATA_PATH` for the bare CLI). Each request creates a `run_id` and
 writes:
 
 - `runs/<session_id>/session_state.json`
@@ -483,7 +473,7 @@ Never assume a fixed `_optimized.cu` / `_optimized.py` suffix on
 real-backend runs after 2026-05.
 
 Cross-task GEAK work artefacts keyed by `kernel_id` live in the
-sibling tree `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`
+sibling tree `<workspace_path>/kernel-agent-workspace/<kernel_id>/`
 (populated by Coordinator and reused across multiple `kernel_optimization.py`
 invocations on the same kernel).
 
@@ -497,7 +487,7 @@ Return one of `KEEP`, `PARTIAL`, `NEEDS_REVIEW`, or `REVERT`.
 `KEEP` requires ALL evidence:
 - compile/import pass
 - correctness pass
-- microbench speedup `>= 1.05x` (the gate threshold) with `micro_speedup_source`
+- microbench speedup `>= 1.10x` (the gate threshold) with `micro_speedup_source`
   in `{"report_scan", "cli_override"}` (i.e. a real measurement, not a default)
 - E2E does not regress
 - accuracy gate passed or accuracy risk is explicitly zero
@@ -509,7 +499,7 @@ budget boundary, sandbox couldn't rebuild the .so for A/B, GEAK sub-agent
 out-of-time. A human reviewer can read the report and salvage.
 
 `NEEDS_REVIEW` is returned when the attempt completed and produced a measured
-speedup in `(1.0x, 1.05x)` — improvement exists but doesn't meet the gate,
+speedup in `(1.0x, 1.10x)` — improvement exists but doesn't meet the gate,
 needs human judgement on shape coverage / risk.
 
 `REVERT` is returned for `compile fail`, `microbench did not improve`
@@ -554,7 +544,7 @@ kernel-agent flow adapts transparently:
   measure pre-patch behaviour and integrate decisions become noise.
 * RayJob recreate — when a fresh RayJob is provisioned (after OOM /
   manual recreate), `_replay_kernel_patches_for_multi_node` in
-  `src/hyperloom/inference_optimizer/cli/__init__.py` scans the session's kernel-agent
+  `src/hyperloom/inference_optimizer/cli/multi_node.py` scans the session's kernel-agent
   workspace for applied manifests and replays each via `apply-patch`
   so the new pods start in the post-stack state.
 

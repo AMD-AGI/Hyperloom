@@ -1933,7 +1933,9 @@ def _export_best_artifacts(
 def _normalized(
     returncode: int, stdout: str, stderr: str, elapsed_s: float, gpu_ids: str = "", skipped: bool = False
 ) -> dict:
-    """Shape the result like geak_submit return dicts.
+    """Shape the kernel-backend result dict (``returncode`` / ``skipped`` /
+    ``stdout_tail`` / ``stderr_tail`` / ``stdout`` / ``gpu_ids`` / ``elapsed_s``
+    / ``cmd``).
 
     ``skipped=True`` marks a forge self-skip: forge bailed before any real
     optimization attempt (unsupported source type, repo not a clean git

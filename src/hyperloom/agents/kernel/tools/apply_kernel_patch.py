@@ -1601,8 +1601,11 @@ def apply_kernel_patch(
         kernel_id (str): Identifier for the kernel being patched.
         artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
             back up in addition to discovered ones.
-        rebuild_command (list[str] | str | None): Override rebuild command; a
-            string is run via ``bash -lc``.
+        rebuild_command (list[str] | str | None): Override rebuild argv; a
+            string is shlex-split and run argv-only (shell=False), never via
+            ``bash -lc``. Commands using shell control operators, or invoking
+            ``bash``/``sh`` with ``-c``/``-lc``, return ``status='failed'``
+            with ``error_class='invalid_rebuild_command'``.
         rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
         skip_rebuild (bool): When ``True``, skip the rebuild step.
         allow_unknown_target (bool): Allow targets outside the known roots.

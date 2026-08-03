@@ -514,12 +514,9 @@ class _CategoryHandling(NamedTuple):
     summary: Callable[[dict[str, Any], list[dict[str, Any]], str], str]
 
 
-#: Single source of truth for the per-category handling that was previously
-#: inlined (and duplicated) at three sites: the summary builder in
-#: ``_summary_one_line`` and the ``totals`` counter increment at both count
-#: sites in ``build_kernel_optimization_summary``. A category absent from this
-#: table falls back to the ``IN_FLIGHT`` counter / an empty summary, preserving
-#: the original ``else`` / trailing-``return ""`` behavior.
+#: Single source of truth for per-category handling: each entry defines the
+#: ``totals`` counter key and the one-line summary builder. A category absent
+#: from this table falls back to the ``in_flight`` counter and an empty summary.
 CATEGORY_DISPATCH: dict[str, _CategoryHandling] = {
     CATEGORY_INTEGRATED: _CategoryHandling("integrated", _summary_integrated),
     CATEGORY_KEEP_PENDING: _CategoryHandling("keep_pending", _summary_keep_pending),
@@ -531,8 +528,7 @@ CATEGORY_DISPATCH: dict[str, _CategoryHandling] = {
 def _category_count_key(category: str) -> str:
     """Resolve the ``totals`` counter for ``category`` via :data:`CATEGORY_DISPATCH`.
 
-    Unknown categories fall back to ``in_flight`` so a novel/blank category
-    increments the same counter the original ``else`` branch did.
+    Unknown or blank categories fall back to the ``in_flight`` counter.
 
     Args:
         category: The kernel outcome category constant.
@@ -1038,8 +1034,8 @@ def _find_highest_impact_missed(
 ) -> dict[str, Any] | None:
     """Pick the missed kernel with the highest ``gpu_pct``.
 
-    "Missed" = ``ATTEMPTED_REJECTED`` OR ``UNATTEMPTED``; ``INTEGRATED`` /
-    ``KEEP_PENDING`` are excluded.
+    "Missed" = anything not ``INTEGRATED`` / ``KEEP_PENDING`` (i.e.
+    ``ATTEMPTED_REJECTED``, ``UNATTEMPTED``, or still ``IN_FLIGHT``).
 
     Args:
         by_kernel: The per-kernel summary rows.

@@ -72,12 +72,12 @@ def _maybe_enrich_rocprof(
     candidates_path: Path,
     run_dir: Path,
 ) -> dict[str, Any]:
-    """Optionally run rocprof-compute enrichment on the roofline sidecar.
+    """Dead rocprof-compute enrichment hook; kept only for the summary key.
 
-    Opt-in via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`` (off by default). Reuses
-    ``rocprof_roofline.enrich_kernel_roofline_sidecar``, which degrades
-    gracefully (rocprof-compute missing / non-reusable kernel / no benchmark
-    files -> row skipped; per-kernel failure -> row failed) and never aborts.
+    Gated off by default via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH``. The
+    ``rocprof_roofline`` module it imports was removed from the repo, so opting
+    in cannot enrich anything — the import raises and the except branch returns
+    an error status.
 
     Args:
         kernel_roofline_path: Path to the written ``kernel_roofline.json``.
@@ -85,8 +85,8 @@ def _maybe_enrich_rocprof(
         run_dir: Per-run output directory used as the profiling workdir.
 
     Returns:
-        The enrich summary dict, ``{"status": "disabled"}`` when the env gate is
-        off, or ``{"status": "error: ..."}`` on unexpected failure. Progress is
+        ``{"status": "disabled"}`` when the env gate is off (the only reachable
+        non-error result), otherwise ``{"status": "error: ..."}``. Progress is
         logged to stderr so stdout stays a single result-JSON line.
     """
     enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
