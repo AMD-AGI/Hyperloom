@@ -1464,122 +1464,32 @@ ensure_langfuse_when_enabled() {
 # --- 4d. Per-framework runtime deps (manifest-driven) ---
 #
 # Scriptable frameworks execute the model author's own code (HY-World-2.0 for
-# worldmirror), which imports packages no ROCm serving image ships. Instead of
-# growing a special case per framework, a framework declares what it needs in
-# assets/framework_deps/<framework>.txt and this installer stays generic —
-# onboarding the next one is a new data file, not new code. No manifest (the
-# sglang / vllm / atom case) means the step is a no-op.
+# worldmirror), which imports packages no ROCm serving image ships. A framework
+# declares what it needs in assets/framework_deps/<framework>.txt, so onboarding
+# the next one is a data file rather than new code, and a framework with no
+# manifest (sglang / vllm / atom) is a no-op.
 #
-# Manifest format, one entry per line, '#' comments and blanks ignored:
-#   <pip-spec>[:<import-name>]      e.g. opencv-python:cv2
-# The import name defaults to the pip name with '-' -> '_' and any version
-# specifier stripped.
+# Manifest parsing, the load-bearing refusal list and the torch-clobber
+# tripwire all live in hyperloom.inference_optimizer.framework_deps, which the
+# CLI preflight also calls, so the two passes cannot drift.
 #
-# Upstream requirements.txt files routinely pin the load-bearing stack (e.g.
-# HY-World-2.0 pins torch==2.7.1). Installing that on a ROCm pod swaps the
-# vendor torch for a CUDA wheel and silently kills GPU access for EVERY
-# framework sharing the venv, so those names are refused outright rather than
-# left to the resolver.
-_FRAMEWORK_DEPS_CORE_SKIP=(torch torchvision torchaudio triton numpy)
-
-_framework_dep_is_core() {
-  local needle="$1" pkg
-  for pkg in "${_FRAMEWORK_DEPS_CORE_SKIP[@]}"; do
-    [ "$needle" = "$pkg" ] && return 0
-  done
-  return 1
-}
-
+# $FRAMEWORK is normally only known at launch (--framework), not at install
+# time, which is why preflight owns the pass that covers the documented flow.
+# This one is the fast path for operators who export it before installing.
 ensure_framework_deps() {
-  local fw manifest
-  fw="$(printf '%s' "${FRAMEWORK:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
-  if [ -z "$fw" ]; then
-    log "framework deps: \$FRAMEWORK unset; skipping"
+  if [ -z "${FRAMEWORK:-}" ]; then
+    log "framework deps: \$FRAMEWORK unset at install time; CLI preflight will handle it at launch"
     return 0
   fi
-  manifest="${_script_dir}/framework_deps/${fw}.txt"
-  if [ ! -f "$manifest" ]; then
-    log "framework deps: no manifest for '${fw}'; skipping (expected at ${manifest})"
-    return 0
+  local args=(--framework "$FRAMEWORK" --python "$PYTHON" --prefix "[inference-optimizer] framework deps")
+  [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
+  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+  # --pip-extra is variadic, so it must stay last.
+  if [ ${#PIP_EXTRA[@]} -gt 0 ]; then
+    args+=(--pip-extra "${PIP_EXTRA[@]}")
   fi
-
-  local specs=() imports=() line spec import_name candidate base
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"
-    line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ -n "$line" ] || continue
-    # Split on the LAST colon, but only when the tail looks like a module name
-    # so a VCS/URL spec (git+https://...) is never mangled.
-    spec="$line"
-    import_name=""
-    case "$line" in
-      *:*)
-        candidate="${line##*:}"
-        case "$candidate" in
-          ""|*/*|*" "*) : ;;
-          *) spec="${line%:*}"; import_name="$candidate" ;;
-        esac
-        ;;
-    esac
-    base="$(printf '%s' "$spec" | sed -e 's/[<>=!~;[].*//' -e 's/[[:space:]]*$//')"
-    if _framework_dep_is_core "$base"; then
-      warn "framework deps: refusing load-bearing '${base}' from the ${fw} manifest (would put the ROCm torch stack at risk)"
-      continue
-    fi
-    [ -n "$import_name" ] || import_name="$(printf '%s' "$base" | tr '-' '_')"
-    specs+=("$spec")
-    imports+=("$import_name")
-  done < "$manifest"
-
-  if [ ${#specs[@]} -eq 0 ]; then
-    log "framework deps: ${fw} manifest declares nothing installable"
-    return 0
-  fi
-
-  local missing_specs=() missing_imports=() i
-  for i in "${!specs[@]}"; do
-    if ! "$PYTHON" -c "import ${imports[$i]}" >/dev/null 2>&1; then
-      missing_specs+=("${specs[$i]}")
-      missing_imports+=("${imports[$i]}")
-    fi
-  done
-  if [ ${#missing_specs[@]} -eq 0 ]; then
-    log "framework deps: ${fw} already satisfied"
-    return 0
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "check-only mode; would install ${fw} deps: ${missing_specs[*]}"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "dry-run; skipping ${fw} dep install: ${missing_specs[*]}"
-    return 0
-  fi
-
-  log "installing missing ${fw} deps: ${missing_specs[*]}"
-  local constraints hip_before failed=()
-  constraints="$(mktemp)"
-  _write_core_constraints "$constraints"
-  hip_before="$(_torch_hip_version)"
-  # One at a time: a manifest may carry a package that builds a GPU extension
-  # from sdist, and its failure must not stop the cheap wheels behind it.
-  for i in "${!missing_specs[@]}"; do
-    if "$PYTHON" -m pip install --quiet --no-cache-dir -c "$constraints" \
-        "${PIP_EXTRA[@]}" "${missing_specs[$i]}"; then
-      "$PYTHON" -c "import ${missing_imports[$i]}" >/dev/null 2>&1 \
-        || failed+=("${missing_specs[$i]}[installed-but-not-importable]")
-    else
-      failed+=("${missing_specs[$i]}")
-    fi
-  done
-  _guard_torch_not_clobbered "$constraints" "$hip_before"
-  rm -f "$constraints"
-
-  if [ ${#failed[@]} -gt 0 ]; then
-    warn "framework deps: ${fw} unresolved: ${failed[*]} — benchmarks importing them will fail until this is fixed"
-  else
-    log "framework deps: ${fw} OK"
-  fi
+  "$PYTHON" -m hyperloom.inference_optimizer.framework_deps "${args[@]}" \
+    || die "framework deps for '${FRAMEWORK}' failed fatally; see the error above"
 }
 
 # --- 5. Chain to kernel-agent ---
