@@ -222,10 +222,7 @@ def test_sidecar_records_the_evidence(probe):
     assert record["reason"] == "model_not_terminating"
     assert record["observed_samples"] == 8
     assert record["finish_reason_length"] == 8
-    assert record["length_ratio"] == 1.0
     assert record["cap_hits"] == 8
-    assert record["cap_hit_ratio"] == 1.0
-    assert record["written_at"] > 0
     assert record["max_completion_tokens_seen"] == 16384
     # parse_eval_results globs results*.json for the score; a probe sidecar
     # matching that name would be read as an lm-eval result file.
@@ -354,16 +351,16 @@ def test_read_eval_probe_prefers_the_newest_sidecar(tmp_path):
     about which eval ran last."""
     older = tmp_path / "zzz_first" / EVAL_PROBE_FILENAME
     newer = tmp_path / "aaa_second" / EVAL_PROBE_FILENAME
-    for path, ratio in ((older, 0.1), (newer, 0.9)):
+    for path, hits in ((older, 11), (newer, 22)):
         path.parent.mkdir()
-        path.write_text(json.dumps({"length_ratio": ratio}), encoding="utf-8")
+        path.write_text(json.dumps({"cap_hits": hits}), encoding="utf-8")
     os.utime(older, (1_000_000, 1_000_000))
     os.utime(newer, (2_000_000, 2_000_000))
 
     record = read_eval_probe(tmp_path)
 
     assert record is not None
-    assert record["length_ratio"] == 0.9
+    assert record["cap_hits"] == 22
 
 
 def test_read_eval_probe_is_none_without_a_sidecar(tmp_path):
@@ -381,9 +378,7 @@ def test_eval_probe_summary_is_empty_without_a_probe():
 
 
 def test_eval_probe_summary_names_the_kind_and_the_evidence():
-    summary = eval_probe_summary(
-        {"observed_samples": 16, "finish_reason_length": 16, "max_completion_tokens_seen": 16384}
-    )
+    summary = eval_probe_summary({"observed_samples": 16, "cap_hits": 16, "max_completion_tokens_seen": 16384})
     assert EVAL_KIND_GENERATION_PATHOLOGY in summary
     assert "16/16" in summary
     assert "16384" in summary

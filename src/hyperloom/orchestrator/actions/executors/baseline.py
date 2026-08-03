@@ -1619,7 +1619,9 @@ class BaselineExecutor:
         ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``.
 
         With eval-on-fail enablement active (the default), the result is stamped
-        as an eval-failure contract and routed to enablement rather than
+        as an eval-failure contract -- ``eval_generation_pathology`` when the
+        generation probe tripped, else whatever the score classifies as -- and
+        routed to enablement rather than
         stopping; ``_is_promotable_result`` then blocks it from anchoring
         ``baseline_tput`` / ``baseline_accuracy`` / ``baseline_config_path``.
         Otherwise the run stops. Throughput-level baseline failures are handled
@@ -1720,13 +1722,8 @@ class BaselineExecutor:
                 f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
                 f"source={result.get('accuracy_source')}"
             )
-            # A tripped probe changes what the score means: the eval was cut
-            # short because the model never stopped generating, so the ~0 is a
-            # broken generation loop and not a model that answered and got them
-            # wrong. ``classify_accuracy_failure`` cannot see this -- it only
-            # gets a number -- and an authoring specialist told nothing but
-            # "accuracy=0.0" goes looking for a quality regression that never
-            # happened.
+            # A tripped probe means the eval was cut short because the model
+            # never stopped generating, not that it answered and got them wrong.
             probe = result.get("eval_probe")
             if probe:
                 kind = EVAL_KIND_GENERATION_PATHOLOGY
@@ -1739,7 +1736,7 @@ class BaselineExecutor:
                 "enablement instead of stopping the run.",
                 acc,
                 floor,
-                kind or "unclassified",
+                kind,
             )
             return
         request_baseline_accuracy_stop(
@@ -1753,16 +1750,14 @@ class BaselineExecutor:
         salvaged: dict[str, Any],
         shared_state: Any,
     ) -> float:
-        """Record a salvaged sibling accuracy as evidence, and as the gate input
-        only when it can serve as one.
+        """Record a salvaged sibling accuracy, publishing it as the gate
+        reference only when it can serve as one.
 
-        The ``result`` fields are evidence and carry the score whatever its
-        value. ``SharedState.baseline_accuracy`` is not evidence — it is the
-        reference every later accuracy gate compares against, and ``<= 0`` is
-        that gate's "no baseline, skip the check" sentinel
-        (:func:`accuracy_passed`). Publishing a measured zero there would turn a
-        real quality failure into a silent gate bypass for every subsequent
-        candidate, so the two are written under different conditions.
+        ``result`` carries the score whatever its value: that is evidence.
+        ``SharedState.baseline_accuracy`` is the reference later gates compare
+        against, where ``<= 0`` is :func:`accuracy_passed`'s "no baseline, skip
+        the check" sentinel -- a measured zero there bypasses the gate for every
+        later candidate.
 
         Args:
             result: The baseline result dict, mutated in place.
