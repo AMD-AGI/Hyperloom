@@ -387,6 +387,11 @@ def conversations_path(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "conversations.jsonl"
 
 
+def orchestration_turns_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/orchestration_turns.jsonl``."""
+    return trace_dir(session_dir) / "orchestration_turns.jsonl"
+
+
 def research_hints_md(session_dir: Path) -> Path:
     """``<sd>/research_hints.md`` — human-readable proven-prior hints
     collected by the research scout.
@@ -455,6 +460,11 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
             ``<session_dir>/agents/<role>/system_prompt.snapshot.md``.
     """
     return agent_dir(session_dir, role) / "system_prompt.snapshot.md"
+
+
+def agent_mcp_setup_path(session_dir: Path, role: str) -> Path:
+    """Compute the per-agent MCP setup snapshot path."""
+    return agent_dir(session_dir, role) / "mcp_setup.json"
 
 
 # External baseline comparison artefacts. Dedicated top-level subdir (not
@@ -758,6 +768,7 @@ def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep
 __all__ = [
     "allocate_turn_workdir",
     "agent_dir",
+    "agent_mcp_setup_path",
     "agent_prompt_snapshot",
     "breakdown_parts_dir",
     "competitor_target_json",
@@ -780,6 +791,7 @@ __all__ = [
     "kernel_agent_runs_root",
     "llm_calls_path",
     "manifest_path",
+    "orchestration_turns_path",
     "patches_dir",
     "reports_dir",
     "research_hints_json",

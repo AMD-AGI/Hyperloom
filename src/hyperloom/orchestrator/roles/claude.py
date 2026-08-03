@@ -13,11 +13,14 @@ SDK + network.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
+import json
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -43,6 +46,7 @@ from .mcp_context_tools import (
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
+    EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
 )
@@ -196,6 +200,10 @@ class ClaudeBackend:
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
+    _mcp_setup_error: str | None = field(default=None, init=False)
+    _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
+    _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
+    _active_stderr: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool.
@@ -252,6 +260,7 @@ class ClaudeBackend:
                 )
             except Exception as exc:  # noqa: BLE001
                 self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
+                self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
                 cfg = None
             if cfg is not None:
                 self.mcp_server_config = cfg
@@ -284,6 +293,11 @@ class ClaudeBackend:
             The parsed :class:`BackendTurnResult` for the turn.
         """
         full_prompt = self._compose_prompt(prompt)
+        self._begin_turn_diagnostic(
+            prompt=full_prompt,
+            system_prompt=system_prompt,
+            tools=tools or [],
+        )
         max_turns_use = max_turns or self.max_turns_default
         # Claude Code counts the model's own text/tool messages as turns, so a
         # literal max_turns=1 trips ("Reached maximum number of turns (1)")
@@ -294,11 +308,20 @@ class ClaudeBackend:
         # raw-completion floor to every mode, not just raw_completion.
         max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
         resume_session = self._session_id if self.conversational else None
-        options = self._build_options(
-            tools=tools or [],
+        try:
+            options = self._build_options(
+                tools=tools or [],
+                max_turns=max_turns_use,
+                system_prompt=system_prompt,
+                resume_session_id=resume_session,
+            )
+        except BaseException as exc:
+            self._finish_turn_diagnostic(outcome="backend_error", error=exc)
+            raise
+        self._update_turn_options(
+            options,
             max_turns=max_turns_use,
-            system_prompt=system_prompt,
-            resume_session_id=resume_session,
+            resume_session=resume_session,
         )
 
         # Each attempt bounds the gap BETWEEN streamed SDK messages (silence
@@ -361,9 +384,17 @@ class ClaudeBackend:
                     ),
                 }
             )
-            raise BackendError(
+            error = BackendError(
                 f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s (likely upstream proxy stall)"
-            ) from exc
+            )
+            self._finish_turn_diagnostic(outcome="backend_error", error=error)
+            raise error from exc
+        except BaseException as exc:
+            self._finish_turn_diagnostic(outcome="backend_error", error=exc)
+            raise
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
+            self._active_turn_diagnostic["new_session"] = bool(session_id and not resume_session)
         # Capture the SDK session token for the next conversational resume;
         # only overwrite on a non-empty id.
         if self.conversational:
@@ -383,6 +414,13 @@ class ClaudeBackend:
         cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = safe_int(usage.get("input_tokens") if usage else None)
         output_tokens = safe_int(usage.get("output_tokens") if usage else None)
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["usage"] = {
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
         self.calls.append(
             {
                 "prompt_chars": len(full_prompt),
@@ -396,10 +434,13 @@ class ClaudeBackend:
             }
         )
         if not intents and not self.raw_completion and not allow_no_intent:
-            raise NoIntentEmitted(
+            error = NoIntentEmitted(
                 f"claude reply contained no parseable emit_intent tool_use "
                 f"blocks (raw_text_len={len(raw_text)}, tool_blocks={tool_block_count})"
             )
+            self._finish_turn_diagnostic(outcome="no_intent", error=error)
+            raise error
+        self._finish_turn_diagnostic(outcome="succeeded")
         return BackendTurnResult(
             intents=intents,
             raw_text=raw_text,
@@ -467,6 +508,138 @@ class ClaudeBackend:
         Used after a checkpoint/compaction or resume rebuild.
         """
         self._session_id = None
+
+    def get_turn_diagnostic(self) -> dict[str, Any]:
+        """Return the most recently completed turn diagnostic."""
+        return dict(self._last_turn_diagnostic)
+
+    def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
+        """Return the current MCP setup snapshot."""
+        schema = json.dumps(EMIT_INTENT_TOOL_INPUT_SCHEMA, sort_keys=True, separators=(",", ":"))
+        diag = self.get_turn_diagnostic()
+        return {
+            "backend": type(self).__name__,
+            "model": self.model,
+            "sdk_name": getattr(self.sdk_module, "__name__", None),
+            "sdk_version": getattr(self.sdk_module, "__version__", None),
+            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "gateway_endpoint": self._gateway_endpoint_identifier(),
+            "mcp_servers": diag.get("mcp_servers", []),
+            "emit_intent": {
+                "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
+                "registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+                "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
+                "setup_error": self._mcp_setup_error,
+            },
+            "allowed_tools": diag.get("allowed_tools", []),
+        }
+
+    def _begin_turn_diagnostic(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+        tools: list[str],
+    ) -> None:
+        previous_session = self._session_id if self.conversational else None
+        self._active_stderr = []
+        self._active_turn_diagnostic = {
+            "backend": type(self).__name__,
+            "model": self.model,
+            "sdk_name": getattr(self.sdk_module, "__name__", None),
+            "sdk_version": getattr(self.sdk_module, "__version__", None),
+            "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
+            "gateway_endpoint": self._gateway_endpoint_identifier(),
+            "resume_requested": bool(previous_session),
+            "previous_session_id_hash": self._session_hash(previous_session),
+            "session_id_hash": None,
+            "new_session": None,
+            "max_turns": None,
+            "timeout_sec": self.call_timeout_s,
+            "reasoning_effort": None,
+            "thinking": None,
+            "prompt": prompt,
+            "system_prompt": system_prompt or "",
+            "allowed_tools": list(tools),
+            "mcp_servers": [],
+            "emit_intent_registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+            "messages": [],
+            "result": "",
+            "raw_text": "",
+            "tool_blocks": [],
+            "parse_errors": [],
+            "usage": {},
+            "stderr_tail": [],
+        }
+
+    def _update_turn_options(self, options: Any, *, max_turns: int, resume_session: str | None) -> None:
+        diag = self._active_turn_diagnostic
+        if diag is None:
+            return
+        kwargs = getattr(options, "kwargs", None)
+        if not isinstance(kwargs, dict):
+            kwargs = {}
+        allowed = kwargs.get("allowed_tools", getattr(options, "allowed_tools", diag["allowed_tools"]))
+        servers = kwargs.get("mcp_servers", getattr(options, "mcp_servers", {}))
+        if not kwargs:
+            if self.raw_completion:
+                allowed = []
+                servers = {}
+            else:
+                allowed = [tool for tool in diag["allowed_tools"] if tool != EMIT_INTENT_TOOL_NAME]
+                if self.mcp_tool_name and self.mcp_tool_name not in allowed:
+                    allowed.append(self.mcp_tool_name)
+                if self._context_server_config is not None:
+                    allowed.extend(tool for tool in CONTEXT_TOOL_QUALIFIED_NAMES if tool not in allowed)
+                servers = {}
+                if self.mcp_server_config is not None:
+                    servers[MCP_SERVER_NAME] = self.mcp_server_config
+                if self._context_server_config is not None:
+                    servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
+        diag["max_turns"] = max_turns
+        diag["resume_requested"] = bool(resume_session)
+        diag["allowed_tools"] = [str(tool) for tool in allowed or []]
+        diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
+        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
+        default_effort = "medium" if self.conversational else "low"
+        diag["reasoning_effort"] = kwargs.get(
+            "effort",
+            getattr(options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()),
+        )
+        diag["thinking"] = kwargs.get(
+            "thinking",
+            getattr(options, "thinking", {"type": (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()}),
+        )
+
+    def _finish_turn_diagnostic(self, *, outcome: str, error: BaseException | None = None) -> None:
+        diag = self._active_turn_diagnostic
+        if diag is None:
+            return
+        diag["outcome"] = outcome
+        diag["stderr_tail"] = self._active_stderr[-50:]
+        if error is not None:
+            diag["error_type"] = type(error).__name__
+            diag["error_message"] = str(error)
+        self._last_turn_diagnostic = diag
+        self._active_turn_diagnostic = None
+
+    def _gateway_endpoint_identifier(self) -> str | None:
+        raw = (
+            os.environ.get("ANTHROPIC_BASE_URL")
+            or os.environ.get("DEEPSEEK_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or ""
+        ).strip()
+        if not raw:
+            return None
+        parts = urlsplit(raw)
+        return parts.netloc or "configured"
+
+    @staticmethod
+    def _session_hash(session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
 
     def _build_options(
         self,
@@ -572,6 +745,7 @@ class ClaudeBackend:
         text = line.strip()
         if text:
             self.calls.append({"stderr": text})
+            self._active_stderr.append(text)
 
     async def _invoke_and_collect(
         self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
@@ -615,7 +789,9 @@ class ClaudeBackend:
                 msg_session = getattr(message, "session_id", None)
                 if isinstance(msg_session, str) and msg_session:
                     session_id = msg_session
+                self._record_message_diagnostic(message)
                 for block in self._iter_blocks(message):
+                    self._record_tool_block_diagnostic(block)
                     if self._is_tool_use_for_emit_intent(block):
                         tool_block_count += 1
                         intent = self._parse_tool_use_block(block)
@@ -646,6 +822,8 @@ class ClaudeBackend:
             err_str = str(exc)
             _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
             if _non_fatal:
+                if self._active_turn_diagnostic is not None:
+                    self._active_turn_diagnostic["sdk_boundary_error"] = err_str
                 if intents:
                     log.warning(
                         "claude SDK raised '%s' but %d intents already collected; returning partial results",
@@ -671,6 +849,9 @@ class ClaudeBackend:
                     pass
         # Prefer the consolidated ResultMessage text; fall back to TextBlocks.
         raw_text = "".join(result_chunks) or "".join(text_chunks)
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["result"] = "".join(result_chunks)
+            self._active_turn_diagnostic["raw_text"] = raw_text
         return intents, raw_text, tool_block_count, last_usage, session_id
 
     @staticmethod
@@ -727,8 +908,42 @@ class ClaudeBackend:
             validated = validate_envelope(envelope)
         except IntentValidationError as exc:
             log.info("claude tool_use validation failed: %s", exc)
+            if self._active_turn_diagnostic is not None:
+                self._active_turn_diagnostic["parse_errors"].append(str(exc))
             return None
         return validated[0] if validated else None
+
+    def _record_message_diagnostic(self, message: Any) -> None:
+        diag = self._active_turn_diagnostic
+        if diag is None:
+            return
+        summary: dict[str, Any] = {"type": type(message).__name__}
+        for name in ("is_error", "subtype", "request_id"):
+            value = getattr(message, name, None)
+            if value is not None:
+                summary[name] = value
+                if name == "request_id" and not diag.get("request_id"):
+                    diag["request_id"] = str(value)
+        result = getattr(message, "result", None)
+        if isinstance(result, str):
+            summary["result"] = result
+        diag["messages"].append(summary)
+
+    def _record_tool_block_diagnostic(self, block: Any) -> None:
+        diag = self._active_turn_diagnostic
+        if diag is None:
+            return
+        summary: dict[str, Any] = {"type": type(block).__name__}
+        name = getattr(block, "name", None)
+        if isinstance(name, str) and name:
+            summary["name"] = name
+        raw_input = getattr(block, "input", None)
+        if isinstance(raw_input, dict):
+            summary["input_keys"] = sorted(str(key) for key in raw_input)
+            intent_type = raw_input.get("intent_type")
+            if isinstance(intent_type, str):
+                summary["intent_type"] = intent_type
+        diag["tool_blocks"].append(summary)
 
     @staticmethod
     def _extract_text(block: Any) -> str:

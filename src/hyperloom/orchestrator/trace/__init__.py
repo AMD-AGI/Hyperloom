@@ -29,6 +29,12 @@ from .llm_trace import (
     LLMTraceRowError,
     append_llm_call,
 )
+from .orchestration_trace import (
+    OrchestrationTraceRowError,
+    OrchestrationTurnRecord,
+    append_orchestration_turn,
+    write_mcp_setup_once,
+)
 from .langfuse_emitter import flush_session, get_emitter
 from .parse_usage import (
     normalize_usage,
@@ -41,12 +47,16 @@ __all__ = [
     "ConversationRowError",
     "LLMCallRecord",
     "LLMTraceRowError",
+    "OrchestrationTraceRowError",
+    "OrchestrationTurnRecord",
     "append_conversation",
     "append_llm_call",
+    "append_orchestration_turn",
     "flush_session",
     "get_emitter",
     "langfuse_live_enabled",
     "normalize_usage",
     "parse_claude_stream_json_usage",
     "redact_secrets",
+    "write_mcp_setup_once",
 ]
