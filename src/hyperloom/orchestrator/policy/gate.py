@@ -366,6 +366,17 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
 
+# prune_branch scopes. ``family`` retires the action for the rest of the run;
+# ``queued`` only drains the backlog and leaves the family usable.
+PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
+PRUNE_BRANCH_SCOPE_QUEUED: str = "queued"
+PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
+    {
+        PRUNE_BRANCH_SCOPE_FAMILY,
+        PRUNE_BRANCH_SCOPE_QUEUED,
+    }
+)
+
 # Ceiling on a single extend_lease step; repeated extensions are allowed.
 EXTEND_LEASE_MAX_SEC: int = 3600
 
@@ -2139,6 +2150,18 @@ class PolicyGate:
             family = str(payload.get("family", "")).strip()
             if not family:
                 raise PolicyDenied("prune_branch missing family", rule="payload")
+            scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+            if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
+                raise PolicyDenied(
+                    f"prune_branch scope={scope!r} not allowed "
+                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    rule="prune_scope",
+                    hint=(
+                        f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
+                        f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
+                        f"only cancels the queued backlog."
+                    ),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -2252,6 +2275,9 @@ __all__ = [
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",
+    "PRUNE_BRANCH_ALLOWED_SCOPES",
+    "PRUNE_BRANCH_SCOPE_FAMILY",
+    "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
     "REQUEST_ROUTING",

@@ -32,7 +32,12 @@ from .coordinator_helpers import (
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
-from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
+from ..policy.gate import (
+    PolicyDenied,
+    PRUNE_BRANCH_SCOPE_FAMILY,
+    PRUNE_BRANCH_SCOPE_QUEUED,
+    SPECIALIST_FROM_AGENT_PREFIX,
+)
 from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import get_handler
@@ -889,18 +894,26 @@ class IntentRouter:
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.
 
-        Adds the family to the persistent pruned set, cancels any tasks in that
-        family, and broadcasts a ``prune_branch`` event.
+        ``scope="family"`` (the default) adds the family to the persistent
+        pruned set so it stays retired. ``scope="queued"`` only drains the
+        backlog, leaving the family available — the move for an action whose
+        queue outlived its usefulness rather than one that has to stop.
 
         Args:
             source (str): The agent issuing the prune.
             intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
-                ``family`` and optional ``reason``.
+                ``family``, optional ``reason`` and optional ``scope``.
         """
         family = intent.payload["family"]
-        if self.shared_state.add_pruned_family(family):
+        reason = str(intent.payload.get("reason") or "prune_branch")
+        scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+        drain_only = scope == PRUNE_BRANCH_SCOPE_QUEUED
+        if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
-        cancelled = await self.tasks.cancel_family([family])
+        if drain_only and family == "baseline":
+            cancelled = await self._drain_queued_baselines(reason=reason)
+        else:
+            cancelled = await self.tasks.cancel_family([family], reason=reason)
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -909,6 +922,7 @@ class IntentRouter:
                 {
                     "kind": "prune_branch",
                     "family": family,
+                    "scope": scope,
                     "cancelled_task_ids": cancelled,
                     "reason": intent.payload.get("reason"),
                 },
