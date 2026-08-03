@@ -303,7 +303,7 @@ def test_a_rejects_kernel_cat_when_name_is_runtime_api():
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     """Build a synthetic trace mirroring the resume4 shape and confirm
-    the buggy events drop out of top-K."""
+    is_kernel_event rejects the sync events before they can reach top-K."""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
@@ -4606,8 +4606,7 @@ def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
 
     assert "## System-Level Signals" in text
     assert "GPU idle | 20.00%" in text
-    # 20% idle is above the default 80%? No — default gate is high; ensure the
-    # note reflects the threshold comparison deterministically.
+    # 20% idle is within the default 80% gate; the note records that comparison.
     assert "idle gate" in text
     assert "Exposed communication | 4.00%" in text
     assert "Exposed memcpy (device copy) | 1.00%" in text

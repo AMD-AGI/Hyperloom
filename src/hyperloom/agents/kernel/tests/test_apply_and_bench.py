@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: MIT
 """Unit tests for apply_and_bench helpers (no serving / no GPU required).
 
-Covers the patch-operation coverage gate (_diff_unsupported_ops) and the
-measurement spread/significance helper (_spread).
+Covers the patch-operation coverage gate (_diff_unsupported_ops), the
+measurement spread/significance helper (_spread), P99 tail-latency parsing and
+the peak-VRAM probe, and the vLLM orphan reap during server teardown.
 """
 
 from __future__ import annotations
@@ -86,7 +87,7 @@ def test_spread_edge_cases():
     assert one["median"] == 5.0 and one["stdev"] == 0.0 and one["n"] == 1
 
 
-# WP-6: P99 tail-latency parsing + peak-VRAM probe (additive to the ABBA result)
+# P99 tail-latency parsing + peak-VRAM probe (additive to the ABBA result)
 
 
 def test_bench_once_parses_p99(tmp_path, monkeypatch):
