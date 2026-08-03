@@ -191,6 +191,36 @@ def test_worldplay_materialize_configures_github_repo_fallback(monkeypatch, tmp_
     assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
 
 
+def test_worldplay_grid_rebuild_keeps_bundled_script_path(monkeypatch, tmp_path):
+    """Grid rebuild must keep the bundled absolute script path.
+
+    ``resolve_scriptable_script`` only searches the Magpie / InferenceX dirs by
+    name, so downgrading to a bare ``worldplay_mi355x.sh`` makes every explore
+    and sweep variant abort with ``magpie_nonzero_invalid_measurement``.
+    """
+    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+        apply_runtime_benchmark_overrides,
+    )
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("WORLDPLAY_REPO_PATH", "/repos/HY-WorldPlay")
+    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi355x",
+        model_path="/models/HunyuanVideo-1.5",
+    )
+    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+
+    apply_runtime_benchmark_overrides(bench, model_path=bench["model"], gpu_type="mi355x")
+
+    assert bench["benchmark_script"].startswith("/")
+    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+
+
 def test_worldplay_extra_env_repo_path_updates_runtime_alias(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
