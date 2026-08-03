@@ -634,20 +634,21 @@ def _geak_result_has_material(
     """Decide whether a GEAK result carries a material optimization product.
 
     Guards the 2b promote path against pure passthrough noise: when GEAK ships
-    nothing (empty result) OR ships no kernel/head/overlay/patch AND echoes the
-    pre-KERNEL current_best config back unchanged, a rebench that beats
-    current_best is measurement variance, not a kernel gain.
+    no kernel/head/overlay/patch AND echoes the pre-KERNEL current_best config
+    back unchanged, a rebench that beats current_best is measurement variance,
+    not a kernel gain.
 
     Material means ANY of:
-      * ``accepted_kernels`` non-empty (kernel rewrites);
-      * ``accepted_heads`` non-empty (attention-head optimizations);
+      * ``accepted_kernels`` has a non-empty entry (kernel rewrites);
+      * ``accepted_heads`` has a non-empty entry (attention-head optimizations);
       * ``final_overlay`` non-empty (authored-kernel overlay dir);
       * ``final_patch`` non-empty (source patch);
       * ``accepted_config`` differs from the pre-KERNEL current_best config
         (a kernel enabled via a config switch, e.g. an ASM-GEMM env flag).
 
-    An empty/absent result returns ``True`` (cannot judge, so do not block the
-    native resume revalidation path).
+    An empty/absent result cannot be judged here and returns ``True``; the sole
+    2b call site disambiguates it (a pre-existing ``geak_e2e`` stack entry means
+    a resume revalidation of an already-material win, otherwise no material).
 
     Args:
         result: The normalized GEAK ``geak_result`` blob.
@@ -662,11 +663,17 @@ def _geak_result_has_material(
         canonical_fingerprint,
     )
 
+    def _has_nonempty(entries: Any) -> bool:
+        # A list whose items are all empty/blank (e.g. ``[""]``) is not material.
+        if not isinstance(entries, (list, tuple, set)):
+            return bool(entries)
+        return any(str(e).strip() for e in entries)
+
     if not isinstance(result, dict) or not result:
         return True
-    if result.get("accepted_kernels"):
+    if _has_nonempty(result.get("accepted_kernels")):
         return True
-    if result.get("accepted_heads"):
+    if _has_nonempty(result.get("accepted_heads")):
         return True
     if str(result.get("final_overlay") or "").strip():
         return True
