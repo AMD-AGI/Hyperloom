@@ -250,6 +250,10 @@ async def test_run_no_intent_raises():
     b.sdk_query_factory = _query([msg])
     with pytest.raises(NoIntentEmitted):
         await b.run("hi")
+    diag = b.get_turn_diagnostic()
+    assert diag["outcome"] == "no_intent"
+    assert diag["raw_text"] == "hi"
+    assert diag["messages"] == [{"type": "_Msg", "result": "hi"}]
 
 
 # ---- _invoke_and_collect: error-result-success tolerance ------------------
