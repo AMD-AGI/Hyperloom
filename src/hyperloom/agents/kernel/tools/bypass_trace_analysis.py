@@ -74,10 +74,9 @@ def _maybe_enrich_rocprof(
 ) -> dict[str, Any]:
     """Dead rocprof-compute enrichment hook; kept only for the summary key.
 
-    Gated off by default via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH``. The
-    ``rocprof_roofline`` module it imports was removed from the repo, so opting
-    in cannot enrich anything — the import raises and the except branch returns
-    an error status.
+    Gated off by default via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH``. No
+    ``rocprof_roofline`` module exists, so opting in cannot enrich anything —
+    the import raises and the except branch returns an error status.
 
     Args:
         kernel_roofline_path: Path to the written ``kernel_roofline.json``.

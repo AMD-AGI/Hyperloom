@@ -1816,9 +1816,8 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Legacy session_steward routing: the steward was removed and
-        # ``_route_steward_verdict`` has no definition, so this branch cannot
-        # succeed — the except below swallows the AttributeError.
+        # ``_route_steward_verdict`` has no definition anywhere, so this branch
+        # cannot succeed — the except below swallows the AttributeError.
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
