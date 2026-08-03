@@ -3,7 +3,7 @@
 
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``.
 
-Patches the cloned ``benchmarker.py`` in place so benchmark scripts are copied
+Patches the installed ``benchmarker.py`` in place so benchmark scripts are copied
 via a temp-file + ``os.replace`` (no observable intermediate state a concurrent
 ``bash source`` could tear), with a byte-identical skip so a read-only
 pre-staged deployment no-ops. Applied once, idempotent via a sentinel substring,
@@ -1394,9 +1394,13 @@ def ensure_magpie_atomic_scripts_patch(
     script atomically (via ``os.replace``).
 
     Returns ``True`` when the race is closed (freshly-patched, already-patched,
-    or upstream already atomic). Returns ``False`` only when the file is missing
-    or neither the legacy block nor an atomic impl is found — the install script
-    should fail-loud on ``False``. Concurrency-safe (flock + atomic rename).
+    or upstream already atomic). Returns ``False`` both for the benign
+    missing-file case and for a genuine failure (unrecognized ``benchmarker.py``
+    shape or I/O error); only the latter leaves the script-tearing race
+    unmitigated. This bool cannot distinguish them — callers that need to
+    fail-loud (install.sh does) must use :func:`magpie_scripts_patch_status` and
+    read ``MagpiePatchStatus.atomic_genuine_failure``. Concurrency-safe (flock +
+    atomic rename).
 
     Reflects the atomic-copy patch only. The optional SGLang remote-client trust
     patch is independent; callers that need both must use
@@ -1407,8 +1411,8 @@ def ensure_magpie_atomic_scripts_patch(
             falsy.
 
     Returns:
-        True when the atomic-copy race is closed, False when the file is
-        missing or neither the legacy block nor an atomic impl is found.
+        True when the atomic-copy race is closed; False for the benign
+        missing-file case or a genuine failure (unrecognized shape / I/O error).
     """
     return magpie_scripts_patch_status(magpie_dir).atomic_ok
 

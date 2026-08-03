@@ -90,7 +90,7 @@ def is_multi_node() -> bool:
 
 
 def resolve_kb_topology() -> dict[str, Any]:
-    """Resolve ``(nodes, gpus_per_node)`` for the KB hardware topology suffix.
+    """Resolve the node/GPU and PD-disaggregation topology for the KB hardware suffix.
 
     Mirrors :func:`is_multi_node`'s source priority so the recipe KB key stays
     stable across ``--resume``: the ``multi_node_state.json`` values win

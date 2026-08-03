@@ -443,8 +443,12 @@ class FrameworkAgentExecutor:
 
         Returns:
             dict[str, Any]: A result dict whose ``status`` is one of ``kept``,
-                ``reverted``, ``apply_failed``, ``no_patch``, ``fetch_failed``,
-                ``applied_no_bench`` or ``failed``, plus throughput / accuracy
+                ``reverted``, ``accuracy_unavailable_reject`` (accuracy gate
+                required but never evaluated, so the patch was reverted despite
+                an acceptable throughput delta), ``apply_failed``, ``no_patch``,
+                ``fetch_failed``, ``applied_no_bench``, ``skipped`` (multi-node
+                mode; no patch applied and no failure tallied, see
+                ``skipped_reason``) or ``failed``, plus throughput / accuracy
                 / patch bookkeeping fields.
         """
         params = dict(ctx.task.params or {})

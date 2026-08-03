@@ -61,6 +61,8 @@ from ._grid_runner import (
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
+# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
+# params['stack_stable_threshold_pct'].
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -79,12 +81,6 @@ log = logging.getLogger(__name__)
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the inlined stack
 # rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
-
-# Stack rebench stability threshold: after a KEEP, rebench tput must beat
-# ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Sourced from ``_stack_rebench`` so the explore
-# ledger and integrate_patch share one confirmation floor (below the KEEP
-# gate). Override via ``params['stack_stable_threshold_pct']``.
 
 
 _now_iso = functools.partial(now_iso, "auto")

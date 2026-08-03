@@ -141,11 +141,12 @@ def serving_slot_busy() -> bool:
 
 @dataclass
 class SubprocessResult:
-    """Result of a subprocess executed inside a Ray worker.
+    """Declarative shape for a subprocess executed inside a Ray worker.
 
-    Mirrors the ``(returncode, stdout, stderr)`` triple the local path returns
-    so executor-side parsing (``extract_benchmark_measurement`` etc.) is reused
-    unchanged.
+    Mirrors the ``(returncode, stdout, stderr)`` triple the local path returns.
+    Not currently constructed anywhere: ``_run_subprocess_worker`` returns the
+    raw tuple, which executor-side parsing (``extract_benchmark_measurement``
+    etc.) consumes unchanged.
     """
 
     returncode: int

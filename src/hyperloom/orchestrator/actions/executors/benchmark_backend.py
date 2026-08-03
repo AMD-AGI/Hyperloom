@@ -5,10 +5,9 @@
 
 Central place that builds the benchmark subprocess command line so the
 optimizer can run against different benchmark engines without every executor
-knowing which engine is active. The default backend is Magpie and its command
-is byte-for-byte identical to the previously hardcoded Magpie benchmark
-invocation (python -m Magpie -v benchmark --benchmark-config CFG
---output-dir OUT --run-mode local).
+knowing which engine is active. The default backend is Magpie, whose command is
+``python -m Magpie -v benchmark --benchmark-config CFG --output-dir OUT
+--run-mode local``.
 
 The bypass backend implements the same contract (same input YAML, same
 workspace/report artifacts) and is selected via

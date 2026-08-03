@@ -99,8 +99,8 @@ def _coerce_score(raw: Any) -> float | None:
         raw: Raw score value emitted by a model.
 
     Returns:
-        The score clamped to ``[0, 10]``, or ``None`` if it could not be
-        coerced to a finite number.
+        The score clamped to ``[0, 10]``, or ``None`` if ``raw`` is not numeric
+        or is NaN. Infinities are clamped to the bounds.
     """
     try:
         val = float(raw)
@@ -409,6 +409,9 @@ class ProposalScorer:
             model: The model slug whose conversation is being recorded.
             prompt: The full (redacted) scoring prompt sent to the model.
             response: The model's reply text.
+            task_id: The specialist round this scoring spend is attributed to.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
         """
         if self.session_dir is None:
             return
