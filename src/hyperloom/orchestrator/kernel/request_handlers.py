@@ -1215,7 +1215,7 @@ def _fill_integrate_defaults_from_state(
     Returns:
         A shallow copy of ``payload`` with defaults filled from state.
     """
-    from ..state.shared_state import SharedState
+    from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
@@ -1267,16 +1267,9 @@ def _fill_integrate_defaults_from_state(
     current_best = getattr(state, "current_best", None) or {}
 
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
-        # Judge the candidate against the CURRENT BEST recipe it stacks onto,
-        # not the raw baseline. ``extra_server_args`` below is filled from
-        # current_best, so the candidate is re-benched on top of that recipe;
-        # comparing the result to the raw baseline lets a kernel/fusion that
-        # beats baseline but REGRESSES vs the established best (e.g. a
-        # warm-replay recipe) get KEEP'd and drag the recipe down. Mirrors
-        # integrate_patch's rebind to current_best. Baseline is the fallback
-        # only before any current_best exists.
-        cb_tput = float(current_best.get("tput") or 0.0) if isinstance(current_best, dict) else 0.0
-        bt = cb_tput if cb_tput > 0 else float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        # ``extra_server_args`` below is filled from current_best, so the
+        # candidate must be graded against that recipe too.
+        bt = resolve_grading_anchor_tput(state)
         if bt > 0:
             resolved["base_tput"] = bt
 

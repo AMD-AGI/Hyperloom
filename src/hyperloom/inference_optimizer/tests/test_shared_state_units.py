@@ -11,7 +11,34 @@ from hyperloom.orchestrator.state.shared_state import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
+    resolve_grading_anchor_tput,
 )
+
+
+class TestResolveGradingAnchorTput:
+    def test_prefers_current_best_over_baseline(self):
+        s = SharedState()
+        s.baseline_tput = 2195.86
+        s.current_best = {"action": "replay_warm_recipe", "tput": 2358.80}
+        assert resolve_grading_anchor_tput(s) == 2358.80
+
+    def test_falls_back_to_baseline_before_any_validated_layer(self):
+        s = SharedState()
+        s.baseline_tput = 2195.86
+        assert resolve_grading_anchor_tput(s) == 2195.86
+
+    def test_reads_output_throughput_when_tput_absent(self):
+        s = SharedState()
+        s.baseline_tput = 800.0
+        s.current_best = {"action": "explore", "output_throughput": 900.0}
+        assert resolve_grading_anchor_tput(s) == 900.0
+
+    @pytest.mark.parametrize("state", [None, object()])
+    def test_tolerates_missing_state(self, state):
+        assert resolve_grading_anchor_tput(state) == 0.0
+
+    def test_zero_when_nothing_established(self):
+        assert resolve_grading_anchor_tput(SharedState()) == 0.0
 
 
 class TestGridSessionDeadline:

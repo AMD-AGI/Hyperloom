@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -3544,7 +3545,7 @@ class FrameworkPhase(PhaseHandler):
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
-            "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "base_tput": resolve_grading_anchor_tput(state),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
@@ -5118,7 +5119,7 @@ class FrameworkPhase(PhaseHandler):
                 params["base_unset_envs"] = cb_unset
             if str(cb.get("args_mode") or "").strip().lower() == "replace":
                 params["base_args_mode"] = "replace"
-        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        base_tput = resolve_grading_anchor_tput(state)
         if base_tput:
             params["base_tput"] = base_tput
         last_bl = state.last_baseline or {}
