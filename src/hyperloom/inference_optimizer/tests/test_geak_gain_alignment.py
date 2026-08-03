@@ -585,3 +585,101 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
     assert "AWAITING" in facts and "13.79" in facts or "13.8" in facts
     assert "Validated cumulative gain" not in facts
     assert "audit-only" in warns and "not been" in warns.lower() or "NOT" in warns
+
+
+# ── 2b material guard: same-config rebench noise must not stamp kernel gain ───
+
+
+@pytest.mark.asyncio
+async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None:
+    """GEAK returned no kernel/head/overlay/patch AND its accepted_config equals
+    the pre-KERNEL current_best (pure passthrough). A rebench that beats
+    current_best by measurement noise must NOT be recorded as a kernel gain."""
+    base, current_best, measured = 8668.5946, 8900.0, 9025.191
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
+    coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
+    ]
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
+    # geak_result is non-empty but ships NO material product; accepted_config is
+    # the pre-KERNEL current_best config verbatim (passthrough, zero delta).
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=1"},
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "final_overlay": "",
+        "final_patch": "",
+    }
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run for a no-material drop")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    assert ss.current_best["tput"] == pytest.approx(current_best)
+    assert ss.cumulative_gain_validated == pytest.approx(0.0)
+    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
+    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    assert ss.resume_pending_revalidation is False
+    assert not ss.geak_pending
+
+
+@pytest.mark.asyncio
+async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
+    """GEAK shipped no overlay/patch/kernel list, but its accepted_config adds a
+    new flag vs the pre-KERNEL current_best (a kernel enabled via a config
+    switch). That is a real GEAK product and must still promote."""
+    base, current_best, measured = 8668.5946, 8900.0, 9600.0
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
+    coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
+    ]
+    coord.shared_state.resume_pending_revalidation = True
+    # accepted_config adds VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1 (a new kernel switch).
+    result_blob = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--max-num-batched-tokens 24576",
+            "env": "VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1",
+        },
+        "accepted_kernels": [],
+        "accepted_heads": [],
+        "final_overlay": "",
+        "final_patch": "",
+    }
+    coord.shared_state.geak_result = result_blob
+    coord._record_geak_candidate(result_blob)
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run when 2b validates a real delta")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    expected_pct = (measured - base) / base * 100.0
+    assert ss.current_best["tput"] == pytest.approx(measured)
+    assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
+    assert ss.cumulative_gain_provenance == "geak_orch_harness_validated"
+    assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    assert not ss.geak_pending

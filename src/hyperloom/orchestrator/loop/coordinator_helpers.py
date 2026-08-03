@@ -625,6 +625,66 @@ def _geak_revalidation_decision(
     return "validated"
 
 
+def _geak_result_has_material(
+    result: Any,
+    *,
+    prev_best_flags: str = "",
+    prev_best_envs: Any = None,
+) -> bool:
+    """Decide whether a GEAK result carries a material optimization product.
+
+    Guards the 2b promote path against pure passthrough noise: when GEAK ships
+    nothing (empty result) OR ships no kernel/head/overlay/patch AND echoes the
+    pre-KERNEL current_best config back unchanged, a rebench that beats
+    current_best is measurement variance, not a kernel gain.
+
+    Material means ANY of:
+      * ``accepted_kernels`` non-empty (kernel rewrites);
+      * ``accepted_heads`` non-empty (attention-head optimizations);
+      * ``final_overlay`` non-empty (authored-kernel overlay dir);
+      * ``final_patch`` non-empty (source patch);
+      * ``accepted_config`` differs from the pre-KERNEL current_best config
+        (a kernel enabled via a config switch, e.g. an ASM-GEMM env flag).
+
+    An empty/absent result returns ``True`` (cannot judge, so do not block the
+    native resume revalidation path).
+
+    Args:
+        result: The normalized GEAK ``geak_result`` blob.
+        prev_best_flags: Pre-KERNEL current_best ``extra_server_args``.
+        prev_best_envs: Pre-KERNEL current_best ``extra_envs`` mapping.
+
+    Returns:
+        ``True`` when a material product exists (or cannot be judged); else
+        ``False``.
+    """
+    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+        canonical_fingerprint,
+    )
+
+    if not isinstance(result, dict) or not result:
+        return True
+    if result.get("accepted_kernels"):
+        return True
+    if result.get("accepted_heads"):
+        return True
+    if str(result.get("final_overlay") or "").strip():
+        return True
+    if str(result.get("final_patch") or "").strip():
+        return True
+    accepted_cfg = result.get("accepted_config") or {}
+    accepted_flags = str(accepted_cfg.get("flags") or "").strip()
+    parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
+    if extra_flags:
+        accepted_flags = (accepted_flags + " " + extra_flags).strip()
+    got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
+    prev_fp = canonical_fingerprint(
+        str(prev_best_flags or ""),
+        dict(prev_best_envs or {}),
+    )
+    return got_fp != prev_fp
+
+
 def _normalize_geak_overlay_dir(overlay: str) -> str:
     """Normalize a GEAK ``final_overlay`` path to the loadable overlay dir.
 
