@@ -460,10 +460,10 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
 `classify` actions were deleted; the SKILL caller is now expected to
 supply session metadata directly via CLI flags. **Any workload value the
-operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget) MUST
-be forwarded as the matching CLI flag** — these flags are the only source of
-truth; an omitted flag silently falls back to its default and the operator's
-stated value is lost (issue #903):
+operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget, and
+every `--extra-env`) MUST be forwarded as the matching CLI flag** — these flags
+are the only source of truth; an omitted flag silently falls back to its default
+and the operator's stated value is lost:
 
 | Surface | CLI flag | Notes |
 |---|---|---|
@@ -481,6 +481,7 @@ stated value is lost (issue #903):
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+| Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
