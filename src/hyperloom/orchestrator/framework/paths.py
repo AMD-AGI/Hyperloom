@@ -338,7 +338,7 @@ def probe_framework_source_roots_for_env() -> str:
 
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
-_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "worldplay")
+_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "worldplay", "worldmirror")
 
 
 def summarise_framework_root_discovery(roots: str) -> str:

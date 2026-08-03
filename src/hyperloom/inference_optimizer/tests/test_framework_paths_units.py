@@ -239,6 +239,10 @@ class TestDefaultSourceRootsIncludesXdit:
         """xdit must be in _FRAMEWORK_BUCKETS for summarise_framework_root_discovery."""
         assert "xdit" in fp._FRAMEWORK_BUCKETS
 
+    def test_worldmirror_in_framework_buckets(self):
+        """worldmirror must be in _FRAMEWORK_BUCKETS for root discovery summaries."""
+        assert "worldmirror" in fp._FRAMEWORK_BUCKETS
+
     def test_xdit_in_static_patch_fallback_roots(self):
         """/app/xDiT/ must be in the static patch fallback roots."""
         assert any("/app/xDiT" in r for r in fp._STATIC_PATCH_FALLBACK_ROOTS)
