@@ -239,6 +239,9 @@ class BaselineAttemptSummary(TypedDict, total=False):
         key_metric (float | None): Headline metric value, or None if absent.
         workspace (str | None): Benchmark workspace path, or None.
         error_class (str | None): Error classification on failure, or None.
+        extras (dict[str, Any]): Attempt-specific fields from the writeback
+            audit: ``fingerprint``, ``anchor_kept_tput``, and ``eval_probe``
+            (why an accuracy of ~0 was a runaway generation, not wrong answers).
     """
 
     ts: str
@@ -252,6 +255,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
     error_excerpt: str | None
     stderr_tail: str | None
     stderr_log_path: str | None
+    extras: dict[str, Any]
 
 
 class BenchmarkInvocation(TypedDict, total=False):

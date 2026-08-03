@@ -2502,6 +2502,9 @@ class WritebackCollaborator:
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+        # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
+        if result.get("eval_probe"):
+            audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
         if self.shared_state.baseline_tput > 0:
