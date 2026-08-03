@@ -972,7 +972,7 @@ def _apply_patch_atomic_reason(src: Path) -> str:
             "_magpie_patcher: neither the legacy shutil.copy2/chmod block nor "
             "an atomic copy implementation found in %s; Magpie may have been "
             "refactored into an unrecognised shape, or this checkout was "
-            "hand-patched. Hyperloom bugs.md §C #1 (script-tearing race) "
+            "hand-patched. The Hyperloom #C1 script-tearing race "
             "cannot be confirmed mitigated — `profile`/`baseline` may hit "
             "`syntax error near unexpected token 'fi'` again. Manual review "
             "needed.",

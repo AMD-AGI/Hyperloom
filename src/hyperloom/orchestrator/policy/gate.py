@@ -1246,8 +1246,7 @@ class PolicyGate:
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
             f"action from that list, or wait for the Coordinator to "
-            f"advance the phase. See KB_design §3.2 for the per-phase "
-            f"action contract."
+            f"advance the phase."
         )
         if not self.strict_phase:
             # Warn-only: keep the run flowing but record the denial.
@@ -1326,10 +1325,12 @@ class PolicyGate:
             rule="tool_whitelist_role",
             hint=(
                 f"Tool {action_name!r} is restricted to "
-                f"specialist sub-agents. The "
+                f"specialist sub-agents as an action name. The "
                 f"primary agents (orchestration / kernel / critic / "
-                f"robustness) consult KB / PR Monitor via the "
-                f"Coordinator-mediated KnowledgePlane facade instead."
+                f"robustness) reach KB / PR Monitor through the "
+                f"Coordinator-mediated KnowledgePlane facade instead; "
+                f"orchestration additionally holds WebSearch / WebFetch "
+                f"directly via allowed_tools_for_agent."
             ),
         )
 

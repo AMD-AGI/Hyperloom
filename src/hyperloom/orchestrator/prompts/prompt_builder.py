@@ -762,7 +762,8 @@ allowed action until the patch lands on `optimization_stack`:
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
   while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with `gpu_pct >= 3%` and zero attempts) remain —
+  (reusable hot kernels with zero attempts and `gpu_pct >= 10%`, the
+  default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
   drain them with `run_optimization{candidates_path: <from
   last_trace_analyze>}` (the batch handler fans out automatically).
 

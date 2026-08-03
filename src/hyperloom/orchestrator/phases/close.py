@@ -122,7 +122,7 @@ class ClosePhase(PhaseHandler):
         Args:
             from_phase: The phase being left, used only for logging.
         """
-        log.info("CLOSE entered (from=%s); starting 5-step close sequence", from_phase or "<unknown>")
+        log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
         # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
@@ -315,7 +315,7 @@ class ClosePhase(PhaseHandler):
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
         await self._record_close_step("done", status="done")
-        log.info("CLOSE 5-step sequencer complete")
+        log.info("CLOSE 7-step sequencer complete")
 
     async def _enqueue_internal_report_task(
         self,

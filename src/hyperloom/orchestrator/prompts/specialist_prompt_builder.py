@@ -1695,7 +1695,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     rows.append("")
     rows.append(
         "These trees are read-only. Use Read / Grep / Glob to navigate. "
-        "Do NOT attempt Edit / Write / git apply (PolicyGate R4)."
+        "Do NOT attempt Edit / Write / git apply on these trees."
     )
     rows.append("")
     rows.append(
@@ -1931,9 +1931,9 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   throughput + accuracy gate. (Starting/stopping YOUR OWN servers on",
         "   YOUR OWN leased cards per rule 1 is fine; the prohibition here is",
         "   only about mutating the shared framework tree directly.)",
-        "3. **NEVER** call Recipe KB write endpoints (propose-point /",
-        "   propose-edge / propose-lesson / propose-pitfall / update-recipe)",
-        "   directly. The Coordinator owns all KB writes. KB",
+        "3. **NEVER** write to the Recipe KB directly. Its only write paths",
+        "   (``RecipeKB.put_recipe`` and the framework-record writeback) are",
+        "   in-process Coordinator calls. The Coordinator owns all KB writes. KB",
         "   read context is pre-warmed into Section 4 of this prompt; the",
         "   specialist subprocess has no live KB connection.",
         "4. **NEVER** emit any intent other than ``specialist_done``,",
