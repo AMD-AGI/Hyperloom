@@ -40,7 +40,12 @@ def main() -> int:
         "session_dir",
         nargs="?",
         default=None,
-        help="Session directory (default: $USER_DATA_PATH or /workspace/hyperloom)",
+        help=(
+            "Session directory. Defaults to "
+            "$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run pin set by "
+            "the launcher), else $USER_DATA_PATH, else /workspace/hyperloom; "
+            "the latter two are the workspace root, not a per-session dir."
+        ),
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(

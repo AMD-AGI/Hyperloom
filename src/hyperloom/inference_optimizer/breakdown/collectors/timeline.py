@@ -750,7 +750,7 @@ def collect_phase_segments(
         # Session-level marker for legacy-proxy exits.
         warnings.append(
             "plateau_proxy_provisional: legacy params_no_promote_streak "
-            "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
-            "once the fleet is fully v0.8 to fail closed"
+            "proxy fired (r09_provisional / m2_proxy evidence); treat the "
+            "affected plateau exits as provisional, not measured"
         )
     return segments

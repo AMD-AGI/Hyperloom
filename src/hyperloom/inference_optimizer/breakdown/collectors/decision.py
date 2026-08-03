@@ -464,7 +464,9 @@ def collect_token_usage(
             "timeline[].task_id joins action_timeline[].task_id; components "
             "without a per-decision task_id (orchestration / kernel / critic / "
             "proposal_scorer) are counted in session_total/by_component/by_phase "
-            "but appear as tokens=null in timeline (see attribution.unattributed)."
+            "but appear as tokens=null in timeline (orchestration / critic / "
+            "robustness land in attribution.overhead, the rest in "
+            "attribution.unattributed)."
         ),
     }
 

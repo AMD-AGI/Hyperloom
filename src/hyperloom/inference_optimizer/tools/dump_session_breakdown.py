@@ -67,8 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Hyperloom session directory. Defaults to "
-            "$USER_DATA_PATH (set by production launchers) or "
-            "/workspace/hyperloom."
+            "$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run pin set by "
+            "the launcher), else $USER_DATA_PATH, else /workspace/hyperloom; "
+            "the latter two are the workspace root, not a per-session dir."
         ),
     )
     parser.add_argument(
