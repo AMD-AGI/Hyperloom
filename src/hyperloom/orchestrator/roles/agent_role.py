@@ -7,7 +7,7 @@ Each :class:`AgentRole` binds:
 
     * a backend type (Claude tool-using vs. Codex no-tools)
     * a model slug + the env var holding the API key
-    * the system prompt loaded from ``system_prompts/<name>.md``
+    * the system prompt loaded from ``orchestrator/prompts/<name>.md``
     * which intent types the role is allowed to emit
     * permission flags consumed by :class:`PolicyGate`
 

@@ -239,7 +239,7 @@ def _build_orchestration_prompt(
 
 
 def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+    """Return the Critic system prompt sourced from ``orchestrator/prompts/critic.md``.
 
     Returns:
         str: The contents of ``critic.md``.

@@ -530,10 +530,11 @@ def recipe_kb_dir(session_dir: Path) -> Path:
 
 
 def recipe_kb_warm_json(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_warm.json``, the T0 ``find-recipe`` snapshot.
+    """Compute the path to ``.kb_warm.json``, the T0 warm-start recipe snapshot.
 
-    Write-only debug snapshot; specialist assembly reads
-    ``shared_state.warm_start_recipe`` instead.
+    Written by ``recipe_kb_t0.run_t0_anchor`` from the
+    ``_cascade_warm_start_search`` result. Write-only debug snapshot;
+    specialist assembly reads ``shared_state.warm_start_recipe`` instead.
 
     Args:
         session_dir (Path): The session root directory.

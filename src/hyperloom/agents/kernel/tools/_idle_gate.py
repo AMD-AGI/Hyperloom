@@ -72,8 +72,8 @@ def build_high_idle_warning(
         "source": str(report_path),
         "message": (
             f"GPU was idle {idle_pct:.2f}% of trace wall time (threshold "
-            f"{threshold_pct:.2f}%). Per Report_Interfacing.docx §2 "
-            "(idle-gate sanity check in Possible Approach (Hyperloom v3)), "
+            f"{threshold_pct:.2f}%). Most of the wall time is spent outside "
+            "kernel execution, so the bottleneck is scheduling/host-side and "
             "kernel-level rewriting is unlikely to improve end-to-end "
             "latency in this regime — recommend parameter optimization "
             "(batch size, KV-cache shape, prefill/decode split) over "

@@ -997,7 +997,7 @@ class ExploreExecutor:
         # (the ``finally`` after the loop) instead of per variant: the old
         # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
         # every variant, which destabilised the single-node raylet and took the
-        # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
+        # whole session down with it.
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs
         # out; untested variants stay out of the ledger so a resume can retry them.
