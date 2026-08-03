@@ -50,7 +50,10 @@ def _write_yaml(path: Path) -> None:
 
 def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
     ws = slot / "benchmark_sglang_20260513_010101"
-    ws.mkdir(parents=True)
+    # exist_ok: the eval-failure retry reuses ``output_dir``, so a round's slot
+    # can be written twice. Real Magpie timestamps each workspace; this fake
+    # pins the name, so tolerate the re-entry rather than pretend it can't happen.
+    ws.mkdir(parents=True, exist_ok=True)
     (ws / "benchmark_report.json").write_text(
         json.dumps(
             {
@@ -222,9 +225,9 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # Warmup tries eval=true, falls back to eval=false, then the measured
-    # baseline reuses the eval-disabled config.
-    assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
+    # The warmup round never runs eval, so the broken eval surfaces in the
+    # measured round; the retry then re-runs both rounds eval-disabled.
+    assert [c["run_eval"] for c in calls] == ["false", "true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
     assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])

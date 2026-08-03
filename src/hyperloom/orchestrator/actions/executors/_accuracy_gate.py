@@ -5,8 +5,9 @@
 
 Baseline always runs GSM8K; high-risk variants too. Threshold is
 ``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise.
-High-risk = precision/compute-path changes; kernel patches handled by
-kernel-agent.
+High-risk = precision/compute-path changes. Kernel patches are graded through
+the same gate from ``kernel/request_handlers.integrate_handler``, but only once
+their E2E throughput already cleared the KEEP bar.
 """
 
 from __future__ import annotations
@@ -69,6 +70,20 @@ def require_framework_accuracy_default() -> bool:
         ``True`` unless the env var disables it.
     """
     v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def require_kernel_accuracy_default() -> bool:
+    """Default for the kernel-patch accuracy-KEEP gate.
+
+    A kernel patch that clears the E2E throughput bar must also clear the
+    accuracy gate by default; opt out with
+    ``INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY=0``.
+
+    Returns:
+        ``True`` unless the env var disables it.
+    """
+    v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 
@@ -388,4 +403,5 @@ __all__ = [
     "parse_eval_results",
     "request_baseline_accuracy_stop",
     "require_framework_accuracy_default",
+    "require_kernel_accuracy_default",
 ]

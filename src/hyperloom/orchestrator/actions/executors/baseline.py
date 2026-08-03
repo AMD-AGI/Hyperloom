@@ -1047,9 +1047,11 @@ class BaselineExecutor:
 
         Scans the result's ``error`` tail + ``nonfatal_warnings`` and then any
         benchmark stdout/stderr + ``server.log`` under the run's ``output_dir``
-        for ``run_eval``-failure markers. Recursive so the double-run path is
-        covered (the warmup round's logs carry the marker even when the measure
-        round failed for a downstream reason). Never raises.
+        for ``run_eval``-failure markers. On the double-run path the scan climbs
+        to the shared task root so it covers whichever round holds the marker:
+        eval runs in the measured round only, but that round can fail for a
+        downstream reason while the marker sits elsewhere in the tree. Never
+        raises.
 
         Args:
             result: A ``status="failed"`` baseline result dict.
@@ -1070,8 +1072,8 @@ class BaselineExecutor:
         if not out_dir:
             return False
         root = Path(out_dir)
-        # Double-run: the eval failure markers may live in the sibling warmup
-        # round, so climb to the shared task root to scan both rounds.
+        # Double-run: climb to the shared task root so both rounds are scanned
+        # regardless of which round's result was handed in.
         if root.name in ("warmup_round", "measure_round"):
             root = root.parent
         if not root.exists():
@@ -1446,6 +1448,11 @@ class BaselineExecutor:
             )
             # Round 1 (warmup): boot + run, leave running so round 2 can
             # re-attach. Throughput discarded (cold-contaminated).
+            #
+            # The accuracy eval is skipped here: this round's eval output is
+            # discarded downstream anyway (``parse_eval_results`` drops
+            # ``warmup_round/``), so running GSM8K twice per baseline only burned
+            # GPU time. Accuracy comes from the measured round alone.
             warmup_dir = output_dir / "warmup_round"
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -1453,15 +1460,16 @@ class BaselineExecutor:
                 cleanup=False,
                 pid_dir=pid_dir,
                 port=port,
+                run_eval=False,
             )
             log.info(
-                "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
+                "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server, eval skipped) in %s",
                 warmup_dir,
             )
             warmup_result = await self._run_single_benchmark(
                 config_path=warmup_cfg,
                 output_dir=warmup_dir,
-                **common,
+                **{**common, "run_eval_disabled": True},
             )
             if warmup_result.get("status") != "succeeded":
                 # Warmup failure almost certainly recurs, so skip the
@@ -1606,6 +1614,7 @@ class BaselineExecutor:
         cleanup: bool,
         pid_dir: Path,
         port: int,
+        run_eval: bool = True,
     ) -> Path:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
@@ -1619,6 +1628,8 @@ class BaselineExecutor:
             pid_dir: Shared pid/metadata directory keying the persistent
                 server across both rounds.
             port: Server port shared across both rounds.
+            run_eval: When ``False``, force ``RUN_EVAL=false`` for this round.
+                Used to skip the GSM8K run in the discarded warmup round.
 
         Returns:
             Path to the written per-round lifecycle YAML.
@@ -1632,6 +1643,8 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             port=port,
         )
+        if not run_eval:
+            bench.setdefault("envs", {})["RUN_EVAL"] = "false"
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:

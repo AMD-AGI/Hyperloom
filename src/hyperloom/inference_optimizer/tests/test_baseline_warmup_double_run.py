@@ -202,6 +202,40 @@ def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     assert captured[1]["benchmark"]["server_lifecycle"]["cleanup"] is True
 
 
+def test_double_run_skips_eval_in_discarded_warmup_round(tmp_path, monkeypatch):
+    """Only the measured round runs the accuracy eval.
+
+    The warmup round's eval output is discarded downstream regardless, so
+    running GSM8K there burned GPU time for a score nobody could read.
+    """
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert captured[0]["benchmark"]["envs"]["RUN_EVAL"] == "false"
+    assert str(captured[1]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "true"
+
+
 def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
     """Focused callers may explicitly opt out of the default cold+hot baseline."""
     base = tmp_path / "base.yaml"

@@ -4314,6 +4314,75 @@ def _lookup_kernel_roofline_name(session_dir: Path, kernel_id: str) -> str:
     return ""
 
 
+def _grade_integrate_accuracy(
+    bench_result: dict[str, Any],
+    *,
+    session_dir: Path,
+) -> dict[str, Any]:
+    """Grade a kernel re-baseline's accuracy against the session baseline.
+
+    The re-baseline's measured round already ran the serving GSM8K eval, so the
+    score is read off ``bench_result`` rather than re-measured -- grading costs
+    no extra GPU time. A measured drop beyond ``ACCURACY_THRESHOLD`` blocks the
+    KEEP. A missing verdict blocks only when a positive baseline accuracy proves
+    eval works in this environment; otherwise the gate degrades to
+    throughput-only so eval-less setups are not universally blocked.
+
+    Args:
+        bench_result: The re-baseline result dict from ``BaselineExecutor``.
+        session_dir: Session directory used to resolve ``baseline_accuracy``.
+
+    Returns:
+        ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
+        "degraded": bool, "accuracy": float | None, "baseline_accuracy": float,
+        "task": str, "metric": str, "source_file": str}``.
+    """
+    from ..actions.executors._accuracy_gate import (
+        accuracy_keep_block,
+        accuracy_passed,
+        require_kernel_accuracy_default,
+    )
+
+    baseline_accuracy = 0.0
+    try:
+        from ..state.shared_state import SharedState
+
+        baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
+    except Exception:  # noqa: BLE001 - an unresolvable baseline degrades, never raises
+        log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
+
+    measured = bench_result.get("accuracy")
+    new_accuracy = float(measured) if isinstance(measured, (int, float)) else None
+    accuracy_pass: bool | None = None
+    if new_accuracy is not None and baseline_accuracy > 0:
+        accuracy_pass = accuracy_passed(baseline_accuracy, new_accuracy)
+
+    blocked, reason, degraded = accuracy_keep_block(
+        accuracy_pass,
+        required=require_kernel_accuracy_default(),
+        baseline_accuracy=baseline_accuracy,
+    )
+    log.info(
+        "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f",
+        accuracy_pass,
+        blocked,
+        degraded,
+        "n/a" if new_accuracy is None else f"{new_accuracy:.4f}",
+        baseline_accuracy,
+    )
+    return {
+        "blocked": blocked,
+        "accuracy_pass": accuracy_pass,
+        "reason": reason,
+        "degraded": degraded,
+        "accuracy": new_accuracy,
+        "baseline_accuracy": baseline_accuracy,
+        "task": str(bench_result.get("accuracy_task") or ""),
+        "metric": str(bench_result.get("accuracy_metric") or ""),
+        "source_file": str(bench_result.get("accuracy_source") or ""),
+    }
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -4322,8 +4391,11 @@ async def integrate_handler(
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
     Applies an optimized kernel artifact, re-runs the active Magpie baseline,
-    and KEEPs only when measured E2E throughput clears the threshold (source +
-    artifacts are backed up first so non-KEEP can restore without a rebuild).
+    and KEEPs only when measured E2E throughput clears the threshold AND the
+    re-baseline's accuracy holds (source + artifacts are backed up first so
+    non-KEEP can restore without a rebuild). Accuracy is graded only for a
+    candidate that already cleared the throughput bar, from the re-baseline's
+    own GSM8K score -- see :func:`_grade_integrate_accuracy`.
 
     Required payload: ``base_tput``. Optional: patch_path, target_file,
     kernel_id, config_path, extra_server_args, keep_threshold_pct (1.0),
@@ -4338,7 +4410,8 @@ async def integrate_handler(
         A ``HandlerResult`` with the KEEP/REVERT decision and re-baseline
         metrics (``status``, ``decision``, ``base_tput``, ``new_tput``,
         ``gain_pct``, ``kernel_id``, ``patch_path``, ``report_path``,
-        ``workspace``).
+        ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
+        ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
     """
     from ..actions.executors.baseline import BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
@@ -4585,6 +4658,20 @@ async def integrate_handler(
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
 
+    # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
+    # ONLY for a candidate that already cleared the throughput bar, so a
+    # regressing patch never spends a verdict on itself, and graded from the
+    # re-baseline's own GSM8K score, so the verdict costs no extra GPU time.
+    # Placed ahead of the optional source-import / paired-A/B passes so a
+    # patch that loses accuracy short-circuits before they run.
+    accuracy_gate: dict[str, Any] | None = None
+    if decision == "KEEP":
+        accuracy_gate = _grade_integrate_accuracy(bench_result, session_dir=session_dir)
+        if accuracy_gate["blocked"]:
+            # A measured regression is hard negative evidence -> REVERT. A
+            # missing verdict is only an evidence gap -> NEEDS_REVIEW.
+            decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
+
     # import-grep source confirmation (flag-gated, default off). Advisory:
     # annotate whether the served process imported/compiled the patched source.
     # Only the strict sub-flag enforces it, and only on positive non-import
@@ -4718,6 +4805,18 @@ async def integrate_handler(
         result["paired_ab"] = paired_ab
         if paired_ab.get("confirmed") is False:
             result["decision_reason"] = "paired_ab_disconfirmed"
+    # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it
+    # is the reason this candidate lost its KEEP, outranking the throughput-side
+    # annotations above.
+    if accuracy_gate is not None:
+        result["accuracy"] = accuracy_gate["accuracy"]
+        result["baseline_accuracy"] = accuracy_gate["baseline_accuracy"]
+        result["accuracy_pass"] = accuracy_gate["accuracy_pass"]
+        result["accuracy_gate"] = accuracy_gate
+        if accuracy_gate["blocked"]:
+            result["decision_reason"] = (
+                "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
+            )
     return result
 
 

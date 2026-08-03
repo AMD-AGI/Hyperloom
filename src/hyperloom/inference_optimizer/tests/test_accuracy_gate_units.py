@@ -112,3 +112,71 @@ class TestAccuracyPassed:
     def test_custom_threshold(self):
         assert ag.accuracy_passed(0.80, 0.70, threshold=0.11) is True
         assert ag.accuracy_passed(0.80, 0.68, threshold=0.10) is False
+
+
+class TestRequireKernelAccuracyDefault:
+    def test_required_by_default(self, monkeypatch):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", raising=False)
+        assert ag.require_kernel_accuracy_default() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF"])
+    def test_opt_out_spellings(self, monkeypatch, value):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", value)
+        assert ag.require_kernel_accuracy_default() is False
+
+
+class TestGradeIntegrateAccuracy:
+    """The kernel integrate gate reads the re-baseline's own score (no re-measure)."""
+
+    @staticmethod
+    def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
+        from hyperloom.orchestrator.kernel import request_handlers as krh
+        from hyperloom.orchestrator.state import shared_state as ss
+
+        monkeypatch.setattr(
+            ss.SharedState,
+            "load_or_init",
+            classmethod(lambda cls, _dir: ss.SharedState(baseline_accuracy=baseline)),
+        )
+        return krh._grade_integrate_accuracy(bench, session_dir=tmp_path)
+
+    def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
+        out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)
+        assert out["accuracy_pass"] is True
+        assert out["blocked"] is False
+        assert out["degraded"] is False
+
+    def test_regression_blocks_with_negative_verdict(self, monkeypatch, tmp_path):
+        out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.60}, baseline=0.80)
+        assert out["accuracy_pass"] is False
+        assert out["blocked"] is True
+        assert out["accuracy"] == pytest.approx(0.60)
+
+    def test_missing_score_with_known_baseline_blocks_without_verdict(self, monkeypatch, tmp_path):
+        out = self._grade(monkeypatch, tmp_path, bench={}, baseline=0.80)
+        assert out["accuracy_pass"] is None
+        assert out["blocked"] is True
+        assert out["accuracy"] is None
+
+    def test_no_baseline_degrades_to_throughput_only(self, monkeypatch, tmp_path):
+        out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.60}, baseline=0.0)
+        assert out["accuracy_pass"] is None
+        assert out["blocked"] is False
+        assert out["degraded"] is True
+
+    def test_opt_out_never_blocks(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "0")
+        out = self._grade(monkeypatch, tmp_path, bench={}, baseline=0.80)
+        assert out["blocked"] is False
+
+    def test_carries_eval_provenance(self, monkeypatch, tmp_path):
+        bench = {
+            "accuracy": 0.78,
+            "accuracy_task": "gsm8k",
+            "accuracy_metric": "exact_match,strict-match",
+            "accuracy_source": "/ws/results_gsm8k.json",
+        }
+        out = self._grade(monkeypatch, tmp_path, bench=bench, baseline=0.80)
+        assert out["task"] == "gsm8k"
+        assert out["metric"] == "exact_match,strict-match"
+        assert out["source_file"] == "/ws/results_gsm8k.json"

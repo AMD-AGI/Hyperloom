@@ -86,9 +86,16 @@ def _write_baseline_yaml(path: Path) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
+def _fake_workspace(slot: Path, *, tput: float = 800.0, accuracy: float | None = None) -> Path:
     workspace = slot / "benchmark_sglang_smoke"
     workspace.mkdir(parents=True, exist_ok=True)
+    if accuracy is not None:
+        # Mimic the lm-eval output the serving GSM8K run leaves behind, so the
+        # baseline executor parses an accuracy onto its result.
+        (workspace / "results_gsm8k.json").write_text(
+            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": accuracy}}}),
+            encoding="utf-8",
+        )
     (workspace / "benchmark_report.json").write_text(
         json.dumps(
             {
@@ -437,6 +444,198 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
     assert res["gain_pct"] < -1
+
+
+# integrate_handler accuracy gate
+def _accuracy_payload(base_yaml: Path, target: Path, patch_file: Path, kernel_id: str) -> dict:
+    return {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": kernel_id,
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+
+
+def _seed_baseline_accuracy(session_dir: Path, accuracy: float) -> None:
+    state = SharedState.load_or_init(session_dir)
+    state.baseline_accuracy = accuracy
+    state.save(session_dir)
+
+
+def _runner(*, tput: float, accuracy: float | None):
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=tput, accuracy=accuracy)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    return _fake_run
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_keeps_when_accuracy_holds(session_dir, tmp_path):
+    """A throughput win whose accuracy stays within tolerance still KEEPs."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=0.79),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_ok"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "KEEP"
+    assert res["accuracy_pass"] is True
+    assert res["accuracy"] == pytest.approx(0.79)
+    assert res["baseline_accuracy"] == pytest.approx(0.80)
+    assert "decision_reason" not in res
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_reverts_on_accuracy_regression(session_dir, tmp_path):
+    """A throughput win that loses accuracy beyond tolerance must REVERT.
+
+    This is the gate the kernel path was missing: the patch is faster, so the
+    throughput-only decision would have KEEPed it.
+    """
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=0.60),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_bad"),
+            session_dir=session_dir,
+        )
+
+    assert res["gain_pct"] > 1, "the patch must be a throughput win for this to be a real gate test"
+    assert res["decision"] == "REVERT"
+    assert res["accuracy_pass"] is False
+    assert res["decision_reason"] == "accuracy_regression"
+    # A non-KEEP must restore the pristine source.
+    assert res["revert_result"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_missing_accuracy_blocks_keep_when_baseline_known(session_dir, tmp_path):
+    """A known baseline accuracy but no measured score is an evidence gap, not a regression."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=None),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_missing"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["accuracy_pass"] is None
+    assert res["decision_reason"] == "accuracy_evidence_missing"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_without_baseline_accuracy_keeps_on_throughput(session_dir, tmp_path):
+    """No baseline accuracy (eval-less setup) degrades to a throughput-only KEEP."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=None),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_nobase"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "KEEP"
+    assert res["accuracy_gate"]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_skips_accuracy_gate_on_throughput_loss(session_dir, tmp_path):
+    """A candidate that lost throughput is never graded: no verdict is spent on it."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=700.0, accuracy=0.10),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_slow"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "REVERT"
+    assert "accuracy_gate" not in res
+    assert "accuracy_pass" not in res
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_accuracy_gate_opt_out(session_dir, tmp_path, monkeypatch):
+    """``INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY=0`` restores throughput-only KEEP."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "0")
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=None),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_optout"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "KEEP"
+
+
+@pytest.mark.asyncio
+async def test_integrate_accuracy_verdict_lands_in_attempt_ledger(session_dir, tmp_path):
+    """The attempt ledger must carry the accuracy evidence for post-hoc audit."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=0.60),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_acc_ledger"),
+            session_dir=session_dir,
+        )
+
+    entry = SharedState().record_kernel_integrate_result(res)
+    assert entry is not None
+    attempt = entry["attempts"][-1]
+    assert attempt["accuracy"] == pytest.approx(0.60)
+    assert attempt["accuracy_pass"] is False
+    assert attempt["decision_reason"] == "accuracy_regression"
 
 
 @pytest.mark.asyncio
