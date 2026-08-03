@@ -1,0 +1,40 @@
+# Magpie profile benchmark config for WorldMirror (HunyuanWorld-Mirror 2.0).
+# Same contract as baseline_worldmirror.yaml, but with torch profiler enabled so
+# TraceLens can attribute time across the world reconstruction pipeline.
+
+benchmark:
+  framework: worldmirror
+  workload_kind: scriptable
+  model: /models/HY-World-2.0
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    WM_TARGET_SIZE: 518
+    WM_NUM_ITERATIONS: 2
+    WM_WARMUP_CALLS: 3
+    WM_SCENES: ""
+    WM_COND_FLAGS: "0 0 0"
+    WM_USE_TORCH_COMPILE: 0
+    WM_TORCH_COMPILE_MODE: default
+    XDIT_QUALITY_REF: ""
+    WM_QUALITY_REL_MAX: 0.2
+    PROFILE: 1
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: true
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: true

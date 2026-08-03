@@ -15,6 +15,8 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "vllm": "https://github.com/ROCm/vllm.git",
     "atom": "https://github.com/ROCm/ATOM.git",
     "xdit": "https://github.com/xdit-project/xDiT.git",
+    "worldplay": "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git",
+    "worldmirror": "https://github.com/Tencent-Hunyuan/HY-World-2.0.git",
 }
 
 

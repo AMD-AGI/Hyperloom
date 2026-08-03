@@ -1,0 +1,50 @@
+# Magpie baseline benchmark config for WorldMirror (HunyuanWorld-Mirror 2.0).
+# Resolved by default_baseline_config() when $FRAMEWORK=worldmirror.
+#
+# WorldMirror is SCRIPTABLE: no OpenAI-compatible server, no benchmark_serving.py
+# client, and no server lifecycle reuse. The wrapper worldmirror_{runner_type}.sh
+# runs a 3D reconstruction benchmark, writes inferencex_result.json, and the
+# bypass runner converts it into benchmark_report.json for Hyperloom.
+#
+# Fallback-only fields overridden at runtime:
+#   - benchmark.model       <- --model / $MODEL_PATH
+#   - benchmark.runner_type <- --gpu-type / $GPU_TYPE / RUNNER_TYPE
+
+benchmark:
+  framework: worldmirror
+  workload_kind: scriptable
+  model: /models/HY-World-2.0
+  precision: bf16
+  run_mode: local
+
+  envs:
+    TP: 1
+    WM_TARGET_SIZE: 518
+    WM_NUM_ITERATIONS: 5
+    WM_WARMUP_CALLS: 3
+    WM_SCENES: ""
+    WM_COND_FLAGS: "0 0 0"
+    WM_USE_TORCH_COMPILE: 0
+    WM_TORCH_COMPILE_MODE: default
+    WM_TORCH_COMPILE_DYNAMIC: 0
+    WM_USE_AITER_ATTN: 0
+    # Reuses the existing scriptable quality-ref injection keys.
+    XDIT_QUALITY_REF: ""
+    WM_QUALITY_REL_MAX: 0.2
+    PATH: "/venv/bin:/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  gpu_selection:
+    auto: false
+
+  server_lifecycle:
+    enabled: false
+
+  timeout_seconds: 7200
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

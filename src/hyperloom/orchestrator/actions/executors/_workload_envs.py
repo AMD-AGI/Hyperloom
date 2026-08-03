@@ -79,6 +79,8 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 _PROFILE_DEFAULT_OSL = 1024
 _WORLDPLAY_REPO_URL = "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
 _WORLDPLAY_REPO_DIRNAME = "HY-WorldPlay"
+_WORLDMIRROR_REPO_URL = "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
+_WORLDMIRROR_REPO_DIRNAME = "HY-World-2.0"
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -156,6 +158,26 @@ def _worldplay_script_path(runner_type: str) -> Path:
     return scripts_dir / "worldplay_mi355x.sh"
 
 
+def _worldmirror_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
+    """Resolve the WorldMirror benchmark runner suffix."""
+    return (
+        str(gpu_type or "").strip().lower()
+        or str(bench.get("runner_type") or "").strip().lower()
+        or os.environ.get("GPU_TYPE", "").strip().lower()
+        or os.environ.get("RUNNER_TYPE", "").strip().lower()
+        or "mi355x"
+    )
+
+
+def _worldmirror_script_path(runner_type: str) -> Path:
+    """Return the shipped WorldMirror benchmark entrypoint path."""
+    scripts_dir = asset_root() / "assets" / "benchmark_scripts"
+    preferred = scripts_dir / f"worldmirror_{runner_type}.sh"
+    if preferred.is_file():
+        return preferred
+    return scripts_dir / "worldmirror_mi355x.sh"
+
+
 def _default_worldplay_action_ckpt(model_path: str, model_type: str) -> str:
     """Infer the sibling HY-WorldPlay action checkpoint from model path."""
     model = Path(str(model_path or ""))
@@ -181,6 +203,24 @@ def _sync_worldplay_repo_aliases(
     if repo_path:
         envs["WORLDPLAY_REPO_PATH"] = repo_path
         envs["WORLDPLAY_DIR"] = repo_path
+
+
+def _sync_worldmirror_repo_aliases(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    prefer_dir: bool = False,
+) -> None:
+    """Keep WORLDMIRROR_REPO_PATH and WORLDMIRROR_DIR pointing at one checkout."""
+    if str(bench.get("framework") or "").strip().lower() != "worldmirror":
+        return
+    if prefer_dir:
+        repo_path = str(envs.get("WORLDMIRROR_DIR") or envs.get("WORLDMIRROR_REPO_PATH") or "").strip()
+    else:
+        repo_path = str(envs.get("WORLDMIRROR_REPO_PATH") or envs.get("WORLDMIRROR_DIR") or "").strip()
+    if repo_path:
+        envs["WORLDMIRROR_REPO_PATH"] = repo_path
+        envs["WORLDMIRROR_DIR"] = repo_path
 
 
 def _sync_worldplay_action_ckpt(bench: dict[str, Any], envs: dict[str, Any]) -> None:
@@ -247,6 +287,44 @@ def _apply_worldplay_runtime_defaults(
     if action_ckpt_override:
         envs["WORLDPLAY_ACTION_CKPT"] = action_ckpt_override
     _sync_worldplay_action_ckpt(bench, envs)
+
+
+def _apply_worldmirror_runtime_defaults(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    explicit_benchmark_script: bool,
+) -> None:
+    """Resolve WorldMirror repo/script paths at materialization time."""
+    if str(bench.get("framework") or "").strip().lower() != "worldmirror":
+        return
+
+    runner_type = _worldmirror_runner_type(bench, gpu_type)
+    bench["runner_type"] = runner_type
+    if not explicit_benchmark_script:
+        bench["benchmark_script"] = str(_worldmirror_script_path(runner_type))
+
+    repo_path = (
+        os.environ.get("WORLDMIRROR_REPO_PATH", "").strip()
+        or os.environ.get("WORLDMIRROR_DIR", "").strip()
+        or str(envs.get("WORLDMIRROR_REPO_PATH") or "").strip()
+        or str(envs.get("WORLDMIRROR_DIR") or "").strip()
+    )
+    if not repo_path:
+        repo_path = str(deps_cache_root() / _WORLDMIRROR_REPO_DIRNAME)
+    envs["WORLDMIRROR_REPO_URL"] = (
+        os.environ.get("WORLDMIRROR_REPO_URL", "").strip()
+        or str(envs.get("WORLDMIRROR_REPO_URL") or "").strip()
+        or _WORLDMIRROR_REPO_URL
+    )
+    envs["WORLDMIRROR_REPO_PATH"] = repo_path
+    envs["WORLDMIRROR_DIR"] = repo_path
+    envs["WORLDMIRROR_BENCH"] = (
+        os.environ.get("WORLDMIRROR_BENCH", "").strip()
+        or str(envs.get("WORLDMIRROR_BENCH") or "").strip()
+        or str(asset_root() / "assets" / "benchmark_scripts" / "worldmirror_bench.py")
+    )
 
 
 def _remove_moe_runner_backend_arg(args: str) -> str:
@@ -402,6 +480,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
     "worldplay": Path("assets/configs/baseline_worldplay.yaml"),
+    "worldmirror": Path("assets/configs/baseline_worldmirror.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
@@ -592,6 +671,12 @@ def materialize_config_with_envs(
         bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
     _apply_worldplay_runtime_defaults(
+        bench,
+        envs,
+        gpu_type=gpu_type,
+        explicit_benchmark_script=bool(benchmark_script),
+    )
+    _apply_worldmirror_runtime_defaults(
         bench,
         envs,
         gpu_type=gpu_type,
@@ -977,6 +1062,11 @@ def materialize_config_with_envs(
         bench,
         envs,
         prefer_dir="WORLDPLAY_DIR" in safe_extra_envs and "WORLDPLAY_REPO_PATH" not in safe_extra_envs,
+    )
+    _sync_worldmirror_repo_aliases(
+        bench,
+        envs,
+        prefer_dir="WORLDMIRROR_DIR" in safe_extra_envs and "WORLDMIRROR_REPO_PATH" not in safe_extra_envs,
     )
     if "WORLDPLAY_ACTION_CKPT" not in safe_extra_envs:
         _sync_worldplay_action_ckpt(bench, envs)

@@ -3013,6 +3013,8 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             An order-preserving, deduped list of repo URLs to query.
         """
+        from hyperloom.inference_optimizer import framework_registry
+
         from ..framework import client as _fa_client
         from ..specialists.domains import PR_QUERY_REPOS
 
@@ -3029,13 +3031,16 @@ class FrameworkPhase(PhaseHandler):
                 urls.append(u)
 
         # Primary: the framework's own repo.
-        _add(_fa_client.repo_url_for_framework(framework))
+        primary_repo_url = _fa_client.repo_url_for_framework(framework)
+        _add(primary_repo_url)
 
-        # Global allowlist (owner/name -> URL).
-        for repo in PR_QUERY_REPOS:
-            repo = str(repo or "").strip()
-            if repo and "/" in repo:
-                _add(f"https://github.com/{repo}.git")
+        # Serving/infra PRs cannot be git-applied to scriptable model repos.
+        # If a scriptable framework has no repo map yet, keep the old fallback.
+        if not (primary_repo_url and framework_registry.is_scriptable(framework)):
+            for repo in PR_QUERY_REPOS:
+                repo = str(repo or "").strip()
+                if repo and "/" in repo:
+                    _add(f"https://github.com/{repo}.git")
 
         if not urls:
             # Last-ditch: let phase_discover resolve from framework itself.
@@ -3070,7 +3075,7 @@ class FrameworkPhase(PhaseHandler):
         normalized = (repo_url or "").strip().rstrip("/").lower()
         if not normalized:
             return ""
-        for fw in ("sglang", "vllm", "atom", "xdit"):
+        for fw in ("sglang", "vllm", "atom", "xdit", "worldplay", "worldmirror"):
             fw_url = (_fa_client.repo_url_for_framework(fw) or "").strip().rstrip("/").lower()
             if fw_url and fw_url == normalized:
                 return fw
