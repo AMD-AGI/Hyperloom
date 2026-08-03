@@ -852,8 +852,16 @@ def _wait_pd_legs_health(
     return True
 
 
+_LOG_TAIL_BYTES = 8192
+
+
 def _emit_log_tail(log_file: Path) -> None:
     """Append the tail of a log file to stderr if it exists.
+
+    Seeks to the last ``_LOG_TAIL_BYTES`` rather than reading the whole file:
+    the logs now live on a shared filesystem, and slurping a multi-hundred-MB
+    server log over the network on the failure path (both PD legs) would be a
+    heavy read for an 8 KiB tail.
 
     Args:
         log_file (Path): Path to the log file to tail.
@@ -863,7 +871,11 @@ def _emit_log_tail(log_file: Path) -> None:
         sz = log_file.stat().st_size if log_file.is_file() else 0
         _log(f"(tail probe) {name} bytes={sz} path={log_file}")
         if sz > 0:
-            _log(f"{name} tail (last 8kiB):\n" + log_file.read_text(encoding="utf-8", errors="replace")[-8192:])
+            with log_file.open("rb") as f:
+                if sz > _LOG_TAIL_BYTES:
+                    f.seek(sz - _LOG_TAIL_BYTES)
+                tail = f.read().decode("utf-8", errors="replace")
+            _log(f"{name} tail (last 8kiB):\n" + tail)
     except OSError as exc:
         _log(f"(tail probe) cannot read {name}: {exc}")
 
