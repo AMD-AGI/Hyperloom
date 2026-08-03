@@ -31,6 +31,7 @@ from .coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
+    _geak_result_has_material,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
@@ -2813,20 +2814,91 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                ps = (
+                    self.shared_state.geak_result
+                    if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                    else {}
+                )
+                # A rebench that beats current_best is only a KERNEL gain when
+                # GEAK actually produced something. Without a material product
+                # (kernel/head/overlay/patch or a config delta vs the pre-KERNEL
+                # best) the win is same-config measurement noise; drop it.
+                # An empty geak_result cannot be judged by the helper, so
+                # disambiguate here: a pre-existing ``geak_e2e`` stack entry
+                # means this is a resume revalidation of an already-material win
+                # (let it through); otherwise there is no material to validate.
+                if decision == "validated":
+                    stack_now = self.shared_state.optimization_stack or []
+                    has_prior_geak_e2e = any(
+                        isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now
+                    )
+                    if not ps and not has_prior_geak_e2e:
+                        decision = "no_material"
+                    elif ps and not _geak_result_has_material(
+                        ps,
+                        prev_best_flags=str(cb_now.get("extra_server_args") or ""),
+                        prev_best_envs=cb_now.get("extra_envs") or {},
+                    ):
+                        decision = "no_material"
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
-                    ps = (
-                        self.shared_state.geak_result
-                        if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                        else {}
-                    )
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
                     )
+                elif decision == "no_material":
+                    # No material GEAK product; the rebench beating current_best
+                    # is same-config measurement noise. Do not touch the
+                    # headline / stack / gain; record + clear the candidate.
+                    log.info(
+                        "geak 2b rebench beat current_best but GEAK shipped no "
+                        "material product (measured=%r current_best=%r) -> "
+                        "no_material drop",
+                        measured,
+                        cb_tput,
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_no_material",
+                                "measured_tput": float(measured),
+                                "current_best_tput": (
+                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
+                                ),
+                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak no_material: observation emit failed")
+                    # Stamp the drop on geak_result (always, so an empty {} is
+                    # distinguishable from never-populated on resume/debug and
+                    # acts as a tombstone against KERNEL crash-recovery
+                    # re-enqueue) and reject any provisional KEEP in
+                    # kernel_journey so a session audit does not read a dropped
+                    # candidate as an accepted kernel (no-op when the journey
+                    # has no KEEP / the file is absent).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_material"
+                    self.shared_state.geak_result = ps_stamped
+                    try:
+                        self.phase_kernel._reject_geak_kernel_journey(
+                            ps_stamped,
+                            measured_tput=float(measured),
+                            current_best_tput=(
+                                float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
+                            ),
+                            provenance="geak_no_material",
+                            rejection_reason="geak_no_material_product",
+                        )
+                    except Exception:  # noqa: BLE001 - journey reject is best-effort
+                        log.exception("geak no_material: journey rejection failed")
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
                 elif decision == "no_promote":
                     # Well-measured + engaged over baseline, but does not beat
                     # current_best. This is a real result, NOT inconclusive, so
