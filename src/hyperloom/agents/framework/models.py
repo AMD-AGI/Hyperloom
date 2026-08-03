@@ -3,7 +3,7 @@
 
 """Request and result models for framework/ref exploration.
 
-``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
+``ExploreRequest.gap_description`` feeds :mod:`hyperloom.agents.framework.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
 candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
 primus_cortex hard-failing and GitHub best-effort).
@@ -87,7 +87,7 @@ class PrimusCortexConfig:
 
     When present on :class:`ExploreRequest`, the agent routes PR candidate
     enumeration through this service. Errors are hard-failed by callers
-    (see :mod:`framework_agent.sources.primus_cortex`).
+    (see :mod:`hyperloom.agents.framework.sources.primus_cortex`).
     """
 
     base_url: str
@@ -218,11 +218,14 @@ class Candidate:
 
 @dataclass(frozen=True)
 class PrFilter:
-    """Server-side and client-side filter applied to enumerated PR candidates.
+    """Client-side filter applied to enumerated PR candidates.
 
-    Path filters require Stage 2 enrichment (changed_files populated).
-    Labels are case-insensitive. Dates flow through to primus_cortex's
-    REST query when supported.
+    Every dimension (labels, author, dates, paths, counts) is evaluated
+    locally in ``explorer._passes_filter``; no part of this filter is pushed
+    into the primus_cortex query (the only server-side narrowing is the
+    separate ``PrimusCortexConfig.default_label``). Path filters require
+    Stage 2 enrichment (``changed_files`` populated). Labels are
+    case-insensitive.
     """
 
     include_paths: tuple[str, ...] = ()
@@ -538,7 +541,7 @@ class CommandResult:
 class Finding:
     """A single distilled observation suitable for KB contribution.
 
-    Used by :mod:`framework_agent.kb.synthesize_findings`. Keeping the
+    Used by :func:`hyperloom.agents.framework.kb.synthesize_findings`. Keeping the
     record frozen + flat keeps the markdown rendering deterministic.
     """
 

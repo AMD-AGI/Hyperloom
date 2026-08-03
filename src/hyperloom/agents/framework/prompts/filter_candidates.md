@@ -52,7 +52,7 @@ Summary:
 |---|---|
 | Path filter set but `changed_files` empty | Reject with reason `"no changed_files metadata (primus enrichment likely skipped)"`. Do **not** silently pass. |
 | Author filter set but `author` empty | Reject with reason `"author unknown but pr_filter.authors set"`. Same rationale. |
-| Both date filters set and `updated_at` empty | Default behaviour: dates compare against `""` which is always `<` any ISO timestamp, so the candidate may pass `since` and fail `until`. Operators wanting a strict reject should add a `require_labels` / explicit filter instead. |
+| Both date filters set and `updated_at` empty | Both date checks are skipped (each is guarded on a non-empty `updated_at`), so the candidate always passes the date dimensions. Unlike the path / author dimensions, missing date metadata is NOT a reject; operators wanting a strict reject must express it via another dimension. |
 
 ## Output contract
 

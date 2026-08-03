@@ -18,7 +18,12 @@ For every kept candidate:
 4. Read `outputs.benchmark_json` + `outputs.accuracy_json`, apply
    the three-gate winner check (`min_throughput_ratio`,
    `max_accuracy_drop`, `completed` parity).
-5. On the first winner, **early-break** the per-candidate loop.
+5. On the first winner, **early-break** the per-candidate loop — only when
+   `ranking_mode=False` (the default). With `ranking_mode=True` every
+   candidate runs to completion and results are re-sorted by
+   `candidate_score` descending; with `ranking_mode=True` plus
+   `build_concurrency > 1` builds fan out via `asyncio.gather` and there is
+   no early break at all.
 6. If `kb_domain` is set and a winner exists, append a Finding to
    `${KB}/<domain>/empirical_kb.md` via the explorer's KB hook.
 
@@ -59,7 +64,7 @@ execute=...)` is the canonical entry. For piecewise control, mix the
 
 1. Materialise `candidate_dir` as above.
 2. If `prepare_candidate_env=True`, prepare the worktree + venv via
-   `_prepare_candidate_workspace`. Otherwise skip and run commands
+   `_prepare_candidate_workspace_with_artifacts`. Otherwise skip and run commands
    against the existing global environment.
 3. Render command templates with `render_template(spec.command,
    variables, shell_quote=True)`. The variable bag includes
@@ -68,8 +73,8 @@ execute=...)` is the canonical entry. For piecewise control, mix the
 4. Run `build` -> `benchmark` -> `accuracy` -> `cleanup` in that fixed
    order. A non-zero rc on any `required` command shorts the
    candidate to `status="failed"`.
-5. Apply `_winner_decision` to throughput / accuracy / completed.
-   The first winner ends the loop early.
+5. Apply `decision.winner_decision` to throughput / accuracy / completed.
+   The first winner ends the loop early unless `ranking_mode=True`.
 6. If `kb_domain` is set and a winner exists, append a synthesised
    Finding to `${KB}/<domain>/empirical_kb.md` via the explorer's
    KB hook.
@@ -87,6 +92,10 @@ execute=...)` is the canonical entry. For piecewise control, mix the
   "work_dir": "...",
   "baseline": { "throughput": ..., "accuracy": ..., "completed": "..." },
   "thresholds": { "min_throughput_ratio": ..., "max_accuracy_drop": ... },
+  "ranking_mode": false,
+  "prior_ranking": { "enabled": true, "ranked_candidates": 0, "top_prior_score": 0.0 },
+  "build_concurrency": 1,
+  "keep_winner_only": false,
   "winner_ref": "PR:22918" | null,
   "winner_dir": "/.../candidates/01_pr-22918" | null,
   "promotion_policy": "manual_only",

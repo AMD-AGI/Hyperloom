@@ -16,7 +16,9 @@ Two halves of the enablement flow that both build on a
   invariants) handed to the patch-authoring specialist. See
   :func:`build_mandate`.
 
-Pure-Python, GPU-free: no network, LLM, or filesystem access.
+Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
+the local filesystem (source-root probe + installed package version) unless
+``root_hints`` is passed explicitly.
 """
 
 from __future__ import annotations
@@ -78,8 +80,9 @@ class EnablementSearchPlan:
     """Where to look and what to match for an enablement failure.
 
     Attributes:
-        repos: Repo URLs to enumerate PRs from (framework first, then any
-            opted-in bridge repos), order-preserving and deduped.
+        repos: Repo URLs to enumerate PRs from (framework first, then the
+            bridge repos for the signature's ``bridge_layer`` — empty for
+            ``framework`` / unknown layers), order-preserving and deduped.
         keywords: Ranking keywords (auto-extracted + per-kind seeds + the
             offending symbol/model tokens).
     """
@@ -287,14 +290,11 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
 
 # Serial-enablement progress contract. A brand-new architecture or a large
 # capability gap rarely becomes fully runnable inside a single budget window.
-# The integrate side already REWARDS partial progress: a patch that only
-# advances the boot to a *new, deeper* failure is KEPT and stacked as a base for
-# the next round (see ``enablement.enablement_made_progress`` and
-# ``integrate_patch`` ``status="advanced"``). Historically the specialist was
-# only told to make the combo *run*, so on a big gap it judged full runnability
-# infeasible and returned ``empty=true`` wholesale — starving that incremental
-# machinery of the very patches it stacks. This guidance closes that asymmetry:
-# advancing the boot ONE step is an explicit, valid deliverable.
+# The integrate side REWARDS partial progress: a patch that only advances the
+# boot to a *new, deeper* failure is KEPT and stacked as a base for the next
+# round (see ``enablement.enablement_made_progress`` and ``integrate_patch``
+# ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
+# valid deliverable rather than grounds for returning ``empty=true``.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
     "serial: clearing one boot failure usually reveals a deeper one. You do NOT "

@@ -5,8 +5,9 @@
 
 Routes :class:`ExploreRequest` to one or more backends per
 ``request.search_modes`` and merges into a deduplicated :class:`Candidate`
-list. Backends: ``primus_cortex`` (Primus Cortex REST, hard-fail on errors) and
-``github`` (anonymous Search, best-effort, ``[]`` on failure).
+list. Backends: ``gbrain_pr_kb`` (gbrain PR KB pages, best-effort, ``[]`` on
+failure), ``primus_cortex`` (Primus Cortex REST, hard-fail on errors) and
+``github`` (Search, best-effort, ``[]`` on failure).
 
 Contract: empty ``search_modes`` -> ``[]``; a mode requested without its
 config -> :class:`SourceConfigError`; per-mode errors propagate per the
