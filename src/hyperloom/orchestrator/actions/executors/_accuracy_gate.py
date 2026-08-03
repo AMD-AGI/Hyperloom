@@ -126,6 +126,20 @@ def require_framework_accuracy_default() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def require_kernel_accuracy_default() -> bool:
+    """Default for the kernel-patch accuracy-KEEP gate.
+
+    A kernel patch that clears the E2E throughput bar must also clear the
+    accuracy gate by default; opt out with
+    ``INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY=0``.
+
+    Returns:
+        ``True`` unless the env var disables it.
+    """
+    v = os.environ.get("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def resolve_enablement_mode(shared_state: Any) -> str:
     """Read the session's enablement mode.
 
@@ -680,4 +694,5 @@ __all__ = [
     "request_baseline_accuracy_stop",
     "resolve_enablement_mode",
     "require_framework_accuracy_default",
+    "require_kernel_accuracy_default",
 ]
