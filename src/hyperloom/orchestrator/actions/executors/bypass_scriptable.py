@@ -12,8 +12,10 @@ equivalent, so bypass runs the self-contained scriptable benchmark script.
 Script resolution (bypass owns its choice; it does NOT depend on Magpie being
 importable):
   1. ``$HYPERLOOM_BYPASS_SCRIPTS_DIR`` (operator override / vendored dir),
-  2. Magpie's ``scripts/benchmark`` via ``$MAGPIE_PATH`` (reuse when present),
-  3. ``<inferencex>/benchmarks`` (staged copies).
+  2. the package's bundled ``assets/benchmark_scripts`` (frameworks whose
+     entrypoint ships with Hyperloom, e.g. worldplay / worldmirror),
+  3. Magpie's ``scripts/benchmark`` via ``$MAGPIE_PATH`` (reuse when present),
+  4. ``<inferencex>/benchmarks`` (staged copies).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.inference_optimizer.session.paths import asset_root
 
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
@@ -59,6 +62,10 @@ def resolve_scriptable_script(
     override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
     if override:
         candidates.append(Path(override) / name)
+    # Bundled entrypoints are version-matched to this checkout, so they must be
+    # reachable by name too: any rebuild path that re-pins the bare
+    # {framework}_{runner}.sh would otherwise resolve to nothing.
+    candidates.append(asset_root() / "assets" / "benchmark_scripts" / name)
     magpie_path = os.environ.get("MAGPIE_PATH", "").strip()
     if magpie_path:
         candidates.append(Path(magpie_path, "Magpie", "scripts", "benchmark", name))

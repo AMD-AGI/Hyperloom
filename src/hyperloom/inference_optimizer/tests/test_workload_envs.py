@@ -191,12 +191,14 @@ def test_worldplay_materialize_configures_github_repo_fallback(monkeypatch, tmp_
     assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
 
 
-def test_worldplay_grid_rebuild_keeps_bundled_script_path(monkeypatch, tmp_path):
+@pytest.mark.parametrize("framework", ["worldplay", "worldmirror"])
+def test_bundled_script_path_survives_grid_rebuild(monkeypatch, tmp_path, framework):
     """Grid rebuild must keep the bundled absolute script path.
 
-    ``resolve_scriptable_script`` only searches the Magpie / InferenceX dirs by
-    name, so downgrading to a bare ``worldplay_mi355x.sh`` makes every explore
-    and sweep variant abort with ``magpie_nonzero_invalid_measurement``.
+    ``apply_runtime_benchmark_overrides`` re-derives the bare
+    ``{framework}_{gpu_type}.sh`` from ``gpu_type``; without re-applying the
+    scriptable defaults every explore and sweep variant aborts with
+    ``magpie_nonzero_invalid_measurement``.
     """
     from hyperloom.orchestrator.actions.executors._grid_server_args import (
         apply_runtime_benchmark_overrides,
@@ -204,21 +206,39 @@ def test_worldplay_grid_rebuild_keeps_bundled_script_path(monkeypatch, tmp_path)
 
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", "/repos/HY-WorldPlay")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    src = _write(tmp_path / f"{framework}.yaml", framework=framework, model="/models/placeholder", envs={"TP": 1})
+    expected = f"/assets/benchmark_scripts/{framework}_mi355x.sh"
 
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        model_path="/models/HunyuanVideo-1.5",
-    )
-    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/m")
+    assert bench["benchmark_script"].endswith(expected)
 
     apply_runtime_benchmark_overrides(bench, model_path=bench["model"], gpu_type="mi355x")
 
     assert bench["benchmark_script"].startswith("/")
-    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
+    assert bench["benchmark_script"].endswith(expected)
+
+
+@pytest.mark.parametrize("framework", ["worldplay", "worldmirror"])
+def test_bundled_script_resolves_from_bare_name(monkeypatch, tmp_path, framework):
+    """A bare script name must still resolve to the bundled entrypoint.
+
+    Magpie and InferenceX never ship the bundled scriptable entrypoints, so
+    without the package assets dir in the search list any caller that lost the
+    absolute path resolves to None.
+    """
+    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
+
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", raising=False)
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    bench = {"benchmark_script": f"{framework}_mi355x.sh"}
+
+    resolved = bs.resolve_scriptable_script(framework, "mi355x", str(tmp_path / "no-inferencex"), bench)
+
+    assert resolved is not None
+    assert resolved.is_file()
+    assert str(resolved).endswith(f"/assets/benchmark_scripts/{framework}_mi355x.sh")
 
 
 def test_worldplay_extra_env_repo_path_updates_runtime_alias(monkeypatch, tmp_path):
