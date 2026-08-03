@@ -68,6 +68,10 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
     assert summary["warm_replay"] == {"keeps": 1, "total_gain_pct": 50.0}
     assert summary["framework_agent"] == {"keeps": 1, "total_gain_pct": 10.0}
     assert summary["explore"] == {"keeps": 1, "total_gain_pct": 10.0}
+    source_breakdown = attribution["source_breakdown"]
+    assert source_breakdown["framework_pct_of_total"] == 10.0
+    assert source_breakdown["explore_pct_of_total"] == 10.0
+    assert source_breakdown["unattributed_pct_of_total"] == 0.0
 
 
 def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
@@ -111,6 +115,69 @@ def test_prebaseline_enablement_is_not_framework_gain_before_warm_replay():
     assert [entry["source"] for entry in result["entries"]] == ["warm_replay"]
     assert result["entries"][0]["throughput_before"] == 100.0
     assert result["entries"][0]["gain_pct"] == 10.0
+
+
+def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
+    state = {
+        "session_id": "unknown-integrate-owner",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "",
+                "variant_name": "unknown-owner",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
+    assert any("reported as unattributed" in note for note in attribution["notes"])
+    assert any("reported as unattributed" in warning for warning in warnings)
+    assert result["entries"][0]["source"] == "unattributed"
+    assert result["summary_by_source"]["unattributed"] == {
+        "keeps": 1,
+        "total_gain_pct": 10.0,
+    }
+    assert result["validation"]["attributed_total_gain_pct"] == 0.0
+    assert result["validation"]["attribution_gap_pct"] == 10.0
+
+
+def test_integrate_patch_from_kernel_phase_is_not_silently_dropped():
+    state = {
+        "session_id": "kernel-integrate-owner",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "kernel-owned",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 10.0
+    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 0.0
+    assert result["entries"][0]["source"] == "kernel_agent"
+    assert result["validation"]["attributed_total_gain_pct"] == 10.0
+    assert result["validation"]["attribution_gap_pct"] == 0.0
 
 
 def test_collect_optimizations_splits_kernel_backend():

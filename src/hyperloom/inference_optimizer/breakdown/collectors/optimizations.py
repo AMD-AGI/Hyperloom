@@ -397,6 +397,7 @@ def _validation_summary(
         _to_float(entry.get("gain_pct")) or 0.0
         for entry in entries
         if entry.get("validated") is True
+        and entry.get("source") != "unattributed"
     )
     phase_breakdown = attribution.get("phase_breakdown")
     if not isinstance(phase_breakdown, dict):
@@ -423,6 +424,10 @@ def _validation_summary(
         ),
         "gemm_tuning_gain_pct": round(
             _to_float(source_breakdown.get("gemm_tuning_pct_of_total")) or 0.0,
+            6,
+        ),
+        "unattributed_gain_pct": round(
+            _to_float(source_breakdown.get("unattributed_pct_of_total")) or 0.0,
             6,
         ),
     }
