@@ -14,6 +14,7 @@ import pytest
 from hyperloom.agents.framework.enablement import (
     ACCURACY_BELOW_FLOOR,
     CAPABILITY_DISABLED,
+    EVAL_GENERATION_PATHOLOGY,
     EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
     IMPORT_ERROR,
@@ -45,6 +46,17 @@ def test_accuracy_below_floor_kind() -> None:
     sig = classify_failure("baseline accuracy did not meet floor: accuracy=0.12 floor=0.30 task=gsm8k")
     assert sig.kind == ACCURACY_BELOW_FLOOR
     assert sig.bridge_layer == ""
+
+
+def test_generation_pathology_outranks_accuracy_below_floor() -> None:
+    """The probe's evidence carries the below-floor phrasing too, but a truncated
+    eval is a different repair from a model that answered and got them wrong."""
+    sig = classify_failure(
+        "baseline accuracy did not meet floor: accuracy=0.0 floor=0.05 task=gsm8k; "
+        "eval_generation_pathology: 128/128 sampled responses stopped at the 16384-token cap"
+    )
+    assert sig.kind == EVAL_GENERATION_PATHOLOGY
+    assert ACCURACY_BELOW_FLOOR in sig.secondary_kinds
 
 
 def test_eval_runtime_failure_kind() -> None:
