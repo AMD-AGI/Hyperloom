@@ -89,11 +89,31 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
 
-def test_gate_skips_when_the_published_name_does_not_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
+def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op.
+
+    The skip is now gated on CONSECUTIVE resolution failures, so a name that
+    never resolves must still skip (after the retry budget), not hang or fail.
+    """
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+
+    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+
+
+def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CoreDNS blip must not disable the gate when it is most needed.
+
+    One name-resolution failure (below the consecutive-skip threshold) followed
+    by the endpoint coming up must let the gate pass, not skip -- otherwise a
+    single DNS flap during the readiness window would green-light the benchmark
+    into the ECONNREFUSED this gate exists to prevent.
+    """
+    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+    _fast_clock(monkeypatch)
+    # DNS blips once, then the published endpoint answers: gate must hold + pass.
+    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known"), 200, 200])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
 
@@ -125,6 +145,41 @@ def test_gate_is_a_noop_without_a_rewrite(monkeypatch: pytest.MonkeyPatch) -> No
         lambda: {"backend": "rayjob", "service_url": "http://svc:8888"},
     )
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+
+
+def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """timeout_s<=0 is an escape hatch: skip the gate, never fail on it.
+
+    A zero budget used to fail every restart on the second poll (10 > 0). No
+    httpx is installed here on purpose -- the function must return before it is
+    reached.
+    """
+    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+
+    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=0, poll_every_s=5))
+    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=-1, poll_every_s=5))
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, 300),  # unset -> default
+        ("", 300),  # empty -> default
+        ("0", 0),  # explicit skip (honored as <=0 by the gate, not a 0s wait)
+        ("-5", -5),  # negative -> also skip
+        ("600", 600),  # explicit budget
+        ("abc", 300),  # junk -> default, never crashes the restart
+    ],
+)
+def test_published_ready_timeout_env_parse(
+    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int
+) -> None:
+    """The env parse honors 0/negatives as skip and survives junk."""
+    monkeypatch.delenv("HYPERLOOM_MN_PUBLISHED_READY_S", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_S", raw)
+
+    assert life._published_ready_timeout_s() == expected
 
 
 @pytest.mark.parametrize(

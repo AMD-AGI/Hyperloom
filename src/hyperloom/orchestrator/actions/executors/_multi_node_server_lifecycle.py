@@ -746,7 +746,7 @@ async def restart_server_for_round(
                     # Service, whose endpoints lag readiness after a restart.
                     # Confirm it serves too so we don't benchmark into ECONNREFUSED.
                     await _wait_for_published_service_ready_async(
-                        timeout_s=int(os.environ.get("HYPERLOOM_MN_PUBLISHED_READY_S", "300") or 300),
+                        timeout_s=_published_ready_timeout_s(),
                         poll_every_s=int(os.environ.get("HYPERLOOM_MN_HEALTH_POLL_S", "10")),
                     )
                 except ServerRestartFailed as exc:
@@ -1508,6 +1508,23 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
     return False
 
 
+def _published_ready_timeout_s() -> int:
+    """Resolve the published-service gate budget from the environment.
+
+    ``HYPERLOOM_MN_PUBLISHED_READY_S`` overrides the 300s default. A value ``<=0``
+    is honored by the gate as "skip" (an emergency escape hatch), not as a
+    zero-budget wait that would fail every restart on its second poll. Junk falls
+    back to the default rather than crashing the restart.
+
+    Returns:
+        int: The gate timeout in seconds (may be ``<=0`` to signal skip).
+    """
+    try:
+        return int(os.environ.get("HYPERLOOM_MN_PUBLISHED_READY_S", "300"))
+    except ValueError:
+        return 300
+
+
 async def _wait_for_published_service_ready_async(
     timeout_s: int = 300,
     poll_every_s: int = 10,
@@ -1530,7 +1547,9 @@ async def _wait_for_published_service_ready_async(
     published name would not resolve and this gate is a no-op there.
 
     Args:
-        timeout_s: Max seconds to wait for the published endpoint's /health.
+        timeout_s: Max seconds to wait for the published endpoint's /health. A
+            value ``<=0`` skips the gate entirely (an emergency escape hatch) --
+            it does NOT mean a zero-budget wait, which would fail every restart.
         poll_every_s: Seconds between polls.
 
     Raises:
@@ -1538,6 +1557,10 @@ async def _wait_for_published_service_ready_async(
             returns 200 within ``timeout_s``.
     """
     import time as _time
+
+    if timeout_s <= 0:
+        log.info("post-restart published-service gate disabled (HYPERLOOM_MN_PUBLISHED_READY_S<=0)")
+        return
 
     try:
         import httpx as _httpx
@@ -1560,6 +1583,13 @@ async def _wait_for_published_service_ready_async(
     # Two consecutive 200s so a single endpoint-list flap does not pass us.
     required_ok = 2
     ok_streak = 0
+    # Skip only after this many CONSECUTIVE name-resolution failures, so a
+    # CoreDNS blip inside the readiness window (which resolves on a later poll)
+    # does not disable the gate exactly when it is needed. A genuinely
+    # unresolvable name (the outside-cluster case) still skips within
+    # ~dns_skip_after * poll_every_s seconds rather than idling the full budget.
+    dns_skip_after = 3
+    dns_failures = 0
     started = _time.monotonic()
     last_err = ""
     log.info(
@@ -1572,6 +1602,7 @@ async def _wait_for_published_service_ready_async(
             elapsed = int(_time.monotonic() - started)
             try:
                 resp = await client.get(health_url)
+                dns_failures = 0  # resolved + connected: not an unresolvable name
                 if resp.status_code == 200:
                     ok_streak += 1
                     if ok_streak >= required_ok:
@@ -1586,14 +1617,21 @@ async def _wait_for_published_service_ready_async(
                     last_err = f"http_status={resp.status_code}"
             except Exception as exc:  # noqa: BLE001
                 if _is_name_resolution_error(exc):
-                    log.info(
-                        "published service_url %s does not resolve from here; "
-                        "skipping published-service readiness gate",
-                        health_url,
-                    )
-                    return
-                ok_streak = 0
-                last_err = format_exc_brief(exc, limit=120)
+                    dns_failures += 1
+                    if dns_failures >= dns_skip_after:
+                        log.info(
+                            "published service_url %s did not resolve from here after %d attempts; "
+                            "skipping published-service readiness gate",
+                            health_url,
+                            dns_failures,
+                        )
+                        return
+                    ok_streak = 0
+                    last_err = f"name resolution failed ({dns_failures}/{dns_skip_after})"
+                else:
+                    dns_failures = 0  # reached the host: a real refuse/5xx, keep waiting
+                    ok_streak = 0
+                    last_err = format_exc_brief(exc, limit=120)
             if elapsed > timeout_s:
                 raise ServerRestartFailed(
                     f"published service /health did not return 200 within {timeout_s}s "
