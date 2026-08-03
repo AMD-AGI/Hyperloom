@@ -85,26 +85,47 @@ _EVAL_PROBE_PY = """
 import json as _hl_json
 import os as _hl_os
 import sys as _hl_sys
+import time as _hl_time
 
 
 def _hl_eval_probe_install():
     if (_hl_os.environ.get("HYPERLOOM_EVAL_PROBE") or "1").strip().lower() in ("0", "false", "no", "off"):
         return
 
-    def _num(name, default, cast):
+    def _num(name, default, cast, ok):
         try:
-            return cast((_hl_os.environ.get(name) or "").strip())
+            val = cast((_hl_os.environ.get(name) or "").strip())
         except (TypeError, ValueError):
             return default
+        return val if ok(val) else default
 
-    min_samples = max(1, _num("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", 16, int))
-    ratio_limit = _num("HYPERLOOM_EVAL_PROBE_LENGTH_RATIO", 0.75, float)
+    # Out-of-range falls back to the default rather than to the nearest legal
+    # value. RATIO=0 is what an operator reaches for to "turn the probe off",
+    # and clamping it to the smallest legal ratio would do the opposite: cut
+    # every eval short the moment min_samples is reached.
+    min_samples = _num("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", 128, int, lambda v: v >= 8)
+    ratio_limit = _num("HYPERLOOM_EVAL_PROBE_LENGTH_RATIO", 0.75, float, lambda v: 0.0 < v <= 1.0)
 
     import asyncio as _hl_asyncio
     from lm_eval.models import api_models as _hl_api
     from lm_eval.models.openai_completions import LocalChatCompletion as _hl_lcc
 
-    state = {"observed": 0, "length": 0, "max_tokens_seen": 0, "tripped": False}
+    # Reaching here proves this is the lm-eval process, not one of the other
+    # python3 invocations sitecustomize also runs in -- so only here is it safe
+    # to drop a sidecar left by a previous attempt. The eval-failure retry
+    # reuses $RESULT_DIR, and a stale file would be read as this run's verdict.
+    _hl_dir = (_hl_os.environ.get("RESULT_DIR") or "").strip()
+    if _hl_dir:
+        try:
+            _hl_os.remove(_hl_os.path.join(_hl_dir, "hyperloom_eval_probe.json"))
+        except OSError:
+            pass
+
+    state = {"observed": 0, "length": 0, "max_tokens_seen": 0, "cap_hits": 0, "tripped": False}
+    # completion_tokens -> count, over responses the server stopped on length.
+    # The cap is the largest such value: a model that never terminates piles
+    # every capped response onto exactly that number.
+    capped = {}
 
     def _emit():
         record = {
@@ -112,16 +133,24 @@ def _hl_eval_probe_install():
             "observed_samples": state["observed"],
             "finish_reason_length": state["length"],
             "length_ratio": round(float(state["length"]) / state["observed"], 4),
+            "cap_hits": state["cap_hits"],
+            "cap_hit_ratio": round(float(state["cap_hits"]) / state["observed"], 4),
             "max_completion_tokens_seen": state["max_tokens_seen"],
             "min_samples": min_samples,
             "length_ratio_threshold": ratio_limit,
+            "written_at": _hl_time.time(),
         }
         blob = _hl_json.dumps(record, sort_keys=True)
         print("HYPERLOOM_EVAL_PROBE_TRIPPED " + blob, file=_hl_sys.stderr, flush=True)
         # $RESULT_DIR, never $EVAL_RESULT_DIR: append_lm_eval_summary rm -rf's
         # the latter. The name must not match results*.json -- that glob is how
         # parse_eval_results finds the accuracy score.
-        out_dir = (_hl_os.environ.get("RESULT_DIR") or "").strip() or "."
+        out_dir = (_hl_os.environ.get("RESULT_DIR") or "").strip()
+        if not out_dir:
+            # Without it the sidecar would land in the cwd, i.e. InferenceX's
+            # checkout -- the artifact escape the _EVAL_DEST_* patch exists to
+            # prevent. stderr above already carries the whole record.
+            return
         _hl_os.makedirs(out_dir, exist_ok=True)
         with open(_hl_os.path.join(out_dir, "hyperloom_eval_probe.json"), "w", encoding="utf-8") as fh:
             fh.write(blob)
@@ -134,7 +163,16 @@ def _hl_eval_probe_install():
                 state["observed"] += 1
                 if choice.get("finish_reason") == "length":
                     state["length"] += 1
-        if state["observed"] >= min_samples and float(state["length"]) / state["observed"] >= ratio_limit:
+                    capped[seen] = capped.get(seen, 0) + 1
+        if state["observed"] < min_samples:
+            return
+        # Count only the responses that stopped AT the ceiling. A bare
+        # finish_reason=length ratio cannot separate "never terminates" from
+        # "legitimately long answers under a small cap", and the ceiling was
+        # already being tracked without being used.
+        cap = max(capped) if capped else 0
+        state["cap_hits"] = capped.get(cap, 0)
+        if cap > 0 and float(state["cap_hits"]) / state["observed"] >= ratio_limit:
             state["tripped"] = True
             _emit()
 

@@ -576,6 +576,13 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
     because the baseline double-run evaluates in the warmup round, whose
     ``$RESULT_DIR`` nests under the task workspace.
 
+    Several sidecars can be in scope at once — ``integrate_patch`` searches the
+    grid slot, whose sibling variant dirs each own one — so the newest by mtime
+    wins. Path order would not do: attempt dirs are hash-named, so sorting them
+    is unrelated to which eval ran last. The probe also removes any sidecar left
+    in its ``$RESULT_DIR`` before it starts, which covers the retry that reuses
+    one slot.
+
     Args:
         workspace (Path | str): Benchmark workspace to search recursively.
 
@@ -583,11 +590,11 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         dict[str, Any] | None: The probe record stamped with ``kind`` and
         ``source_file``, or ``None`` when no readable sidecar exists.
     """
-    matches = sorted(Path(workspace).rglob(EVAL_PROBE_FILENAME))
+    matches = list(Path(workspace).rglob(EVAL_PROBE_FILENAME))
     if not matches:
         return None
-    latest = matches[-1]
     try:
+        latest = max(matches, key=lambda p: p.stat().st_mtime)
         record = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
@@ -607,10 +614,13 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     """
     if not probe:
         return ""
+    hits = probe.get("cap_hits")
+    if hits is None:
+        hits = probe.get("finish_reason_length", 0)
     return (
-        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {probe.get('finish_reason_length', 0)}/"
-        f"{probe.get('observed_samples', 0)} sampled responses hit the max_tokens cap "
-        f"(up to {probe.get('max_completion_tokens_seen', 0)} tokens); the model never "
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {hits}/"
+        f"{probe.get('observed_samples', 0)} sampled responses stopped at the "
+        f"{probe.get('max_completion_tokens_seen', 0)}-token cap; the model never "
         "emitted EOS, so the eval was cut short and scored ~0"
     )
 

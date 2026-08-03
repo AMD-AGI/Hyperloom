@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -88,11 +89,35 @@ def _install_stub_lm_eval(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
     return api_models, openai_completions
 
 
+def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str | None):
+    """Install the probe with an explicit env; ``None`` unsets a variable."""
+    env.setdefault("RESULT_DIR", str(tmp_path))
+    monkeypatch.delenv("HYPERLOOM_EVAL_PROBE", raising=False)
+    for key, val in env.items():
+        if val is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, val)
+    api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
+    monkeypatch.setattr(
+        _StubLocalChatCompletion,
+        "parse_generations",
+        staticmethod(_StubLocalChatCompletion.__dict__["parse_generations"].__func__),
+    )
+    monkeypatch.setattr(_StubTemplateAPI, "amodel_call", _StubTemplateAPI.amodel_call)
+    exec(compile(_EVAL_PROBE_PY, "<probe>", "exec"), {"__name__": "sitecustomize"})
+    return types.SimpleNamespace(
+        api_models=api_models,
+        openai_completions=openai_completions,
+        result_dir=tmp_path,
+    )
+
+
 @pytest.fixture
 def probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Install the probe over stub lm-eval modules with a low trip threshold."""
     monkeypatch.setenv("RESULT_DIR", str(tmp_path))
-    monkeypatch.setenv("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", "4")
+    monkeypatch.setenv("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", "8")
     monkeypatch.setenv("HYPERLOOM_EVAL_PROBE_LENGTH_RATIO", "0.75")
     monkeypatch.delenv("HYPERLOOM_EVAL_PROBE", raising=False)
     api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
@@ -140,16 +165,16 @@ def test_probe_installs_over_upstream_patches(probe):
 
 
 def test_below_min_samples_does_not_short_circuit(probe):
-    """Three capped responses is not yet evidence; the eval must run on."""
+    """One sample short of the minimum is not yet evidence; the eval runs on."""
     obj = _StubTemplateAPI()
-    _feed(probe, "length", 3)
+    _feed(probe, "length", 7)
     assert asyncio.run(_call(probe, obj)) == ["real answer"]
     assert obj.inner_calls == 1
 
 
 def test_trips_and_short_circuits_once_decisive(probe):
     obj = _StubTemplateAPI()
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     assert asyncio.run(_call(probe, obj)) == [""]
     assert obj.inner_calls == 0, "a tripped probe must not reach the server at all"
 
@@ -167,7 +192,7 @@ def test_terminating_model_is_never_short_circuited(probe):
 def test_loglikelihood_requests_are_never_short_circuited(probe):
     """Loglikelihood scoring emits no tokens, so the pathology cannot apply."""
     obj = _StubTemplateAPI()
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     assert asyncio.run(_call(probe, obj, generate=False)) == ["real answer"]
     assert obj.inner_calls == 1
 
@@ -176,7 +201,7 @@ def test_short_circuit_still_populates_the_harness_cache(probe):
     """lm-eval reconciles answers against cache_keys; skipping the hook would
     desync the run it is supposed to let finish cleanly."""
     obj = _StubTemplateAPI()
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     asyncio.run(_call(probe, obj, cache_keys=[("ctx", "kwargs")]))
     assert obj.cached == [("generate_until", ("ctx", "kwargs"), "")]
 
@@ -186,18 +211,21 @@ def test_gate_survives_a_fresh_event_loop(probe):
     first loop that awaits it, so a non-loop-keyed gate would raise here."""
     obj = _StubTemplateAPI()
     asyncio.run(_call(probe, obj))
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     assert asyncio.run(_call(probe, obj)) == [""]
 
 
 def test_sidecar_records_the_evidence(probe):
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     sidecar = probe.result_dir / EVAL_PROBE_FILENAME
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record["reason"] == "model_not_terminating"
-    assert record["observed_samples"] == 4
-    assert record["finish_reason_length"] == 4
+    assert record["observed_samples"] == 8
+    assert record["finish_reason_length"] == 8
     assert record["length_ratio"] == 1.0
+    assert record["cap_hits"] == 8
+    assert record["cap_hit_ratio"] == 1.0
+    assert record["written_at"] > 0
     assert record["max_completion_tokens_seen"] == 16384
     # parse_eval_results globs results*.json for the score; a probe sidecar
     # matching that name would be read as an lm-eval result file.
@@ -207,7 +235,7 @@ def test_sidecar_records_the_evidence(probe):
 def test_sidecar_is_written_once(probe):
     """Every subsequent response would otherwise rewrite it with a diluted
     ratio, since short-circuited requests never report a finish_reason."""
-    _feed(probe, "length", 4)
+    _feed(probe, "length", 8)
     first = (probe.result_dir / EVAL_PROBE_FILENAME).read_text(encoding="utf-8")
     _feed(probe, "length", 20)
     assert (probe.result_dir / EVAL_PROBE_FILENAME).read_text(encoding="utf-8") == first
@@ -254,6 +282,88 @@ def test_read_eval_probe_finds_a_nested_sidecar(probe, tmp_path):
     assert record is not None
     assert record["kind"] == EVAL_KIND_GENERATION_PATHOLOGY
     assert record["source_file"].endswith(EVAL_PROBE_FILENAME)
+
+
+def test_long_answers_below_the_ceiling_do_not_trip(probe):
+    """``finish_reason=length`` alone is not the pathology. lm-eval sizes
+    max_tokens per request from the remaining context, so a truncated-but-
+    terminating model produces capped responses at several different lengths;
+    only the ones piled on the ceiling are evidence of a runaway loop."""
+    obj = _StubTemplateAPI()
+    for tokens in (1024,) * 4 + (2048,) * 4:
+        probe.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("length", tokens))
+    assert asyncio.run(_call(probe, obj)) == ["real answer"]
+    assert not (probe.result_dir / EVAL_PROBE_FILENAME).exists()
+
+
+def test_length_ratio_zero_falls_back_to_the_default(monkeypatch, tmp_path):
+    """0 is exactly what an operator reaches for to disable the probe. Taken
+    literally it makes the ratio test vacuously true and guillotines every eval,
+    so an out-of-range value must fall back to the default, not be clamped."""
+    p = _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8",
+        HYPERLOOM_EVAL_PROBE_LENGTH_RATIO="0",
+    )
+    obj = _StubTemplateAPI()
+    _feed(p, "stop", 8)
+    assert asyncio.run(_call(p, obj)) == ["real answer"]
+    assert not (tmp_path / EVAL_PROBE_FILENAME).exists()
+
+
+def test_min_samples_below_the_floor_falls_back_to_the_default(monkeypatch, tmp_path):
+    """A one-sample window would end the eval on the first capped response."""
+    p = _install(
+        monkeypatch,
+        tmp_path,
+        HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="1",
+        HYPERLOOM_EVAL_PROBE_LENGTH_RATIO="0.75",
+    )
+    obj = _StubTemplateAPI()
+    _feed(p, "length", 8)
+    assert asyncio.run(_call(p, obj)) == ["real answer"]
+
+
+def test_no_result_dir_keeps_the_sidecar_out_of_the_cwd(monkeypatch, tmp_path):
+    """Without ``$RESULT_DIR`` the cwd is InferenceX's checkout, and writing
+    there is the artifact escape the _EVAL_DEST_* patch exists to prevent. The
+    record still reaches stderr, and the eval is still cut short."""
+    monkeypatch.chdir(tmp_path)
+    p = _install(monkeypatch, tmp_path, RESULT_DIR=None, HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8")
+    obj = _StubTemplateAPI()
+    _feed(p, "length", 8)
+    assert asyncio.run(_call(p, obj)) == [""]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_install_drops_a_stale_sidecar(monkeypatch, tmp_path):
+    """The eval-failure retry reuses ``$RESULT_DIR``, so a sidecar left by the
+    previous attempt would be read as this run's verdict."""
+    stale = tmp_path / EVAL_PROBE_FILENAME
+    stale.write_text(json.dumps({"reason": "model_not_terminating"}), encoding="utf-8")
+
+    _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8")
+
+    assert not stale.exists()
+
+
+def test_read_eval_probe_prefers_the_newest_sidecar(tmp_path):
+    """``integrate_patch`` searches the grid slot, where sibling variants each
+    own a sidecar, and attempt dirs are hash-named — so path order says nothing
+    about which eval ran last."""
+    older = tmp_path / "zzz_first" / EVAL_PROBE_FILENAME
+    newer = tmp_path / "aaa_second" / EVAL_PROBE_FILENAME
+    for path, ratio in ((older, 0.1), (newer, 0.9)):
+        path.parent.mkdir()
+        path.write_text(json.dumps({"length_ratio": ratio}), encoding="utf-8")
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
+
+    record = read_eval_probe(tmp_path)
+
+    assert record is not None
+    assert record["length_ratio"] == 0.9
 
 
 def test_read_eval_probe_is_none_without_a_sidecar(tmp_path):
