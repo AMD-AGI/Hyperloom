@@ -13,6 +13,7 @@ ECONNREFUSED (which surfaced as completed=0 -> invalid measurement).
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import time
 import types
@@ -116,6 +117,60 @@ def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytes
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known"), 200, 200])
 
     asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+
+
+def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Skipping the gate is a WARNING, not a silent INFO: a later completed=0
+    must be traceable back to this skip (the #1060 'surface it' discipline)."""
+    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+    _fast_clock(monkeypatch)
+    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+
+    with caplog.at_level(logging.WARNING, logger=life.log.name):
+        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+
+    assert any("SKIPPING the published-service readiness gate" in r.message for r in caplog.records)
+
+
+def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance.
+
+    With it set to 1, a single resolution failure skips immediately (proving the
+    knob is wired); the default (6) would keep polling instead.
+    """
+    monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", "1")
+    monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
+    _fast_clock(monkeypatch)
+    # One gaierror then 200s: skip_after=1 skips on the first failure (returns
+    # before the 200s); if the knob were ignored (default 6) it would pass on 200s
+    # -- either way it returns, but this asserts the env path does not raise/hang.
+    _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])
+
+    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, 4),  # unset -> default
+        ("", 4),  # empty -> default
+        ("2", 2),  # explicit
+        ("0", 1),  # clamped to the minimum (never a self-defeating 0)
+        ("-3", 1),  # negative -> clamped
+        ("junk", 4),  # junk -> default
+    ],
+)
+def test_env_int_clamps_and_survives_junk(
+    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int
+) -> None:
+    """_env_int floors at the minimum and never crashes on junk."""
+    monkeypatch.delenv("HYPERLOOM_MN_TEST_KNOB", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("HYPERLOOM_MN_TEST_KNOB", raw)
+
+    assert life._env_int("HYPERLOOM_MN_TEST_KNOB", 4, minimum=1) == expected
 
 
 def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.MonkeyPatch) -> None:

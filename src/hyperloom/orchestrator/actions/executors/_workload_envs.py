@@ -1137,7 +1137,17 @@ def materialize_config_with_envs(
 
             if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
                 _eval_tok_env = "false"
-        except Exception:  # noqa: BLE001 - best-effort; never block config materialization
+        except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
+            # Don't degrade silently: if this IS a PD run, failing to resolve the
+            # topology leaves MAGPIE_EVAL_TOKENIZED_REQUESTS unset, lm_eval keeps
+            # sending token-id prompts, and the sglang_router 422s every request
+            # -> accuracy reads 0 with no other clue pointing back here.
+            log.warning(
+                "_workload_envs: could not resolve PD topology to gate the lm_eval prompt format (%s); "
+                "if this is a disaggregated run, MAGPIE_EVAL_TOKENIZED_REQUESTS stays unset and the "
+                "sglang_router may reject token-id prompts with HTTP 422 (accuracy eval would read 0)",
+                exc,
+            )
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env

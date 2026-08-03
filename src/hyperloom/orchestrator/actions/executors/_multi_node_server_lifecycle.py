@@ -1525,6 +1525,24 @@ def _published_ready_timeout_s() -> int:
         return 300
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive int knob from the environment, clamped and junk-tolerant.
+
+    Args:
+        name: Environment variable to read.
+        default: Value used when unset or unparseable.
+        minimum: Floor applied to the parsed value (keeps a knob like a
+            required-streak or retry count from being set to a self-defeating 0).
+
+    Returns:
+        int: The resolved value, at least ``minimum``.
+    """
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
 async def _wait_for_published_service_ready_async(
     timeout_s: int = 300,
     poll_every_s: int = 10,
@@ -1580,15 +1598,18 @@ async def _wait_for_published_service_ready_async(
         return
 
     health_url = published + "/health"
-    # Two consecutive 200s so a single endpoint-list flap does not pass us.
-    required_ok = 2
+    # Consecutive 200s required so a single endpoint-list flap does not pass us
+    # (override: HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK).
+    required_ok = _env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
     ok_streak = 0
     # Skip only after this many CONSECUTIVE name-resolution failures, so a
     # CoreDNS blip inside the readiness window (which resolves on a later poll)
-    # does not disable the gate exactly when it is needed. A genuinely
-    # unresolvable name (the outside-cluster case) still skips within
-    # ~dns_skip_after * poll_every_s seconds rather than idling the full budget.
-    dns_skip_after = 3
+    # does not disable the gate exactly when it is needed. The default gives
+    # ~dns_skip_after * poll_every_s = 60s of DNS tolerance, wide enough to ride
+    # out a CoreDNS rollout; a genuinely unresolvable name (the outside-cluster
+    # case) still skips after that rather than idling the full budget. Override
+    # HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER to widen it further for slow CoreDNS.
+    dns_skip_after = _env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6)
     dns_failures = 0
     started = _time.monotonic()
     last_err = ""
@@ -1619,11 +1640,19 @@ async def _wait_for_published_service_ready_async(
                 if _is_name_resolution_error(exc):
                     dns_failures += 1
                     if dns_failures >= dns_skip_after:
-                        log.info(
-                            "published service_url %s did not resolve from here after %d attempts; "
-                            "skipping published-service readiness gate",
+                        # Surface, don't degrade silently: to the caller this is
+                        # indistinguishable from a pass, so a later completed=0 /
+                        # magpie_nonzero_invalid_measurement has no other clue it
+                        # was this skip. WARN (not INFO) so it is greppable and
+                        # correlatable with a downstream benchmark failure.
+                        log.warning(
+                            "published service_url %s did not resolve from here after %d consecutive "
+                            "attempts (~%ds); SKIPPING the published-service readiness gate. If this is "
+                            "an in-cluster run this is a DNS problem, and a following benchmark "
+                            "completed=0 / ECONNREFUSED likely traces back to this skip.",
                             health_url,
                             dns_failures,
+                            dns_failures * poll_every_s,
                         )
                         return
                     ok_streak = 0
