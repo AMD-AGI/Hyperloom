@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Idempotent, backward-compatible patcher for InferenceX
-``benchmarks/benchmark_lib.sh``.
+"""Idempotent, backward-compatible patchers for the InferenceX checkout.
 
-Upstream resets ``num_prompts="$max_concurrency"`` under ``PROFILE=1``,
-stomping ``--num-prompts`` so the engine finishes before the steady-state
-profiling window opens. The patch makes that line honour
-``${NUM_PROMPTS:-$max_concurrency}`` — bit-for-bit identical when the env is
-unset.
+Each ``ensure_*`` function rewrites one upstream line in place: ``$NUM_PROMPTS``
+support and ``PROFILE_EXTRA_BODY`` consumption for profiling, the eval-artifact
+redirect to ``$RESULT_DIR``, the ``HYPERLOOM_EVAL_START`` phase marker, and the
+generation-pathology probe injected into lm-eval's ``sitecustomize.py``.
 
 Applied in place, once: idempotent via a sentinel substring, serialized across
 processes via ``fcntl.flock``, written atomically. Returns ``False``
@@ -76,6 +74,131 @@ _EVAL_START_LEGACY = '    export EVAL_RESULT_DIR="$results_dir"'
 _EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPERLOOM_EVAL_START" >&2'
 _EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
 _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
+
+# Early-exit probe for a model that never emits EOS. InferenceX runs lm-eval
+# with ``--gen_kwargs max_tokens=min(16384, ctx-4096)``, so a degenerate model
+# burns that budget on every one of GSM8K's 1319 docs and takes the whole
+# baseline timeout with it. Injected as source rather than imported: the
+# lm-eval subprocess shares an interpreter with Hyperloom only by accident.
+_EVAL_PROBE_PY = """
+# --- HYPERLOOM_EVAL_PROBE ---------------------------------------------------
+import json as _hl_json
+import os as _hl_os
+import sys as _hl_sys
+
+
+def _hl_eval_probe_install():
+    if (_hl_os.environ.get("HYPERLOOM_EVAL_PROBE") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+
+    def _num(name, default, cast):
+        try:
+            return cast((_hl_os.environ.get(name) or "").strip())
+        except (TypeError, ValueError):
+            return default
+
+    min_samples = max(1, _num("HYPERLOOM_EVAL_PROBE_MIN_SAMPLES", 16, int))
+    ratio_limit = _num("HYPERLOOM_EVAL_PROBE_LENGTH_RATIO", 0.75, float)
+
+    import asyncio as _hl_asyncio
+    from lm_eval.models import api_models as _hl_api
+    from lm_eval.models.openai_completions import LocalChatCompletion as _hl_lcc
+
+    state = {"observed": 0, "length": 0, "max_tokens_seen": 0, "tripped": False}
+
+    def _emit():
+        record = {
+            "reason": "model_not_terminating",
+            "observed_samples": state["observed"],
+            "finish_reason_length": state["length"],
+            "length_ratio": round(float(state["length"]) / state["observed"], 4),
+            "max_completion_tokens_seen": state["max_tokens_seen"],
+            "min_samples": min_samples,
+            "length_ratio_threshold": ratio_limit,
+        }
+        blob = _hl_json.dumps(record, sort_keys=True)
+        print("HYPERLOOM_EVAL_PROBE_TRIPPED " + blob, file=_hl_sys.stderr, flush=True)
+        # $RESULT_DIR, never $EVAL_RESULT_DIR: append_lm_eval_summary rm -rf's
+        # the latter. The name must not match results*.json -- that glob is how
+        # parse_eval_results finds the accuracy score.
+        out_dir = (_hl_os.environ.get("RESULT_DIR") or "").strip() or "."
+        _hl_os.makedirs(out_dir, exist_ok=True)
+        with open(_hl_os.path.join(out_dir, "hyperloom_eval_probe.json"), "w", encoding="utf-8") as fh:
+            fh.write(blob)
+
+    def _observe(outputs):
+        for out in outputs if isinstance(outputs, list) else [outputs]:
+            seen = int((out.get("usage") or {}).get("completion_tokens") or 0)
+            state["max_tokens_seen"] = max(state["max_tokens_seen"], seen)
+            for choice in out.get("choices") or []:
+                state["observed"] += 1
+                if choice.get("finish_reason") == "length":
+                    state["length"] += 1
+        if state["observed"] >= min_samples and float(state["length"]) / state["observed"] >= ratio_limit:
+            state["tripped"] = True
+            _emit()
+
+    # Wrap whatever is installed now so InferenceX's own parse_generations
+    # patch (appended just above) stays in effect. Observation must never break
+    # the eval it is watching, hence the guard.
+    _hl_prev_parse = _hl_lcc.parse_generations
+
+    def _hl_probe_parse_generations(outputs, **kwargs):
+        if not state["tripped"]:
+            try:
+                _observe(outputs)
+            except Exception:
+                pass
+        return _hl_prev_parse(outputs, **kwargs)
+
+    _hl_lcc.parse_generations = staticmethod(_hl_probe_parse_generations)
+
+    # get_batched_requests creates one task per request up front, and
+    # amodel_call builds its payload BEFORE awaiting the inner semaphore, so
+    # every payload already carries the large max_tokens by the time the probe
+    # trips. Park the tasks in an equally sized outer gate instead. asyncio.run
+    # builds a fresh loop per batch and a Semaphore binds to the first loop
+    # that awaits it, so the gate is loop-keyed.
+    _hl_prev_amodel_call = _hl_api.TemplateAPI.amodel_call
+    gate = {"loop": None, "sem": None}
+
+    async def _hl_probe_amodel_call(self, session, sem, messages, **kwargs):
+        loop = _hl_asyncio.get_running_loop()
+        if gate["loop"] is not loop:
+            gate["loop"] = loop
+            gate["sem"] = _hl_asyncio.Semaphore(max(1, int(self._concurrent or 1)))
+        async with gate["sem"]:
+            if not (state["tripped"] and kwargs.get("generate", True)):
+                return await _hl_prev_amodel_call(self, session, sem, messages, **kwargs)
+            answers = [""] * len(messages)
+            for answer, cache_key in zip(answers, kwargs.get("cache_keys") or []):
+                self.cache_hook.add_partial("generate_until", cache_key, answer)
+            return answers
+
+    _hl_api.TemplateAPI.amodel_call = _hl_probe_amodel_call
+
+
+# sitecustomize runs at interpreter startup: raising here would break every
+# python3 the benchmark shells out to, not just lm-eval.
+try:
+    _hl_eval_probe_install()
+except Exception:
+    pass
+# --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
+"""
+
+# Anchored on the unique ``export PYTHONPATH`` line that closes
+# ``_patch_lm_eval``. The heredoc is quoted so nothing inside it is
+# shell-expanded, and its terminator must sit at column 0.
+_EVAL_PROBE_LEGACY = '    export PYTHONPATH="${patch_dir}:${PYTHONPATH:-}"'
+_EVAL_PROBE_PATCHED = (
+    "    cat >> \"$patch_dir/sitecustomize.py\" <<'HYPERLOOM_PY'\n"
+    + _EVAL_PROBE_PY.lstrip("\n")
+    + "HYPERLOOM_PY\n"
+    + _EVAL_PROBE_LEGACY
+)
+_EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
+_EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_probe_patcher.lock")
 
 
 def _discover_inferencex_roots(
@@ -543,9 +666,74 @@ def ensure_benchmark_lib_eval_start_patched(
     )
 
 
+def _is_eval_probe_patched(src: Path) -> bool:
+    """Return whether ``benchmark_lib.sh`` already injects the eval probe.
+
+    Args:
+        src (Path): The ``benchmark_lib.sh`` file to inspect.
+
+    Returns:
+        bool: ``True`` if the eval-probe sentinel is present; ``False`` on a
+        miss or read error.
+    """
+    return file_contains_sentinel(src, _EVAL_PROBE_SENTINEL, log, "_inferencex_patcher")
+
+
+def ensure_benchmark_lib_eval_probe_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure ``_patch_lm_eval`` also installs Hyperloom's early-exit probe.
+
+    The probe watches ``finish_reason`` on completed responses; once the sample
+    is decisive it answers the remaining requests with an empty string, so
+    lm-eval still finishes normally and writes a ``results*.json`` scoring ~0 --
+    the verdict a non-terminating model would have earned hours later anyway.
+    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
+    is missing or the anchor line is absent — the eval then runs unbounded as
+    before. Concurrency-safe; independent lock so it does not serialize with
+    the other patches on the same file.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        True when at least one discovered ``benchmark_lib.sh`` is patched (or
+        already patched), False when none could be patched.
+    """
+    return _ensure_patched(
+        _resolve_benchmark_lib_paths(inferencex_path),
+        _is_eval_probe_patched,
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_EVAL_PROBE_LEGACY,
+            patched_line=_EVAL_PROBE_PATCHED,
+            tmp_prefix=".benchmark_lib.sh.eval_probe_",
+            missing_msg=(
+                "_inferencex_patcher: expected _patch_lm_eval PYTHONPATH export "
+                "not found in %s; upstream layout may have changed. A model that "
+                "never emits EOS will run the accuracy eval to the full "
+                "max_tokens budget on every sample instead of exiting early."
+            ),
+            success_msg=("_inferencex_patcher: installed eval generation-pathology probe in %s"),
+        ),
+        _EVAL_PROBE_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "benchmark_lib.sh missing — skipping eval-probe patch (fine for "
+            "tests and dry-runs without a real InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to eval-probe-patch %s; other discovered roots will still be attempted"
+        ),
+    )
+
+
 __all__ = [
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
+    "ensure_benchmark_lib_eval_probe_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
 ]

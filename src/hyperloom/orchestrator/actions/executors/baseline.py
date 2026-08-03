@@ -62,6 +62,7 @@ from ._workload_envs import (
 )
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
+    ensure_benchmark_lib_eval_probe_patched,
     ensure_benchmark_lib_eval_start_patched,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
@@ -1152,6 +1153,14 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 — patch is best-effort
                 log.warning(
                     "baseline_executor: eval-start patch skipped for %s: %s",
+                    ix_root,
+                    exc,
+                )
+            try:
+                ensure_benchmark_lib_eval_probe_patched(Path(ix_root))
+            except Exception as exc:  # noqa: BLE001 — patch is best-effort
+                log.warning(
+                    "baseline_executor: eval-probe patch skipped for %s: %s",
                     ix_root,
                     exc,
                 )
@@ -2916,7 +2925,7 @@ class BaselineExecutor:
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
             )
         else:
-            from ._accuracy_gate import parse_eval_results
+            from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
 
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
             # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
@@ -2931,6 +2940,11 @@ class BaselineExecutor:
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
+            # Records why the score is ~0; the score itself is already correct.
+            eval_probe = read_eval_probe(eval_search_root)
+            if eval_probe:
+                result["eval_probe"] = eval_probe
+                log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",

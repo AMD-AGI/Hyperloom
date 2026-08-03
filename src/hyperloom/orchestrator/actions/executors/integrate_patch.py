@@ -31,7 +31,9 @@ from ._accuracy_gate import (
     accuracy_meets_floor,
     accuracy_passed,
     classify_accuracy_failure,
+    eval_probe_summary,
     parse_eval_results,
+    read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
@@ -2712,6 +2714,9 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
+            if _probe_reason:
+                reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
@@ -3172,9 +3177,6 @@ class IntegratePatchExecutor:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
-        Returns ``(bench_result_dict, gate_evidence)`` where gate_evidence
-        carries ``accuracy_pass`` (True / False / None).
-
         Args:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
@@ -3185,7 +3187,8 @@ class IntegratePatchExecutor:
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
-            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None).
+            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
+            and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
@@ -3324,12 +3327,16 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
+        # Guarded: an empty root would send the recursive scan over the cwd.
+        eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
+
         return bench, {
             "accuracy_pass": accuracy_pass,
             "accuracy": measured_accuracy,
             "enablement_accuracy": enablement_accuracy,
             "enablement_accuracy_task": enablement_accuracy_task,
             "enablement_accuracy_metric": enablement_accuracy_metric,
+            "eval_probe": eval_probe,
         }
 
     @staticmethod

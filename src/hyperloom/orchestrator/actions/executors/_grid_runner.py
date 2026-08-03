@@ -45,7 +45,10 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 from .benchmark_backend import build_benchmark_command
-from ._inferencex_patcher import ensure_benchmark_lib_eval_start_patched
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_eval_probe_patched,
+    ensure_benchmark_lib_eval_start_patched,
+)
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -926,12 +929,21 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Baseline patches its own checkout, but explore / sweep never pass
         # through that hook: re-assert here so a resumed session or a re-cloned
-        # checkout still emits the eval-start marker. Idempotent.
+        # checkout still emits the eval-start marker and installs the
+        # generation-pathology probe. Both idempotent.
         try:
             ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
         except Exception as exc:  # noqa: BLE001 — patch is best-effort
             log.warning(
                 "_grid_runner: eval-start patch skipped for %s: %s",
+                inferencex_path,
+                exc,
+            )
+        try:
+            ensure_benchmark_lib_eval_probe_patched(Path(inferencex_path))
+        except Exception as exc:  # noqa: BLE001 — patch is best-effort
+            log.warning(
+                "_grid_runner: eval-probe patch skipped for %s: %s",
                 inferencex_path,
                 exc,
             )
