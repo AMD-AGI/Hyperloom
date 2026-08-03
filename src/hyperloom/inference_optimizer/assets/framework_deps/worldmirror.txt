@@ -1,0 +1,28 @@
+# WorldMirror (HY-World-2.0) runtime dependencies.
+#
+# Derived by AST-scanning every import under hyworld2/worldrecon (including
+# function-local ones) and keeping what the benchmark path actually reaches.
+# The upstream requirements.txt is NOT usable verbatim: it pins torch==2.7.1 /
+# numpy==1.26.4 / open3d==0.18.0, which would swap this pod's ROCm torch for a
+# CUDA build, and it drags in panogen / GS-training deps nothing here imports.
+#
+# Deliberately absent:
+#   flash_attn            - no ROCm wheel; served by the SDPA shim in
+#                           benchmark_scripts/worldmirror_compat/
+#   gradio, spaces,       - gradio_app.py only (interactive demo), never on
+#   pillow_heif             the benchmark path
+
+einops
+plyfile
+trimesh
+opencv-python:cv2
+
+# Gaussian-splat rasterization, called on the model forward path
+# (worldmirror.py: self.gs_renderer.render).
+gsplat
+
+# Function-local imports, invisible to a plain import of the pipeline module
+# but hit at run time:
+onnxruntime      # inference_utils.compute_sky_mask
+moviepy          # render_utils.render_interpolated_video
+pycolmap         # inference_utils, COLMAP camera/depth priors
