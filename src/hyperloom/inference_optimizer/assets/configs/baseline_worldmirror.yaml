@@ -28,6 +28,11 @@ benchmark:
     WM_TORCH_COMPILE_MODE: default
     WM_TORCH_COMPILE_DYNAMIC: 0
     WM_USE_AITER_ATTN: 0
+    # Headline latency covers the model forward only. A reconstruction also
+    # runs CPU sky/edge masking and point-cloud serialisation (~1.9s vs ~0.11s
+    # forward); measuring those would dilute a real GPU win below noise.
+    # Set to "e2e" to optimize whole-pipeline wall-clock instead.
+    WM_METRIC_SCOPE: inference
     # Reuses the existing scriptable quality-ref injection keys.
     XDIT_QUALITY_REF: ""
     WM_QUALITY_REL_MAX: 0.2

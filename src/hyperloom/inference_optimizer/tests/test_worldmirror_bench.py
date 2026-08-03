@@ -52,3 +52,52 @@ def test_worldmirror_depth_quality_ref_write_and_compare(tmp_path):
     assert established["reason"] == "reference_established"
     assert compared["passed"] is True
     assert compared["heads"]["depth"]["rel_l1"] == 0.0
+
+
+def test_metric_scope_defaults_to_inference(monkeypatch):
+    """The forward is ~5% of a reconstruction; e2e would bury a real GPU win."""
+    bench = _load_bench()
+    monkeypatch.delenv("WM_METRIC_SCOPE", raising=False)
+    assert bench.metric_scope() == "inference"
+    monkeypatch.setenv("WM_METRIC_SCOPE", "  E2E ")
+    assert bench.metric_scope() == "e2e"
+    monkeypatch.setenv("WM_METRIC_SCOPE", "nonsense")
+    assert bench.metric_scope() == "inference"
+
+
+def test_read_stage_timings_parses_pipeline_output(tmp_path):
+    bench = _load_bench()
+    (tmp_path / "pipeline_timing.json").write_text(
+        '{"inference": 0.11022, "compute_mask": 1.187, "case_total": 2.036, "note": "x"}',
+        encoding="utf-8",
+    )
+    stages = bench.read_stage_timings(tmp_path)
+    assert stages["inference"] == 0.11022
+    assert stages["case_total"] == 2.036
+    assert "note" not in stages, "non-numeric entries must be dropped"
+
+
+def test_read_stage_timings_missing_or_corrupt_is_empty(tmp_path):
+    bench = _load_bench()
+    assert bench.read_stage_timings(tmp_path) == {}
+    (tmp_path / "pipeline_timing.json").write_text("not json", encoding="utf-8")
+    assert bench.read_stage_timings(tmp_path) == {}
+
+
+def test_bench_driver_always_enables_log_time():
+    """The reported latency is derived from the per-stage file, which the
+    pipeline only writes when log_time is on."""
+    src = _BENCH_PATH.read_text(encoding="utf-8")
+    assert "log_time=bool(args.profile_dir)" not in src
+    assert "log_time=True" in src
+
+
+def test_bench_driver_captures_a_profiler_trace():
+    """Without an exported trace, roofline and the kernel agent have no input."""
+    src = _BENCH_PATH.read_text(encoding="utf-8")
+    assert "from torch.profiler import ProfilerActivity, profile" in src
+    assert "export_chrome_trace" in src
+    # Profiling must not inflate the measurement it is meant to explain, so the
+    # call site has to sit after the timed loop closes.
+    call_site = src.index("_capture_profile_trace(pipeline, scenes[0]")
+    assert call_site > src.index("duration = time.perf_counter() - start")
