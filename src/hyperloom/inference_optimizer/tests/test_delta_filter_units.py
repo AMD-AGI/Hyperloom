@@ -241,3 +241,191 @@ def test_delta_features_capture_flags_and_envs():
     assert feats["env_SGLANG_USE_AITER"] == 1
     assert feats["shape_n_flags"] == 2
     assert feats["shape_max_num"] == 16.0
+
+
+class TestUnionBackend:
+    """Both backends configured: threshold, plus the ranker's top picks.
+
+    The two models disagree in useful ways -- the GBDT thresholds an absolute
+    score, the ranker orders better -- so the union was measured to lose the
+    best candidate on 1.1% of identities where the threshold alone loses 1.1
+    times more, for 0.1pp of extra candidates kept.
+    """
+
+    @staticmethod
+    def _reply(order: str):
+        """Patch the ranker call to return a fixed ordering."""
+        return lambda variants, identity_text: [int(t) - 1 for t in order.split(",")]
+
+    def test_ranker_top_pick_survives_a_failing_score(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        """The whole point: a candidate the threshold drops is rescued by rank 1."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        # "cons" carries the flag trained as harmful, so it scores below 0.5 and
+        # the threshold alone drops it -- but the ranker puts it first.
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,1,3"))
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert info["reason"] == "ok_union"
+        assert info["backend"] == "union"
+        assert "cons" in {v.name for v in kept}
+        assert info["backstop_added"] == ["cons"]
+
+    def test_backstop_zero_reduces_to_the_threshold(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        """Operators who want the old behaviour can turn the rescue off."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        monkeypatch.setenv(df.ENV_BACKSTOP, "0")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,1,3"))
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert "cons" not in {v.name for v in kept}
+        assert info["backstop_added"] == []
+
+    def test_survivors_keep_their_original_order(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        """The union selects; it does not reorder what the caller then measures."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,1,3"))
+        kept, _ = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        names = [v.name for v in kept]
+        assert names == sorted(names, key=[v.name for v in grid].index)
+
+    def test_falls_back_to_the_gbdt_when_the_ranker_is_unreachable(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        """Losing one backend degrades to the other, never to no filtering."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity: None)
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert info["reason"] == "ok"
+        assert info["backend"] == "gbdt"
+        assert info["llm_reason"] == "llm_unavailable"
+        assert "cons" not in {v.name for v in kept}
+
+    def test_falls_back_to_the_ranker_when_the_artifact_is_missing(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        monkeypatch.setenv(df.ENV_DIR, str(tmp_path / "absent"))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_KEEP_FRACTION, "0.3")
+        monkeypatch.setattr(df, "_rank_with_llm", self._reply("2,1,3"))
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert info["reason"] == "ok_llm"
+        assert info["gbdt_reason"] == "artifact_unreadable"
+        assert [v.name for v in kept] == ["cons"]
+
+    def test_both_unavailable_keeps_everything(
+            self, monkeypatch, tmp_path, grid, ctx, checkpoint):
+        monkeypatch.setenv(df.ENV_DIR, str(tmp_path / "absent"))
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity: None)
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert kept == grid
+        assert info["applied"] is False
+
+    def test_bad_backstop_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv(df.ENV_BACKSTOP, "not-a-number")
+        assert df._backstop() == df.DEFAULT_BACKSTOP
+
+
+class TestContextFeatures:
+    """Features describing a candidate's standing within its own grid.
+
+    An artifact trained with them scores wrong rather than failing if the caller
+    computes them differently, so the arithmetic is pinned here against the
+    training-side definition in recipe-rank/try_context_features.py.
+    """
+
+    def test_relative_position_spans_the_field(self):
+        rows = [{"shape_n_flags": 1}, {"shape_n_flags": 3}, {"shape_n_flags": 5}]
+        df._add_context_features(rows)
+        assert [r["ctx_shape_n_flags_rel"] for r in rows] == [0.0, 0.5, 1.0]
+        assert [r["ctx_shape_n_flags_dev"] for r in rows] == [-2.0, 0.0, 2.0]
+        assert all(r["ctx_n_candidates"] == 3 for r in rows)
+
+    def test_identical_candidates_do_not_divide_by_zero(self):
+        rows = [{"shape_n_flags": 2}, {"shape_n_flags": 2}]
+        df._add_context_features(rows)
+        assert all(r["ctx_shape_n_flags_rel"] == 0.0 for r in rows)
+
+    def test_rarity_falls_as_a_flag_becomes_common(self):
+        """A flag every candidate carries distinguishes none of them."""
+        shared = [{"flag__kv_cache_dtype": 1} for _ in range(4)]
+        df._add_context_features(shared)
+        assert shared[0]["ctx_flag_rarity"] == 0.0
+
+        mixed = [{"flag__kv_cache_dtype": 1}, {"flag__page_size": 1},
+                 {"flag__page_size": 1}, {"flag__page_size": 1}]
+        df._add_context_features(mixed)
+        assert mixed[0]["ctx_flag_rarity"] > mixed[1]["ctx_flag_rarity"]
+
+    def test_flagless_candidate_gets_zero_rarity(self):
+        rows = [{"shape_n_flags": 0}, {"flag__page_size": 1}]
+        df._add_context_features(rows)
+        assert rows[0]["ctx_flag_rarity"] == 0.0
+
+    def test_empty_grid_is_a_no_op(self):
+        rows: list = []
+        df._add_context_features(rows)
+        assert rows == []
+
+    def test_artifacts_without_context_columns_skip_the_pass(
+            self, monkeypatch, tmp_path, grid, ctx):
+        """The shipped model has no ctx_ columns and must be unaffected."""
+        called = {"n": 0}
+        real = df._add_context_features
+        monkeypatch.setattr(df, "_add_context_features",
+                            lambda rows: (called.__setitem__("n", called["n"] + 1),
+                                          real(rows))[1])
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        df.filter_variants(grid, **ctx)
+        assert called["n"] == 0
+
+
+class TestRelativeCut:
+    """Cutting at a share of the identity's own top score rather than a constant.
+
+    The fixed cut is calibrated across the corpus but not within an identity, so
+    it drops the best candidate of a low-scoring identity and keeps junk from a
+    high-scoring one. On both held-out splits the relative cut dominates it:
+    at max*0.08 it saves 20pp more candidates for the same 1.5% loss rate.
+    """
+
+    def test_scales_with_the_identity_top_score(self, monkeypatch):
+        monkeypatch.setenv(df.ENV_RELATIVE, "0.08")
+        cut, label = df._cut_for([0.9, 0.5, 0.01])
+        assert cut == pytest.approx(0.072)
+        assert label == "max*0.080"
+
+    def test_top_scorer_always_clears_the_cut(self, monkeypatch, tmp_path, grid, ctx):
+        """A relative cut cannot empty the grid, however low the scores are."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_RELATIVE, "0.99")
+        kept, info = df.filter_variants(grid, **ctx)
+        assert kept, "the highest-scoring candidate must survive"
+        assert info["reason"] == "ok", "the empty-grid fallback should not fire"
+
+    def test_unset_keeps_the_fixed_cut(self, monkeypatch):
+        monkeypatch.delenv(df.ENV_RELATIVE, raising=False)
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.25")
+        cut, label = df._cut_for([0.9, 0.5, 0.01])
+        assert cut == 0.25
+        assert label == "0.250"
+
+    @pytest.mark.parametrize("bad", ["not-a-number", "0", "1", "1.5", "-0.2"])
+    def test_out_of_range_falls_back_to_the_fixed_cut(self, monkeypatch, bad):
+        """A factor at or past the ends is not a cut anyone meant to ask for."""
+        monkeypatch.setenv(df.ENV_RELATIVE, bad)
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.030")
+        assert df._cut_for([0.9, 0.5])[0] == 0.030
+
+    def test_all_zero_scores_fall_back_to_the_fixed_cut(self, monkeypatch):
+        """Scaling by a zero top score would keep everything; the constant won't."""
+        monkeypatch.setenv(df.ENV_RELATIVE, "0.08")
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.030")
+        assert df._cut_for([0.0, 0.0])[0] == 0.030
