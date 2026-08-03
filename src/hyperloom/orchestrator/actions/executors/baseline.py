@@ -1739,10 +1739,16 @@ class BaselineExecutor:
         salvaged: dict[str, Any],
         shared_state: Any,
     ) -> float:
-        """Record a salvaged sibling accuracy on the result and SharedState.
+        """Record a salvaged sibling accuracy as evidence, and as the gate input
+        only when it can serve as one.
 
-        Records the score whatever its value; deciding whether it is *usable*
-        belongs to the caller, which knows the applicable floor.
+        The ``result`` fields are evidence and carry the score whatever its
+        value. ``SharedState.baseline_accuracy`` is not evidence — it is the
+        reference every later accuracy gate compares against, and ``<= 0`` is
+        that gate's "no baseline, skip the check" sentinel
+        (:func:`accuracy_passed`). Publishing a measured zero there would turn a
+        real quality failure into a silent gate bypass for every subsequent
+        candidate, so the two are written under different conditions.
 
         Args:
             result: The baseline result dict, mutated in place.
@@ -1753,6 +1759,8 @@ class BaselineExecutor:
         Returns:
             float: The salvaged accuracy.
         """
+        from ._accuracy_gate import accuracy_meets_floor
+
         acc_val = float(salvaged["accuracy"])
         result["accuracy"] = acc_val
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
@@ -1760,7 +1768,7 @@ class BaselineExecutor:
         result["accuracy_source"] = salvaged.get("source_file", "")
         result.setdefault("nonfatal_warnings", [])
         result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
-        if shared_state is not None:
+        if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             try:
                 shared_state.baseline_accuracy = acc_val
             except Exception:  # noqa: BLE001 — salvage must never break baseline
