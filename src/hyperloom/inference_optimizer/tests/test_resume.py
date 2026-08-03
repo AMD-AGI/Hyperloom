@@ -209,7 +209,6 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     c1 = Coordinator(session_dir, backends=backends)
     try:
         # Seed prerequisites so arbitrary proposals are accepted.
-        c1.shared_state.baseline_tput = 100.0
         c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c1.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
@@ -227,6 +226,10 @@ async def test_replay_mixed_pending_and_decided(session_dir):
             )
             tail = await c1.bus.tail(topic="proposal", n=1)
             proposal_ids.append(tail[0].msg_id)
+            if action == "baseline":
+                # profile/explore require baseline_tput > 0 (execution_order);
+                # the real baseline action would have set this on completion.
+                c1.shared_state.baseline_tput = 100.0
 
         await c1._handle_intent(
             "critic",

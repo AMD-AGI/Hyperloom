@@ -7,6 +7,7 @@ reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,6 +68,57 @@ def coord(session_dir) -> Coordinator:
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
     out = coord._context_inbox_reader()
     assert out == "(no inbox events)"
+
+
+def test_trace_orchestration_turn_persists_diagnostics(coord: Coordinator) -> None:
+    backend = SimpleNamespace(
+        model="claude-test",
+        get_turn_diagnostic=lambda: {
+            "backend": "ClaudeBackend",
+            "model": "claude-test",
+            "sdk_name": "claude_agent_sdk",
+            "sdk_version": "1.2.3",
+            "resume_requested": True,
+            "previous_session_id_hash": "old",
+            "session_id_hash": "new",
+            "new_session": False,
+            "max_turns": 12,
+            "timeout_sec": 300.0,
+            "prompt": "prompt",
+            "system_prompt": "system",
+            "allowed_tools": ["mcp__inference_optimizer__emit_intent"],
+            "mcp_servers": ["inference_optimizer"],
+            "emit_intent_registered": True,
+            "messages": [{"type": "ResultMessage", "is_error": False, "result": "done"}],
+            "result": "done",
+            "raw_text": "done",
+            "tool_blocks": [],
+            "parse_errors": [],
+            "usage": {"input_tokens": 3},
+            "stderr_tail": [],
+        },
+        get_mcp_setup_diagnostic=lambda: {
+            "sdk_name": "claude_agent_sdk",
+            "emit_intent": {"registered": True},
+        },
+    )
+
+    coord._trace_orchestration_turn(
+        agent_name="orchestration",
+        backend=backend,
+        prompt="prompt",
+        system_prompt="system",
+        tools=["emit_intent"],
+        outcome="no_intent",
+        error=RuntimeError("missing intent"),
+    )
+
+    row = json.loads((coord.session_dir / "reports" / "trace" / "orchestration_turns.jsonl").read_text())
+    setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
+    assert row["outcome"] == "no_intent"
+    assert row["resume_requested"] is True
+    assert row["error_type"] == "RuntimeError"
+    assert setup["emit_intent"]["registered"] is True
 
 
 @pytest.mark.asyncio

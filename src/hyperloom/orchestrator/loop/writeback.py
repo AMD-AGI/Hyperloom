@@ -22,7 +22,8 @@ from ..state.optimization_journal import (
     operation_kind_for,
     summarize_change,
 )
-from ..state.shared_state import SharedState
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -647,7 +648,7 @@ class WritebackCollaborator:
             # pending state, preserve the frozen trigger identity, increment stall.
             reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
             is_revalidation = bool(
-                (task.params or {}).get("reason") == "enablement_eval_revalidation"
+                (task.params or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
@@ -2031,8 +2032,8 @@ class WritebackCollaborator:
         bv: dict[str, Any],
         *,
         gap_canonical_id: str = "",
-    ) -> None:
-        """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name.
+    ) -> bool:
+        """Lift a winner only when it improves the current throughput anchor.
 
         Args:
             task_kind: The action kind that produced the winner (stamped on the
@@ -2041,7 +2042,20 @@ class WritebackCollaborator:
             bv: The winning variant dict (args, envs, metrics, provenance).
             gap_canonical_id: When known, stamped onto the stack entry so
                 provenance resolves by gap id rather than name.
+
+        Returns:
+            ``True`` when the winner was lifted, ``False`` when it was refused
+            for not beating the current anchor.
         """
+        anchor = resolve_grading_anchor_tput(self.shared_state)
+        if anchor > 0 and float(best_tput) <= anchor:
+            log.info(
+                "current_best held at %.1f: %s winner measured %.1f (no lift)",
+                anchor,
+                task_kind,
+                float(best_tput),
+            )
+            return False
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
@@ -2193,6 +2207,7 @@ class WritebackCollaborator:
             self.shared_state.cumulative_gain = (
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
+        return True
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
         """Whether to enqueue the post-baseline PRELUDE bootstrap chain.
@@ -2323,7 +2338,7 @@ class WritebackCollaborator:
         promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         is_revalidation = bool(
-            task_params.get("reason") == "enablement_eval_revalidation"
+            task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
         # The anchor is the best measurement of the unmodified stack. A later,
@@ -2487,14 +2502,19 @@ class WritebackCollaborator:
             # Stamp canonical params fingerprint for the self-loop denial helper.
             "fingerprint": _baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
-            "is_revalidation": bool(task_params.get("reason") == "enablement_eval_revalidation"),
+            "is_revalidation": bool(task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON),
             "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
             "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+        # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
+        if result.get("eval_probe"):
+            audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
+        if self.shared_state.baseline_tput > 0:
+            await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
         # snapshot ceiling in case the later roofline step fails.
         if isinstance(tput, (int, float)) and tput > 0:
@@ -2539,6 +2559,61 @@ class WritebackCollaborator:
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+
+    async def _drain_queued_baselines(self, *, reason: str) -> list[str]:
+        """Cancel redundant queued baselines, preserving enablement revalidation.
+
+        Args:
+            reason: Stamped onto the cancellation history and the observation.
+
+        Returns:
+            The cancelled task ids (empty when the queue held none).
+        """
+        spared = await self._enablement_revalidation_task_ids()
+        try:
+            cancelled = await self.tasks.cancel_family(
+                ["baseline"],
+                reason=reason,
+                exclude_task_ids=spared,
+            )
+        except Exception:  # noqa: BLE001 — draining is best-effort
+            log.exception("baseline drain: cancel_family failed")
+            return []
+        if not cancelled:
+            return []
+        log.info(
+            "baseline drain: cancelled %d queued baseline task(s) (reason=%s, spared=%d)",
+            len(cancelled),
+            reason,
+            len(spared),
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "baseline_drain",
+                "reason": reason,
+                "cancelled_task_ids": cancelled,
+                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+            },
+        )
+        return cancelled
+
+    async def _enablement_revalidation_task_ids(self) -> set[str]:
+        """Return queued enablement-revalidation baseline task IDs."""
+        spared: set[str] = set()
+        tracked = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        if tracked:
+            spared.add(tracked)
+        try:
+            for task in await self.tasks.queued():
+                if str(getattr(task, "kind", "") or "") != "baseline":
+                    continue
+                if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
+                    spared.add(str(getattr(task, "task_id", "") or ""))
+        except Exception:  # noqa: BLE001 — fall back to the tracked id alone
+            log.exception("baseline drain: queued-task scan failed")
+        return {t for t in spared if t}
 
     async def _promote_replay_warm_recipe(
         self,
@@ -3047,13 +3122,12 @@ class WritebackCollaborator:
                 explore_gap_cid = (
                     str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
                 )
-                self._lift_to_current_best(
+                promoted = self._lift_to_current_best(
                     "explore",
                     float(best_tput),
                     best_winner,
                     gap_canonical_id=explore_gap_cid,
                 )
-                promoted = True
                 changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
@@ -3070,7 +3144,12 @@ class WritebackCollaborator:
                 )
         else:
             changed = True
-        audit_decision = "promoted" if promoted else "discarded"
+        if promoted:
+            audit_decision = "promoted"
+        elif winners and not is_revalidation_task:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "round_id": round_id,
             "winners_count": (len(winners) if isinstance(winners, list) else 0),
@@ -3109,6 +3188,7 @@ class WritebackCollaborator:
                 or task_params.get("enablement_landing")
             )
         )
+        lifted = False
         if kept_flag:
             specialist_task_id = str(result.get("specialist_task_id") or "")
             lift = {
@@ -3133,12 +3213,11 @@ class WritebackCollaborator:
             if prebaseline_enablement:
                 lift["baseline_enablement"] = True
                 lift["attribution_eligible"] = False
-            if prebaseline_enablement:
                 # This patch establishes the runnable baseline environment. Keep
                 # it in the configuration stack for reproducibility, but mark it
                 # ineligible for gain attribution because no runnable before
                 # measurement exists.
-                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                lifted = self._lift_to_current_best("integrate_patch", float(new_tput), lift)
                 log.info(
                     "integrate_patch KEEP accepted as pre-baseline enablement; "
                     "retained in config stack without gain attribution "
@@ -3147,8 +3226,8 @@ class WritebackCollaborator:
                     specialist_task_id,
                 )
             else:
-                self._lift_to_current_best("integrate_patch", float(new_tput), lift)
-                if self.shared_state.baseline_tput > 0:
+                lifted = self._lift_to_current_best("integrate_patch", float(new_tput), lift)
+                if lifted and self.shared_state.baseline_tput > 0:
                     self._update_cumulative_gain_validated(new_tput)
                     self.shared_state.resume_pending_revalidation = False
                     await self._maybe_enqueue_watermark_roofline(
@@ -3164,13 +3243,14 @@ class WritebackCollaborator:
             }:
                 self.shared_state.pending_integrate = {}
                 changed = True
-        audit_decision = (
-            "enablement_accepted"
-            if prebaseline_enablement
-            else "promoted"
-            if kept_flag
-            else "discarded"
-        )
+        if prebaseline_enablement:
+            audit_decision = "enablement_accepted" if lifted else "no_promote"
+        elif lifted:
+            audit_decision = "promoted"
+        elif kept_flag:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "status": status,
             "specialist_task_id": result.get("specialist_task_id"),
@@ -3265,6 +3345,7 @@ class WritebackCollaborator:
                         entry["max_gain_pct_observed_in_batch"] = gain
                     break
         changed = True
+        lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
             lift = {
                 "name": f"framework:{cand_id}",
@@ -3274,13 +3355,18 @@ class WritebackCollaborator:
                 "extra_envs": {},
                 "workspace": result.get("workspace"),
             }
-            self._lift_to_current_best("framework", float(new_tput), lift)
-            if self.shared_state.baseline_tput > 0:
+            lifted = self._lift_to_current_best("framework", float(new_tput), lift)
+            if lifted and self.shared_state.baseline_tput > 0:
                 self._update_cumulative_gain_validated(new_tput)
                 await self._maybe_enqueue_watermark_roofline(
                     reason="framework_keep_watermark",
                 )
-        audit_decision = "promoted" if kept_flag else "discarded"
+        if lifted:
+            audit_decision = "promoted"
+        elif kept_flag:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "candidate_id": cand_id,
             "batch_id": batch_id,
@@ -3722,7 +3808,8 @@ class WritebackCollaborator:
         else:
             return False
         before = len(self.shared_state.optimization_stack or [])
-        self._lift_to_current_best(kind, float(tput), bv)
+        if not self._lift_to_current_best(kind, float(tput), bv):
+            return False
         return len(self.shared_state.optimization_stack or []) > before
 
     def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
@@ -4096,6 +4183,8 @@ class WritebackCollaborator:
                             "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
+                    # Revalidation reproduces the whole stack, so its gain is
+                    # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
                     "enable_stack_rebench": False,
                 }
@@ -4158,6 +4247,7 @@ class WritebackCollaborator:
                     "note": "post-resume full-stack end-to-end revalidation",
                 }
             ],
+            # Cumulative-vs-baseline, same as the geak revalidation above.
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
             "enable_stack_rebench": False,
         }

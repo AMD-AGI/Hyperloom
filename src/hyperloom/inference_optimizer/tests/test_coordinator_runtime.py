@@ -671,6 +671,37 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
 
 
 @pytest.mark.asyncio
+async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(session_dir):
+    """Orchestration can drain a backlog and still propose the family afterwards."""
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    try:
+        a = await c.tasks.create(kind="baseline", params={}, idempotency_key="qa")
+        b = await c.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="qb")
+
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={
+                    "family": "baseline",
+                    "reason": "anchor already established",
+                    "scope": "queued",
+                },
+            ),
+        )
+
+        assert (await c.tasks.get(a.task_id)).state == "cancelled"
+        assert (await c.tasks.get(b.task_id)).state == "cancelled"
+        assert "baseline" not in c.shared_state.pruned_families
+        events = await c.bus.tail(topic="event")
+        assert any(
+            m.payload.get("kind") == "prune_branch" and m.payload.get("scope") == "queued" for m in events
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
     bad = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
     plans = {"critic": ScriptedPlan(turns=[MockTurn(intents=[bad])])}

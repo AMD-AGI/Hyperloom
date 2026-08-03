@@ -11,6 +11,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_frame
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
+from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -460,9 +461,7 @@ class ProposalsCollaborator:
             if cb_args_mode == "replace":
                 params.setdefault("base_args_mode", "replace")
         if pending.action_name == "sweep":
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_tput", resolve_grading_anchor_tput(self.shared_state))
             params.setdefault("base_extra_args", cb_args)
             if cb_remove_args:
                 params.setdefault("base_remove_args", cb_remove_args)
@@ -474,10 +473,7 @@ class ProposalsCollaborator:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self._inject_explore_runtime_params(params)
-            # Inject base_tput/base_extra_args tied to current_best (or baseline_tput) so _gain_pct resolves.
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_tput", resolve_grading_anchor_tput(self.shared_state))
             params.setdefault("base_extra_args", cb_args)
             if cb_envs:
                 params.setdefault("base_extra_envs", dict(cb_envs))
@@ -494,9 +490,7 @@ class ProposalsCollaborator:
             # Seed the patched-eval server with the same base args/config every
             # other eval server uses, else it launches on bare framework defaults
             # and crashes at startup regardless of the patch.
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
+            params.setdefault("base_tput", resolve_grading_anchor_tput(self.shared_state))
             params.setdefault("base_extra_args", cb_args)
             if cb_remove_args:
                 params.setdefault("base_remove_args", cb_remove_args)

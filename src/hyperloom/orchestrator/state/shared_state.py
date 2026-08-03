@@ -89,6 +89,33 @@ def _first_positive_tput(d: Any) -> float:
     return 0.0
 
 
+def resolve_grading_anchor_tput(state: Any) -> float:
+    """Throughput a new candidate must beat: the recipe it is composed on top of.
+
+    Candidates are launched with ``current_best``'s args/envs, so grading them
+    against ``baseline_tput`` compares a measurement to a configuration it was
+    never taken on: anything that beats the bare baseline but regresses against
+    the established recipe (e.g. a warm-replay bundle) reads as a win and drags
+    ``current_best`` down. ``baseline_tput`` is the fallback only before any
+    validated layer exists.
+
+    Args:
+        state: Any object exposing ``current_best`` / ``baseline_tput``
+            (``None`` and partial test doubles are tolerated).
+
+    Returns:
+        ``current_best``'s throughput when positive, else ``baseline_tput``;
+        ``0.0`` when neither is established.
+    """
+    if state is None:
+        return 0.0
+    best = _first_positive_tput(getattr(state, "current_best", None))
+    if best > 0:
+        return best
+    baseline = getattr(state, "baseline_tput", 0.0)
+    return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
+
+
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
     ("decoder_type", "decoder"),

@@ -854,6 +854,7 @@ def collect_baseline(
                 "error_excerpt": a.get("error_excerpt"),
                 "stderr_tail": a.get("stderr_tail"),
                 "stderr_log_path": a.get("stderr_log_path"),
+                "extras": a.get("extras") or {},
             }
         )
 
@@ -1010,6 +1011,8 @@ def _reconstruct_baseline_attempts(
                 "error_excerpt": None,
                 "stderr_tail": None,
                 "stderr_log_path": None,
+                # Reconstruction reads the on-disk reports; audit extras are state-only.
+                "extras": {},
             }
         )
     return out

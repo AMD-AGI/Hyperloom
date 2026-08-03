@@ -34,7 +34,6 @@ from ..phases.machine_state import (
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
-    SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     domain_for_tag,
     get_domain,
@@ -146,6 +145,9 @@ EXPLORE_ACTION_NAME: str = "explore"
 # rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
 # action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
 SWEEP_ACTION_NAME: str = "sweep"
+
+# Reference measurement action; named constant for the ``baseline_phase_singleton`` rule.
+BASELINE_ACTION_NAME: str = "baseline"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -367,6 +369,17 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 # kill_task sources; the other scheduling-police intents stay robustness-only.
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
+
+# prune_branch scopes. ``family`` retires the action for the rest of the run;
+# ``queued`` only drains the backlog and leaves the family usable.
+PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
+PRUNE_BRANCH_SCOPE_QUEUED: str = "queued"
+PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
+    {
+        PRUNE_BRANCH_SCOPE_FAMILY,
+        PRUNE_BRANCH_SCOPE_QUEUED,
+    }
+)
 
 # Ceiling on a single extend_lease step; repeated extensions are allowed.
 EXTEND_LEASE_MAX_SEC: int = 3600
@@ -683,6 +696,8 @@ class PolicyGate:
         self,
         action_name: str,
         params: dict[str, Any] | None,
+        *,
+        task_id: str = "",
     ) -> None:
         """Re-validate a persisted queued task before executor dispatch.
 
@@ -696,6 +711,8 @@ class PolicyGate:
         Args:
             action_name: The task ``kind`` / delegate action name.
             params: Task params deserialized from the DB row.
+            task_id: Persisted task id, used to admit the tracked enablement
+                revalidation baseline.
 
         Raises:
             PolicyDenied: When the task would have been rejected had it
@@ -720,7 +737,17 @@ class PolicyGate:
         # conc_sweep against itself and surface as a spurious conc_sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate_body(role, payload, check_phase=False)
+        skip_baseline_singleton = (
+            kind == BASELINE_ACTION_NAME
+            and bool(task_id)
+            and str(task_id) == str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "")
+        )
+        self._validate_delegate_body(
+            role,
+            payload,
+            check_phase=False,
+            skip_baseline_singleton=skip_baseline_singleton,
+        )
 
     def _closing_phase_denial(
         self,
@@ -811,6 +838,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_phase: bool,
+        skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
 
@@ -854,6 +882,8 @@ class PolicyGate:
         # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
+        if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
+            self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -948,6 +978,8 @@ class PolicyGate:
                 payload,
                 intent_kind="propose_action",
             )
+        if action_name == BASELINE_ACTION_NAME:
+            self._validate_baseline_singleton(payload)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -1400,6 +1432,31 @@ class PolicyGate:
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
                 f"on the audit trail)."
+            ),
+        )
+
+    # ``baseline_phase_singleton``
+    def _validate_baseline_singleton(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        """Deny a repeat baseline once the session has an anchor."""
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        anchor = getattr(ss, "baseline_tput", 0.0)
+        if not isinstance(anchor, (int, float)) or anchor <= 0:
+            return
+        raise PolicyDenied(
+            (
+                f"baseline: the session anchor is already established "
+                f"(baseline_tput={float(anchor):.1f}); a repeat baseline "
+                f"re-measures a reference the run already has."
+            ),
+            rule="baseline_phase_singleton",
+            hint=(
+                "PRELUDE is done with baseline; let the phase advance and "
+                "re-measure the candidate rather than the reference."
             ),
         )
 
@@ -2077,6 +2134,18 @@ class PolicyGate:
             family = str(payload.get("family", "")).strip()
             if not family:
                 raise PolicyDenied("prune_branch missing family", rule="payload")
+            scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+            if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
+                raise PolicyDenied(
+                    f"prune_branch scope={scope!r} not allowed "
+                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    rule="prune_scope",
+                    hint=(
+                        f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
+                        f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
+                        f"only cancels the queued backlog."
+                    ),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -2184,11 +2253,15 @@ __all__ = [
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
+    "BASELINE_ACTION_NAME",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",
+    "PRUNE_BRANCH_ALLOWED_SCOPES",
+    "PRUNE_BRANCH_SCOPE_FAMILY",
+    "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
     "REQUEST_ROUTING",
