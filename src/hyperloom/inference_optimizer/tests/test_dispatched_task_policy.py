@@ -224,6 +224,32 @@ def test_validate_dispatched_task_internal_profile_skips_delegate_body(tmp_path,
     gate.validate_dispatched_task("profile", {"reason": "watermark_refresh"})
 
 
+@pytest.mark.asyncio
+async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_singleton(tmp_path, monkeypatch):
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.baseline_tput = 1000.0
+    executed = {"ran": False}
+
+    async def _stub(_ctx) -> dict:
+        executed["ran"] = True
+        return {"status": "ok"}
+
+    sub.register_executor("baseline", _stub)
+    task = await sub.tasks.create(
+        kind="baseline",
+        params={"reason": "enablement_eval_revalidation"},
+        idempotency_key="enablement-revalidation",
+    )
+    state.enablement_revalidation_task_id = task.task_id
+
+    result = await sub.run_task(task)
+
+    assert result.state == "succeeded"
+    assert executed["ran"] is True
+
+
 def test_validate_dispatched_task_skips_phase_incompatible(tmp_path, monkeypatch):
     gate, _sd = _gate(tmp_path, monkeypatch, strict_phase=True)
     state = gate.shared_state

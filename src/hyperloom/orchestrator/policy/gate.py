@@ -690,6 +690,8 @@ class PolicyGate:
         self,
         action_name: str,
         params: dict[str, Any] | None,
+        *,
+        task_id: str = "",
     ) -> None:
         """Re-validate a persisted queued task before executor dispatch.
 
@@ -703,6 +705,8 @@ class PolicyGate:
         Args:
             action_name: The task ``kind`` / delegate action name.
             params: Task params deserialized from the DB row.
+            task_id: Persisted task id, used to admit the tracked enablement
+                revalidation baseline.
 
         Raises:
             PolicyDenied: When the task would have been rejected had it
@@ -727,7 +731,17 @@ class PolicyGate:
         # conc_sweep against itself and surface as a spurious conc_sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate_body(role, payload, check_phase=False)
+        tracked_revalidation = (
+            kind == BASELINE_ACTION_NAME
+            and bool(task_id)
+            and str(task_id) == str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "")
+        )
+        self._validate_delegate_body(
+            role,
+            payload,
+            check_phase=False,
+            skip_baseline_singleton=tracked_revalidation,
+        )
 
     def _closing_phase_denial(
         self,
@@ -820,6 +834,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_phase: bool,
+        skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
 
@@ -863,7 +878,7 @@ class PolicyGate:
         # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        if action_name == BASELINE_ACTION_NAME:
+        if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload, intent_kind="delegate")
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
@@ -1431,24 +1446,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Deny an LLM ``baseline`` once the session has an anchor.
-
-        PRELUDE allows ``baseline`` so the run can reach ``baseline_tput > 0``,
-        and nothing retired it afterwards: a run could keep re-measuring a
-        reference it already had, at roughly twenty GPU-minutes a turn, while
-        the newest measurement silently redefined every later gain. Escape:
-        ``params.bypass_baseline_singleton=True``.
-
-        Args:
-            payload (dict[str, Any]): the intent payload;
-                ``params.bypass_baseline_singleton`` opts out of the guard.
-            intent_kind (str): the channel the action arrived on, used in the
-                error hint.
-
-        Raises:
-            PolicyDenied: when ``baseline_tput`` is already positive and no
-                bypass flag is set.
-        """
+        """Deny a repeat baseline once the session has an anchor."""
         params = payload.get("params") or {}
         if isinstance(params, dict) and params.get("bypass_baseline_singleton"):
             return
