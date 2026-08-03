@@ -4,8 +4,8 @@
 # kv_cache_vision) and drive roofline/kernel analysis. Resolved by
 # `_default_profile_config()` when $FRAMEWORK=worldplay.
 #
-# Fallback-only fields (overridden at runtime): benchmark.model, runner_type.
-# benchmark_script is pinned to worldplay_{runner_type}.sh at materialize time.
+# Fallback-only fields are resolved at runtime: benchmark.model, runner_type,
+# WORLDPLAY_REPO_PATH, and the bundled benchmark_script entrypoint.
 #
 # In profile mode the trace is the deliverable, so one timed repeat is enough and
 # the quality gate is off (the choke point forces the reference empty under
@@ -14,7 +14,7 @@
 benchmark:
   framework: worldplay
   workload_kind: scriptable
-  model: /primus/xiaofei/HY-WorldPlay/models/HunyuanVideo-1.5   # OVERRIDDEN at runtime.
+  model: /models/HunyuanVideo-1.5  # placeholder; overridden at runtime.
   precision: bf16
   run_mode: local
 
@@ -36,8 +36,6 @@ benchmark:
     WORLDPLAY_QUALITY_CALIBRATE: 0
     XDIT_QUALITY_REF: ""
     # Local / offline weight resolution (see baseline_worldplay.yaml).
-    WORLDPLAY_REPO: /primus/xiaofei/HY-WorldPlay
-    HF_HOME: /primus/xiaofei/HY-WorldPlay/models/hf_cache
     HF_HUB_OFFLINE: 1
     TRANSFORMERS_OFFLINE: 1
     PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"

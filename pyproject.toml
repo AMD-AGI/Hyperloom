@@ -171,6 +171,8 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
+    "assets/benchmark_scripts/*.sh",
+    "assets/benchmark_scripts/*.py",
     # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
     # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
     "assets/slurm/*.sh",

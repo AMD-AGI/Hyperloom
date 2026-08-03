@@ -31,17 +31,29 @@ def _scriptable_script_name(framework: str, runner_type: str) -> str:
     return f"{framework}_{runner_type}.sh"
 
 
-def resolve_scriptable_script(framework: str, runner_type: str, inferencex_root: str) -> Path | None:
+def resolve_scriptable_script(
+    framework: str,
+    runner_type: str,
+    inferencex_root: str,
+    bench: dict[str, Any] | None = None,
+) -> Path | None:
     """Resolve the scriptable benchmark script path.
 
     Args:
         framework: Scriptable framework name (e.g. xdit).
         runner_type: GPU runner (e.g. mi300x).
         inferencex_root: InferenceX checkout root (fallback location).
+        bench: Materialized benchmark section; absolute ``benchmark_script``
+            wins when present.
 
     Returns:
         The resolved script path, or None when not found.
     """
+    explicit = str((bench or {}).get("benchmark_script") or "").strip()
+    if explicit:
+        explicit_path = Path(explicit)
+        if explicit_path.is_file():
+            return explicit_path
     name = _scriptable_script_name(framework, runner_type)
     candidates: list[Path] = []
     override = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
@@ -125,7 +137,7 @@ def run_scriptable(
         ``(returncode, error)`` — error is a string when a pre-run problem
         occurred (script missing), else None.
     """
-    script = resolve_scriptable_script(framework, runner_type, inferencex_root)
+    script = resolve_scriptable_script(framework, runner_type, inferencex_root, bench)
     if script is None:
         return 2, f"scriptable benchmark script not found for {framework}_{runner_type}.sh"
     env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
