@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Alignment / credibility unit tests for the GEAK(GEAK) e2e gain path.
+"""Alignment / credibility unit tests for the GEAK e2e gain path.
 
 Covers the three coupling points that keep Hyperloom's reported gain honest and
 consistent with GEAK's own e2e speedup:

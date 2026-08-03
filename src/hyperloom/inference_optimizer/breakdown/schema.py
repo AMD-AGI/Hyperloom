@@ -364,9 +364,10 @@ class PhaseEvent(TypedDict, total=False):
 
     Attributes:
         ts (str): ISO UTC timestamp of the event.
-        action (str): Action kind (``baseline`` / ``profile`` / ``backends`` /
-            ``params`` / ``sweep`` / ``validate_stack`` / ``kernel_opt`` /
-            ``trace_analyze`` / ``integrate``).
+        action (str): Action kind (``baseline`` / ``profile`` / ``explore`` /
+            ``roofline`` / ``sweep`` / ``kernel_opt`` / ``integrate``).
+            ``backends`` / ``params`` / ``validate_stack`` appear only when
+            reading archived sessions (see :class:`CapabilitySummary`).
         task_id (str): Orchestrator task id.
         kernel_id (str | None): Kernel id for kernel_agent-owned actions, else None.
         status (str): Outcome (``succeeded`` / ``failed``).
@@ -388,7 +389,7 @@ class PhaseEvent(TypedDict, total=False):
 
     ts: str
     action: (
-        str  # baseline / profile / backends / params / sweep / validate_stack / kernel_opt / trace_analyze / integrate
+        str  # baseline / profile / explore / roofline / sweep / kernel_opt / integrate (+ archived: backends / params / validate_stack)
     )
     task_id: str
     kernel_id: str | None  # only for kernel_agent-owned actions
@@ -430,6 +431,8 @@ class CapabilitySummary(TypedDict, total=False):
 
     Attributes:
         geak (CapabilityEntry): GEAK kernel-generation capability.
+        forge (CapabilityEntry): Forge kernel-generation capability; emitted by
+            the collector but not yet declared on this TypedDict.
         explore (CapabilityEntry): Primary explore (param/backend search) row.
         backends (CapabilityEntry): Compatibility alias for backend exploration.
         params (CapabilityEntry): Compatibility alias for param exploration.
@@ -1089,9 +1092,8 @@ class CriticRobustness(TypedDict, total=False):
     Attributes:
         critic_iterations (list[CriticIteration]): Critic-agent review passes.
         robustness_signals (list[RobustnessSignal]): Fault/recovery events handled.
-        kb_writes_summary (CriticKBWritesSummary): Counts of KB writes proxied
-            through the critic's ``commit-review`` protocol (the Coordinator
-            performs the writes; the critic only authors them).
+        kb_writes_summary (CriticKBWritesSummary): Tally of the critic
+            iterations' verdicts (``total`` plus ``by_verdict``).
     """
 
     critic_iterations: list[CriticIteration]
@@ -1122,7 +1124,7 @@ class GpuMonitorAggregate(TypedDict, total=False):
 
 
 class LaneTimelineEntry(TypedDict, total=False):
-    """One row of the legacy M6 lane occupancy summary (resource_lock capacity / holders / expired leases)."""
+    """One row of the lane occupancy summary (resource_lock capacity / live holders / expired leases)."""
 
     lane: str
     capacity: int
@@ -1193,6 +1195,9 @@ class SourceBreakdown(TypedDict, total=False):
     ``validated_total_pct``.
 
     Attributes:
+        forge_pct_of_total (float): Gain share from Forge kernel rewrites,
+            credited only on Forge KEEP evidence. Emitted first by the
+            collector; not yet declared on this TypedDict.
         geak_pct_of_total (float): Gain share from GEAK kernel rewrites.
         explore_pct_of_total (float): Gain share from the primary explore family.
         replay_warm_recipe_pct_of_total (float): Gain share from warm-recipe
@@ -1280,6 +1285,9 @@ class PhaseBreakdown(TypedDict, total=False):
         framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
         explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
         kernel (PhaseBreakdownKernel): KERNEL_AGENT phase gain by ``kernel_id``.
+            The producer emits this bucket under the key ``kernel_agent``,
+            unlike ``framework`` which is normalized down from
+            ``FRAMEWORK_AGENT``.
         gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
             bucketed separately from source-level kernel rewrites.
         sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
@@ -1405,7 +1413,7 @@ class KBProvenance(TypedDict, total=False):
     """Recipe KB integration audit for the session.
 
     Covers warm-start context seeded from the KB, the warm-replay outcome,
-    pending/created KB points, queue depth, and the flusher daemon status.
+    queue depth, and the flusher daemon status.
 
     Attributes:
         recipe_kb_session_id (str): Recipe KB session id.
@@ -1420,13 +1428,9 @@ class KBProvenance(TypedDict, total=False):
         warm_replay_attempted (bool): Whether a warm replay was attempted.
         warm_history_injected (bool): Whether warm history was injected.
         stack_fingerprint (dict[str, str]): Fingerprint of the optimization stack.
-        pending_edges (list[KBPendingEdge]): Edges queued but not committed.
         queue (KBQueueStats): Depth stats for the KB write queues.
         audit_tail_count (int): Number of audit-tail entries.
         audit_status_counts (dict[str, int]): Audit entries counted by status.
-        points_created (list[KBPointCreated]): KB points created this session.
-        points_by_kind (dict[str, int]): Created-point counts by kind.
-        commit_summary (KBCommitSummary): Outcome of committing the edges.
         flusher_status (KBFlusherStatus): KB flusher daemon lifecycle marker.
         kb_degraded_reason (str): KB soft-degrade reason (None / ``explicit_flag`` /
             ``ir3_auto``).
@@ -1500,7 +1504,7 @@ class CriticKBWritesSummary(TypedDict, total=False):
     """Summary of critic-agent ``commit-review`` outputs (Coordinator proxies these into ``kb_provenance``)."""
 
     total: int
-    by_verdict: dict[str, int]  # KEEP / REVERT / NEEDS_INFO / ...
+    by_verdict: dict[str, int]  # APPROVE / REJECT / REDIRECT / ADVISE / NEEDS_REVIEW (upper-cased critic verdicts)
 
 
 # Top-level shape
@@ -1567,9 +1571,20 @@ class RooflineProgress(TypedDict, total=False):
 
     Carries reference lines (ceiling = vendor peak, target = ceiling ×
     ratio, default 0.70), the ``trajectory[]`` stepped line
-    (baseline + KEEPs), and raw ``snapshots[]``. Edge cases: no
-    snapshot → ``ceiling_available = False``; no KEEP → trajectory is just
-    the baseline point.
+    (baseline + KEEPs), and raw ``snapshots[]``. Edge cases: no KEEP →
+    trajectory is just the baseline point.
+
+    Two ceiling domains exist. Decode workloads use the throughput fields
+    below. Scriptable / diffusion (xDiT) workloads have no tok/s decode
+    ceiling and instead report a latency-domain ceiling — the collector emits
+    ``ceiling_kind`` (``"throughput"`` / ``"latency"`` / ``"none"``),
+    ``latency_ceiling_ms`` (ideal per-image compute floor),
+    ``achieved_latency_ms`` (measured e2e), ``latency_ceiling_available`` and
+    ``current_best_pct_of_latency_ceiling`` (ideal/measured, so higher is
+    nearer the floor); none of the five are declared below yet. Consumers
+    should branch on ``ceiling_kind``: the latency branch leaves
+    ``ceiling_available`` False while setting ``latency_ceiling_available``
+    True, so ``ceiling_available = False`` does not mean "no ceiling".
     """
 
     # Reference lines (only set when snapshots[] is non-empty)
@@ -1850,7 +1865,7 @@ class GemmTuning(TypedDict, total=False):
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim)."""
 
-    kernel_id: str  # ``k001``..``k010``
+    kernel_id: str  # zero-padded rank ordinal, ``k001``.. (one per candidate; pool size = --top-k, default 100)
     name: str  # ``aiter::ck_moe_stage1`` etc
     source_file: str  # absolute path; "" when unknown
     kernel_category: str  # ``MoE`` / ``LayerNorm`` / ``unknown``
@@ -2620,7 +2635,7 @@ class SessionBreakdown(TypedDict, total=False):
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
         phase_timeline (list[PhaseEvent]): Flat per-action timeline (v1-reader compat).
-        phase_segments (list[PhaseSegment]): Phase-boundary view (M2).
+        phase_segments (list[PhaseSegment]): Phase-boundary view.
         action_timeline (list[PhaseEvent]): v2 canonical flat per-action timeline.
         capability_summary (CapabilitySummary): Per-capability roll-up.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.

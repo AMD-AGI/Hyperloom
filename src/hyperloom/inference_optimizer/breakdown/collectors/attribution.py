@@ -83,9 +83,10 @@ def _action_family(action: str) -> str:
         action (str): A stack-entry / gain-ledger action label.
 
     Returns:
-        str: One of ``kernel`` / ``backends`` / ``params`` / ``validate`` /
-        ``sweep`` / ``explore`` / ``replay_warm_recipe`` / ``framework`` /
-        ``gemm_tuning``, or ``"other"`` when unrecognized.
+        str: One of ``kernel_agent`` / ``backends`` / ``params`` /
+        ``validate`` / ``sweep`` / ``explore`` / ``replay_warm_recipe`` /
+        ``framework`` / ``gemm_tuning`` / ``geak``, or ``"other"`` when
+        unrecognized.
     """
     s = (action or "").lower()
     for predicate, family in _ACTION_FAMILY_TABLE:

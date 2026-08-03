@@ -11,7 +11,7 @@ the following layout:
 <key=value tokens, possibly across several lines>
 
 === Knowledge base hints ===
-<free text, only for the orchestration role>
+<free text; legacy — no longer emitted, still tolerated by the parser>
 
 === Inbox for <agent> (newest last) ===
   seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload=<python-repr-dict>

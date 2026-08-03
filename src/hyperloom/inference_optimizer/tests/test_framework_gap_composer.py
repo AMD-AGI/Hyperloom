@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``orchestrator.action_executors._framework_gap_composer``."""
+"""Unit tests for ``orchestrator.actions.executors._framework_gap_composer``."""
 
 from __future__ import annotations
 

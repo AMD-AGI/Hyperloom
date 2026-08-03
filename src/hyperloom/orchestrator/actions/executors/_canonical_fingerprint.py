@@ -7,8 +7,10 @@ A single content-addressed identity for any explore variant so the
 ``explore_search`` ledger has one canonical key per variant and dedup across
 specialist / LLM / default_grid proposals collapses to the same row.
 
-The on-disk fingerprint is content-only (``sorted(extra_args)`` +
-``sorted(extra_envs)``); discriminators such as framework / tp /
+The on-disk fingerprint is content-only: sorted ``extra_args`` tokens + sorted
+``extra_envs`` pairs, plus the removal/replacement controls (``remove_args``,
+``unset_envs``, ``args_mode``) and a canonicalised ``runtime_override`` when any
+of those is non-default. Discriminators such as framework / tp /
 workload_signature are kept as side metadata rather than folded into the hash.
 """
 

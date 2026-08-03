@@ -1,4 +1,4 @@
-"""Shared fixtures for quantization_agent tests.
+"""Shared fixtures for the quantization-agent tests.
 
 Two helpers are exposed here:
 

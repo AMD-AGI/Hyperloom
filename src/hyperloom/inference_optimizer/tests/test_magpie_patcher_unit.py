@@ -972,7 +972,7 @@ def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
     run_lm_eval taught the flag, with the sentinel landing inside that function.
 
     Skips silently when the fixture is not checked in, so the suite stays
-    hermetic;     the logic is already covered by the multi-catch-all stub above."""
+    hermetic; the logic is already covered by the multi-catch-all stub above."""
     fixture = Path(__file__).parent / "fixtures" / "benchmark_lib_a4bb43af.sh"
     if not fixture.is_file():
         pytest.skip("real pinned benchmark_lib.sh fixture not present")

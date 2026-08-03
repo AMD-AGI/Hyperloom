@@ -1444,12 +1444,6 @@ class KernelPhase(PhaseHandler):
         untuned schema's dispatch keys and write one self-contained CSV for E2E.
 
         Implemented on the stdlib ``csv`` module on purpose: this runs in the
-        orchestrator process, which must not carry a hard pandas dependency (it
-        is not declared in ``pyproject.toml`` and is absent from the CI/test
-        environment). Values are carried through as text, so a config round-trips
-        byte-for-byte instead of being re-formatted by a dataframe writer.
-
-        Implemented on the stdlib ``csv`` module on purpose: this runs in the
         orchestrator process, which must not carry a hard pandas dependency
         (pandas is not declared in ``pyproject.toml`` and is absent from the
         ``.[test,ci]`` CI environment -- importing it there raises
@@ -1925,9 +1919,13 @@ class KernelPhase(PhaseHandler):
         and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
         the GEMM benchmark is itself an end-to-end serving measurement.
 
-        For forge-gemm-tune results (``requires_e2e_validation=True``), the
-        entry is promoted but ``cumulative_gain_validated`` is NOT stamped —
-        downstream E2E validation (explore action) must confirm the gain.
+        Forge results that requested per-tuner E2E validation
+        (``requires_e2e_validation``), or that are eligible for the CK
+        block-scale switch (``_ck_blockscale_switch_eligible``), are routed to
+        ``_validate_forge_gemm_tuning_e2e`` by ``_handle_gemm_tuning_result``
+        and normally never reach this promoter. Anything that does reach it —
+        including a forge result whose validation already completed — has its
+        gain stamped as validated.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result; ignored if

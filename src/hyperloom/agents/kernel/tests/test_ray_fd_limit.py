@@ -325,7 +325,7 @@ def test_force_restart_local_cluster_binds_dashboard_to_loopback(monkeypatch):
 
 
 def _assert_declares_serving_slot(start_cmd: tuple) -> None:
-    """The head must declare the ``serving_slot`` custom resource (§12 T6)."""
+    """The head must declare the ``serving_slot`` custom resource."""
     assert "--resources" in start_cmd, start_cmd
     idx = start_cmd.index("--resources")
     payload = json.loads(start_cmd[idx + 1])

@@ -45,16 +45,14 @@ consume them.
 
 Compatibility rules:
 
-* **Do not gate on string equality**. A consumer that treats
-  `schema_version` as a contract MUST accept the `v2` and `v3.0`
-  family (for example, parse the `vN[.M]` prefix and compare the major
-  component, or allowlist both strings). Pinning to the exact `v2`
-  string will reject `v3.0` files even though they are wire-compatible.
+* **Parse the version, do not gate on string equality**. Read the
+  `vN[.M]` prefix and compare the major component so a future minor
+  revision of V5 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
-  bump (for example, `v3` → `v4`). The runtime will continue to write the previous
-  version's file in parallel for at least one release after the bump.
+  bump. Only one version is written per session; there is no parallel
+  write of the previous version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -410,20 +408,6 @@ artifacts (for example, for a replay) should resolve relative paths against
 
 ---
 
-## `attribution`
-
-Gain attribution per stack entry: a list of `StackGainEntry`
-(per-validation incremental contribution) plus a `SourceBreakdown`
-that splits the validated total across geak / forge / explore / sweep,
-with legacy alias buckets populated only when the source session
-contains archived action names.
-
-`method` is one of `validated`, `single_source`, `reconstructed`,
-`missing` — consumers should display reconstruction caveats from the
-`notes[]` field.
-
----
-
 ## `enablement` — admission, round lifecycle, builds & attempt runtimes
 
 `EnablementBreakdown`. The enablement subsystem's observability section: which
@@ -706,10 +690,8 @@ regardless of producer.
 The Hyperloom team commits to the following compatibility guarantees.
 
 1. Never removing or renaming a documented field within a
-   major `schema_version`. Such changes require a major bump (the next
-   being `v4`) and a one-release deprecation window with both files
-   written in parallel. Note `v3.0` is not such a break — it shares
-   `v2`'s wire shape and only marks the recorder-aggregation path.
+   major `schema_version`. Such changes require a major bump, as the
+   `v5.0` optimization cutover did.
 2. Never fabricating values for fields the runtime did not
    actually measure. Missing → null / `[]` / `{}`.
 3. Adding new optional fields freely. Consumers must tolerate

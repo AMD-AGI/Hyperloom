@@ -19,7 +19,7 @@ from _bypass_roofline import compute_roofline  # noqa: E402
 
 def test_large_square_gemm_is_compute_bound():
     # (4096,4096)x(4096,4096) bf16: AI ~= 4096/3 ~= 1365 FLOPs/byte, well above the
-    # MI300X bf16 machine balance (~247) -> compute bound; efficiency in (0,100].
+    # MI300X bf16 machine balance (~134) -> compute bound; efficiency in (0,100].
     r = compute_roofline(
         category="GEMM",
         shape_str="(4096,4096) bf16<br>(4096,4096) bf16",

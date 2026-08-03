@@ -996,7 +996,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     tmp_path,
     monkeypatch,
 ):
-    """Q4-a: a failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
+    """A failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -1145,7 +1145,7 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     tmp_path,
     monkeypatch,
 ):
-    """Fix E (Q3c): a fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
+    """A fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -1227,7 +1227,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     sub_agent_runner,
     tmp_path,
 ):
-    """Fix E (Q5): ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
+    """ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``action_executors._accuracy_gate``."""
+"""Unit tests for ``actions.executors._accuracy_gate``."""
 
 from __future__ import annotations
 

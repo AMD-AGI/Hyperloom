@@ -10,7 +10,9 @@
 * **C3 ``cold_start_budget_exhausted``** — aiter JIT cache empty AND remaining budget shorter
   than one cold-start, so the next baseline is SIGTERM'd mid-``hipcc``.
 
-All three suppress repeat fires across the same input fingerprint.
+C1 latches on the manifest fingerprint and C2 on the breakdown mtime, so both stay
+quiet on unchanged input; C3 is stateless and re-fires on every tick while the
+condition holds.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from .symptom import Symptom, SymptomSeverity
 
 
 # ---------------------------------------------------------------------------
-# Static physics tables — conservative engineering values, env-overridable.
+# Static physics tables — conservative engineering values.
 # ---------------------------------------------------------------------------
 
 # HBM GiB per GPU device (not aggregate); NVIDIA refs included for ``--compare-against-gpu``.
@@ -56,7 +58,7 @@ PRECISION_BYTES_PER_PARAM: dict[str, float] = {
     "gptq": 0.5,
 }
 
-# Per-token KV cache bytes per model class (rough averages; override via $HYPERLOOM_KV_BYTES).
+# Per-token KV cache bytes per model class (rough averages).
 KV_BYTES_PER_TOKEN: dict[str, float] = {
     "dense": 16.0,
     "moe_swa": 4.0,

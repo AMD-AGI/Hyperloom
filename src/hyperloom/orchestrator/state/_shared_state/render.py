@@ -1,40 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SharedState — single-writer (Coordinator) persisted session state, backed by atomic JSON at ``$SESSION_DIR/state.json``; enforces CORE_STATE_FIELDS guards.
-
-Fields::
-
-    session_id          str   — set by Coordinator at session creation
-    model_name          str   — e.g. "meta-llama/Llama-3.1-8B-Instruct"
-    model_path          str   — local NFS path to weights
-    model_class         str   — categorical key supplied via --model-class
-    model_arch          dict  — advisory architecture profile (hybrid
-                                structured + free-text notes) loaded from
-                                the launcher's ``<session_dir>/model_arch.json``;
-                                prompt-context only, no deterministic gating
-    model_architectures list  — config.json ``architectures``; stamped into
-                                the recipe-snapshot ``extras`` as a KB tag
-    model_type          str   — config.json ``model_type``; stamped into
-                                the recipe-snapshot ``extras`` as a KB tag
-    target_summary      str   — set by `target_analysis` action
-    baseline_tput       float — primary throughput after `baseline` action;
-                                tok/s/GPU for serving frameworks, img/s for
-                                scriptable xDiT (displayed as e2el_mean_ms)
-    baseline_accuracy   float — GSM8K score after `baseline`
-    current_best        dict  — {action: str, tput: float, accuracy: float}
-    cumulative_gain     float — % over baseline
-    stop_reason         str   — set when graceful stop fires
-    current_action      str   — what's running right now (set by Orchestration)
-    crash_count         int   — incremented by the Coordinator when a tick/agent
-                                exception is recorded; also appends to
-                                crash_timestamps (Robustness only reads it)
-    pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
-    start_ts            str   — ISO timestamp
-    max_minutes         int   — wall-clock budget (0 = unlimited)
-    last_profile_trace  str   — set by Coordinator when `profile` returns a
-                                trace path; consumed by Orch to populate
-                                `trace_analyze` REQUEST `trace_input` param
+"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState`
+(mission / phase / warm-start / search-ledger blocks).
 """
 
 from __future__ import annotations

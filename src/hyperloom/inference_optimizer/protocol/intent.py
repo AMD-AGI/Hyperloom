@@ -3,7 +3,7 @@
 
 """Structured-intent transport validation (protocol layer).
 
-Claude (``emit_intent`` MCP tool_call) and Codex (``validated_json_output``)
+Claude (``emit_intent`` MCP tool_call) and Codex (JSON-in-text envelope)
 transports share one envelope shape, validated via :func:`validate_envelope`.
 Must never import ``orchestrator`` / ``shared_state`` (import cycle).
 """

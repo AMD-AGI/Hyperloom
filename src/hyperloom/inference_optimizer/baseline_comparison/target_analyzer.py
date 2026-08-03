@@ -63,15 +63,19 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 #
 # * The mapping is **best-effort**. When we are not confident, we return
 #   ``None`` and the caller gracefully skips target_analysis. Never raise.
-# * The known-models list is hardcoded here (it changes ~monthly). We
-#   intentionally do NOT hit ``/filters`` at runtime to keep target_analysis
-#   at < 250 ms total.
+# * The known-models list is hardcoded here (it changes ~monthly) so name
+#   mapping stays offline and deterministic; we never hit ``/filters``.
+#   (The measured rows themselves DO come from a live
+#   ``/benchmarks?model=<name>`` GET in ``analyze``, bounded by
+#   ``INFERENCEX_TIMEOUT_SEC`` / ``INFERENCEX_MAX_ATTEMPTS``.)
 # * Matching is case-insensitive; vendor prefixes from common HF repo
 #   conventions (``MiniMaxAI-``, ``deepseek-ai-``, ``meta-llama-``, ...) are
 #   stripped before comparison.
 #
-# If you add a new model to the upstream you must add it here (and the unit
-# test in ``tests/test_baseline_comparison.py`` will catch out-of-sync drift).
+# If you add a new model to the upstream you must add it here. Nothing validates
+# this list against the InferenceX API, and the unit tests in
+# ``src/hyperloom/inference_optimizer/tests/test_baseline_comparison.py`` only
+# smoke-check the tuple's size — drift is silent.
 
 KNOWN_INFERENCEX_MODELS: tuple[str, ...] = (
     "DeepSeek-R1-0528",
@@ -156,7 +160,7 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
 
 
 def _format_report_md(summary: BaselineSummary) -> str:
-    """Render a 10-15 line human-readable markdown summary.
+    """Render a human-readable markdown summary of the external-baseline lookup.
 
     Intentionally avoids printing a gap percentage — the contract is
     "facts only, no derived KPI".

@@ -6,8 +6,9 @@
 The second of two parallel trace sinks (the local ``reports/trace/*.jsonl``
 ledger is always written). This module mirrors each LLM call into Langfuse as a
 Generation while the run is live, plus a session-end ``flush_session`` that
-backfills the recipe-KB / specialist-intel audit spans and the KEEP/REVERT
-decision Scores.
+backfills the out-of-process ``ext/*.jsonl`` child token shards, the recipe-KB
+/ specialist-intel audit spans, the Kernel-Forge and GEMM-tuning step spans,
+and the KEEP/REVERT decision Scores.
 
 Three gates decide whether anything is sent (all must pass, else no-op):
 
@@ -348,7 +349,7 @@ class LangfuseEmitter:
             "spans_opened": 0,  # phase + agent spans created
             "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
-            "kb_spans_sent": 0,  # KB trace spans (assess/priors/recipe)
+            "kb_spans_sent": 0,  # non-LLM spans (recipe-KB / critic priors / specialist intel / forge / gemm)
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
             "recipe_write_audit_read": 0,  # of which were recipe-KB writes
             "specialist_intel_read": 0,  # specialist_intel.jsonl rows swept

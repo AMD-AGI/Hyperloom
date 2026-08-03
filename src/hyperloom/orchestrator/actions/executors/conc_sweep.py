@@ -3,7 +3,7 @@
 
 """ActionRunner for the ``conc_sweep`` SWEEP-phase action.
 
-Thin shell around ``orchestrator.conc_sweep.run_conc_sweep``. The
+Thin shell around ``orchestrator.kernel.conc_sweep.run_conc_sweep``. The
 Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
 ``_enqueue_internal_conc_sweep_task`` (when ``conc_sweep_enabled``, which is
 on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed

@@ -260,13 +260,9 @@ _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 _DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
-# Outer subprocess/global cap for the whole GEMM-tuning run (all shapes/tuners).
-# 5h (was 3h): large models have many more GEMM shapes -- vllm_dense_tunableop
-# already hit ~4512s (>1h) at 312 shapes, and bigger models push past 3h -- so 3h
-# was silently killing the run (rc124) or skipping lower-priority tuners. Kept
-# strictly above the per-group aiter timeout (FORGE_TUNE_TASK_TIMEOUT=2h) so a
-# single hung group is isolated and the rest still tune. NOT tied to the session
-# --max-hours budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC.
+# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
+# for large models with many GEMM shapes. Independent of the session --max-hours
+# budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
@@ -4547,7 +4543,8 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     is_retryable_infra = last_decision == "" and last_status in {"failed", "error", "timeout"} and not rejected_reason
     if failure_count < max_failures and is_retryable_infra:
         return max_failures
-    # High-impact infra-retry (flag-gated, default off): a high-GPU%-share kernel
+    # High-impact infra-retry (HL_HONEST_E2E umbrella, default ON; opt out with
+    # HL_HONEST_E2E=0 or HL_INFRA_RETRY_HIGH_IMPACT=0): a high-GPU%-share kernel
     # that keeps infra-failing gets extra attempts before retirement.
     if is_retryable_infra and _honest_flag("HL_INFRA_RETRY_HIGH_IMPACT"):
         try:
@@ -4671,11 +4668,18 @@ def _batch_kernel_candidates(
         current_source: str = "",
         current_task_group_key: str = "",
     ) -> bool:
-        """A kernel_id is live (batch-eligible) iff NOT rejected, NOT in-flight, and < max_attempts recorded against the CURRENT source_file (per-source counting).
+        """A kernel_id is live (batch-eligible) when it is not in-flight and is under the attempt cap for the current source_file; liveness is scoped per (kernel_id, source_file, task_group_key).
+
+        Two task-group escapes relax the rejection check: a ledger entry
+        recorded under a *different* ``task_group_key`` leaves the kernel live
+        even when rejected, and a rejected kernel with no recorded group key is
+        still live when a ``current_task_group_key`` is supplied.
 
         Args:
             kid: The kernel id to test.
             current_source: The current source file for per-source counting.
+            current_task_group_key: The task-group key of the pending dispatch;
+                empty when the caller has no group identity.
 
         Returns:
             ``True`` when the kernel is batch-eligible, else ``False``.
@@ -5811,13 +5815,16 @@ async def integrate_handler(
     and KEEPs only when measured E2E throughput clears the threshold (source +
     artifacts are backed up first so non-KEEP can restore without a rebuild).
 
-    Required payload: ``base_tput``. Optional: patch_path, target_file,
-    kernel_id, config_path, extra_server_args, keep_threshold_pct (1.0),
+    Payload: ``base_tput`` must be > 0 at decision time, but is auto-filled from
+    SharedState when a baseline has been recorded, so a bare ``{kernel_id}`` (or
+    ``{integration_id}``) payload is accepted. Optional: patch_path,
+    target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
+    extra_envs, source, task_group_key, keep_threshold_pct (1.0),
     budget_minutes (20). Returns ``{status, decision, base_tput, new_tput,
     gain_pct, kernel_id, patch_path, report_path, workspace}``.
 
     Args:
-        payload: The integrate request payload (requires ``base_tput``).
+        payload: The integrate request payload.
         session_dir: Session directory for workspace and state.
 
     Returns:
@@ -5893,8 +5900,9 @@ async def integrate_handler(
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = str(payload.get("extra_server_args") or "").strip()
-    # VRAM barrier (flag-gated, default off): cap re-baseline util so the
-    # integrate server cannot OOM on a tighter node.
+    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
+    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
+    # vLLM so the integrate server cannot OOM on a tighter node.
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
@@ -6086,7 +6094,8 @@ async def integrate_handler(
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
 
-    # import-grep source confirmation (flag-gated, default off). Advisory:
+    # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt
+    # out with HL_HONEST_E2E=0 or HL_CONFIRM_SOURCE_IMPORTED=0). Advisory:
     # annotate whether the served process imported/compiled the patched source.
     # Only the strict sub-flag enforces it, and only on positive non-import
     # evidence (confirmed is False); an "unknown" (None) never penalizes.

@@ -9,8 +9,8 @@ Endpoint shape:
 Two design rules driven by the call-site (target_analysis executor):
 
 * **Never raise on network / parsing problems.** Returns ``None`` (or
-  an empty list, depending on the call) plus a structured warning the
-  caller can persist into ``BaselineSummary.warning``.
+  an empty list, depending on the call); failure detail is logged, and the
+  caller composes its own ``BaselineSummary.warning``.
 * **Bounded timeout + small retry budget.**
 
 Optional environment overrides:
@@ -49,7 +49,8 @@ def _require_http_url(url: str) -> None:
 
 
 class InferenceXFetchError(Exception):
-    """Internal — raised by ``_fetch_raw`` on any fetch failure."""
+    """Raised on any InferenceX fetch failure (unsupported URL scheme,
+    non-200 status, network or transport error)."""
 
     pass
 

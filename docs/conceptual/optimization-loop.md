@@ -193,7 +193,7 @@ released-tag autoselect. This makes support that exists only in an
 unreleased PR or branch reachable. When a discovered PR ref drives the
 build, the source PR URL is recorded as build provenance in the session
 breakdown's `installed_versions` map (`source_pr_url`); see the
-[`enablement` section](../reference/session-breakdown.md#enablement--targeted-build--attempt-runtime-summary).
+[`enablement` section](../reference/session-breakdown.md#enablement--admission-round-lifecycle-builds--attempt-runtimes).
 
 ### Novelty and crash safety
 
@@ -353,6 +353,7 @@ For a finished or interrupted session, start with:
 - `session_breakdown.json`
 
 For reports and dashboards, `session_breakdown.json` is the external
-contract. Its producer code lives under `inference_optimizer/breakdown/`,
+contract. Its producer code lives under
+`src/hyperloom/inference_optimizer/breakdown/`,
 and its consumer-facing shape is documented in
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).

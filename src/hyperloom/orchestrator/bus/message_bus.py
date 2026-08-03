@@ -46,7 +46,7 @@ TOPIC_ALLOWLIST = frozenset(
         "review_verdict",
         "advice",
         "strategy_change",
-        # Dynamic-specialist dispatch audit trail (write-only; must be allow-listed).
+        # Reserved for a dynamic-specialist dispatch audit trail; no emitter in-tree yet.
         "dynamic_specialist_dispatched",
         "dynamic_specialist_status",
         "dynamic_specialist_results",

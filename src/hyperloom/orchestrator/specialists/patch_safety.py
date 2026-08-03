@@ -159,7 +159,7 @@ def patch_targets_missing(
 
 
 # Scope literal that triggers the cross-domain Critic rules. Duplicated from
-# specialist_profile.SCOPE_DOMAINS to keep this module dependency-light.
+# specialists.profile.SCOPE_DOMAINS to keep this module dependency-light.
 SCOPE_DOMAINS_LITERAL: str = "domains"
 
 

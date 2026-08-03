@@ -249,7 +249,7 @@ def _deep_prefix_patch(depth: int) -> str:
 def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     repo = tmp_path / "repo"
     init_git_repo(repo)
-    # ``b/d0/.../d6/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
+    # ``b/d0/.../d5/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
     patch = tmp_path / "deep.patch"
     patch.write_text(_deep_prefix_patch(6), encoding="utf-8")
     ok, err = _git_apply(repo, patch)

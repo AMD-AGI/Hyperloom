@@ -10,7 +10,7 @@ the baseline server args (EXPLORE can still override). The shell is never
 executed — anything dynamic (``$VARS``: TP/CONC/ISL/OSL/model/port) is skipped,
 because the optimizer's normal env seeding already owns those.
 
-Three public entry points:
+Public entry points:
 
 * :func:`parse_reference_script` — lift ``(server_args, envs, model)`` from a
   recipe (local path or http(s) URL). Fail-soft: an unreachable / missing
@@ -20,6 +20,8 @@ Three public entry points:
   ``current_setting.sh`` artifact). Round-trips with the parser.
 * :func:`discover_reference_script` — when no recipe was supplied, find a
   matching one in the InferenceX checkout by filename. Tiered + fail-soft.
+* :func:`models_compatible` — the shared model-gate predicate, used by
+  discovery and by the baseline executor.
 """
 
 from __future__ import annotations

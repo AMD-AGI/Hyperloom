@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :class:`robustness_agent.decision.PolicyAware` (mirrors upstream PolicyGate rules)."""
+"""Unit tests for :class:`hyperloom.agents.robustness.decision.PolicyAware` (mirrors upstream PolicyGate rules)."""
 
 from __future__ import annotations
 

@@ -61,7 +61,7 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
 
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
-    """Positional args must raise so a future caller can't re-order the 5-tuple."""
+    """Positional args must raise so a future caller can't re-order the identity dimensions."""
     # Splat a runtime-built arg list so the positional drift stays a runtime check.
     bad_positional_args = ["m", "h", "fw", "v", "p"]
     with pytest.raises(TypeError):

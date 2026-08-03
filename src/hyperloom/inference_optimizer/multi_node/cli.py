@@ -1691,8 +1691,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
       restart-server invocation; the driver inside the pod handles the rest.
 
     Infera backend (state.backend == 'infera') routes to the SSH fan-out path
-    instead of the Ray Dashboard; the RayJob path below is byte-for-byte
-    unchanged for non-infera state.
+    instead of the Ray Dashboard.
 
     Args:
         args (argparse.Namespace): Parsed ``restart-server`` arguments
@@ -1805,7 +1804,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             )
 
         with _ray_dashboard_client(state) as ray:
-            # Phase B: launch new (skipped when resuming a RUNNING launch).
+            # Launch new servers (skipped when resuming a RUNNING launch).
             # Driver returns once every rank spawned its launcher.
             if not launch_sub:
                 launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
@@ -2043,8 +2042,11 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
             print_logs).
 
     Returns:
-        int: A process exit code (``EXIT_OK`` on success, otherwise a
-            config error code).
+        int: ``EXIT_OK`` once the kill fan-out was submitted, or ``1`` when at
+            least one pod's kill failed (infera path only).
+
+    Raises:
+        RuntimeError: If required state keys are missing.
     """
     if _load_state().get("backend") == "infera":
         return _infera_kill_inference(args)

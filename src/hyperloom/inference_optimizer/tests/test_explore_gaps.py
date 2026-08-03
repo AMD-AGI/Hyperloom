@@ -407,7 +407,7 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
 
 @pytest.mark.asyncio
 async def test_warm_specialist_params_uses_domain_hint_when_domain_missing(coord):
-    """When the LLM omits ``domain`` the gap's ``domain_hint`` fills in (PolicyGate R2 still validates routing)."""
+    """When the LLM omits ``domain`` the gap's ``domain_hint`` fills in (the specialist-dispatch gate still validates the tag)."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
     s.upsert_gap(

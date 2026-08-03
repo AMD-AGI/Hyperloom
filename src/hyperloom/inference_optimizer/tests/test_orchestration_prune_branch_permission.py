@@ -122,7 +122,7 @@ def test_kernel_cannot_emit_prune_branch(gate):
 
 
 def test_critic_cannot_emit_prune_branch(gate):
-    """Critic limited to review_verdict / send_message / advice."""
+    """Critic limited to review_verdict / send_message / alert."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "critic",

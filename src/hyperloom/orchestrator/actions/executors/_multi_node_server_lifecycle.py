@@ -438,8 +438,13 @@ async def restart_server_for_round(
             resuming a running server.
 
     Raises:
-        ServerRestartFailed: On any restart or post-launch /health failure
-            (callers let it bubble).
+        ServerRestartFailed: When the restart still fails after one best-effort
+            remote VRAM-reclaim (``kill-inference``) and one forced fresh retry
+            -- or on the first failure when
+            ``HYPERLOOM_MN_RESTART_RECLAIM_RETRY`` is set to
+            ``0``/``false``/``no``/``off``. Callers let it bubble. The retry
+            means a failing restart can take up to two full ``health_timeout_s``
+            cycles before raising.
     """
     if not is_multi_node():
         return
@@ -520,7 +525,7 @@ async def restart_server_for_round(
             os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
 
         # Per-variant env overrides → forwarded to the SSH-launched sglang via
-        # ``multi_node/cli.py::_collect_forward_env`` (which reads this control
+        # ``multi_node/commands/infera.py::_collect_forward_env`` (reads this control
         # env). Mirrors the HYPERLOOM_MN_PROFILE_TRACE_DIR set/restore pattern:
         # scoped to this single restart so a later arg-only round doesn't
         # inherit this round's envs. Restored in the ``finally`` below.

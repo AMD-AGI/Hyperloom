@@ -1,13 +1,12 @@
 # Benchmark Config
 
-Default configs live here:
-
-```bash
-src/hyperloom/inference_optimizer/assets/configs/baseline_sglang.yaml
-src/hyperloom/inference_optimizer/assets/configs/baseline_vllm.yaml
-src/hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml
-src/hyperloom/inference_optimizer/assets/configs/profile_vllm.yaml
-```
+Default configs live in
+`src/hyperloom/inference_optimizer/assets/configs/`, one
+`baseline_<framework>.yaml` + `profile_<framework>.yaml` pair per supported
+framework (`sglang`, `vllm`, `atom`, `xdit`, `hunyuan_image3`). The resolvers
+are the source of truth: `_workload_envs.py` for the baseline map and
+`_default_profile_config()` in
+`src/hyperloom/orchestrator/actions/executors/profile.py` for the profile map.
 
 Two fields in each YAML are **fallback only** — the optimizer overrides them at
 runtime:
@@ -49,10 +48,12 @@ elsewhere; the default `{framework}_{runner_type}.sh` already respects
 Operators only interact through two `task.params` knobs (full schema in each
 `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare sanitized `*.sh`
 name; overrides the gpu_type auto-pick) and `params.result_dir` (forwarded as
-`$RESULT_DIR`). The Coordinator's `baseline_no_param_change` PolicyGate rule
-denies any baseline proposal that changes params after a failure — the agent
-must retry with identical params and the run terminates after 3 consecutive
-failures.
+`$RESULT_DIR`). A baseline retry after a failure MUST change at least one of
+`params.benchmark_script` / `params.result_dir` / `params.extra_server_args` /
+`params.extra_envs` (prompt RULE F1 — LLM-side judgement, not a PolicyGate
+deny); a proposal repeating a recent failing params fingerprint is dropped as a
+duplicate. Three consecutive baseline failures with no enablement engaged stop
+the run with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
 
 Operator-supplied server flags have a first-class CLI surface:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as

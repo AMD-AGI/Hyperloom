@@ -387,7 +387,7 @@ def _match_benchmark_for_kernel(
     Scans :data:`_BENCHMARK_PATTERNS` in priority order; the first matching
     kernel-name regex hoists that family's bench files to the front (earlier
     patterns win). No match preserves the original order. Prevents picking an
-    off-topic benchmark (e.g. fmha → test_pa.py stalling GEAK Step-5).
+    off-topic benchmark (e.g. fmha → test_pa.py stalling the benchmark step).
 
     Args:
         kernel_name: The kernel name to match patterns against.
@@ -451,14 +451,15 @@ def _render_geak_test_command(
     num_gpus: int,
     timeout_sec: int,
 ) -> str:
-    """Render the ``--test-command`` GEAK receives, with timeout + match.
+    """Render the ``test_command`` handed to the Forge submitter, with timeout
+    + match.
 
     Picks the first existing ``test_*.py`` / ``bench*.py`` from the
     semantically-ordered bench list, prefixes ``timeout <N>``, and wraps
     multi-GPU collectives in ``torchrun --nproc_per_node=<num_gpus>`` so
-    GEAK's subprocess can ``init_process_group`` correctly. Returns ``""``
-    when no usable benchmark exists; the caller leaves
-    ``--test-command`` blank so GEAK falls back to its own discovery.
+    the subprocess can ``init_process_group`` correctly. Returns ``""``
+    when no usable benchmark exists; Forge then falls back to its own
+    autogen / task-preparer driver generation.
 
     Args:
         kernel_name (str): Kernel name used to order benchmark candidates.
@@ -1225,10 +1226,10 @@ def _format_impact_range(
 def _build_extra_context_block(candidate: dict[str, Any]) -> str:
     """Render authoritative workload context for the candidate, if supplied.
 
-    Returns ``""`` when ``extra_dispatch_context`` is absent. When present (set by
-    the driver's ``--enrich`` mode), it injects the real serving config
-    (ISL/OSL/ctx/conc/TP), E2E/Amdahl framing, neighbouring-kernel/fusion cues and
-    resolved roofline specifics so harness-gen can pin the true decode shapes.
+    Returns ``""`` unless a caller has pre-attached ``extra_dispatch_context``
+    to the candidate (no in-tree producer today). When present it is injected
+    verbatim as authoritative workload context (serving config, E2E/Amdahl
+    framing, roofline specifics) so harness-gen can pin the true decode shapes.
 
     Args:
         candidate: The kernel candidate dict, optionally carrying
@@ -2083,7 +2084,10 @@ def invoke_backend(
     gpu_ids, elapsed_s, cmd, optimized_path (optional), cli_workspace (forge).
 
     Args:
-        backend (str): Backend name to run (e.g. ``geak``, ``forge``).
+        backend (str): Backend name to run; only ``forge`` is supported (any
+            other value returns an unknown-backend result with returncode 2).
+            ``geak`` is a whole-pipeline phase delegate, not a value accepted
+            here.
         prompt_file (Path): File containing the rendered optimization prompt.
         source_file (str): Path to the kernel source to be rewritten.
         args (argparse.Namespace): Parsed CLI args carrying backend settings.
@@ -2497,7 +2501,8 @@ def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str 
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an external ``optimization_report.md`` for a speedup figure.
 
-    Uses a median-of-top-3 to dodge cherry-picked best-shape numbers.
+    Averages the top-3 reported speedups to dampen cherry-picked best-shape
+    numbers.
 
     Args:
         report_path: Path to the optimization report.
@@ -2521,7 +2526,6 @@ def _extract_speedup_from_report(report_path: str | Path) -> float | None:
                 continue
     if not found:
         return None
-    # Median-of-top-3 to dodge cherry-picked best-shape numbers.
     found.sort(reverse=True)
     top = found[:3]
     return round(sum(top) / len(top), 4)

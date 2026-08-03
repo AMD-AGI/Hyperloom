@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.logging_setup."""
+"""Tests for hyperloom.agents.framework.logging_setup."""
 
 from __future__ import annotations
 

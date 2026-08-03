@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0 acceptance smoke for Ray-managed GPU execution (ray_modify.plan.md §6 P0).
+"""P0 acceptance smoke for Ray-managed GPU execution.
 
-Demonstrates the make-or-break invariant (§4.2) on a real Ray cluster:
+Demonstrates the make-or-break invariant on a real Ray cluster:
 
   1. A ServingActor holding num_gpus occupies the GPUs while alive.
   2. A second GPU actor requesting a GPU is *pending* (queued) until the

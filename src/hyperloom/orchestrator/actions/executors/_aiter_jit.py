@@ -54,8 +54,8 @@ AITER_CPP_BUILD_PROBE_PATHS: tuple[str, ...] = (
     "/root/.aiter/build",
 )
 
-# Default mtime gate (minutes) for the lock sweep; fallback when compiler
-# liveness is unknown. The proven-dead path bypasses it with stale_minutes=0.
+# Mtime gate (minutes) for the lock sweep. Applied on every path, including the
+# no-live-compiler one: a fresh lock's owner cannot be identified.
 AITER_LOCK_STALE_MINUTES = 5
 
 # Process names that indicate an in-flight aiter/ninja compile. hipcc is a
@@ -247,14 +247,17 @@ def clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
     stale_minutes: int = AITER_LOCK_STALE_MINUTES,
 ) -> dict[str, Any]:
-    """Sweep aiter's JIT build dir for stale plain-file locks left by killed runs.
+    """Sweep aiter's JIT build trees for stale plain-file locks left by killed runs.
 
     Killed runs leave locks that block the next compile. Only deletes locks
     with mtime older than ``stale_minutes`` (default 5). Pass
     ``stale_minutes=0`` is reserved for a caller that independently owns the
-    cache. Build dir resolution: caller arg
-    → $INFERENCE_OPTIMIZER_AITER_JIT_DIR → dynamic <aiter>/jit/build → legacy
-    fallbacks. Never raises (errors counted).
+    cache. Build tree resolution: caller arg (single-dir override) →
+    ``AITER_ROOT_DIR``/build (else ``$HOME/.aiter/build`` plus
+    ``AITER_CPP_BUILD_PROBE_PATHS``) together with ``AITER_JIT_DIR``, the pair
+    being authoritative when both are set → $INFERENCE_OPTIMIZER_AITER_JIT_DIR
+    → dynamic <aiter>/jit/build → legacy fallbacks. Every resolved tree is
+    swept. Never raises (errors counted).
 
     Args:
         aiter_jit_dir (Path | None): Explicit JIT build dir; when ``None`` it
@@ -263,8 +266,9 @@ def clean_stale_aiter_locks(
             (default 5).
 
     Returns:
-        dict[str, Any]: A stats dict (``dir``, ``scanned``, ``deleted``,
-            ``skipped_fresh``, ``errors``).
+        dict[str, Any]: A stats dict (``dir`` — primary tree, ``dirs`` — every
+            swept tree, ``scanned``, ``deleted``, ``skipped_fresh``,
+            ``errors``).
     """
     stats: dict[str, Any] = {
         "dir": None,

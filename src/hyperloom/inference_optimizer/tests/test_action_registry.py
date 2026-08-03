@@ -71,7 +71,7 @@ def test_metadata_expected_gain_pct_must_be_pair():
 
 
 def test_metadata_no_allowed_modes_field():
-    """allowed_modes is not accepted because full mode is the only supported mode."""
+    """``allowed_modes`` is not a recognised field; unknown yaml keys are dropped."""
     payload = _good_payload()
     payload["allowed_modes"] = ["quick"]  # extra fields silently ignored
     meta = ActionMetadata.from_yaml_dict(payload, expected_name="baseline")

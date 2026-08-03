@@ -7,7 +7,9 @@
 ``_reactor_pass`` + lazy collaborator properties); the method clusters it
 delegates to live in the sibling modules here (``conversation``,
 ``maintenance``, ``dispatcher``, ``proposals``, ``writeback``,
-``intent_router``). ``writeback`` also owns the folded result-recording and
-resume-reconcile clusters; ``dispatcher`` owns the folded gating and inline
-action clusters; ``conversation`` owns the folded advisory blocks.
+``intent_router``, ``build_lifecycle``). ``writeback`` also owns the folded
+result-recording and resume-reconcile clusters; ``dispatcher`` owns the folded
+gating and inline action clusters; ``conversation`` owns the folded advisory
+blocks; ``build_lifecycle`` owns the off-loop targeted-build
+enqueue/pump/reap cluster.
 """

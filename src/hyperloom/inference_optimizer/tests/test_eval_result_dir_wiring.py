@@ -538,7 +538,7 @@ def test_parse_eval_results_ignores_discarded_mn_warmup_round(tmp_path):
 def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
     """The warmup filter is workspace-relative, not absolute: a parse rooted AT a
     ``warmup_round`` slot (the baseline warmup round parses its own
-    ``EVAL_RESULT_DIR == .../warmup_round``) must still find its own results.
+    ``RESULT_DIR == .../warmup_round``) must still find its own results.
     """
     warm_slot = tmp_path / "warmup_round"
     _write_results_score(warm_slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.77)

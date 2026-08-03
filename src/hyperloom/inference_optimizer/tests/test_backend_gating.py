@@ -119,7 +119,7 @@ def test_kernel_install_validates_ray_cli_and_serving_slot():
 
 
 def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
-    """bypass backend reports server_lifecycle ineligible with a clear reason."""
+    """bypass backend resolves server_lifecycle from the YAML, not the script name."""
     import yaml
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 

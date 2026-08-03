@@ -137,7 +137,9 @@ class SweepPhase(PhaseHandler):
                 kind="conc_sweep",
                 params=params,
                 idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                # lease_ttl matches total_budget_sec so a long conc_sweep doesn't expire mid-flight.
+                # lease_ttl uses the configured (unclamped) total_budget_sec, an upper
+                # bound on the clamped per-task budget, so a long conc_sweep doesn't
+                # expire mid-flight.
                 lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
             )
         except Exception as exc:  # noqa: BLE001 — defensive

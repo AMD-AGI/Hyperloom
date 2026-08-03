@@ -6,7 +6,8 @@
 The orchestrator package owns:
 
 * MessageBus + IntentEnvelope (A2A transport)
-* ResourceLockManager (4 mutex lanes)
+* ResourceLockManager (7 scheduling lanes; serving-side lanes are mutually
+  exclusive, research/build lanes are serialization-only)
 * TaskRegistry (DelegatedTask state machine)
 * CursorStore (per-agent idempotent replay)
 * AgentRole + PolicyGate

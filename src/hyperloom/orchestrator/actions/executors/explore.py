@@ -61,6 +61,8 @@ from ._grid_runner import (
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
+# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
+# params['stack_stable_threshold_pct'].
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -79,12 +81,6 @@ log = logging.getLogger(__name__)
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the inlined stack
 # rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
-
-# Stack rebench stability threshold: after a KEEP, rebench tput must beat
-# ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Sourced from ``_stack_rebench`` so the explore
-# ledger and integrate_patch share one confirmation floor (below the KEEP
-# gate). Override via ``params['stack_stable_threshold_pct']``.
 
 
 _now_iso = functools.partial(now_iso, "auto")
@@ -1001,7 +997,7 @@ class ExploreExecutor:
         # (the ``finally`` after the loop) instead of per variant: the old
         # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
         # every variant, which destabilised the single-node raylet and took the
-        # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
+        # whole session down with it.
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs
         # out; untested variants stay out of the ledger so a resume can retry them.

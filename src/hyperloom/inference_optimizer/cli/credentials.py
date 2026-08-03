@@ -24,8 +24,10 @@ _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# Hard model allowlist: orchestration MUST resolve to Opus 4-8 (preferred) or a
-# known-good fallback before Coordinator boots.
+# AMD Claude allowlist. Enforced as a hard gate only under
+# INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
+# probe is the gate. Allowlisted ids also get the _CLAUDE_FALLBACK_MODEL ladder
+# on a catalog miss (custom ids fail outright).
 _CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
 
 _CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"

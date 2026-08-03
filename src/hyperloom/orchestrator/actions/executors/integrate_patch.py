@@ -399,7 +399,8 @@ def _preflight_missing_targets(
     build) can never apply; flagging it here yields an actionable advisory
     instead of an opaque ``git_apply_failed`` after a wasted apply attempt.
     Patches supplied directly via ``params.patches`` bypass the
-    authoring-time ``specialist_patch_safety`` gate, so they are checked here.
+    authoring-time ``specialists.patch_safety`` vetting gate
+    (:func:`vet_patches`), so they are checked here.
 
     Args:
         framework_root: The git checkout the patches target.

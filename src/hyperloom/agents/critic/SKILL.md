@@ -33,8 +33,10 @@ globs:
 > a per-session writable artefact location. Hyperloom's main CLI
 > sets it to `$REPO_ROOT` automatically. Per-session writable
 > outputs (decisions, KB drafts, reviewed_msg_ids, per-turn workdirs)
-> always live under `$USER_DATA_PATH/critic-session-memory/` and
-> `$USER_DATA_PATH/critic-workdir/` regardless of `WORKSPACE_PATH`.
+> always live under `$SESSION_DIR/critic-session-memory/`,
+> `$SESSION_DIR/critic-workdir/` and `$SESSION_DIR/critic-kb-dead-letter/`
+> — i.e. `$USER_DATA_PATH/<model_basename>/<UTC_ts>/...`, regardless of
+> `WORKSPACE_PATH`.
 
 ## Mission
 
@@ -94,7 +96,7 @@ For lower-level KB operations, see `actions/draft_kb.md` and
 | `critic_decision_request` | [actions/review_decision.md](actions/review_decision.md) |
 | `kb_draft_request` | [actions/draft_kb.md](actions/draft_kb.md) |
 | `kb_hint_request` | reuse [references/verdict_schema.md](references/verdict_schema.md) — read-only, no commit step needed |
-| `objection_signal` | [actions/objection_signal.md](actions/objection_signal.md) |
+| `objection_signal` | [actions/objection_signal.md](actions/objection_signal.md) — advisory, no commit step |
 
 When in doubt, treat the input as `coordinator_inbox` and parse it as
 described in
@@ -137,9 +139,9 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
   the strict class demands, so blocking them on missing benchmark
   evidence creates a circular deadlock.
 - For **`framework_op`** proposals (`baseline` / `target_analysis` /
-  `recover` / `report` / `session_breakdown` / `framework_pr`): approve
+  `recover` / `report` / `session_breakdown` / `framework_agent`): approve
   by default; Critic is not a useful gatekeeper for framework-level
-  operations. (`framework_pr` is the FRAMEWORK_PR candidate pre-screen
+  operations. (`framework_agent` is the FRAMEWORK_AGENT candidate pre-screen
   gate; the candidate's actual code/config landing is later re-reviewed
   as a strict `integrate_patch` `patch_landing` proposal.)
 
@@ -152,7 +154,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
 | `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt`, `deep_kernel_analysis`, `operator_tuning`, `vendor_kernel_config` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
-| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_pr` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_pr` = FRAMEWORK_PR candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
+| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_agent` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_agent` = FRAMEWORK_AGENT candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
@@ -234,11 +236,15 @@ not catch.
 
 Return `approve` when:
 
-- The action is in the current phase's allowed-action set
-  (`review_constraints.known_actions` mirrors PolicyGate's R1).
-- The proposal has non-empty provenance (specialist proposal_set ID
-  or `default_grid` cold-start tag) — `llm_direct` is denied by
-  PolicyGate so it should never reach Critic.
+- The action is in the current phase's allowed-action set.
+  (`review_constraints.known_actions` carries the allowlist only when
+  the Coordinator supplies it, which it does not in normal runs, so
+  treat this as best-effort; PolicyGate's R1
+  (`rule="phase_incompatible"`) is the real enforcement point and has
+  already run.)
+- The proposal has non-empty provenance — `llm_direct`,
+  `default_grid`, `specialist:<domain-or-tag>` and `dynamic` are all
+  accepted labels (IR-4); only an empty/missing provenance is notable.
 - No KB prior actively contradicts the proposal (e.g. an explicit
   `pitfall` row marked the same variant tried + failed).
 
@@ -250,9 +256,9 @@ the action will produce.
 
 Return `approve` by default. Critic is not a useful gatekeeper for
 `baseline` / `target_analysis` / `recover` / `report` /
-`session_breakdown` / `framework_pr`. Only emit a non-`approve` verdict
+`session_breakdown` / `framework_agent`. Only emit a non-`approve` verdict
 when the proposal is structurally malformed (missing required params,
-wrong phase, etc.). For `framework_pr` (the FRAMEWORK_PR candidate
+wrong phase, etc.). For `framework_agent` (the FRAMEWORK_AGENT candidate
 pre-screen) a `reject` means "do not spend a GPU bench on this
 candidate"; the candidate's eventual patch/config landing is re-reviewed
 strictly as an `integrate_patch` proposal.

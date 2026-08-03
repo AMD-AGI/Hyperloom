@@ -7,8 +7,9 @@ Separate from the serving lanes: constrains specialists that request
 ``needs_gpu=true`` for wall-budgeted on-GPU work (servers on non-8888 ports,
 profiling, autotune, and real benchmark loops on their leased cards).
 
-Ray-managed GPU execution (ray_modify.plan.md §12 T5, decision 3): under
-single-node Ray execution the **physical** card assignment for a ``needs_gpu``
+Ray-managed GPU execution (gated by
+:func:`hyperloom.orchestrator.actions.executors._ray_backend.ray_gpu_specialist_exec_enabled`):
+under single-node Ray execution the **physical** card assignment for a ``needs_gpu``
 specialist is Ray's — the specialist subprocess runs inside a
 ``GpuSpecialistActor(num_gpus=…)`` that Ray masks to its assigned devices. This
 pool is then only **capacity / TTL accounting**: ``try_acquire`` still gates
@@ -33,8 +34,8 @@ from .storage.connection import SqliteConnection
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
-# Reserved synthetic gpu_id base for single-node Ray pending-observation slots
-# (§3.2). Ray owns the physical card assignment, so under Ray this pool is a
+# Reserved synthetic gpu_id base for single-node Ray pending-observation slots.
+# Ray owns the physical card assignment, so under Ray this pool is a
 # count-based admission ledger, not a physical-id allocator: admissions take a
 # synthetic slot id in ``[_RAY_OBS_ID_BASE, _RAY_OBS_ID_BASE + pending_limit)``
 # so multiple specialists can queue on a single physical GPU (Ray serializes
@@ -200,7 +201,7 @@ class SpecialistGpuPool:
     """Capacity-limited GPU allocation for specialist tasks.
 
     Under single-node Ray execution this is capacity/TTL accounting only; Ray
-    owns the physical card assignment (see the module docstring / §12 T5).
+    owns the physical card assignment (see the module docstring).
     """
 
     def __init__(
@@ -304,7 +305,7 @@ class SpecialistGpuPool:
 
         Under single-node Ray execution the physical card is Ray's (the
         specialist runs inside a ``GpuSpecialistActor(num_gpus=…)``), so this
-        pool becomes a count-based admission ledger (§3.2): it hands out a
+        pool becomes a count-based admission ledger: it hands out a
         synthetic slot id from ``[_RAY_OBS_ID_BASE, _RAY_OBS_ID_BASE +
         pending_limit)`` so up to ``pending_limit`` specialists can be in-flight
         (pending + running) at once — Ray then serializes them on ``num_gpus``.

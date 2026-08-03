@@ -22,7 +22,9 @@ Fields::
                                 tok/s/GPU for serving frameworks, img/s for
                                 scriptable xDiT (displayed as e2el_mean_ms)
     baseline_accuracy   float — GSM8K score after `baseline`
-    current_best        dict  — {action: str, tput: float, accuracy: float}
+    current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
+                                per-writer detail (variant_name, extra_server_args,
+                                extra_envs, workspace, latency means)
     cumulative_gain     float — % over baseline
     stop_reason         str   — set when graceful stop fires
     current_action      str   — what's running right now (set by Orchestration)
@@ -541,7 +543,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     closing_phase: bool = False
     closing_started_unix: float = 0.0
     closing_report_task_id: str = ""
-    # True at END of CLOSE 5-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
+    # True at END of CLOSE 7-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
     # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
@@ -577,7 +579,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
     roofline_snapshot_id: int = 0
-    # Append-only compact roofline snapshots for report.py (first baseline kept for before/after); capped at MAX_ROOFLINE_SNAPSHOTS.
+    # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
     roofline_failure_streak: int = 0
@@ -793,10 +795,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_ts: str = ""
     # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions (rows from phase_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
+    # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Append-only operator-facing lifecycle log. Each row (built by
-    # :func:`phase_state.make_lifecycle_event`) records a phase/step boundary
+    # :func:`machine_state.make_lifecycle_event`) records a phase/step boundary
     # plus artifact paths. Coordinator-only writer; capped at ``_LIFECYCLE_CAP``.
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
@@ -829,7 +831,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     recipe_kb_session_id: str = ""
     # Kept (always ``{}``) for resume back-compat.
     recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``find-recipe`` output (parsed dict); empty on first session for a (workload, hw) pair.
+    # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output (parsed dict); empty on first session for a (workload, hw) pair.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
     # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
@@ -1630,7 +1632,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         ts: str | None = None,
         ts_unix: float | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.phase_state`."""
+        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
         from ..phases import machine_state as _m
 
         return _m.record_phase_transition(
@@ -1710,7 +1712,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         duration_s: float | None = None,
         ts: str | None = None,
     ) -> dict[str, Any]:
-        """Forwarding shim — implementation in :mod:`.phase_state`."""
+        """Forwarding shim — implementation in :mod:`hyperloom.orchestrator.phases.machine_state`."""
         from ..phases import machine_state as _m
 
         return _m.record_lifecycle_event(
@@ -2017,7 +2019,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         return _m.kernel_opt_attempts_count(self)
 
-    # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
+    # Reusable hot kernels still owing a kernel_opt attempt. Advisory only — no PolicyGate rule denies
+    # ``report`` on this basis; feeds kernel_work_pending, the report annotations and the prompt guidance.
     def untried_hot_reusable_kernels(
         self,
         *,

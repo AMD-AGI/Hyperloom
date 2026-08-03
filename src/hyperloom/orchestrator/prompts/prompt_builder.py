@@ -4,9 +4,9 @@
 """Compose the Orchestration agent's system prompt from typed inputs.
 
 Wraps the ``orchestration.md`` rules fragment with generated sections
-(mission, session context, pipeline/budget, action catalogue, decision
-framework, optional kernel-opt reference, rules). Deterministic for given
-inputs; the only IO is reading the rules fragment.
+(mission, session context, pipeline/budget, phase contract, action catalogue,
+decision framework, cycle directive, optional kernel-opt reference, rules).
+Deterministic for given inputs; the only IO is reading the rules fragment.
 """
 
 from __future__ import annotations
@@ -93,6 +93,9 @@ def _section_session_context(
     Args:
         framework (str): The framework name shown verbatim.
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
+        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
+            is enabled.
         objective_kind (str): The objective kind (e.g. ``time_only``,
             ``gain_pct``).
         objective_value (float | str | None): Optional objective target value
@@ -136,8 +139,8 @@ def _section_phase_semantics(
     explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
-    """Render the per-phase allowed-action contract (current phase injected
-    dynamically by the Coordinator).
+    """Render the per-phase LLM-proposable action contract (current phase
+    injected dynamically by the Coordinator).
 
     Phases switched off by ``--no-explore`` / ``--no-kernel`` /
     ``--no-framework-agent`` keep their row in the 6-phase chain but are annotated
@@ -368,8 +371,9 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
-    ``integrate_patch`` / ``dynamic_action`` render their closed ``delegate``
-    payload contracts; everything else renders a ``propose_action`` template.
+    ``integrate_patch`` render their closed ``delegate`` payload contracts;
+    ``report`` renders a fixed zero-gain propose_action; everything else
+    renders a ``propose_action`` template.
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
@@ -758,7 +762,8 @@ allowed action until the patch lands on `optimization_stack`:
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
   while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with `gpu_pct >= 3%` and zero attempts) remain —
+  (reusable hot kernels with zero attempts and `gpu_pct >= 10%`, the
+  default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
   drain them with `run_optimization{candidates_path: <from
   last_trace_analyze>}` (the batch handler fans out automatically).
 
