@@ -389,8 +389,9 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "import_error / merged-PR closure -> Rung 4",
     "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
-    "accuracy_below_floor / eval_runtime_failure -> re-diagnose against the failing "
-    "eval contract (accuracy target), then enter at the rung the underlying gap implies",
+    "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "
+    "re-diagnose against the failing eval contract (answer quality, or generation "
+    "that never terminates), then enter at the rung the underlying gap implies",
 )
 
 

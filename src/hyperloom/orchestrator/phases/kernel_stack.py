@@ -9,6 +9,7 @@ import logging as _logging
 from datetime import datetime, timezone
 from typing import Any
 from ..bus.message_bus import Message
+from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -499,9 +500,7 @@ class KernelStackPhase(PhaseHandler):
                 # The stack is applied on top of current_best, so the KEEP
                 # decision uses the incremental gain over current_best, not the
                 # total gain over the original baseline.
-                current_best = self.shared_state.current_best or {}
-                current_best_tput = float(current_best.get("tput") or 0.0)
-                decision_base = current_best_tput if current_best_tput > 0 else base_tput
+                decision_base = resolve_grading_anchor_tput(self.shared_state)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
                 incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0

@@ -29,7 +29,8 @@ bridging patch, gated on *does it run correctly* rather than *is it faster*:
    launch/import/build/eval log into a `FailureSignature`
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
-   `capability_disabled` / `accuracy_below_floor` / `eval_runtime_failure`)
+   `capability_disabled` / `accuracy_below_floor` /
+   `eval_generation_pathology` / `eval_runtime_failure`)
    with the offending file/symbol and a `bridge_layer`.
 2. **Discover** — `hyperloom.agents.framework.enablement_ops.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via

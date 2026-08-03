@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -520,17 +521,26 @@ class TaskRegistry:
                 reclaimed.append(task_id)
         return reclaimed
 
-    async def cancel_family(self, family_kinds: list[str]) -> list[str]:
-        """Bulk-cancel queued tasks of the given kinds (Robustness prune_branch); returns cancelled task_ids.
+    async def cancel_family(
+        self,
+        family_kinds: list[str],
+        *,
+        reason: str = "prune_branch",
+        exclude_task_ids: Iterable[str] = (),
+    ) -> list[str]:
+        """Bulk-cancel queued tasks of the given kinds; returns cancelled task_ids.
 
         Args:
             family_kinds: Task kinds whose queued tasks should be cancelled.
+            reason: Stamped onto each cancellation's history evidence.
+            exclude_task_ids: Task ids to leave queued.
 
         Returns:
             The task ids that were cancelled (empty when none matched).
         """
         if not family_kinds:
             return []
+        spared = {str(t or "").strip() for t in exclude_task_ids if str(t or "").strip()}
         cancelled: list[str] = []
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
@@ -541,13 +551,15 @@ class TaskRegistry:
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
             now = _now_iso()
             for task_id, history_json in rows:
+                if str(task_id or "").strip() in spared:
+                    continue
                 history = json.loads(history_json)
                 history.append(
                     {
                         "from": "queued",
                         "to": "cancelled",
                         "ts": now,
-                        "evidence": {"reason": "prune_branch"},
+                        "evidence": {"reason": reason},
                     }
                 )
                 cur.execute(

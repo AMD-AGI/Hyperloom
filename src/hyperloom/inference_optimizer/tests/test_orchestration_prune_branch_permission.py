@@ -59,6 +59,34 @@ def test_orchestration_prune_branch_missing_family_key_rejected(gate):
     assert exc.value.rule == "payload"
 
 
+def test_orchestration_prune_branch_accepts_queued_scope(gate):
+    """scope='queued' drains a backlog without retiring the family."""
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.PRUNE_BRANCH,
+            payload={
+                "family": "baseline",
+                "reason": "anchor already established",
+                "scope": "queued",
+            },
+        ),
+    )
+
+
+def test_orchestration_prune_branch_unknown_scope_rejected(gate):
+    """An unrecognised scope is denied rather than silently treated as a full prune."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={"family": "baseline", "reason": "x", "scope": "running"},
+            ),
+        )
+    assert exc.value.rule == "prune_scope"
+
+
 # Robustness (pre-existing path) — still works
 def test_robustness_can_still_emit_prune_branch(gate):
     """Pre-existing path unchanged — both sources are in the PRUNE_BRANCH allowlist."""
