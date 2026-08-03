@@ -70,6 +70,8 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "2,3")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     merged = rb._merge_worker_env(
         {
             "ROCR_VISIBLE_DEVICES": "0",  # must be ignored
@@ -82,6 +84,8 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
     assert merged["HIP_VISIBLE_DEVICES"] == "2,3"
     assert merged["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert merged["MY_FLAG"] == "1"
+    assert "SAFE_API_KEY" not in merged
+    assert "OPENAI_API_KEY" not in merged
 
 
 def test_merge_worker_env_none():
@@ -491,8 +495,14 @@ class _FakeGpuActor:
         self.exit_code = _FakeActorMethodP2(lambda: self._exit)
         self.stop = _FakeActorMethodP2(self._stop)
 
-    def _start(self, cmd, env=None, cwd=None, log_path=None):
-        self.started_with = {"cmd": cmd, "env": env, "cwd": cwd, "log_path": log_path}
+    def _start(self, cmd, env=None, cwd=None, log_path=None, scrub_benchmark_env=False):
+        self.started_with = {
+            "cmd": cmd,
+            "env": env,
+            "cwd": cwd,
+            "log_path": log_path,
+            "scrub_benchmark_env": scrub_benchmark_env,
+        }
         return 4242
 
     def _stop(self):
@@ -547,6 +557,7 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     assert lease.poll_started() == 4242
     assert lease.pid() == 4242
     assert actor.started_with["log_path"] == "/tmp/p.log"
+    assert actor.started_with["scrub_benchmark_env"] is False
     assert lease.is_alive() is True
     assert lease.exit_code() is None
     lease.stop()
@@ -777,6 +788,7 @@ def test_serving_group_manager_lifecycle(monkeypatch: pytest.MonkeyPatch):
     assert pg_calls == {"nodes": 2, "gpus": 8.0, "serving_slot": True}
     assert [m[0] for m in made] == [0, 1]  # one rank pinned per bundle index
     assert all(m[1] == 8.0 for m in made)  # num_gpus per rank
+    assert all(m[3].started_with["scrub_benchmark_env"] is True for m in made)
     assert sgm.ranks_alive() == [True, True]
     assert sgm.is_alive() is True
 
@@ -1034,6 +1046,35 @@ def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.Mo
     rc, out, err = actor2.run_blocking(["echo", "hello-actor"], timeout=30)
     assert rc == 0 and "hello-actor" in out
     actor2.stop()
+
+
+def test_serving_actor_scrubs_benchmark_credentials_when_requested(monkeypatch: pytest.MonkeyPatch):
+    """Serving ranks must scrub inherited control-plane credentials."""
+    captured_env: dict[str, str] = {}
+
+    class _CaptureEnvProcess:
+        def start(self, cmd, *, env=None, cwd=None, log_path=None):
+            del cmd, cwd, log_path
+            captured_env.update(env or {})
+            return 4321
+
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureEnvProcess)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2")
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
+
+    actor = rs._serving_actor_body()()
+    actor.start(
+        ["python", "-m", "server"],
+        env={"ROCR_VISIBLE_DEVICES": "caller", "WORKLOAD_FLAG": "1"},
+        scrub_benchmark_env=True,
+    )
+
+    assert captured_env["ROCR_VISIBLE_DEVICES"] == "2"
+    assert captured_env["WORKLOAD_FLAG"] == "1"
+    assert "SAFE_API_KEY" not in captured_env
+    assert "OPENAI_API_KEY" not in captured_env
 
 
 def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyPatch):

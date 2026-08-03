@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
@@ -2043,7 +2044,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         if value is None:
             return None
-        text = str(value)
+        text = redact_secret_values(str(value))
         if not text:
             return None
         if len(text) <= limit:
@@ -2065,7 +2066,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         if value is None:
             return None
-        text = str(value)
+        text = redact_secret_values(str(value))
         if not text:
             return None
         return text[-limit:] if len(text) > limit else text
