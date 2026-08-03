@@ -285,8 +285,12 @@ def _register_executors(
     )
 
     # FRAMEWORK per-candidate executor — Coordinator-internal only.
+    # Key must match the kind the FRAMEWORK phase enqueues ("framework_agent",
+    # per action_surfaces.COORDINATOR_INTERNAL_ACTIONS and
+    # actions/_meta/framework_agent.yaml); registering it as "framework" left
+    # every discovered PR candidate stamped no_result_failed.
     coordinator.sub.register_executor(
-        "framework",
+        "framework_agent",
         FrameworkAgentExecutor(session_dir=session_dir),
     )
 
