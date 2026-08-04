@@ -2389,7 +2389,6 @@ class WritebackCollaborator:
                 if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
                     self.shared_state.baseline_tput = float(tput)
                     self.shared_state.baseline_cold_tput = float(warmup_anchor)
-                    self.shared_state.baseline_hot_tput = float(tput)
                     log.info(
                         "baseline anchor: using hot measure tput %.1f as "
                         "baseline_tput (discarded cold warmup %.1f kept as "
