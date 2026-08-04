@@ -242,7 +242,7 @@ async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_sing
         params={"reason": "enablement_eval_revalidation"},
         idempotency_key="enablement-revalidation",
     )
-    state.enablement_revalidation_task_id = task.task_id
+    state.enablement.revalidation_task_id = task.task_id
 
     result = await sub.run_task(task)
 
@@ -575,8 +575,8 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
 
 def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path, monkeypatch)
-    gate.shared_state.enablement_dispatched = True
-    gate.shared_state.enablement_inflight_task_id = "spec-abc"
+    gate.shared_state.enablement.dispatched = True
+    gate.shared_state.enablement.inflight_task_id = "spec-abc"
     intent = Intent(
         type=IntentType.DELEGATE,
         payload={"action_name": "baseline", "params": {}},
@@ -589,8 +589,8 @@ def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
 
 def test_enablement_round_in_flight_allows_after_cleared(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path, monkeypatch)
-    gate.shared_state.enablement_dispatched = False
-    gate.shared_state.enablement_inflight_task_id = ""
+    gate.shared_state.enablement.dispatched = False
+    gate.shared_state.enablement.inflight_task_id = ""
     # baseline_tput == 0 means baseline_phase_singleton also does not fire
     intent = Intent(
         type=IntentType.DELEGATE,

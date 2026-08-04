@@ -844,7 +844,7 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
     reval = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-tracked")
-    coord.shared_state.enablement_revalidation_task_id = reval.task_id
+    coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord._drain_queued_baselines(reason="baseline_established") == []
     assert (await coord.tasks.get(reval.task_id)).state == "queued"

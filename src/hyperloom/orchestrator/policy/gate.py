@@ -740,7 +740,7 @@ class PolicyGate:
         skip_baseline_singleton = (
             kind == BASELINE_ACTION_NAME
             and bool(task_id)
-            and str(task_id) == str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "")
+            and str(task_id) == str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "")
         )
         self._validate_delegate_body(
             role,
@@ -1444,9 +1444,9 @@ class PolicyGate:
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
-        dispatched = bool(getattr(ss, "enablement_dispatched", False))
+        dispatched = bool(getattr(ss.enablement, "dispatched", False))
         if dispatched:
-            tid = str(getattr(ss, "enablement_inflight_task_id", "") or "")
+            tid = str(getattr(ss.enablement, "inflight_task_id", "") or "")
             raise PolicyDenied(
                 "baseline: an enablement authoring round is currently in flight"
                 + (f" (task={tid})" if tid else ""),

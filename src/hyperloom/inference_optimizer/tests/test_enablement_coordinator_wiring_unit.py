@@ -56,6 +56,13 @@ def _fake_self(**state_kw):
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         gpu_type=state_kw.get("gpu_type", "mi300x"),
+        enablement=types.SimpleNamespace(
+            setup_commands=[],
+            kept_patches=[],
+            kept_stack_action={},
+            localization_manifest=[],
+            last_build_failure={},
+        ),
     )
     fake = types.SimpleNamespace(shared_state=state)
     # Bind the real discovery method so the builder path is exercised.
@@ -102,10 +109,10 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
 def test_build_params_threads_eval_origin_carriers(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
-    fake.shared_state.enablement_origin = "eval"
-    fake.shared_state.enablement_accuracy_floor = 0.3
-    fake.shared_state.enablement_probe_config_path = "/runs/baseline/materialized.yaml"
-    fake.shared_state.enablement_eval_contract_fingerprint = "abc123"
+    fake.shared_state.enablement.origin = "eval"
+    fake.shared_state.enablement.accuracy_floor = 0.3
+    fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
+    fake.shared_state.enablement.eval_contract_fingerprint = "abc123"
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
@@ -220,26 +227,28 @@ def _enqueue_self(**state_kw):
         gpu_type=state_kw.get("gpu_type", "mi300x"),
         # Admission is exercised separately; these cases target the dispatch machinery.
         enablement_mode=state_kw.get("enablement_mode", "all"),
-        enablement_dispatched=state_kw.get("enablement_dispatched", False),
-        enablement_succeeded=state_kw.get("enablement_succeeded", False),
-        enablement_attempts=state_kw.get("enablement_attempts", 0),
-        enablement_human_review_logged=state_kw.get("enablement_human_review_logged", []),
-        enablement_kept_patches=state_kw.get("enablement_kept_patches", []),
-        enablement_stall_streak=state_kw.get("enablement_stall_streak", 0),
+        enablement=types.SimpleNamespace(
+            dispatched=state_kw.get("enablement_dispatched", False),
+            succeeded=state_kw.get("enablement_succeeded", False),
+            attempts=state_kw.get("enablement_attempts", 0),
+            human_review_logged=state_kw.get("enablement_human_review_logged", []),
+            kept_patches=state_kw.get("enablement_kept_patches", []),
+            stall_streak=state_kw.get("enablement_stall_streak", 0),
+            launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
+            inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
+            dispatch_tick=state_kw.get("enablement_dispatch_tick", -1),
+            origin=state_kw.get("enablement_origin", ""),
+            validation_pending=state_kw.get("enablement_validation_pending", False),
+            probe_config_path=state_kw.get("enablement_probe_config_path", ""),
+            accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
+            accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
+            eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
+            active_runtime=state_kw.get("enablement_active_runtime", {}),
+            revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
+            revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
+        ),
         baseline_tput=state_kw.get("baseline_tput", 0.0),
         baseline_failure_streak=state_kw.get("baseline_failure_streak", 1),
-        enablement_launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
-        enablement_inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
-        enablement_dispatch_tick=state_kw.get("enablement_dispatch_tick", -1),
-        enablement_origin=state_kw.get("enablement_origin", ""),
-        enablement_validation_pending=state_kw.get("enablement_validation_pending", False),
-        enablement_probe_config_path=state_kw.get("enablement_probe_config_path", ""),
-        enablement_accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
-        enablement_accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
-        enablement_eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
-        enablement_active_runtime=state_kw.get("enablement_active_runtime", {}),
-        enablement_revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
-        enablement_revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
         tick=state_kw.get("tick", 0),
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
@@ -301,8 +310,8 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == "spec-1"
     # In-flight guard set; attempt counter advanced for candidate rotation.
-    assert fake.shared_state.enablement_dispatched is True
-    assert fake.shared_state.enablement_attempts == 1
+    assert fake.shared_state.enablement.dispatched is True
+    assert fake.shared_state.enablement.attempts == 1
     assert len(fake.tasks.created) == 1
     assert fake.tasks.created[0]["params"]["enablement"] is True
     assert fake.tasks.created[0]["params"]["enablement_attempt"] == 0
@@ -330,7 +339,7 @@ async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, orig
     fake = _enqueue_self(enablement_mode=mode, enablement_origin=origin)
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert bool(tid) is dispatched
-    assert fake.shared_state.enablement_dispatched is dispatched
+    assert fake.shared_state.enablement.dispatched is dispatched
 
 
 @pytest.mark.asyncio
@@ -372,18 +381,18 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     # First dispatch.
     tid1 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid1 == "spec-1"
-    assert fake.shared_state.enablement_attempts == 1
+    assert fake.shared_state.enablement.attempts == 1
     first_idem = fake.tasks.created[0]["idempotency_key"]
 
     # Simulate the authored patch being REVERTED -> re-arm clears in-flight.
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert fake.shared_state.enablement_dispatched is False
-    assert fake.shared_state.enablement_succeeded is False
+    assert fake.shared_state.enablement.dispatched is False
+    assert fake.shared_state.enablement.succeeded is False
 
     # Next tick re-dispatches with a new attempt index + distinct idempotency.
     tid2 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid2 == "spec-2"
-    assert fake.shared_state.enablement_attempts == 2
+    assert fake.shared_state.enablement.attempts == 2
     second_idem = fake.tasks.created[1]["idempotency_key"]
     assert first_idem != second_idem
     assert fake.tasks.created[1]["params"]["enablement_attempt"] == 1
@@ -417,7 +426,7 @@ async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
     # Watchdog should fire: stall streak advances and the guard clears, so a
     # fresh round is dispatched this same tick.
     await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert fake.shared_state.enablement_stall_streak == 2
+    assert fake.shared_state.enablement.stall_streak == 2
 
 
 @pytest.mark.asyncio
@@ -438,15 +447,15 @@ async def test_watchdog_does_not_fire_within_grace(monkeypatch, tmp_path):
     fake.session_dir = tmp_path
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
     # Untouched: still in-flight, streak unchanged.
-    assert fake.shared_state.enablement_dispatched is True
-    assert fake.shared_state.enablement_stall_streak == 1
+    assert fake.shared_state.enablement.dispatched is True
+    assert fake.shared_state.enablement.stall_streak == 1
 
 
 @pytest.mark.asyncio
 async def test_rearm_kept_is_terminal(monkeypatch):
     fake = _enqueue_self(enablement_dispatched=True)
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
-    assert fake.shared_state.enablement_succeeded is True
+    assert fake.shared_state.enablement.succeeded is True
     # A subsequent enqueue attempt is a no-op.
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -459,13 +468,13 @@ async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
     fake = _enqueue_self(enablement_dispatched=True, enablement_origin="eval", enablement_revalidation_generation=1)
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
-    assert fake.shared_state.enablement_validation_pending is True
-    assert fake.shared_state.enablement_succeeded is False
-    assert fake.shared_state.enablement_dispatched is False
+    assert fake.shared_state.enablement.validation_pending is True
+    assert fake.shared_state.enablement.succeeded is False
+    assert fake.shared_state.enablement.dispatched is False
     # Generation is incremented to get a fresh idempotency key.
-    assert fake.shared_state.enablement_revalidation_generation == 2
+    assert fake.shared_state.enablement.revalidation_generation == 2
     # Tracked task_id is cleared for the new window.
-    assert fake.shared_state.enablement_revalidation_task_id == ""
+    assert fake.shared_state.enablement.revalidation_task_id == ""
     # The specialist pump is blocked while validation is pending.
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -565,8 +574,8 @@ async def test_rearm_ignores_non_enablement(monkeypatch):
     fake = _enqueue_self(enablement_dispatched=True)
     fake._maybe_rearm_enablement({"status": "reverted"})
     # No enablement marker -> state untouched.
-    assert fake.shared_state.enablement_dispatched is True
-    assert fake.shared_state.enablement_succeeded is False
+    assert fake.shared_state.enablement.dispatched is True
+    assert fake.shared_state.enablement.succeeded is False
 
 
 @pytest.mark.asyncio
@@ -588,14 +597,14 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
     )
     st = fake.shared_state
     # Not terminal; not stalled.
-    assert st.enablement_succeeded is False
+    assert st.enablement.succeeded is False
     assert st.stop_reason == ""
     # Progressing patch is recorded for stacking; stall streak reset; guard cleared.
-    assert st.enablement_kept_patches == ["/s/runs/specialist/t1/patches/001_qk_rope.patch"]
-    assert st.enablement_stall_streak == 0
-    assert st.enablement_dispatched is False
+    assert st.enablement.kept_patches == ["/s/runs/specialist/t1/patches/001_qk_rope.patch"]
+    assert st.enablement.stall_streak == 0
+    assert st.enablement.dispatched is False
     # Launch log now points at the NEW (deeper) gap so the next round targets it.
-    assert "not initialized from checkpoint" in st.enablement_launch_log
+    assert "not initialized from checkpoint" in st.enablement.launch_log
 
 
 @pytest.mark.asyncio
@@ -618,7 +627,7 @@ async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
             "enablement_launch_log": "RuntimeError: some third gap",
         }
     )
-    assert fake.shared_state.enablement_kept_patches == [
+    assert fake.shared_state.enablement.kept_patches == [
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
         "/s/runs/specialist/t2/patches/002_indexer_share.patch",
     ]
@@ -635,11 +644,11 @@ async def test_rearm_stall_cap_stops_run(monkeypatch):
     for i in range(_ENABLEMENT_MAX_STALL - 1):
         fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
         assert st.stop_reason == ""
-        assert st.enablement_dispatched is False
-        assert st.enablement_stall_streak == i + 1
+        assert st.enablement.dispatched is False
+        assert st.enablement.stall_streak == i + 1
     # The final revert trips the cap -> terminal stop_reason.
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert st.enablement_stall_streak == _ENABLEMENT_MAX_STALL
+    assert st.enablement.stall_streak == _ENABLEMENT_MAX_STALL
     assert st.stop_reason == "enablement_stalled"
 
 
@@ -649,7 +658,7 @@ async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
     fake = _enqueue_self(enablement_dispatched=True)
     st = fake.shared_state
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert st.enablement_stall_streak == 1
+    assert st.enablement.stall_streak == 1
     # Progress resets the streak.
     fake._maybe_rearm_enablement(
         {
@@ -660,7 +669,7 @@ async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
             "enablement_launch_log": "ValueError: not initialized from checkpoint",
         }
     )
-    assert st.enablement_stall_streak == 0
+    assert st.enablement.stall_streak == 0
     assert st.stop_reason == ""
 
 
@@ -668,7 +677,7 @@ async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
 async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
     """Q3: applied setup commands are stacked on advance for durable replay next round."""
     fake = _enqueue_self(enablement_dispatched=True)
-    fake.shared_state.enablement_setup_commands = []
+    fake.shared_state.enablement.setup_commands = []
     fake._maybe_rearm_enablement(
         {
             "enablement": True,
@@ -679,14 +688,14 @@ async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
             "enablement_launch_log": "ValueError: not initialized from checkpoint",
         }
     )
-    assert fake.shared_state.enablement_setup_commands == ["pip install -U transformers"]
+    assert fake.shared_state.enablement.setup_commands == ["pip install -U transformers"]
 
 
 @pytest.mark.asyncio
 async def test_rearm_kept_stacks_setup_commands(monkeypatch):
     """Q3: a runnable KEEP also records the setup commands it relied on."""
     fake = _enqueue_self(enablement_dispatched=True)
-    fake.shared_state.enablement_setup_commands = ["apt-get install -y gh"]
+    fake.shared_state.enablement.setup_commands = ["apt-get install -y gh"]
     fake._maybe_rearm_enablement(
         {
             "enablement": True,
@@ -694,8 +703,8 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch):
             "setup_commands_applied": ["apt-get install -y gh", "pip install vllm==0.24"],
         }
     )
-    assert fake.shared_state.enablement_succeeded is True
-    assert fake.shared_state.enablement_setup_commands == [
+    assert fake.shared_state.enablement.succeeded is True
+    assert fake.shared_state.enablement.setup_commands == [
         "apt-get install -y gh",
         "pip install vllm==0.24",
     ]
@@ -708,13 +717,13 @@ def test_enablement_close_guard_blocks_premature_skip_to_close():
     s = SharedState()
     s.phase = "PRELUDE"
     s.baseline_tput = 0.0
-    s.enablement_succeeded = False
+    s.enablement.succeeded = False
     assert s.enablement_close_guard_active() is True
     # Once a baseline exists, or enablement succeeded, the guard lifts.
     s.baseline_tput = 100.0
     assert s.enablement_close_guard_active() is False
     s.baseline_tput = 0.0
-    s.enablement_succeeded = True
+    s.enablement.succeeded = True
     assert s.enablement_close_guard_active() is False
 
 
@@ -726,10 +735,10 @@ def test_enablement_close_guard_active_during_validation_pending():
     s = SharedState()
     s.phase = "SWEEP"
     s.baseline_tput = 100.0
-    s.enablement_succeeded = False
-    s.enablement_validation_pending = True
+    s.enablement.succeeded = False
+    s.enablement.validation_pending = True
     assert s.enablement_close_guard_active() is True
-    s.enablement_validation_pending = False
+    s.enablement.validation_pending = False
     assert s.enablement_close_guard_active() is False
 
 
@@ -737,7 +746,7 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
     """Q3: stacked base setup commands are passed to the next round + noted."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
-    fake.shared_state.enablement_setup_commands = ["pip install -U transformers"]
+    fake.shared_state.enablement.setup_commands = ["pip install -U transformers"]
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
@@ -749,7 +758,7 @@ def test_build_params_threads_base_patches_when_stacked(monkeypatch):
     """Stacked kept-patches are passed to the next round + noted in the mandate."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
-    fake.shared_state.enablement_kept_patches = [
+    fake.shared_state.enablement.kept_patches = [
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
     ]
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
