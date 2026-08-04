@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
-from ...state.shared_state import resolve_grading_anchor_tput
+from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -1552,21 +1552,7 @@ class IntegratePatchExecutor:
         # before an Explore KEEP always measures against the real stack top.
         # (``shared_state`` and the accuracy_baseline fill are already resolved above.)
         if shared_state is not None:
-            cb = getattr(shared_state, "current_best", None)
-            if isinstance(cb, dict):
-                cb_tput = cb.get("tput")
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                    params["base_tput"] = float(cb_tput)
-                cb_args = str(cb.get("extra_server_args") or "").strip()
-                if cb_args:
-                    params["base_extra_args"] = cb_args
-                cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
-                if cb_envs:
-                    params["base_extra_envs"] = cb_envs
-                for _ctrl in ("remove_args", "unset_envs", "args_mode"):
-                    cb_ctrl = cb.get(_ctrl)
-                    if cb_ctrl and not params.get(f"base_{_ctrl}"):
-                        params[f"base_{_ctrl}"] = cb_ctrl
+            inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
