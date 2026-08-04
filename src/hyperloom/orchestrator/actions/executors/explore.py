@@ -967,13 +967,15 @@ class ExploreExecutor:
 
         # Warm-decision mode. Run a discarded cold warmup round first so the
         # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``. Requires
-        # server_lifecycle reuse; otherwise fall back to a single cold-decision
-        # run. Opt out with INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
-        warm_decision_enabled = os.environ.get(
-            "INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1"
-        ).strip().lower() not in {"0", "false", "no", "off"}
-        use_warm_decision = warm_decision_enabled and lifecycle_eligible
+        # warm — apples-to-apples with ``baseline_tput``.
+        #
+        # Tied to server_lifecycle eligibility and nothing else, because the
+        # baseline gates its cold+hot double-run on the very same verdict
+        # (``baseline.py``: ``double_run_requested and lifecycle["eligible"]``).
+        # Both sides therefore measure hot together or cold together. There is
+        # deliberately no toggle here: the baseline exposes none either, and a
+        # one-sided opt-out silently graded cold candidates against a hot anchor.
+        use_warm_decision = lifecycle_eligible
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
