@@ -2089,13 +2089,18 @@ class WritebackCollaborator:
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
-            existing = {
+            existing_names = {
                 (str(e.get("action")), str(e.get("variant_name")))
                 for e in self.shared_state.optimization_stack
                 if isinstance(e, dict)
             }
+            existing_fps = {
+                str(e.get("fingerprint") or "")
+                for e in self.shared_state.optimization_stack
+                if isinstance(e, dict) and e.get("fingerprint")
+            }
             key = (task_kind, str(variant_name or ""))
-            if key not in existing:
+            if key not in existing_names and str(bv.get("fingerprint") or "") not in existing_fps:
                 source_phase = str(
                     (bv.get("source_phase") if isinstance(bv, dict) else "")
                     or (

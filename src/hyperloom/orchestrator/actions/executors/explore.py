@@ -173,23 +173,6 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
-def _entry_control_fields(entry: Any) -> dict[str, Any]:
-    """Return remove/unset/replace controls from a persisted ledger entry."""
-    if not isinstance(entry, dict):
-        return {}
-    remove_args = to_str_list(entry.get("remove_args"))
-    unset_envs = to_str_list(entry.get("unset_envs"))
-    args_mode = str(entry.get("args_mode") or "append").strip().lower()
-    out: dict[str, Any] = {}
-    if remove_args:
-        out["remove_args"] = remove_args
-    if unset_envs:
-        out["unset_envs"] = unset_envs
-    if args_mode == "replace":
-        out["args_mode"] = "replace"
-    return out
-
-
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects.
 
@@ -776,28 +759,6 @@ class ExploreExecutor:
             ("domains_round_summary", []),
         ):
             search.setdefault(key, default)
-
-        def _entry_fp(entry: Any) -> str:
-            """Resolve a ledger entry's variant fingerprint.
-
-            Args:
-                entry (Any): A ledger entry; expected to be a dict with
-                    a ``fingerprint`` or server-args/envs to derive one.
-
-            Returns:
-                str: The stored or canonically-derived fingerprint, or
-                ``""`` when ``entry`` is not a dict.
-            """
-            if not isinstance(entry, dict):
-                return ""
-            fp = entry.get("fingerprint")
-            if fp:
-                return str(fp)
-            return canonical_fingerprint(
-                str(entry.get("extra_server_args") or ""),
-                dict(entry.get("extra_envs") or {}),
-                **_entry_control_fields(entry),
-            )
 
         tested_dict = search.get("tested") or {}
         name_index = dict(search.get("name_index") or {})
@@ -1574,13 +1535,11 @@ class ExploreExecutor:
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (dedup + accepted preservation) -----------
-        accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}
-        accepted_fps_now.discard("")
+        # ----- Ledger compaction (per-fp last-wins) -----------
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
-            if not fp or fp in accepted_fps_now:
+            if not fp:
                 continue
             rejected_dedup[fp] = entry
 
