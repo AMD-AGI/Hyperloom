@@ -54,24 +54,39 @@ cold start with no LLM variants.
 
 Scriptable (server-less) autoregressive **video** diffusion; the metric is
 steady-state **generated frames per second** (`throughput_unit="fps"`, higher =
-better), surfaced as `output_throughput`. Requires the bypass benchmark backend
-and the vendored customer bench-kit:
+better), surfaced as `output_throughput`. Requires the bypass benchmark backend:
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-export HYPERLOOM_BYPASS_SCRIPTS_DIR=/primus/xiaofei/HY-WorldPlay/hyperloom_bench
+export WORLDPLAY_REPO_PATH=/path/to/HY-WorldPlay        # code checkout
 python3 -m hyperloom.inference_optimizer.cli -v optimize \
   --framework worldplay --gpu-type mi355x \
-  --model /primus/xiaofei/HY-WorldPlay/models/HunyuanVideo-1.5 \
-  --max-hours 12 --no-framework-agent
+  --model /path/to/models/HunyuanVideo-1.5 \
+  --tp 8 --max-hours 12
 ```
 
 Shipped configs `baseline_worldplay.yaml` / `profile_worldplay.yaml`. The
-Hyperloom entrypoint `worldplay_{runner_type}.sh` is the ONLY Hyperloom-authored
-file in `HYPERLOOM_BYPASS_SCRIPTS_DIR`; it wires the customer's byte-identical
-`worldplay_bench_common.sh` + `bench_fps.py` and hands off. It supplies on-disk
-`--model_path`/`--action_ckpt` because this node's HF hub cache holds empty
-snapshot stubs.
+entrypoint `worldplay_{runner_type}.sh`, `worldplay_bench_common.sh` and
+`bench_fps.py` all ship in `assets/benchmark_scripts/` and are pinned by
+absolute path at materialization, so `HYPERLOOM_BYPASS_SCRIPTS_DIR` is only an
+operator override, not a requirement. The entrypoint supplies on-disk
+`--model_path`/`--action_ckpt` because an HF hub cache may hold empty snapshot
+stubs; `--action_ckpt` defaults to
+`<model_parent>/HY-WorldPlay/<ar|bidirectional>_model/diffusion_pytorch_model.safetensors`.
+
+`WORLDPLAY_REPO_PATH` is the HY-WorldPlay **code** checkout (the `hyvideo`
+package), separate from the weights under `--model`. Setting it also registers
+the checkout as a framework source root, which PolicyGate requires before any
+specialist or framework-agent patch against `hyvideo/` can land — the probe
+cannot find a git checkout on its own, only pip-installed packages. Leave it
+unset and the entrypoint clones into `$HYPERLOOM_CACHE_DIR`.
+
+The FRAMEWORK phase works here (the registry carries the HY-WorldPlay
+`repo_url`) and is the only phase that can restructure the pipeline itself —
+sequence-parallel all-to-all, per-step host-to-device copies, repeated work
+hoisted out of the AR rollout. `explore` cannot reach any of that: a variant is
+only CLI flags plus env, and the accepted flag surface is four knobs. Pass
+`--no-framework-agent` to skip it, but do not assume it is the default.
 
 Locked / workload-spec (blacklisted in `_WORLDPLAY_ENV_BLACKLIST`, never explored):
 precision is BF16 (`WORLDPLAY_USE_FP8_GEMMS`/`FP4_GEMMS`/`SAGEATTN` forced off),
@@ -91,9 +106,20 @@ choke point injects `XDIT_QUALITY_REF_WRITE` (establish) / `XDIT_QUALITY_REF`
 
 Seed grid `_worldplay_default_grid` (`worldplay_resident_ar`,
 `worldplay_torch_compile`, `worldplay_group_offload_block`,
-`worldplay_buffer_ops`, `worldplay_scratch_reclaim_off`). Note this node has a
-single MI355X → `TP=1`; the customer's headline is 8-GPU `sp=8`, so single-GPU
-fps is **not directly comparable**.
+`worldplay_buffer_ops`, `worldplay_scratch_reclaim_off`). `TP` is the
+sequence-parallel degree and must match the GPU count you compare against — the
+customer's headline is 8-GPU `sp=8`, so fps from a different `TP` is **not
+directly comparable**.
+
+Measured on 8×MI355X at the headline operating point: baseline lands at
+0.352 fps with run-to-run std 0.26–0.45%, and one generation takes ~341s, so a
+leg costs `(1 warmup + WORLDPLAY_REPEATS) × 5.7 min` (baseline adds two
+quality-calibration generations). Of the seed grid, `torch.compile` is a
+reproducible **regression** (−13%: attention is `@torch.compiler.disable`, so
+compile covers none of the hot path and still pays its overhead) and the
+offloading / resident / ROCm-env knobs all measured inside the noise band. The
++51.8% win on that node came from the kernel path rewriting `attn_fwd`
+(37.9% of GPU time) in Triton, not from `explore`.
 
 **Knob surface for proposers (LLM explore + specialists) — read this before
 proposing variants.** The customer's byte-identical `bench_fps.py` is a thin
