@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperloom · GLM-5.2 Framework-Agent Enablement (glm_moe_dsa on vLLM 0.22.0)</title>
+<style>
+  :root{
+    --bg:#0c1020; --panel:#151b30; --panel2:#1b2340; --ink:#e8ecf8; --muted:#97a0c0;
+    --line:#2b3559;
+    --prelude:#3b82f6; --framework:#8b5cf6; --explore:#22c55e; --kernel:#f59e0b;
+    --sweep:#06b6d4; --close:#ec4899;
+    --good:#34d399; --warn:#fbbf24; --bad:#fb7185;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#16203f 0%,var(--bg) 55%);
+       color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       padding:32px 28px 60px;line-height:1.5}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:16px;margin:34px 0 14px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:6px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 6px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:12px;color:var(--muted)}
+  .chip b{color:var(--ink)}
+  .headline{display:flex;gap:18px;flex-wrap:wrap;margin:18px 0 6px}
+  .kpi{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+       border-radius:14px;padding:14px 18px;min-width:150px}
+  .kpi .v{font-size:26px;font-weight:700}
+  .kpi .l{font-size:12px;color:var(--muted)}
+  .kpi .v.good{color:var(--good)}
+  .kpi .v.bad{color:var(--bad)}
+
+  /* flow / pipeline */
+  .pipe{display:flex;align-items:stretch;gap:0;margin:10px 0 8px;overflow-x:auto;padding-bottom:6px}
+  .stage{flex:1;min-width:172px;position:relative;padding:0 6px}
+  .stagehead{border-radius:12px 12px 0 0;padding:10px 12px;font-weight:700;font-size:13px;color:#0b0f1e;text-align:center;
+             clip-path:polygon(0 0,calc(100% - 14px) 0,100% 50%,calc(100% - 14px) 100%,0 100%,14px 50%)}
+  .stage:first-child .stagehead{clip-path:polygon(0 0,calc(100% - 14px) 0,100% 50%,calc(100% - 14px) 100%,0 100%)}
+  .stage:last-child .stagehead{clip-path:polygon(0 0,100% 0,100% 100%,0 100%,14px 50%)}
+  .body{background:var(--panel);border:1px solid var(--line);border-top:none;border-radius:0 0 12px 12px;
+        padding:10px;min-height:230px}
+  .role{font-size:11px;color:var(--muted);margin-bottom:8px;text-align:center}
+
+  .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;border-radius:9px;
+        padding:9px 10px;margin-bottom:9px}
+  .card .t{font-weight:700;font-size:12.5px}
+  .card .src{font-size:10.5px;color:var(--muted);margin:2px 0 6px}
+  .card code{background:#0c1124;border:1px solid var(--line);border-radius:5px;padding:1px 5px;
+             font-size:10.5px;color:#cfe3ff;display:inline-block;word-break:break-all}
+  .delta{display:inline-block;font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;margin-top:6px}
+  .delta.good{background:rgba(52,211,153,.14);color:var(--good)}
+  .delta.flat{background:rgba(151,160,192,.14);color:var(--muted)}
+  .delta.warn{background:rgba(251,191,36,.14);color:var(--warn)}
+  .delta.bad{background:rgba(251,113,133,.14);color:var(--bad)}
+  .att{float:right;font-size:10px;font-weight:800;border-radius:6px;padding:1px 7px;letter-spacing:.02em}
+  .att.a{background:rgba(139,92,246,.18);color:#c4b5fd;border:1px solid #7c3aed}
+  .att.b{background:rgba(34,197,94,.18);color:#86efac;border:1px solid #16a34a}
+
+  /* gap cards */
+  .loops{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .loopcard{flex:1;min-width:150px;background:linear-gradient(180deg,var(--panel2),var(--panel));
+            border:1px solid var(--line);border-radius:12px;padding:12px 14px;position:relative}
+  .loopcard .ln{font-size:12px;color:var(--muted);font-weight:700}
+  .loopcard .lg{font-size:15px;font-weight:800;margin:4px 0 2px}
+  .loopcard .lc{font-size:11px;color:var(--muted)}
+  .loopcard .lwhat{font-size:11px;color:var(--ink);margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
+  .loopcard.win{border-color:#7c3aed}
+  .loopcard.win2{border-color:#16a34a}
+  .barwrap{height:8px;background:#0c1124;border-radius:6px;margin-top:8px;overflow:hidden}
+  .barwrap i{display:block;height:100%;border-radius:6px}
+
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+  td code{background:#0c1124;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:11px;color:#cfe3ff;word-break:break-all}
+  .tag{font-size:10.5px;border-radius:5px;padding:1px 7px;font-weight:700}
+  .footnote{color:var(--muted);font-size:11.5px;margin-top:10px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:820px){.two{grid-template-columns:1fr}}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .diff{background:#0c1124;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.55;overflow-x:auto;margin-top:8px}
+  .diff .del{color:#fb7185}
+  .diff .add{color:#34d399}
+  .diff .ctx{color:var(--muted)}
+</style>
+</head>
+<body>
+
+<h1>Hyperloom · GLM-5.2 Framework-Agent Enablement</h1>
+<div class="sub">optimizer 如何<b>仅靠自身</b>把无法加载的 <code>glm_moe_dsa</code> (GLM-5.2, DeepSeek V3.2-style DSA) 修复到能在 ROCm vLLM 0.22.0 上加载并服务 —— 从「根本无法 boot」到「实测 baseline 1148.74 tok/s」</div>
+
+<div class="meta">
+  <span class="chip">模型 <b>GLM-5.2 (GlmMoeDsaForCausalLM · MLA + DeepSeek Sparse Attention · 256+1 experts · MTP-1)</b></span>
+  <span class="chip">框架 <b>vLLM 0.22.0 (ROCm)</b></span>
+  <span class="chip">GPU <b>MI325X→MI300X (gfx942) ×8</b></span>
+  <span class="chip">精度 <b>FP8</b></span>
+  <span class="chip">工作负载 <b>TP=8 · CONC=64 · ISL/OSL=1024</b></span>
+  <span class="chip">会话 <b>20260704T031648Z</b></span>
+</div>
+
+<div class="headline">
+  <div class="kpi"><div class="v bad">无法 boot</div><div class="l">修复前:engine core init failed</div></div>
+  <div class="kpi"><div class="v good">✓ 加载 + 服务</div><div class="l">修复后:V1 engine + 1600+ 次 200 OK</div></div>
+  <div class="kpi"><div class="v good">1148.74</div><div class="l">建立的 baseline tok/s (实测)</div></div>
+  <div class="kpi"><div class="v">2 gaps · 2 patches</div><div class="l">诊断出的加载缺口 · 自撰补丁数</div></div>
+  <div class="kpi"><div class="v good">100% autonomous</div><div class="l">补丁全部由 framework specialist 自撰</div></div>
+</div>
+
+<h2>① 结论:两个加载 gap，被 framework-agent 诊断并修复</h2>
+<div class="sub">GLM-5.2 的 <code>glm_moe_dsa</code> 复用了 vLLM 的 <code>deepseek_v2.py</code> 代码路径,但有两个 ROCm/vLLM 0.22.0 未覆盖的加载缺口。EXPLORE 之前的 <b>enablement 环节</b>(coordinator 驱动的 framework specialist)在 baseline 无法启动时被触发,读源码、复现、写 <code>git apply</code> 补丁,依次修复两个 gap 直到模型完整 boot。</div>
+<div class="loops">
+  <div class="loopcard win">
+    <div class="ln">GAP #1 <span style="float:right;font-weight:500">patch 001</span></div>
+    <div class="lg" style="color:#c4b5fd">qk_rope_head_dim 维度错乱</div>
+    <div class="lc">shape_mismatch @ weight loader</div>
+    <div class="barwrap"><i style="width:100%;background:var(--framework)"></i></div>
+    <div class="lwhat">transformers <code>GlmMoeDsaConfig.attribute_map</code> 把 <code>head_dim ↔ qk_rope_head_dim</code> 弄反 → 读到 192 而非 64,MLA 权重切分越界。<b>patch 001</b> 检测到该 bug 并从 <code>config.json</code> 读回正确的 64。</div>
+  </div>
+  <div class="loopcard win2">
+    <div class="ln">GAP #2 <span style="float:right;font-weight:500">patch 002</span></div>
+    <div class="lg" style="color:#86efac">indexer.k_norm 权重缺失</div>
+    <div class="lc">weights not initialized from checkpoint</div>
+    <div class="barwrap"><i style="width:100%;background:var(--explore)"></i></div>
+    <div class="lwhat">checkpoint 只为 21 个 <code>'full'</code> indexer 层提供 <code>k_norm</code>,但 vLLM 在全部 78 层实例化。<b>patch 002</b> 在 <code>load_weights()</code> 中让 57 个 <code>'shared'</code> 层从最近的 full 层复制 k_norm 并标记为已加载。</div>
+  </div>
+</div>
+<div class="footnote">两个 gap 都发生在<b>权重加载 / 模型构建期</b>(不是 kernel 或 config 层),因此普通 EXPLORE 杠杆无法触及 —— 必须由能读源码、写 <code>git apply</code> 补丁的 framework specialist 处理。这正是 enablement 环节存在的意义。</div>
+
+<h2>② Enablement 环节的机制(coordinator 驱动的自修复闭环)</h2>
+<div class="sub">baseline 无法 boot 时,PRELUDE 进入一个「捕获失败日志 → 派发 specialist 撰写补丁 → integrate 应用+重启验证 → 判定 advanced / runnable」的闭环,一次修一个更深的 gap 并把补丁堆叠,直到模型完整启动。</div>
+<div class="pipe">
+  <div class="stage">
+    <div class="stagehead" style="background:var(--prelude)">① BASELINE 失败</div>
+    <div class="body">
+      <div class="role">捕获 launch 失败签名</div>
+      <div class="card" style="border-left-color:var(--prelude)">
+        <div class="t">server_init_dead</div>
+        <div class="src">vllm serve 8-way TP 启动即崩<br>traceback 存入 <code>enablement_launch_log</code></div>
+        <code>Engine core initialization failed</code>
+        <div><span class="delta bad">baseline_tput = 0 · 无法进入 EXPLORE</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="stagehead" style="background:var(--framework)">② 派发 SPECIALIST</div>
+    <div class="body">
+      <div class="role">enablement_specialist (GPU lane)</div>
+      <div class="card" style="border-left-color:var(--framework)">
+        <div class="t">分类 + 撰写补丁</div>
+        <div class="src">classify_failure → 授予 <code>vllm/</code>·<code>aiter/</code>·<code>rocm/</code> 写权限<br>读源码、复现、写 unified diff</div>
+        <code>checkpoint 事实 + 源码上下文注入 mandate</code>
+        <div><span class="delta flat">specialist_done.json + patches/</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="stagehead" style="background:var(--explore)">③ INTEGRATE 验证</div>
+    <div class="body">
+      <div class="role">git apply + 重启 + boot 探测</div>
+      <div class="card" style="border-left-color:var(--explore)">
+        <div class="t">堆叠 + 重新 boot</div>
+        <div class="src">已 KEEP 的补丁作 base 先应用,<br>本轮补丁叠加其上,再启动验证</div>
+        <code>enablement_base_patches (serial stacking)</code>
+        <div><span class="delta good">runnable? / advanced?</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="stagehead" style="background:var(--kernel)">④ REARM 推进</div>
+    <div class="body">
+      <div class="role">_maybe_rearm_enablement</div>
+      <div class="card" style="border-left-color:var(--kernel)">
+        <div class="t">按进展推进</div>
+        <div class="src"><b>advanced</b>:清了旧崩溃、到新 gap → 堆叠补丁、进下一轮<br><b>kept</b>:完全跑通 → 成功</div>
+        <code>补丁堆叠直到 runnable</code>
+        <div><span class="delta good">gap#1 → gap#2 → runnable</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="stagehead" style="background:var(--close)">⑤ BASELINE 建立</div>
+    <div class="body">
+      <div class="role">模型跑通 → 正常优化</div>
+      <div class="card" style="border-left-color:var(--close)">
+        <div class="t">1148.74 tok/s</div>
+        <div class="src">V1 engine 起来、1600+ 次 200 OK<br>PRELUDE 退出 → roofline → EXPLORE</div>
+        <div><span class="delta good">glm_moe_dsa 已 enabled ✓</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="footnote">整个 enablement 由 baseline 首次失败触发,依次修复 gap#1(qk_rope)与 gap#2(k_norm)后,模型完整 boot、baseline 建立,PRELUDE 正常退出进入 roofline / EXPLORE。全程零人工代写补丁。</div>
+
+<h2>③ 两个决定性补丁(specialist 自撰的源码改动)</h2>
+<div class="two">
+  <div class="box">
+    <div class="sub"><span class="att a">patch 001</span> &nbsp;qk_rope_head_dim · <code>vllm/model_executor/models/deepseek_v2.py</code></div>
+    <div style="font-size:12.5px;margin:8px 0">根因:transformers 的 <code>GlmMoeDsaConfig.attribute_map</code> 把 <code>head_dim</code> 与 <code>qk_rope_head_dim</code> 映射弄反,导致 vLLM 读到 <b>192</b>(实为 qk_nope_head_dim)而非正确的 <b>64</b>,MLA 权重切分 <code>.narrow()</code> 越界。</div>
+    <div class="diff">
+<span class="ctx">if config.model_type == "glm_moe_dsa":</span><br>
+<span class="ctx">  # attribute_map bug: qk_rope==qk_nope==head_dim 时触发</span><br>
+<span class="add">+ if qk_rope_head_dim == qk_nope_head_dim == head_dim:</span><br>
+<span class="add">+     raw = json.load(open(f"{path}/config.json"))</span><br>
+<span class="add">+     qk_rope_head_dim = raw["qk_rope_head_dim"]  # = 64</span>
+    </div>
+  </div>
+  <div class="box">
+    <div class="sub"><span class="att b">patch 002</span> &nbsp;k_norm 权重共享 · <code>DeepseekV2Model.load_weights()</code></div>
+    <div style="font-size:12.5px;margin:8px 0">根因:checkpoint 只含 21 个 <code>'full'</code> 层的 <code>indexer.k_norm</code>(层 0,1,2,6,10,…,74);57 个 <code>'shared'</code> 层需在加载后从最近的 full 层复制。补丁使用 <code>load_weights()</code> 子模块作用域的正确 key(不含 <code>model.</code> 前缀)。</div>
+    <div class="diff">
+<span class="ctx"># 加载完成后,为 shared 层补齐 k_norm</span><br>
+<span class="add">+ for dst, src in shared_to_full.items():</span><br>
+<span class="add">+     w = f"layers.{dst}.self_attn.indexer.k_norm.weight"</span><br>
+<span class="add">+     b = f"layers.{dst}.self_attn.indexer.k_norm.bias"</span><br>
+<span class="add">+     params_dict[w].data.copy_(params_dict[srcW].data)</span><br>
+<span class="add">+     params_dict[b].data.copy_(params_dict[srcB].data)</span><br>
+<span class="add">+     loaded_params.add(w); loaded_params.add(b)</span>
+    </div>
+  </div>
+</div>
+<div class="footnote">两个补丁作为 <code>enablement_kept_patches</code> 堆叠应用到 vLLM 源码树:patch 001 先修好 MLA 维度,patch 002 在其之上补齐 sparse-attention indexer 的 k_norm 权重,使 8-way TP 的 FP8 MoE 引擎完整 boot。</div>
+
+<h2>④ 修复后:模型进入正常优化(EXPLORE)</h2>
+<div class="two">
+  <div class="box">
+    <div class="sub">enabled 之后的进展(截至报告时)</div>
+    <table>
+      <thead><tr><th>阶段</th><th>产出</th><th>tok/s</th></tr></thead>
+      <tbody>
+        <tr><td>enablement</td><td>glm_moe_dsa 可加载 (patch 001+002)</td><td style="color:var(--good)">可 boot</td></tr>
+        <tr><td>PRELUDE</td><td>baseline 实测 + roofline/analysis.md</td><td>1148.74</td></tr>
+        <tr><td>EXPLORE</td><td>2 个 KEEP 叠加(全栈 rebench 验证)</td><td>1174.9 → 1191.6</td></tr>
+        <tr><td><b>current_best</b></td><td>EXPLORE + kernel 优化进行中</td><td style="color:var(--good)"><b>1191.59 (+3.73%)</b></td></tr>
+      </tbody>
+    </table>
+    <div class="footnote" style="margin-top:8px">运行仍在进行(~31h / 48h 预算);EXPLORE + KERNEL 持续挖掘增益,到 deadline 自动出 report。</div>
+  </div>
+  <div class="box">
+    <div class="sub">关键观察</div>
+    <ul style="margin:6px 0 0;padding-left:18px;color:var(--ink);font-size:13px">
+      <li><b>目标达成</b>:optimizer 仅靠自身 framework specialist,把「根本无法 boot」的 <code>glm_moe_dsa</code> 修到可加载、可服务、可测(1148.74 tok/s)。全部补丁由 specialist 自撰,无人工代写。</li>
+      <li><b>两个 gap 分层暴露</b>:先是 MLA 的 <code>qk_rope_head_dim</code> 维度错乱(config attribute_map bug),修好后才暴露更深的 DSA indexer <code>k_norm</code> 权重缺失;enablement 的「advanced 判定 + 补丁堆叠」把它们逐层剥离。</li>
+      <li><b>补丁精准落在源码层</b>:patch 001 改 MLA 维度读取,patch 002 改 <code>load_weights()</code> 的权重共享 —— 都是 config/EXPLORE 杠杆无法触及、只有能读改 vLLM 源码的 specialist 才能完成的修复。</li>
+      <li><b>enabled 即无缝进入优化</b>:baseline 一建立,PRELUDE 自动走 roofline → EXPLORE,已叠出 2 个 KEEP(+3.73%),证明修复是「真正可用」而非仅能 boot。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="footnote" style="margin-top:18px">数据来源:session <code>20260704T031648Z</code> 的 <code>state.json</code>(<code>enablement_kept_patches</code> / <code>baseline_tput</code> / <code>optimization_stack</code>)、<code>runs/specialist/*/specialist_done.json</code>(<code>summary</code> / <code>new_findings</code> / <code>patches_written</code>)、补丁文件 <code>001_glm_moe_dsa_qk_rope_fix.patch</code> · <code>k_norm 共享补丁</code>,以及运行日志的 <code>ENABLEMENT: dispatched/rearm</code> 转移与 <code>baseline anchor</code> 记录。</div>
+
+</body>
+</html>

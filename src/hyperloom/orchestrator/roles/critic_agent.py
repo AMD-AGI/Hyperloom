@@ -4,7 +4,7 @@
 """CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
 the Coordinator as a real Critic Backend.
 
-Runs the two-phase loop from ``src/hyperloom/agents/critic/AGENTS.md``
+Runs the two-phase loop from ``src/hyperloom/agents/critic/README.md``
 (prepare-review → Codex review.json → commit-review), giving KB priors,
 per-session memory, review_constraints injection, and emergency fallbacks.
 The returned envelope is re-validated locally so malformed replies surface as
