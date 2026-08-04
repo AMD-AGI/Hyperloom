@@ -153,9 +153,8 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
         task=_task("baseline"),
     )
 
-    # Hot-measure contract: baseline_tput/hot from tput, cold from warmup anchor.
+    # Hot-measure contract: baseline_tput IS the hot round, cold from warmup anchor.
     assert s.baseline_tput == 100.0
-    assert s.baseline_hot_tput == 100.0
     assert s.baseline_cold_tput == 80.0
     assert s.baseline_accuracy == 0.9
     assert s.baseline_runtime_sec == 30.0

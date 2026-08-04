@@ -397,11 +397,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
     # Discarded first-round tput from the baseline cold-start double-run
-    # (audit/debugging only; gain math uses the hot ``baseline_tput``).
+    # (audit/debugging only; gain math uses the hot ``baseline_tput``). Kept
+    # because it is the only durable record of the cold round -- ``baseline_tput``
+    # already IS the hot one, so no separate hot mirror exists.
     baseline_cold_tput: float = 0.0
-    # Mirror of the hot measure-round tput; matches ``baseline_tput`` when the
-    # double-run path is eligible.
-    baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline
     # lands; backs up snapshot ceiling so the frontend has data even when the
