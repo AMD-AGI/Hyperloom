@@ -54,13 +54,7 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 
 def _force_cold_decision(monkeypatch) -> None:
-    """Make server_lifecycle reuse ineligible, so the decision round is a cold single run.
-
-    Warm-decision is tied to lifecycle eligibility and has no toggle of its own
-    (the baseline's double-run has none either, and a one-sided opt-out would
-    grade cold candidates against a hot anchor). Tests that need the single-round
-    cold path therefore express the real precondition: no reuse available.
-    """
+    """Make server_lifecycle reuse ineligible, the one precondition for a cold decision round."""
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.explore.resolve_lifecycle_params",
         lambda _config_path: {
@@ -838,12 +832,7 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
     sub_agent_runner,
     tmp_path,
 ):
-    """Superseding a stale ``base_tput`` also re-reads the args it was measured on.
-
-    Adopting the newer anchor alone would launch the candidate on the stack the
-    params snapshotted while grading it against the newer number, so a neutral
-    variant reads as a regression.
-    """
+    """Superseding a stale ``base_tput`` also re-reads the args it was measured on."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -906,12 +895,7 @@ async def test_explore_stack_rebench_floor_follows_the_in_batch_anchor(
     sub_agent_runner,
     tmp_path,
 ):
-    """The 2nd in-batch KEEP is confirmed against the anchor round 1 graded it on.
-
-    Anchoring the floor on the round-start ``base_tput`` left it a whole KEEP
-    below the live bar, so a variant that regressed against the recipe it was
-    layered on still passed "stable" and was KEPT with a negative gain.
-    """
+    """A 2nd KEEP that regresses against the 1st is evicted, not KEPT with a negative gain."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)

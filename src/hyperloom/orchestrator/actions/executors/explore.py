@@ -40,7 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.shared_state import resolve_grading_anchor_tput, resolve_grading_base
+from ...state.shared_state import resolve_grading_anchor_tput
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -595,37 +595,25 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # The anchor and the config it was measured on are ONE unit: params
-        # snapshot the pair from current_best at dispatch, but a KEEP can land
-        # while this task sits queued. Adopting the newer anchor alone would
-        # grade a candidate built on the stale stack against the newer number,
-        # so the whole triple is replaced together or not at all. Revalidation
-        # reproduces the saved stack against baseline_tput, so it never re-reads.
+        # Params snapshot the anchor and the stack it was measured on together;
+        # a KEEP landing while this task queued invalidates both, so refresh them
+        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
         ss = extra.get("shared_state") or extra.get("state")
-        revalidating_stack = params.get("source") == "resume_stack_revalidate"
-        live_base = None if revalidating_stack else resolve_grading_base(ss)
-        if live_base is not None and float(live_base["tput"]) > base_tput:
+        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
+        if live_anchor > base_tput:
             if base_tput > 0:
-                log.warning(
-                    "explore: anchor drift, params base_tput=%.1f but live anchor is %.1f; "
-                    "re-reading base args/envs from the same current_best",
-                    base_tput,
-                    float(live_base["tput"]),
-                )
-            base_tput = float(live_base["tput"])
-            base_extra_args = str(live_base["extra_server_args"])
-            base_extra_envs = dict(live_base["extra_envs"])
-            base_remove_args = to_str_list(live_base["remove_args"])
-            base_unset_envs = to_str_list(live_base["unset_envs"])
-            if live_base["args_mode"] == "replace":
-                base_args_mode = "replace"
-        elif base_tput <= 0 and not revalidating_stack:
-            # No validated layer yet, so the anchor is ``baseline_tput`` and the
-            # config it was measured on is the bare reference one the params
-            # already carry. Only the number can be missing here, so recovering
-            # it alone keeps the pair consistent. Without this a params omission
-            # grades every variant against 0 and discards real wins.
-            base_tput = resolve_grading_anchor_tput(ss)
+                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", base_tput, live_anchor)
+            base_tput = live_anchor
+            cb = getattr(ss, "current_best", None)
+            cb = cb if isinstance(cb, dict) else {}
+            # Only current_best carries args; a baseline_tput anchor leaves the
+            # params stack (seeded from the baseline record) authoritative.
+            if float(cb.get("tput") or cb.get("output_throughput") or 0.0) > 0:
+                base_extra_args = str(cb.get("extra_server_args") or "").strip()
+                base_extra_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
+                base_remove_args = to_str_list(cb.get("remove_args"))
+                base_unset_envs = to_str_list(cb.get("unset_envs"))
+                base_args_mode = str(cb.get("args_mode") or base_args_mode).strip().lower()
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
@@ -986,14 +974,9 @@ class ExploreExecutor:
 
         # Warm-decision mode. Run a discarded cold warmup round first so the
         # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``.
-        #
-        # Tied to server_lifecycle eligibility and nothing else, because the
-        # baseline gates its cold+hot double-run on the very same verdict
-        # (``baseline.py``: ``double_run_requested and lifecycle["eligible"]``).
-        # Both sides therefore measure hot together or cold together. There is
-        # deliberately no toggle here: the baseline exposes none either, and a
-        # one-sided opt-out silently graded cold candidates against a hot anchor.
+        # warm — apples-to-apples with ``baseline_tput``. Keyed to lifecycle
+        # eligibility and nothing else: the baseline gates its cold+hot double-run
+        # on the same verdict, so both sides measure hot together or cold together.
         use_warm_decision = lifecycle_eligible
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
@@ -1363,9 +1346,6 @@ class ExploreExecutor:
                         else:
                             outcome = "KEEP"
 
-                    # Round-1 measurement. Warm whenever ``use_warm_decision``
-                    # is on (it re-attaches to the warmup's hot server), so this
-                    # is the DECISION number, not a cold one.
                     decision_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
@@ -1488,13 +1468,8 @@ class ExploreExecutor:
                                 config_path=config_path,
                                 base_extra_args=stack_extra_args,
                                 variant=rebench_variant,
-                                # The floor must sit on the anchor round 1 graded
-                                # against, which advances with each in-batch KEEP.
-                                # Anchoring it on the round-start ``base_tput``
-                                # instead left the floor a whole KEEP below the
-                                # live bar, so the 2nd+ variant could regress
-                                # against the recipe it was layered on, still pass
-                                # "stable", and be KEPT with a negative gain.
+                                # Floor sits on the anchor round 1 graded against,
+                                # which advances with each in-batch KEEP.
                                 base_tput=running_base_tput,
                                 stable_threshold_pct=stack_stable_threshold_pct,
                                 output_slot=slot / "stack_rebench",
@@ -1778,8 +1753,7 @@ class ExploreExecutor:
         )
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
-        # Every KEEP advances ``running_base_tput`` to its own measurement, so
-        # with winners present this is the throughput of the final stack.
+        # Each KEEP advances ``running_base_tput``, so this is the final stack.
         output_throughput = float(running_base_tput) if winners else None
 
         # Successful = at least one bench produced a measurement or was reaped
