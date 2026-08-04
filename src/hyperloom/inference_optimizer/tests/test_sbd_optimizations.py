@@ -28,6 +28,8 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
             },
             {
                 "action": "integrate_patch",
+                "source_phase": "FRAMEWORK_AGENT",
+                "framework_agent_authoring": True,
                 "variant_name": "framework-patch",
                 "tput": 160.0,
                 "ts": "1970-01-01T00:00:20+00:00",
@@ -35,6 +37,8 @@ def test_collect_optimizations_unifies_warm_framework_and_explore():
             },
             {
                 "action": "integrate_patch",
+                "source_phase": "EXPLORE",
+                "domain": "serving_specialist",
                 "variant_name": "explore-config",
                 "tput": 170.0,
                 "ts": "1970-01-01T00:00:30+00:00",
@@ -133,6 +137,7 @@ def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
             },
         ],
         "gain_per_stack_entry": [10.0],
+        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
     }
     warnings: list[str] = []
 
@@ -147,11 +152,48 @@ def test_integrate_patch_with_unknown_phase_is_visible_as_unattributed():
         "keeps": 1,
         "total_gain_pct": 10.0,
     }
+    assert result["entries"][0]["source_method"] == "unknown"
+    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
     assert result["validation"]["attributed_total_gain_pct"] == 0.0
     assert result["validation"]["attribution_gap_pct"] == 10.0
+    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
 
 
-def test_integrate_patch_from_kernel_phase_is_not_silently_dropped():
+def test_ownerless_integrate_patch_ignores_framework_and_explore_timeline():
+    for timeline_phase in ("EXPLORE", "FRAMEWORK_AGENT"):
+        state = {
+            "session_id": f"ownerless-{timeline_phase.lower()}",
+            "baseline_tput": 100.0,
+            "cumulative_gain_validated": 10.0,
+            "cumulative_gain_validated_stack_len": 1,
+            "optimization_stack": [
+                {
+                    "action": "integrate_patch",
+                    "variant_name": "ownerless",
+                    "tput": 110.0,
+                    "ts": "1970-01-01T00:00:10+00:00",
+                },
+            ],
+            "gain_per_stack_entry": [10.0],
+            "phase_history": [{"to_phase": timeline_phase, "ts_unix": 0.0}],
+        }
+        warnings: list[str] = []
+
+        attribution = collect_attribution(state, [], [], warnings)
+        result = collect_optimizations(state, attribution, [], [], warnings)
+
+        assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
+        assert attribution["source_breakdown"]["explore_pct_of_total"] == 0.0
+        assert attribution["source_breakdown"]["framework_pct_of_total"] == 0.0
+        assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+        assert result["entries"][0]["source"] == "unattributed"
+        assert result["validation"]["attribution_gap_pct"] == 10.0
+        assert result["validation"]["source_breakdown"]["unattributed_gain_pct"] == 10.0
+        assert any("reported as unattributed" in warning for warning in warnings)
+
+
+def test_integrate_patch_with_only_kernel_completion_phase_is_unattributed():
     state = {
         "session_id": "kernel-integrate-owner",
         "baseline_tput": 100.0,
@@ -161,7 +203,10 @@ def test_integrate_patch_from_kernel_phase_is_not_silently_dropped():
             {
                 "action": "integrate_patch",
                 "source_phase": "KERNEL_AGENT",
-                "variant_name": "kernel-owned",
+                "backend": "forge",
+                "engine": "forge",
+                "final_overlay": "/tmp/not-kernel-ownership.patch",
+                "variant_name": "unknown-owner",
                 "tput": 110.0,
                 "ts": "1970-01-01T00:00:10+00:00",
             },
@@ -173,11 +218,187 @@ def test_integrate_patch_from_kernel_phase_is_not_silently_dropped():
     attribution = collect_attribution(state, [], [], warnings)
     result = collect_optimizations(state, attribution, [], [], warnings)
 
-    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 10.0
-    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 0.0
+    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 0.0
+    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 10.0
+    assert result["entries"][0]["source"] == "unattributed"
+    assert result["entries"][0]["source_method"] == "unknown"
+    assert result["entries"][0]["optimization_kind"] != "kernel_patch"
+    assert result["validation"]["attributed_total_gain_pct"] == 0.0
+    assert result["validation"]["attribution_gap_pct"] == 10.0
+    assert attribution["phase_breakdown"]["unattributed"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
+
+
+def test_integrate_patch_domain_survives_legacy_ledger_and_owns_all_breakdowns():
+    state = {
+        "session_id": "cross-phase-serving-config",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "KERNEL_AGENT",
+                "domain": "serving_specialist",
+                "operation_kind": "param",
+                "variant_name": "fp8-per-channel-int4-quickreduce-stack",
+                "candidate_extra_server_args": "--quantization fp8_per_channel",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
+    }
+    warnings: list[str] = []
+
+    attribution = collect_attribution(state, [], [], warnings)
+    result = collect_optimizations(state, attribution, [], [], warnings)
+
+    assert attribution["source_breakdown"]["explore_pct_of_total"] == 10.0
+    assert attribution["source_breakdown"]["kernel_unattributed_pct_of_total"] == 0.0
+    assert result["entries"][0]["source"] == "explore"
+    assert result["entries"][0]["optimization_kind"] == "param"
+    assert result["entries"][0]["kernel_id"] is None
+    assert attribution["phase_breakdown"]["explore"]["total_gain_pct"] == 10.0
+    assert attribution["phase_breakdown"]["explore"]["by_domain"] == {
+        "serving_specialist": 10.0,
+    }
+    assert attribution["phase_breakdown"]["kernel_agent"]["total_gain_pct"] == 0.0
+
+
+def test_framework_proposal_integrate_patch_overrides_kernel_completion_phase():
+    state = {
+        "session_id": "cross-phase-framework-config",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "KERNEL_AGENT",
+                "framework_agent_authoring": True,
+                "provenance": "specialist:serving_specialist",
+                "domain": "serving_specialist",
+                "operation_kind": "param",
+                "variant_name": "fp8-per-channel-int4-quickreduce-stack",
+                "candidate_extra_server_args": "--quantization fp8_per_channel",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
+    assert result["entries"][0]["source"] == "framework_agent"
+    assert result["entries"][0]["optimization_kind"] == "serving_config"
+
+
+def test_direct_framework_action_ignores_delayed_completion_phase():
+    state = {
+        "session_id": "cross-phase-direct-framework",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "framework",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "PR:123",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
+    assert result["entries"][0]["source"] == "framework_agent"
+    assert result["entries"][0]["source_method"] == "action_family"
+
+
+def test_integrate_patch_projects_source_manifest_and_changed_files():
+    state = {
+        "session_id": "integrate-patch-artifacts",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "EXPLORE",
+                "domain": "serving_specialist",
+                "variant_name": "quantization-patch",
+                "source_manifest": (
+                    "/session/optimization_stack/src/spec-1/manifest.json"
+                ),
+                "target_files": [
+                    "vllm/model_executor/layers/quantization/foo.py",
+                    "vllm/model_executor/layers/quantization/bar.py",
+                ],
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert result["entries"][0]["artifacts"] == [
+        {
+            "kind": "source_manifest",
+            "path": "/session/optimization_stack/src/spec-1/manifest.json",
+        },
+        {
+            "kind": "target_file",
+            "path": "vllm/model_executor/layers/quantization/foo.py",
+        },
+        {
+            "kind": "target_file",
+            "path": "vllm/model_executor/layers/quantization/bar.py",
+        },
+    ]
+
+
+def test_integrate_with_kernel_evidence_remains_kernel_agent():
+    state = {
+        "session_id": "kernel-integrate-k001",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate",
+                "source_phase": "KERNEL_AGENT",
+                "kernel_id": "k001",
+                "backend": "forge",
+                "patch_path": "/runs/k001.patch",
+                "target_file": "vllm/_aiter_ops.py",
+                "variant_name": "k001",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+        "phase_history": [{"to_phase": "KERNEL_AGENT", "ts_unix": 0.0}],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
     assert result["entries"][0]["source"] == "kernel_agent"
-    assert result["validation"]["attributed_total_gain_pct"] == 10.0
-    assert result["validation"]["attribution_gap_pct"] == 0.0
+    assert result["entries"][0]["source_method"] == "action_family"
+    assert result["entries"][0]["kernel_id"] == "k001"
+    assert result["entries"][0]["backend"] == "forge"
 
 
 def test_collect_optimizations_splits_kernel_backend():

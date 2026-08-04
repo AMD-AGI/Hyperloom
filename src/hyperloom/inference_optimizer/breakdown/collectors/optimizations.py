@@ -149,12 +149,14 @@ def _resolve_source(
         raw.get("tuned_file"),
         raw.get("final_overlay"),
     )
-    if (
+    if not action.startswith("integrate_patch") and (
         any(value not in (None, "", [], {}) for value in kernel_markers)
         or action in {"geak_e2e", "gemm_tuning", "fusion", "integrate"}
         or action.startswith("kernel_opt")
     ):
         return "kernel_agent", "action_family"
+    if action in {"framework", "framework_agent"}:
+        return "framework_agent", "action_family"
 
     explicit = _normalized_phase(
         raw.get("source_phase")
@@ -162,6 +164,26 @@ def _resolve_source(
         or raw.get("phase")
         or gain.get("phase")
     )
+    if action.startswith("integrate_patch"):
+        if raw.get("framework_agent_authoring") or gain.get(
+            "framework_agent_authoring"
+        ):
+            return "framework_agent", "recorded"
+        provenance = str(
+            raw.get("provenance") or gain.get("provenance") or ""
+        ).strip().lower()
+        specialist_owned = bool(
+            raw.get("domain")
+            or gain.get("domain")
+            or provenance.startswith("specialist:")
+        )
+        if explicit in {"framework_agent", "explore"}:
+            return explicit, "recorded"
+        if specialist_owned:
+            return "explore", "recorded"
+        # integrate_patch ownership must be explicit. Never infer it from the
+        # phase active when the delayed application happened.
+        return "unattributed", "unknown"
     if explicit:
         return explicit, "recorded"
 
@@ -174,8 +196,6 @@ def _resolve_source(
 
     if action in {"explore", "backends", "params"}:
         return "explore", "action_family"
-    if action == "framework_agent":
-        return "framework_agent", "action_family"
     return "unattributed", "unknown"
 
 
@@ -220,6 +240,7 @@ def _artifacts(raw: dict[str, Any]) -> list[dict[str, str]]:
         ("report", "final_report_path"),
         ("report", "report_path"),
         ("overlay", "final_overlay"),
+        ("source_manifest", "source_manifest"),
     )
     out = [
         {"kind": str(item.get("kind") or ""), "path": str(item.get("path") or "")}
@@ -235,6 +256,15 @@ def _artifacts(raw: dict[str, Any]) -> list[dict[str, str]]:
             continue
         seen.add(key)
         out.append({"kind": kind, "path": path})
+    target_files = raw.get("target_files") or []
+    if isinstance(target_files, list):
+        for value in target_files:
+            path = str(value or "").strip()
+            key = ("target_file", path)
+            if not path or key in seen:
+                continue
+            seen.add(key)
+            out.append({"kind": "target_file", "path": path})
     return out
 
 

@@ -225,6 +225,14 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
                     "status": "kept",
                     "specialist_task_id": "spec-orphan",
                     "output_throughput": 123.0,
+                    "source_phase": "FRAMEWORK_AGENT",
+                    "domain": "serving_specialist",
+                    "provenance": "specialist:serving_specialist",
+                    "framework_agent_authoring": True,
+                    "source_manifest": (
+                        "/session/optimization_stack/src/spec-orphan/manifest.json"
+                    ),
+                    "target_files": ["vllm/model.py"],
                 },
             },
         )
@@ -237,6 +245,16 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
     assert replay["variant"] == "spec-orphan"
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
+    assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
+    assert coord.shared_state.optimization_stack[-1]["provenance"] == (
+        "specialist:serving_specialist"
+    )
+    assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
+        "/session/optimization_stack/src/spec-orphan/manifest.json"
+    )
+    assert coord.shared_state.optimization_stack[-1]["target_files"] == [
+        "vllm/model.py"
+    ]
     assert coord.shared_state.resume_pending_revalidation is True
 
 
@@ -269,6 +287,9 @@ async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordina
     assert replay["appended"] is True
     assert coord.shared_state.pending_integrate == {}
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-pending"
+    assert "source_phase" not in coord.shared_state.optimization_stack[-1]
+    assert "domain" not in coord.shared_state.optimization_stack[-1]
+    assert "framework_agent_authoring" not in coord.shared_state.optimization_stack[-1]
     assert coord.shared_state.resume_pending_revalidation is True
 
 
