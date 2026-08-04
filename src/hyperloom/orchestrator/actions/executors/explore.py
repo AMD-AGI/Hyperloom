@@ -1453,7 +1453,7 @@ class ExploreExecutor:
                         stack_rebench_workspace: str | None = None
                         stack_rebench_warnings: list[str] = []
 
-                        if enable_stack_rebench and base_tput > 0:
+                        if enable_stack_rebench and running_base_tput > 0:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
@@ -1488,7 +1488,14 @@ class ExploreExecutor:
                                 config_path=config_path,
                                 base_extra_args=stack_extra_args,
                                 variant=rebench_variant,
-                                base_tput=base_tput,
+                                # The floor must sit on the anchor round 1 graded
+                                # against, which advances with each in-batch KEEP.
+                                # Anchoring it on the round-start ``base_tput``
+                                # instead left the floor a whole KEEP below the
+                                # live bar, so the 2nd+ variant could regress
+                                # against the recipe it was layered on, still pass
+                                # "stable", and be KEPT with a negative gain.
+                                base_tput=running_base_tput,
                                 stable_threshold_pct=stack_stable_threshold_pct,
                                 output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
@@ -1512,11 +1519,11 @@ class ExploreExecutor:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
                                     "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                    "with base_tput=%.2f * (1+%.2f%%))",
+                                    "with running_base_tput=%.2f * (1+%.2f%%))",
                                     gv.name,
                                     stack_rebench_tput,
                                     stable_floor,
-                                    base_tput,
+                                    running_base_tput,
                                     stack_stable_threshold_pct,
                                 )
                                 tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
