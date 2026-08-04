@@ -260,6 +260,11 @@ class Config:
     finalize_max_findings_in_report: int = 20
     finalize_max_tasks_per_action: int = 50
 
+    # -- phase budget / conversation progress signals --
+    phase_budget_enabled: bool = True
+    phase_budget_warn_used_pct: float = 90.0
+    conversation_progress_enabled: bool = True
+
     # -- cross-tick state persistence --
     # Subprocess-per-tick transport needs disk-backed state for any
     # consecutive-tick rule (gpu leak, gain_plateau, cooldowns). ``False`` =

@@ -58,6 +58,8 @@ from .signals.preflight import (
 from .signals.progress import ProgressConfig
 from .signals.repeated_payload import RepeatedPayloadConfig
 from .signals.state_integrity import StateIntegrityConfig
+from .signals.conversation_progress import ConversationProgressConfig
+from .signals.phase_budget import PhaseBudgetConfig
 from .signals.stall import StallConfig
 from .sources.base import DegradeRouter, Source, SourceData, SourceUnavailable
 from .sources.local_probe import LocalProbeConfig, LocalProbeSource
@@ -290,6 +292,12 @@ def build_reactor_components(
         "external_deps": ExternalDepsConfig(
             mount_latency_warn_ms=config.external_mount_latency_warn_ms,
             mount_latency_critical_ms=(config.external_mount_latency_critical_ms),
+        ),
+        "phase_budget": PhaseBudgetConfig(
+            warn_used_pct=config.phase_budget_warn_used_pct,
+        ),
+        "conversation_progress": ConversationProgressConfig(
+            enabled=config.conversation_progress_enabled,
         ),
     }
     classifier = Classifier(configs=signal_configs, state_store=state_store)
