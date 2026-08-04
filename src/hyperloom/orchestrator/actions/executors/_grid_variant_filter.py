@@ -306,7 +306,7 @@ _WORLDPLAY_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
 # ``WORLDPLAY_WARMUP_CHUNKS=0`` is precisely the harmful setting, since it folds
 # cold-start cost into the timed runs.
 _WORLDPLAY_ENV_MEASUREMENT_LOCK: dict[str, str] = {
-    "WORLDPLAY_REPEATS": "timed-repeat count is part of the baseline measurement contract (locked at 5)",
+    "WORLDPLAY_REPEATS": "timed-repeat count is part of the baseline measurement contract (locked at 3)",
     "WORLDPLAY_WARMUP_CHUNKS": "warmup-generation count is part of the baseline measurement contract (locked at 1)",
 }
 
@@ -382,7 +382,7 @@ _WORLDPLAY_FORBIDDEN_SERVER_FLAGS: dict[str, str] = {
     "--width": "resolution is part of the workload spec — not a tunable",
     "--video_length": "frame count is part of the workload spec (locked at 125)",
     "--aspect_ratio": "resolution/aspect is part of the workload spec — not a tunable",
-    "--repeats": "timed-repeat count is part of the baseline measurement contract (locked at 5)",
+    "--repeats": "timed-repeat count is part of the baseline measurement contract (locked at 3)",
     "--warmup": "warmup-generation count is part of the baseline measurement contract (locked at 1)",
 }
 
