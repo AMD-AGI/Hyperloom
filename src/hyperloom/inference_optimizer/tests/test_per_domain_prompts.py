@@ -742,6 +742,20 @@ def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
     assert "unavailable" in usr_p
 
 
+def test_pr_monitor_section_lists_all_granted_tools():
+    """Every tool in PR_MONITOR_TOOL_NAMES must appear in the rendered §6."""
+    from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
+
+    _sys, usr_p = _build_serving_prompt(task_id="tool-drift", pr_monitor_available=True)
+    prefix = "mcp__pr_monitor__"
+    for tool_full in PR_MONITOR_TOOL_NAMES:
+        short = tool_full[len(prefix):]
+        assert short in usr_p, (
+            f"Granted PR Monitor tool '{short}' is not advertised in §6 PR MONITOR. "
+            "Update _section_pr_feed in specialist_prompt_builder.py."
+        )
+
+
 # 7. SpecialistRunner — happy path + failure synth
 @pytest.mark.asyncio
 async def test_specialist_runner_happy_path(tmp_path):

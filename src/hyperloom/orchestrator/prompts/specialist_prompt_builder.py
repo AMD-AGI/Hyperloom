@@ -1649,15 +1649,18 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: Markdown lines for the PR-query capability section.
     """
+    from hyperloom.orchestrator.policy.gate import PR_MONITOR_TOOL_NAMES
     from hyperloom.orchestrator.specialists.domains import PR_QUERY_REPOS
 
     rows = ["## 6. PR MONITOR", ""]
     if not inp.pr_monitor_available:
         rows.append("(unavailable: pr_monitor disabled)")
         return rows
+    _prefix = "mcp__pr_monitor__"
+    tool_shorts = sorted(t[len(_prefix) :] for t in PR_MONITOR_TOOL_NAMES if t.startswith(_prefix))
     rows += [
         "Use ``mcp__pr_monitor__*`` tools to query PRs on demand:",
-        "``pr_search`` / ``pr_list`` / ``pr_get`` / ``pr_files`` / ``pr_patches`` / ``pr_file_patch`` / ``pr_blob``",
+        " / ".join(f"``{t}``" for t in tool_shorts),
         "",
         "Repos you may query:",
     ]
