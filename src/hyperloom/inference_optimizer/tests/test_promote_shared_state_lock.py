@@ -928,3 +928,41 @@ def test_lift_accepts_winner_that_beats_current_best(session_dir):
     assert lifted is True
     assert s.current_best["tput"] == 1100.0
     assert s.optimization_stack[-1]["variant_name"] == "real-win"
+
+
+async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
+    """A kernel integrate publishes args and envs from the same config.
+
+    Writing ``current_best`` without ``extra_envs`` published a config whose args
+    and envs came from different layers, and every dispatch site seeded from it.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+
+    await coord.writeback._record_integrate_keep(
+        {"new_tput": 1200.0, "kernel_id": "k001", "integration_id": "i1"},
+    )
+
+    assert s.current_best["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8_e4m3"
+
+
+async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
+    """A forge-GEMM KEEP ships ``result['extra_envs']``; it must survive the promote."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {"KEEP_ME": "1", "TUNED": "old"}}
+
+    await coord.writeback._record_integrate_keep(
+        {"new_tput": 1200.0, "kernel_id": "k002", "extra_envs": {"TUNED": "new"}},
+    )
+
+    assert s.current_best["extra_envs"] == {"KEEP_ME": "1", "TUNED": "new"}
