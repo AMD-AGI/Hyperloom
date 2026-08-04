@@ -182,7 +182,7 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 _TRACE_HOT_KERNEL_TOP_N = 15
 
 # Global ``last_action_failures`` rolling-log cap.
-_DEFAULT_LAST_FAILURES = 10
+_DEFAULT_LAST_FAILURES = 30
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
@@ -2061,12 +2061,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
-    def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
+    def _truncate_excerpt(value: Any, *, limit: int = 1200) -> str | None:
         """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``).
 
         Args:
             value (Any): The value to coerce to a string excerpt.
-            limit (int): Maximum retained length in characters (default 800).
+            limit (int): Maximum retained length in characters.
 
         Returns:
             str | None: The trimmed string, or ``None`` when ``value`` is
@@ -2132,6 +2132,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
             "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
             "reported_success": result.get("reported_success"),
+            "variant_name": (str(result.get("variant_name")) if result.get("variant_name") else None),
         }
 
     def record_action_attempt(

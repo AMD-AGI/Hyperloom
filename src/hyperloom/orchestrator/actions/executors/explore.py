@@ -1122,6 +1122,8 @@ class ExploreExecutor:
                                 "workload_signature": ws_sig,
                                 "framework": framework,
                                 "reason": "warmup_failed",
+                                "error_class": getattr(w, "error_class", "") if w is not None else "",
+                                "server_log_path": getattr(w, "server_log_path", None) if w is not None else None,
                             }
                             if gv.name:
                                 name_index[gv.name] = fp
@@ -1294,7 +1296,7 @@ class ExploreExecutor:
                     outcome = "FAILED"
                     reason: str = ""
                     if r.status != "succeeded" or gain is None:
-                        reason = (r.error or "")[-256:] or "no_measurement"
+                        reason = (r.error or "")[-1200:] or "no_measurement"
                     elif gain < keep_threshold_pct:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
@@ -1365,6 +1367,8 @@ class ExploreExecutor:
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
+                        "error_class": r.error_class or "",
+                        "server_log_path": r.server_log_path,
                     }
                     if gv.name:
                         name_index[gv.name] = fp
@@ -1594,6 +1598,8 @@ class ExploreExecutor:
                             "round_id": round_id,
                             "ts": _now_iso(),
                             "provenance": provenance,
+                            "error_class": r.error_class or "",
+                            "server_log_path": r.server_log_path,
                         }
                     )
                     losers.append(
@@ -1692,6 +1698,9 @@ class ExploreExecutor:
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
+                    "error_class": str(te.get("error_class") or ""),
+                    "server_log_path": te.get("server_log_path"),
+                    "workspace": te.get("workspace"),
                     # Carry the variant knobs so the journal's
                     # ``classify_change_kind`` can classify the change kind.
                     "variant": {
