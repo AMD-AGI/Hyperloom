@@ -582,6 +582,26 @@ class TestValidateTraceStructureScriptable:
         # execute_*/user_annotation events.
         assert health["per_kernel_attribution_degraded"] is True
 
+    def test_empty_framework_falls_back_to_session_framework(self, monkeypatch, tmp_path):
+        """An unset framework must not be treated as serving.
+
+        Session 20260803T134328Z: the roofline-composite ctx carries no
+        framework, so the worldplay profile leg was validated as serving and
+        reported the two serving-only issues ([1] capture_traces/ missing and
+        [3] no execute_*), each pointing at EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS
+        that a scriptable framework never sets.
+        """
+        from hyperloom.orchestrator.actions.executors import profile as pf
+
+        self._write_trace(tmp_path, with_kernels=True)
+        monkeypatch.setenv("FRAMEWORK", "worldplay")
+
+        health = pf._validate_trace_structure(tmp_path, "")
+
+        assert not any("capture_traces" in i for i in health["issues"])
+        assert not any("[3]" in i for i in health["issues"])
+        assert health["per_kernel_attribution_degraded"] is False
+
 
 class TestQualityGateReportSelection:
     """Verify parse_quality_gate picks the most recently modified report."""
