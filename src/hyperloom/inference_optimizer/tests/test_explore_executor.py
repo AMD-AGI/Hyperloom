@@ -902,6 +902,67 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
 
 
 @pytest.mark.asyncio
+async def test_explore_stack_rebench_floor_follows_the_in_batch_anchor(
+    sub_agent_runner,
+    tmp_path,
+):
+    """The 2nd in-batch KEEP is confirmed against the anchor round 1 graded it on.
+
+    Anchoring the floor on the round-start ``base_tput`` left it a whole KEEP
+    below the live bar, so a variant that regressed against the recipe it was
+    layered on still passed "stable" and was KEPT with a negative gain.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # Match on path segments: ``tmp_path`` is named after the test, so a
+        # substring check would fire on every round.
+        parts = set(slot.parts)
+        if "v01_second" in parts:
+            # Round 1 clears the advanced bar (1260 vs 1200); the confirmation
+            # round drops below it while still beating the round-start 1000.
+            tput = 1100.0 if "stack_rebench" in parts else 1260.0
+        else:
+            tput = 1200.0
+        _fake_workspace(slot, tput=tput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-floor"),
+            "base_tput": 1000.0,
+            "grid": [
+                {"name": "first", "extra_args": "--first", "extra_envs": {}, "provenance": "llm_direct"},
+                {"name": "second", "extra_args": "--second", "extra_envs": {}, "provenance": "llm_direct"},
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-rebench-floor",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"]
+    assert tested[canonical_fingerprint("--first", {})]["outcome"] == "KEEP"
+    assert tested[canonical_fingerprint("--second", {})]["outcome"] == "KEEP_UNSTABLE"
+    assert {w["name"] for w in out["winners"]} == {"first"}
+    assert all(w["gain_pct"] > 0 for w in out["winners"])
+    # The evicted variant must not drag the stack anchor down with it.
+    assert out["running_base_tput"] == 1200.0
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
     _force_cold_decision(monkeypatch)
