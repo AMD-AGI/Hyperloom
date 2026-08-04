@@ -199,14 +199,16 @@ def test_run_skips_when_grid_empty():
 # --------------------------------------------------------------------------
 # _framework_config_new_variants
 # --------------------------------------------------------------------------
-def test_new_variants_filters_already_tested():
+def test_new_variants_retains_historical_tested_fingerprints():
+    """Historical explore_search entries no longer filter the framework config lane."""
     fp = canonical_fingerprint("--x", {})
     s = _fake_self(explore_search={"tested": {fp: {"outcome": "REVERT"}}})
     grid = [
         {"name": "tested", "extra_args": "--x", "extra_envs": {}},
         {"name": "fresh", "extra_args": "--y", "extra_envs": {}},
     ]
-    assert [g["name"] for g in s._framework_config_new_variants(grid)] == ["fresh"]
+    # Both variants retained — historical blacklist removed.
+    assert [g["name"] for g in s._framework_config_new_variants(grid)] == ["tested", "fresh"]
 
 
 # --------------------------------------------------------------------------
@@ -297,12 +299,11 @@ def test_hold_generating_runs_explore_from_pending():
 
 
 def test_hold_generating_finishes_when_no_new_candidates():
-    fp = canonical_fingerprint("--x", {})
+    """Historical tested entries no longer filter; lane finishes only when pending_grid is empty."""
     s = _fake_self(
         framework_config_exploration_enabled=True,
         framework_config_lane_state="generating",
-        framework_config_pending_grid=[{"name": "v", "extra_args": "--x", "extra_envs": {}}],
-        explore_search={"tested": {fp: {"outcome": "REVERT"}}},
+        framework_config_pending_grid=[],  # grid is already empty, not filtered-away
     )
     s._framework_config_generation_inflight = _async_return(False)
     assert _hold(s) is False

@@ -930,3 +930,49 @@ def test_lift_accepts_winner_that_beats_current_best(session_dir):
     assert lifted is True
     assert s.current_best["tput"] == 1100.0
     assert s.optimization_stack[-1]["variant_name"] == "real-win"
+
+
+def test_lift_does_not_double_append_same_fingerprint(session_dir):
+    """A renamed variant with the same content fingerprint must not add a second stack entry."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    fp = "shared_fp_abc123"
+    s.optimization_stack = [
+        {"action": "explore", "variant_name": "original", "fingerprint": fp, "tput": 1100.0}
+    ]
+    s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {"name": "renamed", "fingerprint": fp, "candidate_extra_server_args": "--fast", "extra_envs": {}},
+    )
+
+    # current_best refreshed but stack not duplicated.
+    assert lifted is True
+    assert s.current_best["tput"] == 1200.0
+    assert len(s.optimization_stack) == 1
+    assert s.optimization_stack[0]["variant_name"] == "original"
+
+
+def test_lift_at_or_below_anchor_does_not_modify_stack(session_dir):
+    """An accepted rerun that does not beat the live anchor leaves current_best unchanged."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    fp = "shared_fp_rerun"
+    s.optimization_stack = [
+        {"action": "explore", "variant_name": "prior", "fingerprint": fp, "tput": 1100.0}
+    ]
+    s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        1050.0,  # below current anchor of 1100
+        {"name": "prior_rerun", "fingerprint": fp, "candidate_extra_server_args": "--fast", "extra_envs": {}},
+    )
+
+    assert lifted is False
+    assert s.current_best["tput"] == 1100.0
+    assert len(s.optimization_stack) == 1
