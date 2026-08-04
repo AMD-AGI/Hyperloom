@@ -240,6 +240,7 @@ def _artifacts(raw: dict[str, Any]) -> list[dict[str, str]]:
         ("report", "final_report_path"),
         ("report", "report_path"),
         ("overlay", "final_overlay"),
+        ("source_manifest", "source_manifest"),
     )
     out = [
         {"kind": str(item.get("kind") or ""), "path": str(item.get("path") or "")}
@@ -255,6 +256,15 @@ def _artifacts(raw: dict[str, Any]) -> list[dict[str, str]]:
             continue
         seen.add(key)
         out.append({"kind": kind, "path": path})
+    target_files = raw.get("target_files") or []
+    if isinstance(target_files, list):
+        for value in target_files:
+            path = str(value or "").strip()
+            key = ("target_file", path)
+            if not path or key in seen:
+                continue
+            seen.add(key)
+            out.append({"kind": "target_file", "path": path})
     return out
 
 

@@ -2855,9 +2855,11 @@ class IntegratePatchExecutor:
             )
 
         source_snapshot_dir = ""
+        source_manifest_path = ""
+        source_target_files: list[str] = []
         source_base_sha = ""
         try:
-            from ...source_snapshot import snapshot_source_layer
+            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
 
             if framework_root is not None:
                 _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
@@ -2881,6 +2883,15 @@ class IntegratePatchExecutor:
                 )
                 if snap:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+                    if source_snapshot_dir:
+                        source_manifest_path = str(
+                            Path(source_snapshot_dir) / MANIFEST_NAME
+                        )
+                    source_target_files = [
+                        str(item.get("rel") or "")
+                        for item in (snap.get("files") or [])
+                        if isinstance(item, dict) and item.get("rel")
+                    ]
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
@@ -2918,6 +2929,8 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 "source_snapshot": source_snapshot_dir,
+                "source_manifest": source_manifest_path,
+                "target_files": source_target_files,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,
             },

@@ -2166,10 +2166,22 @@ class WritebackCollaborator:
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
                 if isinstance(bv, dict):
-                    for _src_key in ("source_snapshot", "framework_root", "base_sha"):
+                    for _src_key in (
+                        "source_snapshot",
+                        "source_manifest",
+                        "framework_root",
+                        "base_sha",
+                    ):
                         val = bv.get(_src_key)
                         if val:
                             stack_entry[_src_key] = str(val)
+                    target_files = [
+                        str(path)
+                        for path in (bv.get("target_files") or [])
+                        if str(path).strip()
+                    ]
+                    if target_files:
+                        stack_entry["target_files"] = target_files
                     for _attr_key in ("baseline_enablement", "attribution_eligible"):
                         if _attr_key in bv:
                             stack_entry[_attr_key] = bool(bv.get(_attr_key))
@@ -3261,6 +3273,12 @@ class WritebackCollaborator:
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
                 "source_snapshot": result.get("source_snapshot") or "",
+                "source_manifest": result.get("source_manifest") or "",
+                "target_files": [
+                    str(path)
+                    for path in (result.get("target_files") or [])
+                    if str(path).strip()
+                ],
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }
@@ -3884,6 +3902,12 @@ class WritebackCollaborator:
                 # source_patch recovered on THIS path is equally reproducible in
                 # the GEAK baseline (no path is left snapshot-less).
                 "source_snapshot": result.get("source_snapshot") or "",
+                "source_manifest": result.get("source_manifest") or "",
+                "target_files": [
+                    str(path)
+                    for path in (result.get("target_files") or [])
+                    if str(path).strip()
+                ],
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
             }

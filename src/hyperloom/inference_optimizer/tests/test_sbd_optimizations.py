@@ -324,6 +324,51 @@ def test_direct_framework_action_ignores_delayed_completion_phase():
     assert result["entries"][0]["source_method"] == "action_family"
 
 
+def test_integrate_patch_projects_source_manifest_and_changed_files():
+    state = {
+        "session_id": "integrate-patch-artifacts",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "integrate_patch",
+                "source_phase": "EXPLORE",
+                "domain": "serving_specialist",
+                "variant_name": "quantization-patch",
+                "source_manifest": (
+                    "/session/optimization_stack/src/spec-1/manifest.json"
+                ),
+                "target_files": [
+                    "vllm/model_executor/layers/quantization/foo.py",
+                    "vllm/model_executor/layers/quantization/bar.py",
+                ],
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert result["entries"][0]["artifacts"] == [
+        {
+            "kind": "source_manifest",
+            "path": "/session/optimization_stack/src/spec-1/manifest.json",
+        },
+        {
+            "kind": "target_file",
+            "path": "vllm/model_executor/layers/quantization/foo.py",
+        },
+        {
+            "kind": "target_file",
+            "path": "vllm/model_executor/layers/quantization/bar.py",
+        },
+    ]
+
+
 def test_integrate_with_kernel_evidence_remains_kernel_agent():
     state = {
         "session_id": "kernel-integrate-k001",

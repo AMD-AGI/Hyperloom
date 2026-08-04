@@ -229,6 +229,10 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
                     "domain": "serving_specialist",
                     "provenance": "specialist:serving_specialist",
                     "framework_agent_authoring": True,
+                    "source_manifest": (
+                        "/session/optimization_stack/src/spec-orphan/manifest.json"
+                    ),
+                    "target_files": ["vllm/model.py"],
                 },
             },
         )
@@ -245,6 +249,12 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
     assert coord.shared_state.optimization_stack[-1]["provenance"] == (
         "specialist:serving_specialist"
     )
+    assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
+        "/session/optimization_stack/src/spec-orphan/manifest.json"
+    )
+    assert coord.shared_state.optimization_stack[-1]["target_files"] == [
+        "vllm/model.py"
+    ]
     assert coord.shared_state.resume_pending_revalidation is True
 
 

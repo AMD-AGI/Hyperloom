@@ -776,7 +776,7 @@ def test_lift_applies_unset_envs_before_new_envs(session_dir):
 
 @pytest.mark.asyncio
 async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
-    """source_snapshot/framework_root/base_sha from the lift bv reach the stack entry."""
+    """Source snapshot manifest and changed files reach the stack entry."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 1000.0
@@ -792,6 +792,8 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
             "tput": 1500.0,
             "scope": "source_patch",
             "source_snapshot": "/session/optimization_stack/src/abc123",
+            "source_manifest": "/session/optimization_stack/src/abc123/manifest.json",
+            "target_files": ["vllm/model_executor/layers/quantization/foo.py"],
             "framework_root": "/opt/vllm",
             "base_sha": "deadbeef",
         },
@@ -799,6 +801,12 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
 
     top = s.optimization_stack[-1]
     assert top.get("source_snapshot") == "/session/optimization_stack/src/abc123"
+    assert top.get("source_manifest") == (
+        "/session/optimization_stack/src/abc123/manifest.json"
+    )
+    assert top.get("target_files") == [
+        "vllm/model_executor/layers/quantization/foo.py"
+    ]
     assert top.get("framework_root") == "/opt/vllm"
     assert top.get("base_sha") == "deadbeef"
 
