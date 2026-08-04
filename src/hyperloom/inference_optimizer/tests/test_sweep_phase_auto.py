@@ -778,6 +778,25 @@ async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_internal_sweep_task_carries_the_arg_mode_controls(coord):
+    """A ``replace`` current_best reaches the sweep, which assembles variants from it.
+
+    ``_build_grid`` honours ``base_args_mode`` / ``base_remove_args``, so omitting
+    them made the sweep append onto flags the champion had deliberately replaced.
+    """
+    coord.shared_state.current_best = {
+        "tput": 1000.0,
+        "extra_server_args": "--mla 1",
+        "remove_args": ["--chunked-prefill-size"],
+        "args_mode": "replace",
+    }
+    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
+    assert task.params["base_extra_args"] == "--mla 1"
+    assert task.params["base_remove_args"] == ["--chunked-prefill-size"]
+    assert task.params["base_args_mode"] == "replace"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_recipe_kb_recipe_propagates(coord):
     """Recipe-driven grid surfaces as source='recipe_kb' on the task."""
     coord.shared_state.warm_start_recipe = {
