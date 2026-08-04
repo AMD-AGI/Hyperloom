@@ -463,9 +463,10 @@ class ConversationCollaborator:
         if push_full:
             sections.append("=== Shared session state ===")
             sections.append(self.shared_state.to_prompt_summary())
-            # Capacities a needs_gpu dispatch is admitted against.
-            sections.append("=== Resource pools ===")
-            sections.append(self.shared_state.to_resource_pools_summary())
+            # Resource pools are orchestration-only; robustness cannot schedule GPU work.
+            if agent_name != "robustness":
+                sections.append("=== Resource pools ===")
+                sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
             obj = self._current_objective
             self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0

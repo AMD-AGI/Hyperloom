@@ -3,29 +3,32 @@
 
 """Parse Coordinator-rendered prompts into a ReactorContext.
 
-The Coordinator's ``_compose_prompt`` emits a
-deterministic two-section text:
+The Coordinator's ``_compose_prompt`` emits blocks separated by ``=== X ===``
+headers. For the robustness role the expected blocks are:
+
+    === Phase ===
+    phase     : EXPLORE
+    ...
 
     === Shared session state ===
     session_id=...
-    model=<name>  class=<klass>
-    baseline_tput=...  baseline_acc=...
     ...
-    crash_count=...
-    current_action=...
-    ...
+
+    === Time budget ===
+    elapsed=...min  remaining=...min  budget=...min  closing_phase=False
+
+    === Phase budget telemetry ===
+      PRELUDE: elapsed=123s cap=456s used=27%
+      EXPLORE: elapsed=789s cap=unlimited used=0%
+
+    === Conversation progress ===
+    ticks_without_progress=3 threshold=12 severity=ok last_progress_tick=45
+
     === Inbox for <agent> [(newest last)] ===
     seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload={'k': 'v', ...}
-    ...
 
-Or, when no new messages exist::
-
-    === Inbox for <agent> ===
-    (no new messages)
-
-Consumes only a few SharedState fields plus the inbox tail; parse failures
-are logged once and surface as an empty :class:`ReactorContext` rather than
-raising, so the reactor's heartbeat fallback keeps the loop alive.
+Parse failures surface as an empty :class:`ReactorContext` rather than
+raising, keeping the reactor's heartbeat fallback alive.
 """
 
 from __future__ import annotations
@@ -55,6 +58,23 @@ _SHARED_HEADER = "=== Shared session state ==="
 _INBOX_HEADER_PREFIX = "=== Inbox for "
 _KB_HEADER_PREFIX = "=== Knowledge base hints"
 _TIME_BUDGET_HEADER = "=== Time budget ==="
+_PHASE_HEADER = "=== Phase ==="
+_PHASE_BUDGET_HEADER = "=== Phase budget telemetry ==="
+_CONVERSATION_PROGRESS_HEADER = "=== Conversation progress ==="
+
+_PHASE_BUDGET_LINE_RE = re.compile(
+    r"^\s+(?P<phase>[A-Z_]+):\s+"
+    r"elapsed=(?P<elapsed>\d+)s\s+"
+    r"(?:cap=(?P<cap>\d+)s|cap=unlimited)\s+"
+    r"used=(?P<used>-?\d+(?:\.\d+)?)%\s*$"
+)
+
+_CONVERSATION_PROGRESS_LINE_RE = re.compile(
+    r"^\s*ticks_without_progress=(?P<ticks>\d+)\s+"
+    r"threshold=(?P<threshold>\d+)\s+"
+    r"severity=(?P<severity>\S+)\s+"
+    r"last_progress_tick=(?P<last>\d+)\s*$"
+)
 
 # SharedState lines we care about.
 _SCALAR_KEYS = {
@@ -92,6 +112,43 @@ _TIME_BUDGET_LINE_RE = re.compile(
     r"budget=(?P<budget>-?\d+(?:\.\d+)?)min\s+"
     r"closing_phase=(?P<closing>True|False)\s*$"
 )
+
+
+@dataclass
+class PhaseBudgetRow:
+    """One parsed row from the ``=== Phase budget telemetry ===`` block.
+
+    Attributes:
+        phase (str): Phase name in upper-case (e.g. ``"EXPLORE"``).
+        elapsed_sec (int): Seconds elapsed in this phase.
+        cap_sec (int): Budget cap in seconds; ``-1`` when unlimited.
+        used_pct (float): Fraction of budget consumed (0–100). Meaningful
+            only when ``cap_sec >= 0``.
+    """
+
+    phase: str
+    elapsed_sec: int
+    cap_sec: int
+    used_pct: float
+
+
+@dataclass
+class ConversationProgress:
+    """Parsed ``=== Conversation progress ===`` block.
+
+    Attributes:
+        ticks_without_progress (int): Ticks since the last measurable
+            advancement (new KEEP / stack growth / validated-gain / phase).
+        threshold (int): Tick count above which severity is ``"high"``.
+        severity (str): ``"ok"`` or ``"high"`` as emitted by the Coordinator.
+        last_progress_tick (int): Session-wide tick index of the most recent
+            progress event.
+    """
+
+    ticks_without_progress: int
+    threshold: int
+    severity: str
+    last_progress_tick: int
 
 
 @dataclass
@@ -181,6 +238,19 @@ class ReactorContext:
     Built by :func:`from_coordinator_prompt` (SINGLE_PROC) or
     :func:`from_inbox_jsonl` (MULTI_CLI; M3).  The reactor does not need
     to know which transport produced the context.
+
+    Attributes:
+        tick_index (int): In-process tick counter.
+        shared_state (SharedStateSnapshot): Parsed SharedState fields.
+        inbox (list[InboxItem]): Parsed inbox messages for this tick.
+        now_unix (float): Wall-clock timestamp for this tick.
+        parse_warnings (list[str]): Non-fatal parse issues; logged once.
+        phase (str): Current pipeline phase extracted from ``=== Phase ===$``.
+            Empty string when the block is absent.
+        phase_budget (list[PhaseBudgetRow]): Per-phase budget rows from
+            ``=== Phase budget telemetry ===``; empty when absent.
+        conversation_progress (ConversationProgress | None): Parsed progress
+            signal from ``=== Conversation progress ===``; ``None`` when absent.
     """
 
     tick_index: int = 0
@@ -188,6 +258,9 @@ class ReactorContext:
     inbox: list[InboxItem] = field(default_factory=list)
     now_unix: float = field(default_factory=time.time)
     parse_warnings: list[str] = field(default_factory=list)
+    phase: str = ""
+    phase_budget: list[PhaseBudgetRow] = field(default_factory=list)
+    conversation_progress: ConversationProgress | None = None
 
 
 def from_coordinator_prompt(
@@ -228,12 +301,18 @@ def from_coordinator_prompt(
     inbox, warnings = _parse_inbox(sections.get("inbox", ""))
     if not sections:
         warnings.append("no recognised sections in prompt")
+    phase = _parse_phase(sections.get("phase", ""))
+    phase_budget = _parse_phase_budget(sections.get("phase_budget", ""))
+    conversation_progress = _parse_conversation_progress(sections.get("conversation_progress", ""))
     return ReactorContext(
         tick_index=tick_index,
         shared_state=snapshot,
         inbox=inbox,
         now_unix=now_unix,
         parse_warnings=warnings,
+        phase=phase,
+        phase_budget=phase_budget,
+        conversation_progress=conversation_progress,
     )
 
 
@@ -245,9 +324,9 @@ def from_coordinator_prompt(
 def _split_sections(prompt: str) -> dict[str, str]:
     """Walk the prompt line-by-line and group lines by section.
 
-    Returns a dict keyed by ``shared_state`` / ``time_budget`` / ``inbox`` /
-    ``kb``. Only the first three are consumed downstream; the ``kb`` body is
-    collected but unused.
+    Returns a dict keyed by section name. Recognised keys:
+    ``shared_state``, ``time_budget``, ``inbox``, ``kb``,
+    ``phase``, ``phase_budget``, ``conversation_progress``.
 
     Args:
         prompt (str): The full rendered Coordinator prompt text.
@@ -274,6 +353,18 @@ def _split_sections(prompt: str) -> dict[str, str]:
             continue
         if stripped.startswith(_KB_HEADER_PREFIX):
             current = "kb"
+            sections.setdefault(current, [])
+            continue
+        if stripped == _PHASE_HEADER:
+            current = "phase"
+            sections.setdefault(current, [])
+            continue
+        if stripped == _PHASE_BUDGET_HEADER:
+            current = "phase_budget"
+            sections.setdefault(current, [])
+            continue
+        if stripped == _CONVERSATION_PROGRESS_HEADER:
+            current = "conversation_progress"
             sections.setdefault(current, [])
             continue
         if current is None:
@@ -392,6 +483,85 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
     "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),
     "has_keep_pending_integrate": ("has_keep_pending_integrate", lambda head: head.lower() == "true"),
 }
+
+
+def _parse_phase(body: str) -> str:
+    """Extract the current phase name from the ``=== Phase ===`` block body.
+
+    Looks for a line starting with ``phase     :`` and returns the value
+    in upper-case. Returns ``""`` when absent or unparseable.
+
+    Args:
+        body (str): The phase block body text.
+
+    Returns:
+        str: Upper-case phase name (e.g. ``"EXPLORE"``), or ``""``
+    """
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.startswith("phase"):
+            _, sep, value = line.partition(":")
+            if sep:
+                phase = value.strip().upper()
+                if phase:
+                    return phase
+    return ""
+
+
+def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
+    """Parse the ``=== Phase budget telemetry ===`` block into typed rows.
+
+    Tolerates ``cap=unlimited`` (maps to ``cap_sec=-1``) and
+    ``(no phase history yet)`` (returns empty list). Malformed lines are
+    skipped silently.
+
+    Args:
+        body (str): The phase budget block body text.
+
+    Returns:
+        list[PhaseBudgetRow]: One entry per recognised phase line.
+    """
+    rows: list[PhaseBudgetRow] = []
+    for raw in body.splitlines():
+        match = _PHASE_BUDGET_LINE_RE.match(raw)
+        if not match:
+            continue
+        cap_str = match.group("cap")
+        cap_sec = int(cap_str) if cap_str is not None else -1
+        rows.append(
+            PhaseBudgetRow(
+                phase=match.group("phase"),
+                elapsed_sec=int(match.group("elapsed")),
+                cap_sec=cap_sec,
+                used_pct=to_float(match.group("used"), default=0.0),
+            )
+        )
+    return rows
+
+
+def _parse_conversation_progress(body: str) -> ConversationProgress | None:
+    """Parse the ``=== Conversation progress ===`` block.
+
+    Expects a single body line in the form emitted by the Coordinator:
+    ``ticks_without_progress=N threshold=M severity=ok last_progress_tick=K``.
+    Returns ``None`` when the body is absent or does not match.
+
+    Args:
+        body (str): The conversation progress block body text.
+
+    Returns:
+        ConversationProgress | None: Parsed progress or ``None``.
+    """
+    for raw in body.splitlines():
+        match = _CONVERSATION_PROGRESS_LINE_RE.match(raw)
+        if match:
+            return ConversationProgress(
+                ticks_without_progress=int(match.group("ticks")),
+                threshold=int(match.group("threshold")),
+                severity=match.group("severity").lower(),
+                last_progress_tick=int(match.group("last")),
+            )
+    return None
 
 
 def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
