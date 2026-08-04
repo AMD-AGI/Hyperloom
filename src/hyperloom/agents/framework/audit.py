@@ -371,6 +371,30 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def build_audit_refine_prompt(static_result: dict[str, Any], patch_text: str) -> str:
+    """Build the prompt for the opt-in LLM semantic-audit refine layer.
+
+    Args:
+        static_result: The static-layer verdict dict.
+        patch_text: The PR's unified diff; truncated to 6 000 chars before sending.
+
+    Returns:
+        The assembled prompt string.
+    """
+    import json as _json
+
+    return (
+        "You are auditing whether an upstream PR's change is already present in "
+        "a local framework source tree. Given the static analysis result and the "
+        "PR diff, return STRICT JSON with keys: semantic_status (one of "
+        f"{list(_SEMANTIC_STATUSES)}), applicability (one of {list(_APPLICABILITIES)}), "
+        "confidence (0..1), recommended_next_step (skip|direct_framework|"
+        "author_via_specialist), note (short). Do not invent evidence.\n\n"
+        f"STATIC_RESULT:\n{_json.dumps(static_result, ensure_ascii=False)}\n\n"
+        f"PR_DIFF (truncated):\n{patch_text[:6000]}\n"
+    )
+
+
 def _maybe_llm_refine(
     request: dict[str, Any],
     static_result: dict[str, Any],
@@ -427,16 +451,7 @@ def _maybe_llm_refine(
         static_result.setdefault("risks", []).append("llm refine skipped: openai sdk unavailable")
         return static_result
 
-    prompt = (
-        "You are auditing whether an upstream PR's change is already present in "
-        "a local framework source tree. Given the static analysis result and the "
-        "PR diff, return STRICT JSON with keys: semantic_status (one of "
-        f"{list(_SEMANTIC_STATUSES)}), applicability (one of {list(_APPLICABILITIES)}), "
-        "confidence (0..1), recommended_next_step (skip|direct_framework|"
-        "author_via_specialist), note (short). Do not invent evidence.\n\n"
-        f"STATIC_RESULT:\n{json.dumps(static_result, ensure_ascii=False)}\n\n"
-        f"PR_DIFF (truncated):\n{patch_text[:6000]}\n"
-    )
+    prompt = build_audit_refine_prompt(static_result, patch_text)
     raw_text, _ = _llm_cfg.stream_chat_completion_text(
         client,
         model=model,

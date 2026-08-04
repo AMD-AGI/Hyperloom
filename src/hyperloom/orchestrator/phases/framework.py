@@ -2643,6 +2643,9 @@ class FrameworkPhase(PhaseHandler):
         """
         import json as _json
 
+        from hyperloom.common.llm_config import astream_chat_completion_text
+        from hyperloom.orchestrator.prompts.framework_ranker_prompt import build_framework_ranker_prompt
+
         client = self._framework_agent_ranker_client()
         if client is None:
             return None
@@ -2650,24 +2653,10 @@ class FrameworkPhase(PhaseHandler):
         if not model:
             return None
         state = self.shared_state
-        # Workload context.
-        ctx_lines = [
-            "You are selecting ONE upstream PR to integrate next, to maximize "
-            "LLM serving throughput (tokens/s) for this exact workload:",
-            f"- model: {getattr(state, 'model', '') or getattr(state, 'model_path', '')}",
-            f"- framework: {getattr(state, 'framework', '')}",
-            f"- gpu_type: {getattr(state, 'gpu_type', '')}",
-            f"- precision: {getattr(state, 'precision', '')}",
-            f"- tensor_parallel: {getattr(state, 'tp', '')}",
-        ]
         best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
-        if best:
-            ctx_lines.append(f"- current_best_throughput_tok_s: {best}")
-        # Candidate list (cap to keep the prompt bounded).
         cap = 60
         listed = candidates[:cap]
-        ctx_lines.append("")
-        ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
+        candidate_rows: list[str] = []
         for i, c in enumerate(listed):
             cid = self._framework_candidate_key(c)
             title = str(c.get("title") or "").strip()
@@ -2675,62 +2664,36 @@ class FrameworkPhase(PhaseHandler):
             audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
             appl = str((audit or {}).get("applicability") or "") if audit else ""
             extra = f" [audit_applicability={appl}]" if appl else ""
-            ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
-        if any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed):
-            ctx_lines.append("")
-            ctx_lines.append(
-                "One option above is a LOCAL-EXPLORATION arm (its id starts with "
-                "'local_explore:'): instead of integrating an upstream PR, a "
-                "write-capable specialist authors a patch directly from the live "
-                "source + profiling evidence (it may also compare against the "
-                "latest upstream code via web search). Prefer it when the "
-                "discovered PRs look weak, already-present, or off the current "
-                "bottleneck."
-            )
-        # Step C — soft guidance: fold this session's already-tried / failed
-        # candidates into the prompt as negative samples so the ranker stops
-        # re-picking equivalents. Purely derived from the ledgers (zero extra
-        # LLM cost); best-effort — a build failure must never wedge ranking.
+            candidate_rows.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        has_local_explore = any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed)
+        # Fold already-tried / failed candidates as negative samples (best-effort).
         try:
-            tried_block = self._render_framework_memory_for_prompt(
+            memory_block = self._render_framework_memory_for_prompt(
                 self._build_framework_working_memory(),
             )
         except Exception:  # noqa: BLE001 — advisory only
             log.debug("FRAMEWORK: working-memory render for ranker failed", exc_info=True)
-            tried_block = ""
-        if tried_block:
-            ctx_lines.append("")
-            ctx_lines.append(tried_block)
-        ctx_lines.append("")
-        ctx_lines.append(
-            "Prefer PRs from this session's own framework repo, especially those "
-            "targeting the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
-            "A cross-framework PR is acceptable when it carries transferable high-value "
-            "serving tech worth porting. Always choose exactly ONE candidate; reply "
-            '{"candidate_id": "<id>", "reason": "<short>"}.'
+            memory_block = ""
+        prompt = build_framework_ranker_prompt(
+            model=getattr(state, "model", "") or getattr(state, "model_path", ""),
+            framework=getattr(state, "framework", ""),
+            gpu_type=getattr(state, "gpu_type", ""),
+            precision=getattr(state, "precision", ""),
+            tp=getattr(state, "tp", ""),
+            best_throughput=best,
+            candidate_rows=candidate_rows,
+            has_local_explore=has_local_explore,
+            memory_block=memory_block,
         )
-        prompt = "\n".join(ctx_lines)
 
-        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
-        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted (same
-        # constraint ProposalScorer hit). Stream and accumulate the deltas. The
-        # deadline wraps BOTH stream creation and the chunk loop so a proxy that
-        # opens the stream then stalls mid-body can't hang the ranker.
         async def _read_stream() -> str:
-            parts: list[str] = []
-            stream = await client.chat.completions.create(
+            text, _ = await astream_chat_completion_text(
+                client,
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=400,
-                stream=True,
-                stream_options={"include_usage": True},
             )
-            async for chunk in stream:
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta is not None and delta.content:
-                        parts.append(delta.content)
-            return "".join(parts)
+            return text
 
         try:
             text = (
