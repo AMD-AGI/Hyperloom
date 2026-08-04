@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -149,21 +150,58 @@ def run_scriptable(
         return 2, f"scriptable benchmark script not found for {framework}_{runner_type}.sh"
     env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
     cmd = ["bash", str(script)]
-    try:
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        _write_logs(workspace, "", f"scriptable benchmark timed out after {timeout_s}s")
-        return 124, None
-    _write_logs(workspace, proc.stdout or "", proc.stderr or "")
+    # Streamed straight to disk instead of captured in memory: a runner killed
+    # from outside (lease reap / OOM) must still leave a forensic trail.
+    with ExitStack() as stack:
+        stdout_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stdout.log"))
+        stderr_sink = stack.enter_context(_open_log_sink(workspace, "scriptable_stderr.log"))
+        proc = subprocess.Popen(  # noqa: S603 — cmd is this module's own bash entrypoint
+            cmd,
+            env=env,
+            stdout=stdout_sink,
+            stderr=stderr_sink,
+        )
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            _write_logs(
+                workspace,
+                "",
+                f"scriptable benchmark timed out after {timeout_s}s",
+                append=True,
+            )
+            return 124, None
     return proc.returncode, None
 
 
-def _write_logs(workspace: Path, stdout: str, stderr: str) -> None:
-    """Persist scriptable subprocess logs (best-effort)."""
+def _open_log_sink(workspace: Path, name: str):
+    """Open a streaming log sink under ``workspace``, falling back to DEVNULL.
+
+    An unwritable workspace must not stop the benchmark, so the sink degrades
+    instead of raising.
+    """
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        return (workspace / name).open("wb")
+    except OSError:
+        return nullcontext(subprocess.DEVNULL)
+
+
+def _write_logs(workspace: Path, stdout: str, stderr: str, *, append: bool = False) -> None:
+    """Persist scriptable subprocess logs (best-effort).
+
+    ``append`` keeps already-streamed output intact when a late marker (e.g. a
+    timeout note) is added.
+    """
+    mode = "a" if append else "w"
     try:
         if stdout:
-            (workspace / "scriptable_stdout.log").write_text(stdout, encoding="utf-8")
+            with (workspace / "scriptable_stdout.log").open(mode, encoding="utf-8") as fh:
+                fh.write(stdout)
         if stderr:
-            (workspace / "scriptable_stderr.log").write_text(stderr, encoding="utf-8")
+            with (workspace / "scriptable_stderr.log").open(mode, encoding="utf-8") as fh:
+                fh.write(stderr)
     except OSError:
         pass
