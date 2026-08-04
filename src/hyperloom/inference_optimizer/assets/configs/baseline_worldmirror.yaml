@@ -21,8 +21,19 @@ benchmark:
     TP: 1
     WM_TARGET_SIZE: 518
     WM_NUM_ITERATIONS: 5
+    # Floor only: the driver warms every timed scene regardless, because a shape
+    # the process has not met pays a 3-18s ROCm kernel compile/autotune inside
+    # the timed forward (measured iteration 0 = 82.5s vs 9.2s steady state).
     WM_WARMUP_CALLS: 3
-    WM_SCENES: ""
+    # The seven 32-image scenes. They hold a per-scene CV of 0.2-3.8% over four
+    # repetitions, so a 10% win is resolvable; the remaining light scenes sit at
+    # a 13.3% median CV (up to 42.8%) and would bury the signal. Empty = all 22.
+    WM_SCENES: "Building Landmark Messy_Room Park_Stone Small_Room Statue_Face Tree_Building"
+    # Write only what is consumed: depth (quality gate) and camera (1.2ms).
+    # Trimming gs/points/normal writing measured -38% wall-clock, -65% peak RSS
+    # and removed a ~75MB/reconstruction host-memory leak, with the forward
+    # unchanged (411.2 vs 406.1ms pooled). Set to "full" for every artifact.
+    WM_SAVE_ARTIFACTS: minimal
     WM_COND_FLAGS: "0 0 0"
     WM_USE_TORCH_COMPILE: 0
     WM_TORCH_COMPILE_MODE: default

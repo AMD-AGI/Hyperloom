@@ -4,8 +4,9 @@
 
 """WorldMirror scriptable benchmark driver.
 
-The driver loads HY-World-2.0 once, runs warmup calls, measures reconstruction
-latency across selected scenes, and writes an InferenceX-shaped result JSON.
+The driver loads HY-World-2.0 once, warms every scene it is about to time,
+measures reconstruction latency across the selected scenes, and writes an
+InferenceX-shaped result JSON.
 """
 
 from __future__ import annotations
@@ -34,7 +35,14 @@ def discover_scenes(worldmirror_dir: Path, scenes_spec: str) -> list[Path]:
             if not p.is_absolute():
                 candidate = root / "examples" / "worldrecon"
                 matches = sorted(candidate.glob(f"*/*{token}*"))
-                p = matches[0] if matches else root / token
+                # Exact name wins: on substring order alone "Building" could
+                # resolve to "Tree_Building" and time the wrong scene.
+                exact = [m for m in matches if m.name == token]
+                p = (exact or matches or [root / token])[0]
+            if not p.exists():
+                # The pipeline swallows an invalid path as a skip, which would
+                # shrink the timed set and silently downgrade the metric scope.
+                raise SystemExit(f"WorldMirror scene not found for '{token}': {p}")
             scenes.append(p)
         return scenes
 
@@ -132,6 +140,67 @@ def metric_scope() -> str:
     return scope if scope in _METRIC_SCOPES else "inference"
 
 
+_SAVE_ARTIFACT_MODES = ("minimal", "full")
+_SAVE_FLAG_KEYS = ("save_depth", "save_camera", "save_normal", "save_gs", "save_points")
+_MINIMAL_SAVE_FLAGS = {
+    "save_depth": True,
+    "save_camera": True,
+    "save_normal": False,
+    "save_gs": False,
+    "save_points": False,
+}
+
+
+def save_artifact_mode() -> str:
+    """Which reconstruction artifacts reach disk.
+
+    ``minimal`` (default) writes only what is consumed downstream: depth (the
+    quality gate) and camera (measured 1.2ms). Writing gs/points/normal costs
+    38% of wall-clock and leaks ~75MB per reconstruction without moving the
+    forward. ``full`` restores every artifact.
+    """
+    mode = os.environ.get("WM_SAVE_ARTIFACTS", "minimal").strip().lower()
+    return mode if mode in _SAVE_ARTIFACT_MODES else "minimal"
+
+
+def save_flags(mode: str) -> dict[str, bool]:
+    """Pipeline save_* kwargs for a mode, shared by warmup and timed calls."""
+    if mode == "full":
+        return dict.fromkeys(_SAVE_FLAG_KEYS, True)
+    return dict(_MINIMAL_SAVE_FLAGS)
+
+
+def warmup_plan(scenes: list[Path], requested: int) -> list[Path]:
+    """Scenes to warm before timing: every timed scene at least once.
+
+    A shape the process has not met pays a one-time 3-18s ROCm kernel
+    compile/autotune inside the timed forward (MIOpen user db + comgr), so
+    partial coverage inflates iteration 0: measured 82.5s against a 9.2s steady
+    state over 22 scenes. ``requested`` is therefore a floor, not the total.
+    """
+    if not scenes:
+        return []
+    plan = list(scenes)
+    while len(plan) < max(requested, 0):
+        plan.append(scenes[len(plan) % len(scenes)])
+    return plan
+
+
+def summarize_latencies(values: list[float]) -> dict[str, float | int]:
+    """Mean plus a spread measure; CV is what says whether a 10% win resolves."""
+    if not values:
+        return {"count": 0, "mean_ms": 0.0, "median_ms": 0.0, "stdev_ms": 0.0, "cv_pct": 0.0}
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    return {
+        "count": len(values),
+        "mean_ms": round(mean, 6),
+        "median_ms": round(statistics.median(values), 6),
+        "stdev_ms": round(stdev, 6),
+        "cv_pct": round(100.0 * stdev / mean, 4) if mean > 0 else 0.0,
+    }
+
+
 def read_stage_timings(run_output: Path | str) -> dict[str, float]:
     """Read the per-stage timings the pipeline writes when log_time is on."""
     path = Path(run_output) / "pipeline_timing.json"
@@ -144,7 +213,14 @@ def read_stage_timings(run_output: Path | str) -> dict[str, float]:
     return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
 
 
-def _capture_profile_trace(pipeline, scene: Path, output_root: Path, target_size: int, profile_dir: str) -> None:
+def _capture_profile_trace(
+    pipeline,
+    scene: Path,
+    output_root: Path,
+    target_size: int,
+    profile_dir: str,
+    save_kwargs: dict[str, bool],
+) -> None:
     """Capture one reconstruction under torch.profiler for TraceLens.
 
     Runs after the timed loop so profiling overhead never enters the
@@ -178,6 +254,7 @@ def _capture_profile_trace(pipeline, scene: Path, output_root: Path, target_size
                 strict_output_path=str(output_root / "profile_capture"),
                 target_size=target_size,
                 log_time=False,
+                **save_kwargs,
             )
             torch.cuda.synchronize()
     except Exception as exc:  # noqa: BLE001
@@ -201,7 +278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-path", default="")
     parser.add_argument("--scenes", default="")
     parser.add_argument("--target-size", type=int, default=518)
-    parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=3, help="floor; every timed scene is warmed regardless")
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--quality-ref", default="")
     parser.add_argument("--quality-ref-write", default="")
@@ -237,14 +314,18 @@ def main(argv: list[str] | None = None) -> int:
         enable_bf16=bool(args.enable_bf16),
     )
 
-    for i in range(max(args.warmup, 0)):
-        scene = scenes[i % len(scenes)]
+    artifact_mode = save_artifact_mode()
+    save_kwargs = save_flags(artifact_mode)
+
+    warmup_scenes = warmup_plan(scenes, args.warmup)
+    for i, scene in enumerate(warmup_scenes):
         pipeline(
             str(scene),
             output_path=str(output_root),
             strict_output_path=str(output_root / f"warmup_{i:03d}"),
             target_size=args.target_size,
             log_time=False,
+            **save_kwargs,
         )
 
     scope = metric_scope()
@@ -252,10 +333,16 @@ def main(argv: list[str] | None = None) -> int:
     inference_ms: list[float] = []
     stage_totals: dict[str, float] = {}
     stage_counts: dict[str, int] = {}
+    per_scene_e2e: dict[str, list[float]] = {}
+    per_scene_inference: dict[str, list[float]] = {}
+    per_iteration_e2e: list[list[float]] = []
+    per_iteration_inference: list[list[float]] = []
     completed = 0
     last_output = output_root
     start = time.perf_counter()
     for iteration in range(max(args.iterations, 1)):
+        per_iteration_e2e.append([])
+        per_iteration_inference.append([])
         for scene in scenes:
             run_output = output_root / f"iter_{iteration:03d}_{scene.name}"
             t0 = time.perf_counter()
@@ -267,14 +354,21 @@ def main(argv: list[str] | None = None) -> int:
                 # Always on: the per-stage breakdown is what the reported
                 # latency is derived from, and it costs a few timestamps.
                 log_time=True,
+                **save_kwargs,
             )
-            e2e_ms.append((time.perf_counter() - t0) * 1000.0)
+            scene_e2e = (time.perf_counter() - t0) * 1000.0
+            e2e_ms.append(scene_e2e)
+            per_scene_e2e.setdefault(scene.name, []).append(scene_e2e)
+            per_iteration_e2e[-1].append(scene_e2e)
             stages = read_stage_timings(run_output)
             for key, value in stages.items():
                 stage_totals[key] = stage_totals.get(key, 0.0) + value
                 stage_counts[key] = stage_counts.get(key, 0) + 1
             if "inference" in stages:
-                inference_ms.append(stages["inference"] * 1000.0)
+                scene_inference = stages["inference"] * 1000.0
+                inference_ms.append(scene_inference)
+                per_scene_inference.setdefault(scene.name, []).append(scene_inference)
+                per_iteration_inference[-1].append(scene_inference)
             completed += 1
             last_output = run_output
     duration = time.perf_counter() - start
@@ -283,16 +377,18 @@ def main(argv: list[str] | None = None) -> int:
     # the two scopes would be silently incomparable across variants.
     if scope == "inference" and completed and len(inference_ms) == completed:
         latencies_ms, scope_applied = inference_ms, "inference"
+        per_scene, per_iteration = per_scene_inference, per_iteration_inference
     else:
         latencies_ms = e2e_ms
         scope_applied = "e2e" if scope == "e2e" else "e2e (pipeline_timing.json unavailable)"
+        per_scene, per_iteration = per_scene_e2e, per_iteration_e2e
 
     mean_ms = statistics.fmean(latencies_ms) if latencies_ms else 0.0
     # Throughput must invert the reported latency, otherwise a scoped metric
     # and a wall-clock rate would disagree about the same run.
     throughput = (1000.0 / mean_ms) if mean_ms > 0 else 0.0
     if args.profile_dir:
-        _capture_profile_trace(pipeline, scenes[0], output_root, args.target_size, args.profile_dir)
+        _capture_profile_trace(pipeline, scenes[0], output_root, args.target_size, args.profile_dir, save_kwargs)
     quality_gate = evaluate_quality_gate(
         last_output,
         args.quality_ref,
@@ -324,11 +420,25 @@ def main(argv: list[str] | None = None) -> int:
             key: round(total / stage_counts[key], 6)
             for key, total in sorted(stage_totals.items())
         },
+        # Per-scene spread decides which scenes can resolve a 10% win: the seven
+        # 32-image scenes sit at CV 0.2-3.8%, the light ones at a 13.3% median.
+        "per_scene_latency_ms": {
+            name: summarize_latencies(values) for name, values in sorted(per_scene.items())
+        },
+        # A residual cold-start shows up here as an outlying iteration 0.
+        "per_iteration_mean_ms": [
+            round(statistics.fmean(values), 6) for values in per_iteration if values
+        ],
         "bench_config": {
             "target_size": args.target_size,
             "warmup": args.warmup,
+            "warmup_requested": args.warmup,
+            "warmup_effective": len(warmup_scenes),
             "iterations": args.iterations,
             "scene_count": len(scenes),
+            "scenes": [scene.name for scene in scenes],
+            "save_artifacts": artifact_mode,
+            "save_flags": save_kwargs,
         },
     }
     out = result_dir / f"{args.result_filename}.json"
