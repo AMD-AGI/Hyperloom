@@ -40,7 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.shared_state import resolve_grading_anchor_tput
+from ...state.shared_state import resolve_grading_anchor_tput, resolve_grading_base
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -595,18 +595,37 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Grade candidates against the live anchor; revalidation uses baseline.
+        # The anchor and the config it was measured on are ONE unit: params
+        # snapshot the pair from current_best at dispatch, but a KEEP can land
+        # while this task sits queued. Adopting the newer anchor alone would
+        # grade a candidate built on the stale stack against the newer number,
+        # so the whole triple is replaced together or not at all. Revalidation
+        # reproduces the saved stack against baseline_tput, so it never re-reads.
         ss = extra.get("shared_state") or extra.get("state")
-        live_anchor = resolve_grading_anchor_tput(ss)
         revalidating_stack = params.get("source") == "resume_stack_revalidate"
-        if not revalidating_stack and live_anchor > base_tput:
+        live_base = None if revalidating_stack else resolve_grading_base(ss)
+        if live_base is not None and float(live_base["tput"]) > base_tput:
             if base_tput > 0:
                 log.warning(
-                    "explore: anchor drift, params base_tput=%.1f but live anchor is %.1f; grading against live",
+                    "explore: anchor drift, params base_tput=%.1f but live anchor is %.1f; "
+                    "re-reading base args/envs from the same current_best",
                     base_tput,
-                    live_anchor,
+                    float(live_base["tput"]),
                 )
-            base_tput = live_anchor
+            base_tput = float(live_base["tput"])
+            base_extra_args = str(live_base["extra_server_args"])
+            base_extra_envs = dict(live_base["extra_envs"])
+            base_remove_args = to_str_list(live_base["remove_args"])
+            base_unset_envs = to_str_list(live_base["unset_envs"])
+            if live_base["args_mode"] == "replace":
+                base_args_mode = "replace"
+        elif base_tput <= 0 and not revalidating_stack:
+            # No validated layer yet, so the anchor is ``baseline_tput`` and the
+            # config it was measured on is the bare reference one the params
+            # already carry. Only the number can be missing here, so recovering
+            # it alone keeps the pair consistent. Without this a params omission
+            # grades every variant against 0 and discards real wins.
+            base_tput = resolve_grading_anchor_tput(ss)
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
