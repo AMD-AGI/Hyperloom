@@ -53,6 +53,16 @@ class ConversationCollaborator:
                 log.exception("Coordinator: orchestration reset_conversation failed")
         self._coord._orchestration_seeded = False
 
+    def _count_prompt_mode(self, mode: str) -> None:
+        """Tally one orchestration prompt push as SEED or DELTA.
+
+        Args:
+            mode: ``"seed"`` or ``"delta"``.
+        """
+        census = dict(self.shared_state.orchestration_prompt_modes or {})
+        census[mode] = int(census.get(mode, 0)) + 1
+        self.shared_state.orchestration_prompt_modes = census
+
     def _conversation_progress_signal(self) -> dict[str, Any]:
         """Compute the no-progress circuit-breaker signal.
 
@@ -392,6 +402,7 @@ class ConversationCollaborator:
                     self._orchestration_seeded,
                     getattr(self.shared_state, "tick", 0),
                 )
+                self._count_prompt_mode("seed" if push_full else "delta")
 
         # On a full SEED push, inject recovered working memory.
         if (

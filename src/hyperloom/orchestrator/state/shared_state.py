@@ -882,6 +882,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # records; recovers a later degenerate compaction from a prior snapshot.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
 
+    # Census of orchestration prompt pushes: {"seed": n, "delta": n}; a ratio
+    # near 1:0 means compaction is re-seeding the conversation every tick.
+    orchestration_prompt_modes: dict[str, int] = field(default_factory=dict)
+
     # Bounded ring (cap 10) of per-macro-cycle directives injected into the
     # orchestration system prompt; entries: {cycle, directive, source, ts}.
     cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
