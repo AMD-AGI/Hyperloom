@@ -116,6 +116,54 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
+def resolve_grading_base(state: Any) -> dict[str, Any] | None:
+    """The anchor **and** the config it was measured on, read as one unit.
+
+    A candidate is graded by comparing its throughput against an anchor while
+    being launched on top of that anchor's args/envs, so the two halves are only
+    meaningful together. Task params snapshot the pair at dispatch; refreshing
+    just the anchor at execution time (``resolve_grading_anchor_tput`` alone)
+    grades a candidate built on the stale stack against the newer number, which
+    reads as a regression for a variant that is merely neutral. Callers that
+    re-resolve the anchor mid-flight must take the whole triple from here.
+
+    Returns ``None`` when ``current_best`` carries no positive throughput: the
+    anchor then falls back to ``baseline_tput``, whose args live in the baseline
+    record rather than on state, so the dispatch-time snapshot is authoritative
+    and must be left alone.
+
+    Args:
+        state: Any object exposing ``current_best`` (``None`` and partial test
+            doubles are tolerated).
+
+    Returns:
+        A dict with ``tput``, ``extra_server_args``, ``extra_envs``,
+        ``remove_args``, ``unset_envs`` and ``args_mode``, or ``None``.
+    """
+    if state is None:
+        return None
+    cb = getattr(state, "current_best", None)
+    if not isinstance(cb, dict):
+        return None
+    tput = _first_positive_tput(cb)
+    if tput <= 0:
+        return None
+
+    def _controls(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return [str(v) for v in (value or []) if str(v).strip()]
+
+    return {
+        "tput": tput,
+        "extra_server_args": str(cb.get("extra_server_args") or "").strip(),
+        "extra_envs": {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()},
+        "remove_args": _controls(cb.get("remove_args")),
+        "unset_envs": _controls(cb.get("unset_envs")),
+        "args_mode": str(cb.get("args_mode") or "").strip().lower(),
+    }
+
+
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
     ("decoder_type", "decoder"),

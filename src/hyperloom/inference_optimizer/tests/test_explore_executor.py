@@ -834,6 +834,74 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
 
 
 @pytest.mark.asyncio
+async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Superseding a stale ``base_tput`` also re-reads the args it was measured on.
+
+    Adopting the newer anchor alone would launch the candidate on the stack the
+    params snapshotted while grading it against the newer number, so a neutral
+    variant reads as a regression.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "--live-layer 1",
+        "extra_envs": {"LIVE_ENV": "1"},
+    }
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=1100.0)  # +10% vs the live 1000
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-live-base"),
+            # Snapshotted together at dispatch, before the newer layer landed.
+            "base_tput": 800.0,
+            "base_extra_args": "--stale-layer 1",
+            "enable_stack_rebench": False,
+            "grid": [
+                {
+                    "name": "on_live_stack",
+                    "extra_args": "--variant 2",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-live-base-args",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    fp = canonical_fingerprint("--variant 2", {})
+    assert out["explore_search_update"]["tested"][fp]["base_tput"] == 1000.0
+    winner = out["winners"][0]
+    assert "--live-layer 1" in winner["extra_server_args"]
+    assert "--variant 2" in winner["extra_server_args"]
+    assert "--stale-layer" not in winner["extra_server_args"]
+    assert winner["extra_envs"]["LIVE_ENV"] == "1"
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
     _force_cold_decision(monkeypatch)
