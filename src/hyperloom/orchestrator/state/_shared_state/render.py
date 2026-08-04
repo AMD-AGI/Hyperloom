@@ -737,10 +737,14 @@ class _RenderMixin:
         rejected = list(search.get("rejected") or [])
         tested = search.get("tested") or {}
         cursor = search.get("cursor", 0)
-        out: list[str] = [
-            "",
-            f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}",
-        ]
+        head = f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}"
+        # Surfaced on the head line because the per-variant bodies are capped at
+        # the last 5 rows, which can hide a whole round reaped by the overtime gate.
+        last_round = search.get("last_round")
+        n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
+        if n_killed:
+            head += f"  killed_overtime(last_round)={n_killed}"
+        out: list[str] = ["", head]
         if accepted:
             out.append("    accepted:")
             for entry in accepted[-5:]:

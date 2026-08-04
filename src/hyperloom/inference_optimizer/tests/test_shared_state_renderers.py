@@ -81,6 +81,22 @@ def test_format_search_state():
     assert "cursor=3" in out
     assert "accepted:" in out
     assert "rejected (last 5):" in out
+    assert "killed_overtime" not in out
+
+
+def test_format_search_state_head_reports_killed_overtime():
+    search = {
+        "cursor": 8,
+        "tested": {"f1": {}, "f2": {}},
+        "last_round": {"round_id": 3, "killed_overtime": ["f1", "f2"]},
+    }
+    out = SharedState._format_search_state(search)
+    assert "killed_overtime(last_round)=2" in out
+    # A round with no kill must not add noise to the head line.
+    search["last_round"] = {"round_id": 4, "killed_overtime": []}
+    assert "killed_overtime" not in SharedState._format_search_state(search)
+    search["last_round"] = "not-a-dict"
+    assert "killed_overtime" not in SharedState._format_search_state(search)
 
 
 def test_format_optimization_stack():
