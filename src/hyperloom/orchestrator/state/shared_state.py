@@ -2122,7 +2122,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         Returns:
             dict[str, Any]: The shared diagnostic fields (``error_class`` /
                 ``error_excerpt`` / ``stderr_tail`` / ``stderr_log_path`` /
-                ``workspace`` / ``raw_result_path`` / ``reported_success``).
+                ``workspace`` / ``raw_result_path`` / ``reported_success`` /
+                ``variant_name``).
         """
         return {
             "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
@@ -2146,7 +2147,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         extras: dict[str, Any] | None = None,
         max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
     ) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, raw_result_path, reported_success, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`.
+        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`.
 
         Args:
             action (str): The audited action name (must be in

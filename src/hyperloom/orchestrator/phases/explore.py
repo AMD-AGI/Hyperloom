@@ -1189,33 +1189,20 @@ class ExplorePhase(PhaseHandler):
         anchor = self._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
 
-        failures = list(state.last_action_failures or [])[-30:]
+        # Already capped by ``record_action_failure``; read the whole log.
         seen_failures: dict[str, dict[str, Any]] = {}
-        for row in failures:
+        for row in state.last_action_failures or []:
             if not isinstance(row, dict):
                 continue
             action = str(row.get("action") or "").strip() or "unknown"
             err = str(row.get("error_class") or "").strip() or "unknown_error"
             variant = str(row.get("variant_name") or "").strip()
-            # Include variant discriminator when present so different crash
-            # causes don't collapse into the same gap.
+            # Variant discriminator keeps distinct crash causes in distinct gaps.
             key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
             layer, domain = self._gap_layer_for_action(action)
-            excerpt = str(row.get("error_excerpt") or "").strip()
-            # Build a human-readable symptom from the first meaningful excerpt
-            # line, falling back to the generic (action, error_class) label.
-            if excerpt:
-                first_line = next(
-                    (ln.strip() for ln in excerpt.splitlines() if ln.strip()),
-                    "",
-                )
-                symptom_detail = first_line[:200] if first_line else err
-            else:
-                symptom_detail = err
-            if variant:
-                symptom = f"{action}/{variant} fails: {symptom_detail}"
-            else:
-                symptom = f"{action} repeatedly fails with {symptom_detail}"
+            excerpt = str(row.get("error_excerpt") or "")
+            detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
+            symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"
             attempt = {
                 "action": action,
                 "variant_name": variant,
@@ -1341,7 +1328,10 @@ class ExplorePhase(PhaseHandler):
         task: "Task | None",
         result: dict[str, Any],
     ) -> None:
-        """Record each FAILED per_variant_outcomes row into last_action_failures.
+        """Record each FAILED ``per_variant_outcomes`` row into ``last_action_failures``.
+
+        A crashed variant does not fail the round, so the round-level recorder
+        never sees it.
 
         Args:
             task: The completed explore task; ``None`` is a no-op.
@@ -1350,25 +1340,23 @@ class ExplorePhase(PhaseHandler):
         if task is None:
             return
         per_variant = result.get("per_variant_outcomes")
-        if not isinstance(per_variant, list) or not per_variant:
+        if not isinstance(per_variant, list):
             return
-        state = self.shared_state
         for vo in per_variant:
             if not isinstance(vo, dict):
                 continue
             if str(vo.get("outcome") or "").upper() != "FAILED":
                 continue
-            envelope: dict[str, Any] = {
-                "variant_name": str(vo.get("variant_name") or ""),
-                "error_class": str(vo.get("error_class") or ""),
-                "error": str(vo.get("reason") or ""),
-                "workspace": vo.get("workspace"),
-                "stderr_log_path": vo.get("server_log_path"),
-            }
-            state.record_action_failure(
+            self.shared_state.record_action_failure(
                 action="explore",
-                task_id=str(getattr(task, "task_id", "") or ""),
-                result=envelope,
+                task_id=str(task.task_id or ""),
+                result={
+                    "variant_name": str(vo.get("variant_name") or ""),
+                    "error_class": str(vo.get("error_class") or ""),
+                    "error": str(vo.get("reason") or ""),
+                    "workspace": vo.get("workspace"),
+                    "stderr_log_path": vo.get("server_log_path"),
+                },
             )
 
     @staticmethod

@@ -1122,8 +1122,8 @@ class ExploreExecutor:
                                 "workload_signature": ws_sig,
                                 "framework": framework,
                                 "reason": "warmup_failed",
-                                "error_class": getattr(w, "error_class", "") if w is not None else "",
-                                "server_log_path": getattr(w, "server_log_path", None) if w is not None else None,
+                                "error_class": w.error_class if w is not None else "",
+                                "server_log_path": w.server_log_path if w is not None else None,
                             }
                             if gv.name:
                                 name_index[gv.name] = fp

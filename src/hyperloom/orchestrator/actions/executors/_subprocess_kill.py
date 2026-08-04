@@ -466,8 +466,8 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     """Return a short ``server.log`` excerpt around the first terminal
     engine/worker-init marker, or ``None`` when no fatal marker is present.
 
-    Baseline / profile failure classification calls this to surface the real
-    server-side root cause — e.g. vLLM's ``RuntimeError: Engine core
+    Baseline / profile / explore failure classification calls this to surface
+    the real server-side root cause — e.g. vLLM's ``RuntimeError: Engine core
     initialization failed`` — instead of the Magpie wrapper's generic
     stdout/stderr tail. The excerpt keeps a couple of lines of context around
     the marker. Best-effort: a missing / unreadable log returns ``None``.

@@ -1018,7 +1018,7 @@ class DispatcherCollaborator:
                     )
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
-                        "gaps refresh: variant failure recording failed for task=%s",
+                        "explore: per-variant failure recording failed for task=%s",
                         task.task_id,
                     )
                 try:

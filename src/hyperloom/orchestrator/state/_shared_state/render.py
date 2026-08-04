@@ -19,6 +19,11 @@ def _shared_state_module():
     return shared_state
 
 
+# Failure rows rendered into the prompt, and per-row excerpt budget.
+_FAILURES_RENDERED = 10
+_FAILURE_EXCERPT_CHARS = 600
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Forwarding shim — implementation in :mod:`.policy`."""
@@ -600,39 +605,36 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render the most-recent global failures with multi-line excerpt and log path.
+        """Render the most-recent global failures, each with its excerpt tail and log path.
 
         Returns:
-            str: A newline-separated render of the last 10 failures (with an
-                ``[+N earlier]`` suffix when more exist), or ``"(none)"``.
+            str: A newline-separated render of the last
+                :data:`_FAILURES_RENDERED` failures (with an
+                ``[+N earlier failures]`` suffix when more exist), or
+                ``"(none)"``.
         """
         if not self.last_action_failures:
             return "(none)"
-        _SHOW = 10
         rows: list[str] = []
-        for entry in self.last_action_failures[-_SHOW:]:
+        for entry in self.last_action_failures[-_FAILURES_RENDERED:]:
             if not isinstance(entry, dict):
                 continue
             action = entry.get("action") or "?"
             error_class = entry.get("error_class") or "?"
             ts = entry.get("ts") or "?"
-            excerpt = entry.get("error_excerpt") or ""
-            ws = entry.get("workspace") or "-"
-            log_path = entry.get("stderr_log_path") or ""
-            variant = entry.get("variant_name") or ""
-            # Keep last 600 chars of the excerpt so multi-line tracebacks survive.
-            excerpt_tail = excerpt[-600:].strip() if excerpt else ""
             header = f"[{action}/{error_class}@{ts}]"
+            variant = entry.get("variant_name") or ""
             if variant:
                 header += f" variant={variant}"
-            header += f" ws={ws}"
+            header += f" ws={entry.get('workspace') or '-'}"
+            log_path = entry.get("stderr_log_path") or ""
             if log_path:
                 header += f" log={log_path}"
-            if excerpt_tail:
-                rows.append(f'{header}\n  {excerpt_tail}')
-            else:
-                rows.append(header)
-        earlier = len(self.last_action_failures) - _SHOW
+            # stderr_tail holds the actionable end of the blob; excerpt is its head.
+            blob = entry.get("stderr_tail") or entry.get("error_excerpt") or ""
+            excerpt = blob[-_FAILURE_EXCERPT_CHARS:].strip()
+            rows.append(f"{header}\n  {excerpt}" if excerpt else header)
+        earlier = len(self.last_action_failures) - _FAILURES_RENDERED
         suffix = f"\n[+{earlier} earlier failures]" if earlier > 0 else ""
         return "\n".join(rows) + suffix if rows else "(none)"
 
@@ -691,14 +693,15 @@ class _RenderMixin:
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
-        reason = str(entry.get("reason") or "").strip()
+        parts: list[str] = []
         error_class = str(entry.get("error_class") or "").strip()
-        suffix_parts = []
         if error_class:
-            suffix_parts.append(f"err={error_class}")
+            parts.append(f"err={error_class}")
+        reason = str(entry.get("reason") or "").strip()
+        # Threshold rejections are already conveyed by the gain column.
         if reason and reason not in ("not_keep", "gain_below_threshold"):
-            suffix_parts.append(f"reason={reason[:120]}")
-        suffix = "  " + " ".join(suffix_parts) if suffix_parts else ""
+            parts.append(f"reason={reason[:120]}")
+        suffix = "  " + " ".join(parts) if parts else ""
         return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
 
     @staticmethod
