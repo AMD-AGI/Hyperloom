@@ -1778,6 +1778,50 @@ def test_worldplay_server_args_reason_locks_measurement_contract(args):
     assert worldplay_server_args_reason(args), f"{args!r} must be blacklisted"
 
 
+# -- WorldPlay store_true shape lock (regression) ----------------------------
+# Session 20260803T134328Z burned two full explore rounds: the proposer wrote
+# ``--enable_torch_compile true`` (the shape every other accepted flag uses),
+# argparse rejected the trailing token, and all four dispatches died in 2.3s as
+# "bench_fps.py: error: unrecognized arguments: true".
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--enable_torch_compile true",
+        "--enable_torch_compile=true",
+        "--enable_torch_compile false",
+        "--offloading 0 --transformer_resident_ar_rollout 1 --enable_torch_compile true",
+    ],
+)
+def test_worldplay_server_args_reason_drops_store_true_with_value(args):
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        worldplay_server_args_reason,
+    )
+
+    reason = worldplay_server_args_reason(args)
+    assert reason, f"{args!r} must be dropped before dispatch"
+    assert "store_true" in reason
+    assert "WORLDPLAY_USE_TORCH_COMPILE" in reason
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--enable_torch_compile",
+        "--enable_torch_compile --group_offloading block_level",
+        "--offloading 0 --group_offloading 0",
+        "--transformer_resident_ar_rollout 1",
+    ],
+)
+def test_worldplay_server_args_reason_keeps_valid_store_true_shape(args):
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        worldplay_server_args_reason,
+    )
+
+    assert worldplay_server_args_reason(args) is None, f"{args!r} must survive"
+
+
 def test_worldplay_seed_grid_survives_its_own_filter():
     """Every curated seed variant must pass the WorldPlay spec filter.
 
