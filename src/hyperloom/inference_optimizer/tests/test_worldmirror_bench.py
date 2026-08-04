@@ -13,15 +13,6 @@ import yaml
 
 _ASSETS = Path(__file__).parents[1] / "assets"
 _BENCH_PATH = _ASSETS / "benchmark_scripts" / "worldmirror_bench.py"
-_HEAVY_SCENES = {
-    "Building",
-    "Landmark",
-    "Messy_Room",
-    "Park_Stone",
-    "Small_Room",
-    "Statue_Face",
-    "Tree_Building",
-}
 
 
 def _load_bench():
@@ -202,10 +193,10 @@ def test_bench_driver_warms_the_plan_and_shares_save_flags():
 
 
 @pytest.mark.parametrize("name", ["baseline_worldmirror.yaml", "profile_worldmirror.yaml"])
-def test_shipped_configs_time_only_the_resolvable_scenes(name):
-    """Averaging all 22 scenes buries a 10% win: the light ones run at a 13.3%
-    median CV against 0.2-3.8% for the seven 32-image scenes."""
+def test_shipped_configs_time_the_whole_scene_set(name):
+    """Narrowing the set drops the light scenes where small-GEMM tuning pays and
+    breaks comparability with the recorded baseline, which covers all 22."""
     envs = yaml.safe_load((_ASSETS / "configs" / name).read_text(encoding="utf-8"))["benchmark"]["envs"]
 
-    assert set(envs["WM_SCENES"].split()) == _HEAVY_SCENES
+    assert envs["WM_SCENES"] == ""
     assert envs["WM_SAVE_ARTIFACTS"] == "minimal"
