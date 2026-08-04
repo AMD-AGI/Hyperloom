@@ -194,6 +194,7 @@ hyperloom = [
 # package (near-verbatim move; already good src-layout per tree-reform.MD).
 "hyperloom.agents.robustness" = [
     "SKILL.md",
+    "prompts/*.md",
 ]
 # tree-reform.MD P2.5: framework-agent's LLM skill assets (SKILL.md/AGENTS.md/
 # README.md, LLM prompt templates, protocol/schema references, and the

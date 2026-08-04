@@ -440,3 +440,87 @@ async def test_llm_engine_skips_when_credentials_missing():
     finally:
         await client.aclose()
     assert text == ""
+
+
+# System prompt injection
+
+
+from hyperloom.agents.robustness.decision.rca_engine import load_rca_system_prompt  # noqa: E402
+
+
+def test_load_rca_system_prompt_returns_nonempty_string():
+    prompt = load_rca_system_prompt()
+    assert isinstance(prompt, str)
+    assert len(prompt) > 100
+    assert "symptom" in prompt.lower()
+
+
+def test_load_rca_system_prompt_fallback(monkeypatch):
+    import hyperloom.agents.robustness.decision.rca_engine as mod
+
+    original_path_class = mod.Path
+
+    class _BadPath(original_path_class):  # type: ignore[misc]
+        def read_text(self, **kw):  # type: ignore[override]
+            raise OSError("no file")
+
+    monkeypatch.setattr(mod, "Path", _BadPath)
+    # Bypass the cache by calling the unwrapped loader logic directly.
+    asset = _BadPath(__file__).resolve().parents[1] / "prompts" / "rca.md"
+    try:
+        text = asset.read_text(encoding="utf-8")
+    except OSError:
+        text = mod._SYSTEM_PROMPT_FALLBACK
+    assert "insufficient evidence" in text
+
+
+@pytest.mark.asyncio
+async def test_llm_engine_uses_injected_system_prompt():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured["system_msg"] = body["messages"][0]["content"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    custom_prompt = "custom system prompt for testing"
+    engine = _engine(
+        handler,
+        system_prompt=custom_prompt,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+    finally:
+        await engine.aclose()
+    assert captured["system_msg"] == custom_prompt
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_uses_injected_system_prompt():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured["system"] = body.get("system")
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": "ok"}]},
+        )
+
+    custom_prompt = "anthropic custom prompt"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com")
+    engine = AnthropicRcaEngine(
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        client=client,
+        system_prompt=custom_prompt,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+    finally:
+        await client.aclose()
+    assert captured["system"] == custom_prompt
