@@ -142,12 +142,17 @@ def metric_scope() -> str:
 
 _SAVE_ARTIFACT_MODES = ("minimal", "full")
 _SAVE_FLAG_KEYS = ("save_depth", "save_camera", "save_normal", "save_gs", "save_points")
+_MASK_FLAG_KEYS = ("apply_sky_mask", "apply_edge_mask")
 _MINIMAL_SAVE_FLAGS = {
     "save_depth": True,
     "save_camera": True,
     "save_normal": False,
     "save_gs": False,
     "save_points": False,
+    # The masks feed save_gs/save_points/save_sky_mask only, all off here, while
+    # save_depth uses raw predictions: 15.6s of the 17.2s case is then discarded.
+    "apply_sky_mask": False,
+    "apply_edge_mask": False,
 }
 
 
@@ -164,9 +169,9 @@ def save_artifact_mode() -> str:
 
 
 def save_flags(mode: str) -> dict[str, bool]:
-    """Pipeline save_* kwargs for a mode, shared by warmup and timed calls."""
+    """Pipeline kwargs for a mode, shared by warmup and timed calls."""
     if mode == "full":
-        return dict.fromkeys(_SAVE_FLAG_KEYS, True)
+        return dict.fromkeys(_SAVE_FLAG_KEYS + _MASK_FLAG_KEYS, True)
     return dict(_MINIMAL_SAVE_FLAGS)
 
 

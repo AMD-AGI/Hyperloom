@@ -100,9 +100,23 @@ def test_save_artifacts_defaults_to_minimal(monkeypatch):
         "save_normal": False,
         "save_gs": False,
         "save_points": False,
+        "apply_sky_mask": False,
+        "apply_edge_mask": False,
     }
     assert all(bench.save_flags("full").values())
     assert set(bench.save_flags("full")) == set(minimal)
+
+
+def test_minimal_mode_skips_the_masks_nothing_consumes():
+    """The masks feed save_gs/save_points/save_sky_mask, all off in minimal, while
+    save_depth reads raw predictions: 15.6s of a 17.2s case was being discarded."""
+    bench = _load_bench()
+    minimal = bench.save_flags("minimal")
+
+    assert minimal["apply_sky_mask"] is False
+    assert minimal["apply_edge_mask"] is False
+    assert minimal["save_depth"] is True, "the quality gate still needs depth"
+    assert not any(minimal[k] for k in ("save_gs", "save_points", "save_normal"))
 
 
 def test_summarize_latencies_reports_mean_and_spread():
