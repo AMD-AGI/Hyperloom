@@ -8,8 +8,8 @@ The unified ``explore`` action (one yaml meta, one
 
 Per-variant flow:
 
-1. canonical_fingerprint dedup against ``explore_search.tested``
-   (rename-resistant).
+1. canonical_fingerprint dedup within the submitted grid only; historical
+   ``explore_search`` results are evidence, never an eligibility gate.
 2. Render the variant's Magpie YAML, run E2E bench.
 3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
    threshold + accuracy gate when ``is_high_accuracy_risk``).
@@ -744,7 +744,7 @@ class ExploreExecutor:
                 "workspace": output_root.as_posix(),
             }
 
-        # ----- explore_search dedup ----------------------------------------
+        # ----- explore_search ledger (history seed) -------------------------
         search = dict(params.get("explore_search") or _initial_explore_search_state())
         # Defensive default fill (resume / first-run guards).
         for key, default in (
@@ -1535,7 +1535,7 @@ class ExploreExecutor:
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (per-fp last-wins) -----------
+        # ----- Ledger compaction (per-fingerprint last-wins) ----------------
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")

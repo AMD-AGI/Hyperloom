@@ -936,10 +936,7 @@ class ConversationCollaborator:
                 )
             else:
                 lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
-        lines.append(
-            f"  macro_cycle={cycle}; historical results are evidence, not a gate — "
-            "any fingerprint may be re-proposed."
-        )
+        lines.append(f"  macro_cycle={cycle}")
         lines.append("Advisory only: pick the domain/tag yourself; this nudges focus, it does not gate dispatch.")
         return "\n".join(lines)
 
@@ -948,8 +945,7 @@ class ConversationCollaborator:
 
         Active only in cyclic mode after at least one macro-cycle. Shows the
         current KEEP threshold and lists prior measured results above and below
-        it for decision context. Historical results never gate re-submission;
-        any fingerprint may be re-proposed.
+        it for decision context; the results never gate re-submission.
 
         Returns:
             The rendered advisory text, or ``""`` when not applicable.

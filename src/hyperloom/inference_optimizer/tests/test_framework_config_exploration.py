@@ -92,7 +92,6 @@ def _fake_self(**state_overrides):
     for name in (
         "_build_framework_config_grid",
         "_framework_config_explore_params",
-        "_framework_config_new_variants",
         "_finish_framework_config_lane",
         "_framework_config_max_rounds",
         "_framework_config_grid_from_proposals",
@@ -197,9 +196,9 @@ def test_run_skips_when_grid_empty():
 
 
 # --------------------------------------------------------------------------
-# _framework_config_new_variants
+# grid build retains historically tested fingerprints
 # --------------------------------------------------------------------------
-def test_new_variants_retains_historical_tested_fingerprints():
+def test_grid_build_retains_historical_tested_fingerprints():
     """Historical explore_search entries no longer filter the framework config lane."""
     fp = canonical_fingerprint("--x", {})
     s = _fake_self(explore_search={"tested": {fp: {"outcome": "REVERT"}}})
@@ -207,8 +206,8 @@ def test_new_variants_retains_historical_tested_fingerprints():
         {"name": "tested", "extra_args": "--x", "extra_envs": {}},
         {"name": "fresh", "extra_args": "--y", "extra_envs": {}},
     ]
-    # Both variants retained — historical blacklist removed.
-    assert [g["name"] for g in s._framework_config_new_variants(grid)] == ["tested", "fresh"]
+    out = s._build_framework_config_grid(explicit_grid=grid)
+    assert [g["name"] for g in out] == ["tested", "fresh"]
 
 
 # --------------------------------------------------------------------------
@@ -562,8 +561,8 @@ def test_max_rounds_bad_env_falls_back(monkeypatch):
     assert Coordinator._framework_config_max_rounds(_fake_self()) == FrameworkPhase._FRAMEWORK_CONFIG_MAX_ROUNDS
 
 
-def test_new_variants_skips_non_dict():
-    out = _fake_self()._framework_config_new_variants([{"name": "a", "extra_args": "--x"}, "nope", 123])
+def test_grid_build_skips_non_dict():
+    out = _fake_self()._build_framework_config_grid(explicit_grid=[{"name": "a", "extra_args": "--x"}, "nope", 123])
     assert [g["name"] for g in out] == ["a"]
 
 

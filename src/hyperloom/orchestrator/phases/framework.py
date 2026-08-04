@@ -5224,20 +5224,6 @@ class FrameworkPhase(PhaseHandler):
             v = 0
         return v if v > 0 else self._FRAMEWORK_CONFIG_MAX_ROUNDS
 
-    def _framework_config_new_variants(
-        self,
-        grid: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Return all valid dicts from ``grid``; historical explore ledger does not filter.
-
-        Args:
-            grid: Candidate variant dicts (ExploreExecutor grid schema).
-
-        Returns:
-            The subset of ``grid`` entries that are valid dicts.
-        """
-        return [v for v in (grid or []) if isinstance(v, dict)]
-
     def _finish_framework_config_lane(self, *, reason: str) -> None:
         """Mark the FRAMEWORK config-exploration subphase done and persist.
 
@@ -5539,7 +5525,7 @@ class FrameworkPhase(PhaseHandler):
                 log.exception("framework_config: save after generation dispatch failed")
             return True
         # Generation unavailable: fall back to the deterministic default grid.
-        new_variants = self._framework_config_new_variants(self._build_framework_config_grid())
+        new_variants = self._build_framework_config_grid()
         if not new_variants:
             self._finish_framework_config_lane(reason="no_candidates")
             return False
@@ -5628,7 +5614,7 @@ class FrameworkPhase(PhaseHandler):
             pending = list(getattr(state, "framework_config_pending_grid", None) or [])
             state.framework_config_pending_grid = []
             round_no = int(getattr(state, "framework_config_lane_round", 0) or 0)
-            new_variants = self._framework_config_new_variants(self._build_framework_config_grid(explicit_grid=pending))
+            new_variants = self._build_framework_config_grid(explicit_grid=pending)
             if not new_variants:
                 self._finish_framework_config_lane(reason="generation_empty")
                 return False

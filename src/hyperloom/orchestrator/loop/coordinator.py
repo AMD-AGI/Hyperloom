@@ -1049,7 +1049,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_run_framework_config_exploration": "phase_framework",
         "_framework_config_exploration_inflight": "phase_framework",
         "_framework_config_max_rounds": "phase_framework",
-        "_framework_config_new_variants": "phase_framework",
         "_finish_framework_config_lane": "phase_framework",
         "_framework_config_generation_context_lines": "phase_framework",
         "_dispatch_framework_config_generation_specialist": "phase_framework",

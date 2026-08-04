@@ -2035,6 +2035,10 @@ class WritebackCollaborator:
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
+        The stack append is skipped when the winner is already applied, keyed by
+        ``(action, variant_name)`` or by ``fingerprint``, so a rerun of an
+        already-stacked config cannot double-apply it.
+
         Args:
             task_kind: The action kind that produced the winner (stamped on the
                 stack entry / current_best).
@@ -2089,18 +2093,23 @@ class WritebackCollaborator:
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
-            existing_names = {
+            existing = {
                 (str(e.get("action")), str(e.get("variant_name")))
                 for e in self.shared_state.optimization_stack
                 if isinstance(e, dict)
             }
-            existing_fps = {
-                str(e.get("fingerprint") or "")
-                for e in self.shared_state.optimization_stack
-                if isinstance(e, dict) and e.get("fingerprint")
-            }
             key = (task_kind, str(variant_name or ""))
-            if key not in existing_names and str(bv.get("fingerprint") or "") not in existing_fps:
+            # A rerun under a new name must not re-apply an already-stacked config.
+            candidate_fp = str(bv.get("fingerprint") or "")
+            already_stacked = key in existing or (
+                bool(candidate_fp)
+                and any(
+                    candidate_fp == str(e.get("fingerprint") or "")
+                    for e in self.shared_state.optimization_stack
+                    if isinstance(e, dict)
+                )
+            )
+            if not already_stacked:
                 source_phase = str(
                     (bv.get("source_phase") if isinstance(bv, dict) else "")
                     or (
