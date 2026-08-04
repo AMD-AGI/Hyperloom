@@ -25,14 +25,11 @@ benchmark:
     # the process has not met pays a 3-18s ROCm kernel compile/autotune inside
     # the timed forward (measured iteration 0 = 82.5s vs 9.2s steady state).
     WM_WARMUP_CALLS: 3
-    # The seven 32-image scenes. They hold a per-scene CV of 0.2-3.8% over four
-    # repetitions, so a 10% win is resolvable; the remaining light scenes sit at
-    # a 13.3% median CV (up to 42.8%) and would bury the signal. Empty = all 22.
-    WM_SCENES: "Building Landmark Messy_Room Park_Stone Small_Room Statue_Face Tree_Building"
-    # Write only what is consumed: depth (quality gate) and camera (1.2ms).
-    # Trimming gs/points/normal writing measured -38% wall-clock, -65% peak RSS
-    # and removed a ~75MB/reconstruction host-memory leak, with the forward
-    # unchanged (411.2 vs 406.1ms pooled). Set to "full" for every artifact.
+    # Empty = all 22 scenes. The metric is the across-scene mean, so per-scene
+    # spread averages out: run-to-run CV of that mean measures 0.8-1.6%.
+    WM_SCENES: ""
+    # Only depth (quality gate) and camera are consumed. Writing gs/points/normal
+    # costs 38% wall-clock and leaks ~75MB per reconstruction; "full" restores them.
     WM_SAVE_ARTIFACTS: minimal
     WM_COND_FLAGS: "0 0 0"
     WM_USE_TORCH_COMPILE: 0
