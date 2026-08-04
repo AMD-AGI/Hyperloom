@@ -406,10 +406,12 @@ class IntentRouter:
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Delegates skip _materialize_approved_proposal, so seed the same explore params here.
+        # Delegates skip _materialize_approved_proposal, so seed the same params here.
+        # Both grid actions launch on top of current_best per their action contract.
+        if action_name in ("sweep", "explore"):
+            inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-            inject_stack_base_params(params, self.shared_state, anchor=True)
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
         # into N standard freeform specialist tasks, each dispatched through the
         # normal SpecialistRunner + TaskRegistry + lease + reap path.
