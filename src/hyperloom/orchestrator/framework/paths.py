@@ -243,6 +243,77 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _scriptable_frameworks() -> tuple[str, ...]:
+    """Return the registered scriptable framework names (empty on import error).
+
+    Imported lazily: ``framework_registry`` lives in ``inference_optimizer`` and
+    importing it at module scope would close a cycle back through this package.
+
+    Returns:
+        tuple[str, ...]: Scriptable framework names, or ``()`` when the registry
+            cannot be imported.
+    """
+    try:
+        from hyperloom.inference_optimizer import framework_registry as _reg
+
+        return tuple(name for name in _reg.names() if _reg.is_scriptable(name))
+    except Exception:  # noqa: BLE001 - discovery must never break path resolution
+        return ()
+
+
+def _framework_repo_dirname(framework: str) -> str:
+    """Return the checkout directory name implied by a framework's repo URL.
+
+    ``HY-WorldPlay.git`` -> ``HY-WorldPlay``. Used so a checkout whose directory
+    name differs from the framework name still registers as discovered.
+
+    Args:
+        framework (str): Registered framework name.
+
+    Returns:
+        str: The bare repo directory name, or ``""`` when unknown.
+    """
+    try:
+        from hyperloom.inference_optimizer import framework_registry as _reg
+
+        spec = _reg.FRAMEWORKS.get(framework)
+        url = str(getattr(spec, "repo_url", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not url:
+        return ""
+    name = url.rstrip("/").rsplit("/", 1)[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+def _discover_scriptable_repo_roots() -> tuple[str, ...]:
+    """Discover git-checkout roots for scriptable frameworks.
+
+    Scriptable frameworks (worldplay / worldmirror) run out of a repo checkout
+    instead of a pip-installed package, so importlib spec origins and the
+    site-packages globs never see them. Materialization exports the resolved
+    checkout as ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``; without those
+    roots PolicyGate rejects every patch against the framework's own source and
+    framework-agent cannot touch the code it is meant to optimize.
+
+    Returns:
+        tuple[str, ...]: Normalised, de-duplicated checkout roots that exist.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for framework in _scriptable_frameworks():
+        prefix = framework.upper()
+        for var in (f"{prefix}_REPO_PATH", f"{prefix}_DIR"):
+            candidate = os.environ.get(var, "").strip()
+            if not candidate or not Path(candidate).is_dir():
+                continue
+            root = _normalize_root(candidate)
+            if root and root not in seen:
+                seen.add(root)
+                found.append(root)
+    return tuple(found)
+
+
 def _discover_installed_package_roots() -> tuple[str, ...]:
     """Return active site/dist-packages roots available to specialists."""
     candidates: list[Path] = []
@@ -300,6 +371,7 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_package_roots(),
         _discover_installed_framework_roots(),
+        _discover_scriptable_repo_roots(),
         env_roots,
         resolve_rocm_hip_source_roots(),
     )
@@ -357,8 +429,13 @@ def summarise_framework_root_discovery(roots: str) -> str:
     parts: list[str] = []
     items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]
     for fw in _FRAMEWORK_BUCKETS:
-        token = f"/{fw}/"
-        status = "ok" if any(item.endswith(token) for item in items) else "missing"
+        # A checkout directory rarely matches the framework name (worldplay lives
+        # in HY-WorldPlay), so accept the repo dirname the registry implies too.
+        tokens = [f"/{fw}/"]
+        dirname = _framework_repo_dirname(fw)
+        if dirname:
+            tokens.append(f"/{dirname.lower()}/")
+        status = "ok" if any(item.endswith(t) for item in items for t in tokens) else "missing"
         parts.append(f"{fw}={status}")
     return " ".join(parts)
 
