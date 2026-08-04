@@ -13,6 +13,8 @@ import types
 
 import pytest
 
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
     _extract_enablement_launch_log,
@@ -56,13 +58,7 @@ def _fake_self(**state_kw):
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         gpu_type=state_kw.get("gpu_type", "mi300x"),
-        enablement=types.SimpleNamespace(
-            setup_commands=[],
-            kept_patches=[],
-            kept_stack_action={},
-            localization_manifest=[],
-            last_build_failure={},
-        ),
+        enablement=EnablementRound(),
     )
     fake = types.SimpleNamespace(shared_state=state)
     # Bind the real discovery method so the builder path is exercised.
@@ -238,7 +234,7 @@ def _enqueue_self(**state_kw):
         gpu_type=state_kw.get("gpu_type", "mi300x"),
         # Admission is exercised separately; these cases target the dispatch machinery.
         enablement_mode=state_kw.get("enablement_mode", "all"),
-        enablement=types.SimpleNamespace(
+        enablement=EnablementRound(
             succeeded=state_kw.get("enablement_succeeded", False),
             attempts=state_kw.get("enablement_attempts", 0),
             human_review_logged=state_kw.get("enablement_human_review_logged", []),
@@ -303,7 +299,6 @@ def _enqueue_self(**state_kw):
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     fake._enablement_in_flight = types.MethodType(FrameworkPhase._enablement_in_flight, fake)
-    fake.state = types.SimpleNamespace(pending_proposals={}, running_tasks={})
     return fake
 
 

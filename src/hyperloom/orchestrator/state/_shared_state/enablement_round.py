@@ -5,17 +5,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass
 class EnablementRound:
-    """State scoped to a single enablement repair attempt.
-
-    All fields correspond directly to the ``enablement_*`` fields that were
-    formerly top-level on SharedState; the ``enablement_`` prefix is stripped.
-    """
+    """State scoped to a single enablement repair attempt."""
 
     # Eval-origin enablement carriers: set when the first baseline runs but its
     # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
@@ -80,6 +76,3 @@ class EnablementRound:
         known = set(cls.__dataclass_fields__)
         filtered = {k: v for k, v in raw.items() if k in known}
         return cls(**filtered)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)

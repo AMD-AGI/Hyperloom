@@ -111,14 +111,14 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
 
     Empty for boot-origin enablement so the boot path is unchanged.
     """
-    origin = str(getattr(state.enablement, "origin", "") or "")
+    origin = str(state.enablement.origin or "")
     if not origin:
         return {}
     out: dict[str, Any] = {
         "enablement_origin": origin,
-        "enablement_accuracy_floor": float(getattr(state.enablement, "accuracy_floor", 0.0) or 0.0),
+        "enablement_accuracy_floor": float(state.enablement.accuracy_floor or 0.0),
     }
-    cfg = str(getattr(state.enablement, "probe_config_path", "") or "")
+    cfg = str(state.enablement.probe_config_path or "")
     if cfg:
         out["enablement_probe_config_path"] = cfg
     return out
@@ -1137,14 +1137,14 @@ class FrameworkPhase(PhaseHandler):
         )
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
-        base_patches = [str(p) for p in (getattr(state.enablement, "kept_patches", None) or [])]
+        base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
         # command is ever auto-seeded here: an unpinned upgrade of the shared
         # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
         # transformers-major skew) and environment/build acquisition is owned by
         # the isolated targeted-build path + the specialist's own setup_commands.
-        base_setup = [str(c) for c in (getattr(state.enablement, "setup_commands", None) or [])]
+        base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
         notes = mandate.task_description
         if base_patches or base_setup:
             progress_bits = []
@@ -1222,13 +1222,13 @@ class FrameworkPhase(PhaseHandler):
             params_out["runtime_candidate"] = runtime_candidate
         # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
         # the same runtime the last round promoted.
-        kept_action = getattr(state.enablement, "kept_stack_action", None)
+        kept_action = state.enablement.kept_stack_action
         if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
             params_out["runtime_candidate"] = kept_action
         if localization_candidate is not None:
             params_out["localization_candidate"] = localization_candidate
         # Inject the last targeted-build failure into the mandate.
-        last_build_failure = getattr(state.enablement, "last_build_failure", None) or {}
+        last_build_failure = state.enablement.last_build_failure or {}
         if isinstance(last_build_failure, dict) and last_build_failure:
             fc = str(last_build_failure.get("failure_class") or "")
             fs = str(last_build_failure.get("failure_summary") or "")
@@ -1495,9 +1495,8 @@ class FrameworkPhase(PhaseHandler):
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
         * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
           genuine-baseline revalidation; authoring is paused until it resolves.
-        * ``enablement_dispatched`` — an authoring attempt is in flight; cleared
-          on REVERT by :meth:`_maybe_rearm_enablement` so the next tick retries
-          with the next bridging candidate (``enablement_attempts`` rotates it).
+        * ``inflight_task_id`` — a specialist task is running; in-flight status
+          is derived from the task registry so no stored bool can get stuck.
         * run deadline passed — stop dispatching new work near the close.
 
         A non-blank log is always dispatched (the specialist repairs from the raw
@@ -1510,13 +1509,13 @@ class FrameworkPhase(PhaseHandler):
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
 
         state = self.shared_state
-        origin = str(getattr(state.enablement, "origin", "") or "")
+        origin = str(state.enablement.origin or "")
         admitted = eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
         if not admitted:
             return ""
-        if bool(getattr(state.enablement, "succeeded", False)):
+        if bool(state.enablement.succeeded):
             return ""
-        if bool(getattr(state.enablement, "validation_pending", False)):
+        if bool(state.enablement.validation_pending):
             # A KEEP'd eval-origin patch is awaiting genuine-baseline revalidation;
             # do not dispatch another authoring round until that resolves.
             return ""
@@ -1537,8 +1536,8 @@ class FrameworkPhase(PhaseHandler):
         deadline = getattr(self, "_run_deadline", None)
         if deadline is not None and time.monotonic() >= float(deadline):
             return ""
-        launch_log = str(getattr(state.enablement, "launch_log", "") or "")
-        attempt = int(getattr(state.enablement, "attempts", 0) or 0)
+        launch_log = str(state.enablement.launch_log or "")
+        attempt = int(state.enablement.attempts or 0)
         params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
         if params is None:
             # A non-blank UNKNOWN log is recorded for human review, once per log.
@@ -1639,7 +1638,7 @@ class FrameworkPhase(PhaseHandler):
             return
         digest = hashlib.sha1(text.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()
         state = self.shared_state
-        seen = getattr(state.enablement, "human_review_logged", None)
+        seen = state.enablement.human_review_logged
         if not isinstance(seen, list):
             seen = []
             state.enablement.human_review_logged = seen
@@ -1714,7 +1713,7 @@ class FrameworkPhase(PhaseHandler):
 
         def _stack_setup_commands() -> None:
             """Append this round's applied setup commands to the durable stack."""
-            cur = list(getattr(state.enablement, "setup_commands", None) or [])
+            cur = list(state.enablement.setup_commands or [])
             for c in res.get("setup_commands_applied") or []:
                 sc = str(c)
                 if sc and sc not in cur:
@@ -1744,14 +1743,14 @@ class FrameworkPhase(PhaseHandler):
             if isinstance(runtime, dict) and runtime:
                 state.enablement.active_runtime = runtime
                 # Retain the attempt-runtime record (cap at 5 newest).
-                records = list(getattr(state.enablement, "attempt_runtimes", None) or [])
+                records = list(state.enablement.attempt_runtimes or [])
                 records.append(runtime)
                 state.enablement.attempt_runtimes = records[-5:]
             # Record the localized closure manifest so it is not re-fetched on
             # the next round.
             manifest = res.get("enablement_localization_manifest")
             if isinstance(manifest, dict) and manifest:
-                existing = list(getattr(state.enablement, "localization_manifest", None) or [])
+                existing = list(state.enablement.localization_manifest or [])
                 existing.append(manifest)
                 state.enablement.localization_manifest = existing
 
@@ -1764,7 +1763,7 @@ class FrameworkPhase(PhaseHandler):
             accepted_cfg = str(res.get("enablement_accepted_config_path") or "").strip()
             if accepted_cfg:
                 state.enablement.accepted_config_path = accepted_cfg
-            if str(getattr(state.enablement, "origin", "") or "") == "eval":
+            if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
                 # promotes. Hold succeeded; open the revalidation window. Keep the
@@ -1774,7 +1773,7 @@ class FrameworkPhase(PhaseHandler):
                 # Increment generation so the new window gets a fresh idempotency
                 # key and cannot reuse a prior terminal TaskRegistry row.
                 state.enablement.revalidation_generation = (
-                    int(getattr(state.enablement, "revalidation_generation", 0) or 0) + 1
+                    int(state.enablement.revalidation_generation or 0) + 1
                 )
                 state.enablement.revalidation_task_id = ""
             else:
@@ -1783,7 +1782,7 @@ class FrameworkPhase(PhaseHandler):
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
-            kept = list(getattr(state.enablement, "kept_patches", None) or [])
+            kept = list(state.enablement.kept_patches or [])
             for p in res.get("patches_applied") or []:
                 sp = str(p)
                 if sp and sp not in kept:
@@ -1798,7 +1797,7 @@ class FrameworkPhase(PhaseHandler):
             _reset_baseline_failure_backstop()
         else:
             # No progress: count toward the stall cap.
-            state.enablement.stall_streak = int(getattr(state.enablement, "stall_streak", 0) or 0) + 1
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
@@ -1812,11 +1811,11 @@ class FrameworkPhase(PhaseHandler):
             "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s "
             "stacked=%d stall_streak=%d next_attempt=%d%s",
             status,
-            bool(getattr(state.enablement, "succeeded", False)),
+            bool(state.enablement.succeeded),
             status == "advanced" or bool(res.get("advanced")),
-            len(getattr(state.enablement, "kept_patches", None) or []),
-            int(getattr(state.enablement, "stall_streak", 0) or 0),
-            int(getattr(state.enablement, "attempts", 0) or 0),
+            len(state.enablement.kept_patches or []),
+            int(state.enablement.stall_streak or 0),
+            int(state.enablement.attempts or 0),
             f" stop_reason={stop_set}" if stop_set else "",
         )
 
@@ -4110,7 +4109,7 @@ class FrameworkPhase(PhaseHandler):
             # Ref and repo_url come from the existing stack action when present;
             # otherwise the top discovery candidate for the component is used;
             # empty ref falls back to tag-descending autoselect.
-            existing_stack = getattr(state.enablement, "kept_stack_action", None) or {}
+            existing_stack = state.enablement.kept_stack_action or {}
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
 
@@ -4148,7 +4147,7 @@ class FrameworkPhase(PhaseHandler):
                 }
                 hints = _component_hints.get(component, ())
                 default_repo = repo_url or ""
-                for _cand in list(getattr(state.enablement, "candidate_refs", None) or []):
+                for _cand in list(state.enablement.candidate_refs or []):
                     _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
                     if not _ref:
                         continue
@@ -4221,7 +4220,7 @@ class FrameworkPhase(PhaseHandler):
         import os as _os
 
         state = self.shared_state
-        marker_task_id = str(getattr(state.enablement, "last_specialist_task_id", "") or "").strip()
+        marker_task_id = str(state.enablement.last_specialist_task_id or "").strip()
         task_id = str(task_id or marker_task_id).strip()
         if not task_id:
             return
@@ -4348,7 +4347,7 @@ class FrameworkPhase(PhaseHandler):
             task_id = str(getattr(task, "task_id", "") or "")
             # Skip rows already accounted for (tracked by enablement_build_manifest).
             state = self.shared_state
-            manifest = list(getattr(state.enablement, "build_manifest", None) or [])
+            manifest = list(state.enablement.build_manifest or [])
             seen_ids = {str(m.get("task_id") or "") for m in manifest if isinstance(m, dict)}
             if task_id in seen_ids:
                 return
@@ -4392,7 +4391,7 @@ class FrameworkPhase(PhaseHandler):
                 if isinstance(last_ev, dict):
                     fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
 
-            lbf = getattr(state.enablement, "last_build_failure", None) or {}
+            lbf = state.enablement.last_build_failure or {}
             if not fc and isinstance(lbf, dict):
                 fc = str(lbf.get("failure_class") or "")
 
@@ -4401,7 +4400,7 @@ class FrameworkPhase(PhaseHandler):
             # has not been seen before (novel), reverted when it is a repeat.
             time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
             if fc in time_classes:
-                new_log = str(getattr(state.enablement, "launch_log", "") or "")
+                new_log = str(state.enablement.launch_log or "")
                 res = {
                     "enablement": True,
                     "status": "advanced",
@@ -4415,14 +4414,14 @@ class FrameworkPhase(PhaseHandler):
                 task_params = getattr(task, "params", None) or {}
                 _action = _TBA.from_state(task_params)
                 _key = list(_bnk(_action))
-                ledger = list(getattr(state.enablement, "build_novelty", None) or [])
+                ledger = list(state.enablement.build_novelty or [])
                 is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
                 ledger.append(_key)
                 state.enablement.build_novelty = ledger[-20:]
                 if is_repeat:
                     res = {"enablement": True, "status": "reverted"}
                 else:
-                    new_log = str(getattr(state.enablement, "launch_log", "") or "")
+                    new_log = str(state.enablement.launch_log or "")
                     res = {
                         "enablement": True,
                         "status": "advanced",
@@ -4454,7 +4453,7 @@ class FrameworkPhase(PhaseHandler):
 
         state = self.shared_state
         runtime_override = br.runtime.to_runtime_override()
-        launch_log = str(getattr(state.enablement, "launch_log", "") or "")
+        launch_log = str(state.enablement.launch_log or "")
         before_sig = classify_failure(launch_log).to_dict()
         params: dict[str, Any] = {
             "enablement": True,
@@ -4468,7 +4467,7 @@ class FrameworkPhase(PhaseHandler):
         }
         # Prefer the eval-origin probe config so the re-run keeps the original
         # workload/eval contract; fall back to the promoted baseline config.
-        cfg = str(getattr(state.enablement, "probe_config_path", "") or "") or str(
+        cfg = str(state.enablement.probe_config_path or "") or str(
             getattr(state, "baseline_config_path", "") or ""
         )
         if cfg:
@@ -4499,11 +4498,11 @@ class FrameworkPhase(PhaseHandler):
         contract. Idempotent and one-at-a-time.
         """
         state = self.shared_state
-        if not bool(getattr(state.enablement, "validation_pending", False)):
+        if not bool(state.enablement.validation_pending):
             return ""
         # If we already have a tracked revalidation task that is still alive, do
         # not create another one.
-        tracked_tid = str(getattr(state.enablement, "revalidation_task_id", "") or "").strip()
+        tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if tracked_tid:
             try:
                 for t in (*await self.tasks.queued(), *await self.tasks.running()):
@@ -4520,14 +4519,14 @@ class FrameworkPhase(PhaseHandler):
         # Prefer the accepted (post-fix) config so revalidation uses the same
         # effective config the KEEP'd candidate ran; fall back to the trigger
         # probe config only when no accepted config was recorded.
-        accepted_cfg = str(getattr(state.enablement, "accepted_config_path", "") or "").strip()
-        probe_cfg = str(getattr(state.enablement, "probe_config_path", "") or "").strip()
+        accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
+        probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
         if cfg:
             params["config_path"] = cfg
         # Carry the active runtime override so the revalidation baseline runs
         # under the same framework runtime as the KEEP'd candidate.
-        active_rt = getattr(state.enablement, "active_runtime", None) or {}
+        active_rt = state.enablement.active_runtime or {}
         if isinstance(active_rt, dict) and active_rt:
             from ..framework.stack_actions import FrameworkRuntime
 
@@ -4537,7 +4536,7 @@ class FrameworkPhase(PhaseHandler):
                 params["runtime_override"] = rt_override
         # Use generation in the idempotency key so each revalidation window gets
         # a fresh row even when a prior window's row is in a terminal state.
-        gen = int(getattr(state.enablement, "revalidation_generation", 0) or 0)
+        gen = int(state.enablement.revalidation_generation or 0)
         task, _existing = await self.tasks.create_or_return_existing(
             kind="baseline",
             params=params,
@@ -4545,7 +4544,7 @@ class FrameworkPhase(PhaseHandler):
         )
         task_id = str(getattr(task, "task_id", "") or "")
         # Persist the task_id so _promote_baseline can verify identity.
-        if task_id and task_id != str(getattr(state.enablement, "revalidation_task_id", "") or ""):
+        if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)

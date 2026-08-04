@@ -1716,7 +1716,7 @@ class ExplorePhase(PhaseHandler):
         # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
         # integrate_patch owns the enablement stall accounting, so an enablement
         # round must reach it to bump ``enablement_stall_streak`` / clear
-        # ``enablement_dispatched`` and eventually fire ``enablement_stalled``.
+        # ``enablement_stall_streak`` and eventually fire ``enablement_stalled``.
         # Non-enablement config deliverables keep the strict "levers required" gate.
         if not config_levers and not is_enablement:
             return
@@ -1769,9 +1769,7 @@ class ExplorePhase(PhaseHandler):
         # config-lever-only enablement deliverable MUST still flow the enablement
         # marker + setup_commands into integrate_patch, otherwise the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
-        # ``enablement_dispatched`` stays stuck ``True`` forever — the run then
-        # cannot reach ``enablement_stalled`` and spins until wall-clock. See
-        # framework.py::_maybe_rearm_enablement.
+        # the enablement stall streak is only advanced via _maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)

@@ -455,10 +455,10 @@ class WritebackCollaborator:
         run's fingerprint never matches the measured one.
         """
         state = self.shared_state
-        was_validation_pending = bool(getattr(state.enablement, "validation_pending", False))
+        was_validation_pending = bool(state.enablement.validation_pending)
         incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
         measured_incoming = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None
-        stored_kind = str(getattr(state.enablement, "baseline_eval_kind", "") or "")
+        stored_kind = str(state.enablement.baseline_eval_kind or "")
         preserve_measured_trigger = (
             incoming_kind == EVAL_KIND_ACCURACY_UNAVAILABLE
             and not measured_incoming
@@ -471,7 +471,7 @@ class WritebackCollaborator:
         # no-progress round so the enablement_stalled cap can still terminate.
         if was_validation_pending:
             state.enablement.validation_pending = False
-            state.enablement.stall_streak = int(getattr(state.enablement, "stall_streak", 0) or 0) + 1
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
@@ -483,8 +483,8 @@ class WritebackCollaborator:
                 "an eval-less baseline reported accuracy_unavailable and must not "
                 "overwrite it",
                 stored_kind,
-                getattr(state.enablement, "observed_accuracy", None),
-                getattr(state.enablement, "observed_task", ""),
+                state.enablement.observed_accuracy,
+                state.enablement.observed_task,
             )
             return
         cfg = result_payload.get("materialized_config")
@@ -4129,9 +4129,9 @@ class WritebackCollaborator:
         revalidation cannot be enqueued (tracked_tid is still the old row).
         """
         state = self.shared_state
-        if not bool(getattr(state.enablement, "validation_pending", False)):
+        if not bool(state.enablement.validation_pending):
             return
-        tracked_tid = str(getattr(state.enablement, "revalidation_task_id", "") or "").strip()
+        tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if not tracked_tid:
             return
         try:
@@ -4146,7 +4146,7 @@ class WritebackCollaborator:
                 state.enablement.validation_pending = False
                 state.enablement.revalidation_task_id = ""
                 state.enablement.stall_streak = (
-                    int(getattr(state.enablement, "stall_streak", 0) or 0) + 1
+                    int(state.enablement.stall_streak or 0) + 1
                 )
                 state.enablement.inflight_task_id = ""
                 report["fixes"].append(

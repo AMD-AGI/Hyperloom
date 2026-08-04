@@ -1461,9 +1461,6 @@ def collect_enablement(
     last_spec_tid = str(_eg(state, "last_specialist_task_id", "") or "")
     if last_spec_tid:
         out["last_specialist_task_id"] = last_spec_tid
-    dispatch_tick = _as_int(_eg(state, "dispatch_tick"), default=-1)
-    if dispatch_tick >= 0:
-        out["dispatch_tick"] = dispatch_tick
     reval_gen = _as_int(_eg(state, "revalidation_generation"))
     if reval_gen:
         out["revalidation_generation"] = reval_gen

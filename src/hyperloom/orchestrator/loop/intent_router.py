@@ -333,9 +333,8 @@ class IntentRouter:
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the
             # executor, so the normal integrate-result rearm never fires. Without
-            # this, enablement_dispatched stays stuck True and the run cannot
-            # advance the stall streak toward enablement_stalled. Treat the
-            # rejection as a no-progress round.
+            # this, the stall streak would never advance toward enablement_stalled.
+            # Treat the rejection as a no-progress round.
             try:
                 self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
