@@ -73,7 +73,7 @@ _now_iso = _kernel_decision_settings._now_iso
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
-def _first_positive_tput(d: Any) -> float:
+def first_positive_tput(d: Any) -> float:
     """Return the first positive ``tput``/``output_throughput`` from a dict.
 
     Args:
@@ -111,17 +111,22 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     """
     if state is None:
         return 0.0
-    best = _first_positive_tput(getattr(state, "current_best", None))
+    best = first_positive_tput(getattr(state, "current_best", None))
     if best > 0:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
+def _normalize_envs(value: Any) -> dict[str, str]:
+    """Coerce an env mapping to ``str -> str``; a resumed non-dict reads as empty."""
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
 # ``base_*`` task param -> the ``current_best`` field it mirrors and its normalizer.
 _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("base_extra_args", "extra_server_args", lambda v: str(v or "").strip()),
-    ("base_extra_envs", "extra_envs", lambda v: {str(k): str(x) for k, x in (v or {}).items()}),
+    ("base_extra_envs", "extra_envs", _normalize_envs),
     ("base_remove_args", "remove_args", to_str_list),
     ("base_unset_envs", "unset_envs", to_str_list),
     ("base_args_mode", "args_mode", lambda v: "replace" if str(v or "").strip().lower() == "replace" else ""),
@@ -2333,7 +2338,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
             return float(self.baseline_tput)
-        return _first_positive_tput(self.last_baseline)
+        return first_positive_tput(self.last_baseline)
 
     def _resolve_current_best_achieved_tput(self) -> float:
         """Optimized-arm throughput for a current_best roofline snapshot.
@@ -2346,7 +2351,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             float: The resolved current_best throughput, or ``0.0`` when none
                 is available.
         """
-        return _first_positive_tput(self.current_best)
+        return first_positive_tput(self.current_best)
 
     def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
         """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.
