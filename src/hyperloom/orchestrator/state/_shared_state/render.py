@@ -600,16 +600,17 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render up to the 3 most-recent global failures; full list on disk.
+        """Render the most-recent global failures with multi-line excerpt and log path.
 
         Returns:
-            str: A pipe-joined render of the last 3 failures (with an
+            str: A newline-separated render of the last 10 failures (with an
                 ``[+N earlier]`` suffix when more exist), or ``"(none)"``.
         """
         if not self.last_action_failures:
             return "(none)"
+        _SHOW = 10
         rows: list[str] = []
-        for entry in self.last_action_failures[-3:]:
+        for entry in self.last_action_failures[-_SHOW:]:
             if not isinstance(entry, dict):
                 continue
             action = entry.get("action") or "?"
@@ -617,10 +618,23 @@ class _RenderMixin:
             ts = entry.get("ts") or "?"
             excerpt = entry.get("error_excerpt") or ""
             ws = entry.get("workspace") or "-"
-            excerpt_short = excerpt.splitlines()[0][:200] if excerpt else ""
-            rows.append(f'[{action}/{error_class}@{ts}] err="{excerpt_short}" ws={ws}')
-        suffix = f" [+{len(self.last_action_failures) - 3} earlier]" if len(self.last_action_failures) > 3 else ""
-        return " | ".join(rows) + suffix if rows else "(none)"
+            log_path = entry.get("stderr_log_path") or ""
+            variant = entry.get("variant_name") or ""
+            # Keep last 600 chars of the excerpt so multi-line tracebacks survive.
+            excerpt_tail = excerpt[-600:].strip() if excerpt else ""
+            header = f"[{action}/{error_class}@{ts}]"
+            if variant:
+                header += f" variant={variant}"
+            header += f" ws={ws}"
+            if log_path:
+                header += f" log={log_path}"
+            if excerpt_tail:
+                rows.append(f'{header}\n  {excerpt_tail}')
+            else:
+                rows.append(header)
+        earlier = len(self.last_action_failures) - _SHOW
+        suffix = f"\n[+{earlier} earlier failures]" if earlier > 0 else ""
+        return "\n".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
         """Render the most recent rejected kernel patches for the prompt.
@@ -677,7 +691,15 @@ class _RenderMixin:
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
+        reason = str(entry.get("reason") or "").strip()
+        error_class = str(entry.get("error_class") or "").strip()
+        suffix_parts = []
+        if error_class:
+            suffix_parts.append(f"err={error_class}")
+        if reason and reason not in ("not_keep", "gain_below_threshold"):
+            suffix_parts.append(f"reason={reason[:120]}")
+        suffix = "  " + " ".join(suffix_parts) if suffix_parts else ""
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
 
     @staticmethod
     def _enrich_with_tested_gain(
@@ -738,8 +760,8 @@ class _RenderMixin:
                     "      • " + _RenderMixin._format_variant_line(_RenderMixin._enrich_with_tested_gain(entry, tested))
                 )
         if rejected:
-            out.append("    rejected (last 5):")
-            for entry in rejected[-5:]:
+            out.append("    rejected (last 15):")
+            for entry in rejected[-15:]:
                 if not isinstance(entry, dict):
                     continue
                 out.append("      • " + _RenderMixin._format_variant_line(entry))
