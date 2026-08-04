@@ -1435,15 +1435,27 @@ class PolicyGate:
             ),
         )
 
-    # ``baseline_phase_singleton``
+    # ``baseline_phase_singleton`` / ``enablement_round_in_flight``
     def _validate_baseline_singleton(
         self,
         payload: dict[str, Any],
     ) -> None:
-        """Deny a repeat baseline once the session has an anchor."""
+        """Deny a baseline proposal when an enablement round is in flight or the anchor is established."""
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
+        dispatched = bool(getattr(ss, "enablement_dispatched", False))
+        if dispatched:
+            tid = str(getattr(ss, "enablement_inflight_task_id", "") or "")
+            raise PolicyDenied(
+                "baseline: an enablement authoring round is currently in flight"
+                + (f" (task={tid})" if tid else ""),
+                rule="enablement_round_in_flight",
+                hint=(
+                    "Wait for the enablement specialist to finish and rearm "
+                    "before re-running baseline."
+                ),
+            )
         anchor = getattr(ss, "baseline_tput", 0.0)
         if not isinstance(anchor, (int, float)) or anchor <= 0:
             return

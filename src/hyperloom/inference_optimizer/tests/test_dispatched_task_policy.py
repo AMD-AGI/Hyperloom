@@ -571,3 +571,29 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     assert res.result == {"produced": "work"}
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
+
+
+def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, monkeypatch)
+    gate.shared_state.enablement_dispatched = True
+    gate.shared_state.enablement_inflight_task_id = "spec-abc"
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    with pytest.raises(PolicyDenied) as exc_info:
+        gate.validate_intent("orchestration", intent)
+    assert exc_info.value.rule == "enablement_round_in_flight"
+    assert "spec-abc" in str(exc_info.value)
+
+
+def test_enablement_round_in_flight_allows_after_cleared(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, monkeypatch)
+    gate.shared_state.enablement_dispatched = False
+    gate.shared_state.enablement_inflight_task_id = ""
+    # baseline_tput == 0 means baseline_phase_singleton also does not fire
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    gate.validate_intent("orchestration", intent)
