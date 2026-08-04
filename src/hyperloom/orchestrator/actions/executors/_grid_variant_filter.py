@@ -406,6 +406,23 @@ _WORLDPLAY_DISTILLED_CKPT_MARKERS: tuple[str, ...] = (
 # Captures the value after ``--action_ckpt`` (space- or ``=``-separated).
 _RE_ACTION_CKPT = re.compile(r"--action_ckpt[=\s]+(\S+)")
 
+# ``bench_fps.py`` declares these ``action="store_true"``, so they take NO value.
+# Proposers routinely write ``--enable_torch_compile true`` (the shape every other
+# accepted flag uses); argparse then rejects the trailing token and the leg dies as
+# ``no_measurement`` seconds in, burning a whole propose/review/dispatch round.
+# Dropping pre-dispatch costs nothing and lets the default seed grid take over.
+_WORLDPLAY_STORE_TRUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--enable_torch_compile",
+        "--few_step",
+    }
+)
+
+_RE_STORE_TRUE_VALUE = re.compile(
+    "(" + "|".join(sorted(re.escape(f) for f in _WORLDPLAY_STORE_TRUE_FLAGS)) + ")"
+    r"(?![A-Za-z0-9_-])(?:=|\s+)(?!-)(\S+)"
+)
+
 
 def _ckpt_is_distilled(value: str | None) -> bool:
     """Whether an action-ckpt path names a distilled / few-step checkpoint.
@@ -456,6 +473,17 @@ def worldplay_server_args_reason(
         return (
             f"--action_ckpt {_ckpt_m.group(1)}: distilled/few-step checkpoint is "
             "a different model (50-step ar_model is the locked workload spec)"
+        )
+    # Shape-level: a store_true flag carrying a value argparse-errors even though
+    # the flag itself is accepted, so it never reaches the unknown-flag check.
+    _bool_m = _RE_STORE_TRUE_VALUE.search(args)
+    if _bool_m:
+        flag, value = _bool_m.group(1), _bool_m.group(2)
+        env = "WORLDPLAY_USE_TORCH_COMPILE" if flag == "--enable_torch_compile" else "WORLDPLAY_FEW_STEP"
+        return (
+            f"{flag} {value}: store_true flag takes no value (argparse error → "
+            f"no_measurement); pass the bare {flag} to enable it, or toggle "
+            f"{env}=0/1 instead"
         )
     unknown = sorted({f for f in flags if f not in _WORLDPLAY_ACCEPTED_SERVER_FLAGS})
     if unknown:
