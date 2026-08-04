@@ -965,4 +965,5 @@ __all__ = [
     "kill_my_spawned_server",
     "new_session_kwargs",
     "run_with_session_kill",
+    "server_log_death_excerpt",
 ]

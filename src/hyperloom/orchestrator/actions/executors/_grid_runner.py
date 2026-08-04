@@ -39,6 +39,7 @@ from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from .benchmark_result import (
     estimate_killed_variant_throughput,
@@ -1432,6 +1433,7 @@ async def run_grid(
                     variant_timeout_sec,
                     exc,
                 )
+                _wto_slog_path = warmup_slot / "server.log"
                 _write_variant_abort_marker(
                     slot,
                     variant_name=variant.name,
@@ -1447,6 +1449,7 @@ async def run_grid(
                         status="failed",
                         error=f"warmup_timeout: {exc}",
                         error_class="warmup_magpie_timeout",
+                        server_log_path=str(_wto_slog_path) if _wto_slog_path.exists() else None,
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=["run_grid_warmup_round_failed"],
@@ -1477,8 +1480,10 @@ async def run_grid(
                     framework=str(lifecycle.get("framework") or ""),
                     port=int(lifecycle.get("port") or 0),
                 )
+                _wf_slog_path = warmup_slot / "server.log"
+                _wf_slog_excerpt = server_log_death_excerpt(str(_wf_slog_path))
                 warmup_error = (
-                    redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
+                    _wf_slog_excerpt or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
                     if warmup_rc != 0
                     else "warmup benchmark_report missing valid throughput/completed requests"
                 )
@@ -1514,6 +1519,7 @@ async def run_grid(
                         returncode=warmup_rc,
                         error=warmup_error,
                         error_class="warmup_round_failed",
+                        server_log_path=str(_wf_slog_path) if _wf_slog_path.exists() else None,
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=[
@@ -1679,6 +1685,7 @@ async def run_grid(
                 error_summary=str(exc),
                 extra_args=variant.extra_server_args,
             )
+            _to_slog_path = slot / "server.log"
             results.append(
                 VariantResult(
                     name=variant.name,
@@ -1687,6 +1694,7 @@ async def run_grid(
                     status="failed",
                     error=f"timeout: {exc}",
                     error_class="magpie_timeout",
+                    server_log_path=str(_to_slog_path) if _to_slog_path.exists() else None,
                     note=variant.note,
                     runtime_sec=round(
                         max(0.0, time.time() - variant_started_unix),
@@ -1732,13 +1740,15 @@ async def run_grid(
                 variant.name,
                 variant_runtime_sec,
             )
+            _slog_path = slot / "server.log"
+            _slog_excerpt = server_log_death_excerpt(str(_slog_path)) or (
+                "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
+            )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
                 error_class="server_init_dead",
-                error_summary=(
-                    "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
-                ),
+                error_summary=_slog_excerpt,
                 extra_args=variant.extra_server_args,
             )
             results.append(
@@ -1749,8 +1759,9 @@ async def run_grid(
                     status="failed",
                     returncode=rc,
                     runtime_sec=variant_runtime_sec,
-                    error="server_init_dead: engine/worker bootstrap failed",
+                    error=_slog_excerpt,
                     error_class="server_init_dead",
+                    server_log_path=str(_slog_path) if _slog_path.exists() else None,
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
                 )
@@ -1805,6 +1816,7 @@ async def run_grid(
                 variant.name,
                 variant_runtime_sec,
             )
+            _ds_slog_path = slot / "server.log"
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
@@ -1826,6 +1838,7 @@ async def run_grid(
                     runtime_sec=variant_runtime_sec,
                     error="detokenizer_stall: server ready but log went silent",
                     error_class="detokenizer_stall",
+                    server_log_path=str(_ds_slog_path) if _ds_slog_path.exists() else None,
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
@@ -1860,6 +1873,7 @@ async def run_grid(
                     f"{estimated_tput:.1f}tok/s"
                     f"(n={ok_estimate.get('num_samples')})"
                 )
+            _ok_slog_path = slot / "server.log"
             results.append(
                 VariantResult(
                     name=variant.name,
@@ -1874,6 +1888,7 @@ async def run_grid(
                         f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
                         f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
                     ),
+                    server_log_path=str(_ok_slog_path) if _ok_slog_path.exists() else None,
                     note=variant.note,
                     nonfatal_warnings=ok_warnings,
                 )
@@ -1927,6 +1942,8 @@ async def run_grid(
                 error_summary=no_ws_error_summary,
                 extra_args=variant.extra_server_args,
             )
+            _nws_slog_path = slot / "server.log"
+            _nws_excerpt = server_log_death_excerpt(str(_nws_slog_path))
             results.append(
                 VariantResult(
                     name=variant.name,
@@ -1934,8 +1951,9 @@ async def run_grid(
                     extra_envs=dict(variant.extra_envs),
                     status="failed",
                     returncode=rc,
-                    error=no_ws_error_summary,
+                    error=_nws_excerpt or no_ws_error_summary,
                     error_class="no_benchmark_workspace",
+                    server_log_path=str(_nws_slog_path) if _nws_slog_path.exists() else None,
                     nonfatal_warnings=harvest_tags,
                     note=variant.note,
                 )
@@ -1962,14 +1980,16 @@ async def run_grid(
             warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
+            _inv_slog_path = slot / "server.log"
+            _inv_slog_excerpt = server_log_death_excerpt(str(_inv_slog_path))
             if rc != 0:
-                error = redact_secret_values((stderr or stdout)[-2000:])
+                error = _inv_slog_excerpt or redact_secret_values((stderr or stdout)[-2000:])
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
-                error = "benchmark_report missing"
+                error = _inv_slog_excerpt or "benchmark_report missing"
                 invalid_class = "benchmark_report_missing"
             else:
-                error = "benchmark_report missing valid throughput/completed requests"
+                error = _inv_slog_excerpt or "benchmark_report missing valid throughput/completed requests"
                 invalid_class = "benchmark_report_invalid_metric"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
@@ -2001,6 +2021,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=error,
                     error_class=invalid_class,
+                    server_log_path=str(_inv_slog_path) if _inv_slog_path.exists() else None,
                     note=variant.note,
                 )
             )
