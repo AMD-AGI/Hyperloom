@@ -268,6 +268,13 @@ class WritebackCollaborator:
             str(result.get("extra_server_args") or "")
             or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
         ).strip()
+        # An integrate carries no env delta of its own except a forge-GEMM tuning
+        # KEEP, so inherit the stack's env layer and let that delta win. Dropping
+        # it published a current_best whose args and envs came from different
+        # configs, which every dispatch site then seeded from.
+        extra_envs = dict((cb.get("extra_envs") or {}) if isinstance(cb, dict) else {})
+        if isinstance(result.get("extra_envs"), dict):
+            extra_envs.update({str(k): str(v) for k, v in result["extra_envs"].items()})
         apply_result = result.get("apply_result") or {}
         backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
         if not backup_manifest and isinstance(apply_result, dict):
@@ -331,6 +338,7 @@ class WritebackCollaborator:
             "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
             "extra_server_args": extra_args,
+            "extra_envs": extra_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
