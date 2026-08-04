@@ -316,6 +316,51 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert row2["from_phase"] == "PRELUDE"
 
 
+def test_explore_elapsed_accumulates_completed_and_live_segments():
+    s = SharedState()
+    s.record_phase_transition(
+        to_phase="EXPLORE",
+        reason="phase_entered",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=100.0,
+    )
+    s.record_phase_transition(
+        to_phase="KERNEL_AGENT",
+        reason="explore_done",
+        evidence={},
+        ts="2026-05-19T00:02:00+00:00",
+        ts_unix=220.0,
+    )
+    assert s.explore_elapsed_accum_s == 120.0
+    assert phase_state.explore_elapsed_seconds(s, now_unix=300.0) == 120.0
+
+    s.record_phase_transition(
+        to_phase="EXPLORE",
+        reason="sweep_reloop",
+        evidence={},
+        ts="2026-05-19T00:03:00+00:00",
+        ts_unix=280.0,
+    )
+    assert phase_state.explore_elapsed_seconds(s, now_unix=310.0) == 150.0
+
+
+def test_langfuse_status_includes_explore_runtime_and_kb_hit():
+    s = SharedState()
+    s.start_ts = "2026-05-19T00:00:00+00:00"
+    s.phase = "EXPLORE"
+    s.phase_started_unix = 100.0
+    s.explore_elapsed_accum_s = 120.0
+    s.warm_start_context = {"status": "hit"}
+
+    summary = s._langfuse_status_summary()
+
+    assert summary["kb_hit"] == "hit"
+    assert summary["explore_elapsed_s"] >= 120
+    assert "explore_ratio" in summary
+    assert "session_elapsed_s" in summary
+
+
 def test_core_state_fields_includes_phase_fields():
     for f in (
         "phase",
@@ -323,6 +368,7 @@ def test_core_state_fields_includes_phase_fields():
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
+        "explore_elapsed_accum_s",
     ):
         assert f in CORE_STATE_FIELDS, f
 

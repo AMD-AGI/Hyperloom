@@ -800,6 +800,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
+    # Durable sum of completed EXPLORE segments. The current active EXPLORE
+    # segment is added at status-render time; accumulating completed segments
+    # avoids undercounting long macro-cycle runs after phase_history is capped.
+    explore_elapsed_accum_s: float = 0.0
     # Append-only operator-facing lifecycle log. Each row (built by
     # :func:`machine_state.make_lifecycle_event`) records a phase/step boundary
     # plus artifact paths. Coordinator-only writer; capped at ``_LIFECYCLE_CAP``.
@@ -1464,7 +1468,22 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "session_id": self.session_id or "",
             "model_name": self.model_name or "",
             "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
+            "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
+        try:
+            from ..phases.machine_state import explore_elapsed_seconds
+
+            explore_elapsed_s = explore_elapsed_seconds(self)
+            session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
+            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
+            summary["session_elapsed_s"] = int(round(session_elapsed_s))
+            summary["explore_ratio"] = (
+                round(explore_elapsed_s / session_elapsed_s, 4)
+                if session_elapsed_s > 0.0
+                else 0.0
+            )
+        except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
+            log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
