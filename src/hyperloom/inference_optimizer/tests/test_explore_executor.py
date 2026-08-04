@@ -54,7 +54,7 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
 
 
 def _force_cold_decision(monkeypatch) -> None:
-    """Make server_lifecycle reuse ineligible, the one precondition for a cold decision round."""
+    """Make server_lifecycle reuse ineligible, one of the two warm-decision preconditions."""
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.explore.resolve_lifecycle_params",
         lambda _config_path: {
@@ -1193,6 +1193,55 @@ async def test_explore_cold_decision_keeps_eval(
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
     decision = [ev for slot, ev in seen if "stack_rebench" not in slot]
     assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
+
+
+@pytest.mark.asyncio
+async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run(
+    sub_agent_runner,
+    tmp_path,
+):
+    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available.
+
+    The baseline gates its cold+hot double run on ``baseline_double_run`` as well
+    as lifecycle eligibility, so warm-decision has to honour both or a hot
+    candidate is scored against a cold anchor.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_double_run = False
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    seen: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append(str(slot))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-singleround"),
+            "base_tput": 800.0,
+            "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
+            "variant_timeout_sec": 30,
+        },
+        idempotency_key="ex-no-double-run",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert not [slot for slot in seen if "warmup_round" in slot]
 
 
 @pytest.mark.asyncio

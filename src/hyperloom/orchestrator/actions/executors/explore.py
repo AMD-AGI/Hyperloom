@@ -40,7 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.shared_state import resolve_grading_anchor_tput, stack_base_params
+from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -600,10 +600,9 @@ class ExploreExecutor:
                 log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, live_anchor)
             params["base_tput"] = live_anchor
             cb = getattr(ss, "current_best", None)
-            cb = cb if isinstance(cb, dict) else {}
             # Only current_best carries args; a baseline_tput anchor leaves the
             # params stack (seeded from the baseline record) authoritative.
-            if float(cb.get("tput") or cb.get("output_throughput") or 0.0) > 0:
+            if first_positive_tput(cb) > 0:
                 params.update(stack_base_params(cb))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
@@ -971,10 +970,11 @@ class ExploreExecutor:
 
         # Warm-decision mode. Run a discarded cold warmup round first so the
         # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``. Keyed to lifecycle
-        # eligibility and nothing else: the baseline gates its cold+hot double-run
-        # on the same verdict, so both sides measure hot together or cold together.
-        use_warm_decision = lifecycle_eligible
+        # warm — apples-to-apples with ``baseline_tput``. Mirrors both conjuncts
+        # the baseline gates its cold+hot double-run on, so the two sides measure
+        # hot together or cold together: a session that opted out of the double
+        # run has a COLD ``baseline_tput`` and must be graded cold.
+        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
