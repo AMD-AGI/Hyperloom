@@ -40,7 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.shared_state import resolve_grading_anchor_tput
+from ...state.shared_state import resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -589,31 +589,28 @@ class ExploreExecutor:
             }
 
         # ----- Inputs ------------------------------------------------------
+        # Params snapshot the anchor and the stack it was measured on together;
+        # a KEEP landing while this task queued invalidates both, so refresh them
+        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
+        ss = extra.get("shared_state") or extra.get("state")
+        snapshot_tput = float(params.get("base_tput") or 0.0)
+        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
+        if live_anchor > snapshot_tput:
+            if snapshot_tput > 0:
+                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, live_anchor)
+            params["base_tput"] = live_anchor
+            cb = getattr(ss, "current_best", None)
+            cb = cb if isinstance(cb, dict) else {}
+            # Only current_best carries args; a baseline_tput anchor leaves the
+            # params stack (seeded from the baseline record) authoritative.
+            if float(cb.get("tput") or cb.get("output_throughput") or 0.0) > 0:
+                params.update(stack_base_params(cb))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
         base_remove_args = to_str_list(params.get("base_remove_args"))
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Params snapshot the anchor and the stack it was measured on together;
-        # a KEEP landing while this task queued invalidates both, so refresh them
-        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
-        ss = extra.get("shared_state") or extra.get("state")
-        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
-        if live_anchor > base_tput:
-            if base_tput > 0:
-                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", base_tput, live_anchor)
-            base_tput = live_anchor
-            cb = getattr(ss, "current_best", None)
-            cb = cb if isinstance(cb, dict) else {}
-            # Only current_best carries args; a baseline_tput anchor leaves the
-            # params stack (seeded from the baseline record) authoritative.
-            if float(cb.get("tput") or cb.get("output_throughput") or 0.0) > 0:
-                base_extra_args = str(cb.get("extra_server_args") or "").strip()
-                base_extra_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
-                base_remove_args = to_str_list(cb.get("remove_args"))
-                base_unset_envs = to_str_list(cb.get("unset_envs"))
-                base_args_mode = str(cb.get("args_mode") or base_args_mode).strip().lower()
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
