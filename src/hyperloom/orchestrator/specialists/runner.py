@@ -769,15 +769,24 @@ class SpecialistRunner:
         metadata: dict[str, Any] | None,
         tick: int | None = None,
         phase: str | None = None,
+        structured: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Append one ``conversations.jsonl`` row for an in-process specialist
-        turn. Persists the full (redacted) prompt + completion. No-op without a
-        session dir.
+        """Append one ``conversations.jsonl`` row for a specialist turn.
+
+        Persists the full (redacted) prompt + completion together with the
+        turn's structured output, because the prose alone records what the
+        specialist said rather than what it produced. No-op without a session
+        dir.
 
         Args:
             task_id: The specialist task id.
             turn: The turn index being recorded.
             metadata: Backend turn metadata carrying the prompt + response.
+            tick: Owning tick, when the caller knows it.
+            phase: Owning phase, when the caller knows it.
+            structured: The turn's structured output as ``intent_type`` /
+                ``payload`` pairs -- emitted intents on the in-process path, the
+                ``specialist_done`` payload on the subprocess one.
         """
         if self.session_dir is None:
             return
@@ -785,7 +794,7 @@ class SpecialistRunner:
             md = metadata or {}
             prompt = md.get("prompt")
             response = md.get("response")
-            if not prompt and not response:
+            if not prompt and not response and not structured:
                 return
             record = ConversationRecord(
                 session_id=self.session_dir.name,
@@ -797,6 +806,7 @@ class SpecialistRunner:
                 model=md.get("model"),
                 prompt=prompt or "",
                 response=response or "",
+                intents=structured or None,
             )
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the run
@@ -925,6 +935,8 @@ class SpecialistRunner:
                 metadata=turn_result.metadata,
                 tick=_tick,
                 phase=_phase,
+                structured=[{"intent_type": i.type.value, "payload": i.payload}
+                            for i in turn_result.intents],
             )
 
             # Tool-violation check (defense in depth).
@@ -1106,10 +1118,17 @@ class SpecialistRunner:
             turn=1,
             tool_calls=sub_result.tool_calls,
         )
-        # Pair the parent-held prompt with the recovered assistant reply so the
-        # production specialist turn lands in conversations.jsonl. No-op when no
-        # reply text was recovered.
-        if sub_result.response:
+        # Pair the parent-held prompt with what the subprocess produced, so the
+        # production specialist turn lands in conversations.jsonl. The reply text
+        # is narration; specialist_done is the output that matters, and gating on
+        # the text alone dropped every turn that wrote a patch without narrating
+        # -- which on this path is the majority, since the subprocess answers by
+        # writing files rather than by talking.
+        structured = (
+            [{"intent_type": "specialist_done", "payload": sub_result.done_payload}]
+            if sub_result.done_payload else []
+        )
+        if sub_result.response or structured:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=1,
@@ -1119,6 +1138,7 @@ class SpecialistRunner:
                 },
                 tick=_tick,
                 phase=_phase,
+                structured=structured,
             )
         self._write_heartbeat(
             workspace,

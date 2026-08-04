@@ -648,10 +648,14 @@ def _keep_union(variants, scores, order, info, version) -> tuple[list, dict]:
                 total=len(variants), dropped=dropped,
                 ranker_version=version or None,
                 backstop_added=[getattr(variants[i], "name", "?") for i in added])
+    # Name the casualties, not just the count. The threshold path already does
+    # this, and without it the only way to learn what a round pruned is to diff
+    # the proposal list against the variants that ran.
     log.info("delta_filter(union): kept %d/%d (cut %s + top-%d); "
-             "ranker rescued %s",
+             "ranker rescued %s; dropped %s",
              len(kept), len(variants), cut_label, n_back,
-             ", ".join(getattr(variants[i], "name", "?") for i in added) or "nothing")
+             ", ".join(getattr(variants[i], "name", "?") for i in added) or "nothing",
+             ", ".join("%s=%.4f" % kv for kv in dropped[:6]) or "nothing")
     return kept, info
 
 

@@ -254,6 +254,13 @@ class RobustnessAgentBackend:
             "turn_idx": turn_idx,
             "tick_index": runtime_tick_index,
             "parse_warnings": parse_warnings,
+            # The caller pairs these into conversations.jsonl. Without the prompt
+            # the row carries an output with no input, which is unusable for
+            # anything that wants the pair. raw_text is a placeholder here
+            # because the runtime answers with an intent envelope, not prose, so
+            # the response half is the envelope itself and travels in `intents`.
+            "prompt": prompt,
+            "response": "",
         }
         # Fold any RCA-LLM token spend into canonical metadata counters.
         self._merge_llm_usage(metadata, emit.get("llm_usage"))

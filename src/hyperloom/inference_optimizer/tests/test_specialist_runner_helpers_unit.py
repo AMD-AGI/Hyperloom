@@ -264,3 +264,78 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
     assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
     assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
+
+
+# --- conversation recording: structured output beside the prose --------------
+#
+# The subprocess specialist answers by writing files, so its reply text is
+# narration and specialist_done is the output a distillation corpus needs.
+# These pin that the row carries it, and that a turn which produced a payload
+# without narrating is no longer dropped.
+
+
+def _capture_rows(monkeypatch):
+    """Collect rows the recorder would append, without touching disk."""
+    from hyperloom.orchestrator.trace import conversation_trace as ct
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+    return rows
+
+
+def test_specialist_row_carries_emitted_intents(tmp_path, monkeypatch):
+    rows = _capture_rows(monkeypatch)
+    r = _runner(session_dir=tmp_path / "SID")
+    r._record_specialist_conversation(
+        task_id="t1", turn=2,
+        metadata={"prompt": "P", "response": "wrote a patch"},
+        structured=[{"intent_type": "delegate", "payload": {"task_id": "t2"}}],
+    )
+    assert len(rows) == 1
+    assert rows[0]["intents"] == [{"intent_type": "delegate", "payload": {"task_id": "t2"}}]
+    assert rows[0]["component"] == "specialist" and rows[0]["turn"] == 2
+
+
+def test_specialist_row_carries_the_done_payload(tmp_path, monkeypatch):
+    """The subprocess path's structured output is specialist_done, not intents."""
+    rows = _capture_rows(monkeypatch)
+    r = _runner(session_dir=tmp_path / "SID")
+    done = {"empty": False, "domain": "serving", "proposal_set": ["p1"], "summary": "s"}
+    r._record_specialist_conversation(
+        task_id="t1", turn=1,
+        metadata={"prompt": "P", "response": ""},
+        structured=[{"intent_type": "specialist_done", "payload": done}],
+    )
+    assert rows[0]["intents"] == [{"intent_type": "specialist_done", "payload": done}]
+
+
+def test_specialist_turn_without_prose_is_still_recorded(tmp_path, monkeypatch):
+    """The old text-only guard dropped exactly the turns worth keeping."""
+    rows = _capture_rows(monkeypatch)
+    r = _runner(session_dir=tmp_path / "SID")
+    r._record_specialist_conversation(
+        task_id="t1", turn=1, metadata={"prompt": "", "response": ""},
+        structured=[{"intent_type": "specialist_done", "payload": {"empty": False}}],
+    )
+    assert len(rows) == 1, "a turn with a done payload must survive"
+
+
+def test_specialist_turn_with_nothing_at_all_is_skipped(tmp_path, monkeypatch):
+    rows = _capture_rows(monkeypatch)
+    r = _runner(session_dir=tmp_path / "SID")
+    r._record_specialist_conversation(
+        task_id="t1", turn=1, metadata={"prompt": "", "response": ""}, structured=[])
+    assert rows == []
+
+
+def test_specialist_row_redacts_secrets_in_the_done_payload(tmp_path, monkeypatch):
+    """A done payload can carry server args, so it goes through redaction too."""
+    rows = _capture_rows(monkeypatch)
+    r = _runner(session_dir=tmp_path / "SID")
+    r._record_specialist_conversation(
+        task_id="t1", turn=1, metadata={"prompt": "P", "response": "r"},
+        structured=[{"intent_type": "specialist_done",
+                     "payload": {"summary": "SAFE_API_KEY=supersecretvalue"}}],
+    )
+    summary = rows[0]["intents"][0]["payload"]["summary"]
+    assert "supersecretvalue" not in summary and "[REDACTED]" in summary

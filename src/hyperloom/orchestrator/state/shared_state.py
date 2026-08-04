@@ -1351,6 +1351,37 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         return asdict(self)
 
+    def _snapshot_tick_state(self, session_dir: Path, blob: dict[str, Any]) -> None:
+        """Keep a per-tick copy of the state under ``states/`` when asked to.
+
+        ``state.json`` is overwritten in place, so a finished session retains only
+        its final state while having recorded one prompt per tick. Anything that
+        wants to reproduce the prompt of tick N therefore has nothing to load, and
+        replaying tick 3 against the final state yields a prompt full of data that
+        did not exist yet.
+
+        Off by default: this writes a full copy of the state on every save, which
+        is roughly 176 KB per tick on a real session, and only a run whose purpose
+        is collecting training data needs it. Best-effort like the other derived
+        artifacts here -- a failure must never block the authoritative write that
+        already happened.
+
+        Args:
+            session_dir (Path): The session root directory.
+            blob (dict[str, Any]): The already-serialized state, reused so the
+                copy cannot drift from what ``state.json`` received.
+        """
+        raw = os.environ.get("HYPERLOOM_STATE_TICK_SNAPSHOTS", "").strip().lower()
+        if raw in ("", "0", "false", "no", "off"):
+            return
+        try:
+            out = Path(session_dir) / "states"
+            out.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(out / ("tick-%05d.json" % int(self.tick or 0)),
+                              blob, indent=2, sort_keys=True)
+        except Exception:  # noqa: BLE001 — a snapshot must never block save
+            log.debug("state tick snapshot failed", exc_info=True)
+
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
@@ -1366,7 +1397,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # so current_best carries the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
+        blob = self.to_dict()
+        atomic_write_json(path, blob, indent=2, sort_keys=True)
+        self._snapshot_tick_state(session_dir, blob)
         # Author-time breakdown capture: snapshot state-owned sections into the
         # recorder spool right after persisting. Best-effort; never blocks save.
         self._session_dir = Path(session_dir)

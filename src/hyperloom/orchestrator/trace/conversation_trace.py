@@ -20,7 +20,11 @@ Design contract:
   channel only carries whatever prose came with the call. Storing just the prose
   records what the model said and loses what it did, which is the half a
   distillation corpus needs. ``intents`` is redacted leaf-by-leaf under the same
-  contract, since an intent payload can carry server args.
+  contract, since an intent payload can carry server args. The field holds
+  ``intent_type`` / ``payload`` pairs whatever the backend's shape: emitted
+  intents for the tool-calling roles, and the ``specialist_done`` envelope for
+  the specialist subprocess, which answers by writing files rather than by
+  emitting intents at all.
 * **Self-contained redaction**: the redactor strips secret *values* (Bearer
   tokens, ``ak-`` / ``sk-`` / ``pk-`` keys, ``ghp_`` GitHub tokens,
   ``KEY=value`` shapes), not just env-var names.
