@@ -213,6 +213,17 @@ class _FakeTasks:
         task = types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued")
         return task, False
 
+    async def get(self, task_id: str):
+        from hyperloom.orchestrator.state.task_registry import TaskNotFound
+
+        for t in self._running:
+            if getattr(t, "task_id", None) == task_id:
+                return types.SimpleNamespace(task_id=task_id, state="running")
+        for t in self._queued:
+            if getattr(t, "task_id", None) == task_id:
+                return types.SimpleNamespace(task_id=task_id, state="queued")
+        raise TaskNotFound(task_id)
+
     async def queued(self):
         return list(self._queued)
 
@@ -228,7 +239,6 @@ def _enqueue_self(**state_kw):
         # Admission is exercised separately; these cases target the dispatch machinery.
         enablement_mode=state_kw.get("enablement_mode", "all"),
         enablement=types.SimpleNamespace(
-            dispatched=state_kw.get("enablement_dispatched", False),
             succeeded=state_kw.get("enablement_succeeded", False),
             attempts=state_kw.get("enablement_attempts", 0),
             human_review_logged=state_kw.get("enablement_human_review_logged", []),
@@ -236,7 +246,6 @@ def _enqueue_self(**state_kw):
             stall_streak=state_kw.get("enablement_stall_streak", 0),
             launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
             inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
-            dispatch_tick=state_kw.get("enablement_dispatch_tick", -1),
             origin=state_kw.get("enablement_origin", ""),
             validation_pending=state_kw.get("enablement_validation_pending", False),
             probe_config_path=state_kw.get("enablement_probe_config_path", ""),
@@ -291,11 +300,9 @@ def _enqueue_self(**state_kw):
     fake._maybe_enqueue_enablement_baseline_revalidation = types.MethodType(
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )
-    fake._enablement_round_silently_finished = types.MethodType(
-        Coordinator._enablement_round_silently_finished, fake
-    )
-    # pending_proposals lives on the coordinator's `state`; the silently-finished
-    # watchdog reads it, so give the fake a `state` with an empty mapping.
+    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+    fake._enablement_in_flight = types.MethodType(FrameworkPhase._enablement_in_flight, fake)
     fake.state = types.SimpleNamespace(pending_proposals={}, running_tasks={})
     return fake
 
@@ -310,7 +317,7 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == "spec-1"
     # In-flight guard set; attempt counter advanced for candidate rotation.
-    assert fake.shared_state.enablement.dispatched is True
+    assert bool(fake.shared_state.enablement.inflight_task_id)
     assert fake.shared_state.enablement.attempts == 1
     assert len(fake.tasks.created) == 1
     assert fake.tasks.created[0]["params"]["enablement"] is True
@@ -339,7 +346,7 @@ async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, orig
     fake = _enqueue_self(enablement_mode=mode, enablement_origin=origin)
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert bool(tid) is dispatched
-    assert fake.shared_state.enablement.dispatched is dispatched
+    assert bool(fake.shared_state.enablement.inflight_task_id) is dispatched
 
 
 @pytest.mark.asyncio
@@ -386,7 +393,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
 
     # Simulate the authored patch being REVERTED -> re-arm clears in-flight.
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert fake.shared_state.enablement.dispatched is False
+    assert not fake.shared_state.enablement.inflight_task_id
     assert fake.shared_state.enablement.succeeded is False
 
     # Next tick re-dispatches with a new attempt index + distinct idempotency.
@@ -402,58 +409,60 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
-    """If an enablement round is marked in-flight but its specialist finished and
-    no integrate/task is pending (a round that ended without a rearm), the
-    watchdog inside _maybe_enqueue_enablement_specialist counts it as a stall and
-    clears the guard — preventing the enablement_dispatched-stuck infinite spin."""
+    """A round whose inflight_task_id maps to a terminal task counts as a stall
+    and clears the guard so a fresh round can dispatch."""
+    import types as _types
+
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
-    # Create a finished specialist marker for the in-flight task.
-    tid = "spec-stuck"
-    done_dir = tmp_path / "runs" / "specialist" / tid
-    done_dir.mkdir(parents=True)
-    (done_dir / "specialist_done.json").write_text("{}")
     fake = _enqueue_self(
-        enablement_dispatched=True,
         enablement_stall_streak=1,
-        enablement_inflight_task_id=tid,
-        enablement_dispatch_tick=0,
-        tick=999,  # well past the watchdog grace period
+        enablement_inflight_task_id="spec-stuck",
     )
-    fake.session_dir = tmp_path
-    # Watchdog should fire: stall streak advances and the guard clears, so a
-    # fresh round is dispatched this same tick.
+    # Simulate a terminal task in the registry.
+    fake.tasks = _FakeTasks(
+        running=[],
+        queued=[],
+    )
+
+    async def _in_flight_false(self=fake):
+        return False
+
+    fake._enablement_in_flight = _in_flight_false
     await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    # Stall streak should have advanced.
     assert fake.shared_state.enablement.stall_streak == 2
 
 
 @pytest.mark.asyncio
-async def test_watchdog_does_not_fire_within_grace(monkeypatch, tmp_path):
-    """The watchdog must not race a just-dispatched round: within the grace
-    period it stays a no-op even if the flag is set."""
+async def test_watchdog_does_not_fire_when_task_running(monkeypatch, tmp_path):
+    """When the inflight_task_id maps to a running task, the round is not
+    counted as a stall — the specialist is still working."""
+    import types as _types
+
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(
-        enablement_dispatched=True,
         enablement_stall_streak=1,
-        enablement_inflight_task_id="spec-recent",
-        enablement_dispatch_tick=998,
-        tick=999,  # only 1 tick elapsed, < grace
+        enablement_inflight_task_id="spec-running",
     )
-    fake.session_dir = tmp_path
+
+    async def _in_flight_true(self=fake):
+        return True
+
+    fake._enablement_in_flight = _in_flight_true
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    # Untouched: still in-flight, streak unchanged.
-    assert fake.shared_state.enablement.dispatched is True
+    # Streak unchanged; still blocked on the running task.
     assert fake.shared_state.enablement.stall_streak == 1
 
 
 @pytest.mark.asyncio
 async def test_rearm_kept_is_terminal(monkeypatch):
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     assert fake.shared_state.enablement.succeeded is True
     # A subsequent enqueue attempt is a no-op.
@@ -465,12 +474,12 @@ async def test_rearm_kept_is_terminal(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(enablement_dispatched=True, enablement_origin="eval", enablement_revalidation_generation=1)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval", enablement_revalidation_generation=1)
     fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
     assert fake.shared_state.enablement.validation_pending is True
     assert fake.shared_state.enablement.succeeded is False
-    assert fake.shared_state.enablement.dispatched is False
+    assert not fake.shared_state.enablement.inflight_task_id
     # Generation is incremented to get a fresh idempotency key.
     assert fake.shared_state.enablement.revalidation_generation == 2
     # Tracked task_id is cleared for the new window.
@@ -571,17 +580,17 @@ async def test_revalidation_skips_when_tracked_task_in_flight():
 
 @pytest.mark.asyncio
 async def test_rearm_ignores_non_enablement(monkeypatch):
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     fake._maybe_rearm_enablement({"status": "reverted"})
     # No enablement marker -> state untouched.
-    assert fake.shared_state.enablement.dispatched is True
+    assert bool(fake.shared_state.enablement.inflight_task_id)
     assert fake.shared_state.enablement.succeeded is False
 
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
     """A patch that clears one gap and reveals a new gap is STACKED, not reverted."""
-    fake = _enqueue_self(enablement_dispatched=True, enablement_stall_streak=2)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=2)
     new_gap_log = (
         "ValueError: Following weights were not initialized from checkpoint: "
         "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
@@ -602,7 +611,7 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
     # Progressing patch is recorded for stacking; stall streak reset; guard cleared.
     assert st.enablement.kept_patches == ["/s/runs/specialist/t1/patches/001_qk_rope.patch"]
     assert st.enablement.stall_streak == 0
-    assert st.enablement.dispatched is False
+    assert not st.enablement.inflight_task_id
     # Launch log now points at the NEW (deeper) gap so the next round targets it.
     assert "not initialized from checkpoint" in st.enablement.launch_log
 
@@ -611,7 +620,7 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
 async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
     """Re-applied base patches are not double-recorded; only the new one is added."""
     fake = _enqueue_self(
-        enablement_dispatched=True,
+        enablement_inflight_task_id="spec-1",
         enablement_kept_patches=["/s/runs/specialist/t1/patches/001_qk_rope.patch"],
     )
     fake._maybe_rearm_enablement(
@@ -638,13 +647,13 @@ async def test_rearm_stall_cap_stops_run(monkeypatch):
     """N consecutive no-progress reverts stop the run with enablement_stalled."""
     from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_STALL
 
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     st = fake.shared_state
     # First _ENABLEMENT_MAX_STALL-1 reverts: bump streak, keep retrying.
     for i in range(_ENABLEMENT_MAX_STALL - 1):
         fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
         assert st.stop_reason == ""
-        assert st.enablement.dispatched is False
+        assert not st.enablement.inflight_task_id
         assert st.enablement.stall_streak == i + 1
     # The final revert trips the cap -> terminal stop_reason.
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
@@ -655,7 +664,7 @@ async def test_rearm_stall_cap_stops_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
     """A progressing round resets the stall streak so serial gaps aren't capped early."""
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     st = fake.shared_state
     fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert st.enablement.stall_streak == 1
@@ -676,7 +685,7 @@ async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
     """Q3: applied setup commands are stacked on advance for durable replay next round."""
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     fake.shared_state.enablement.setup_commands = []
     fake._maybe_rearm_enablement(
         {
@@ -694,7 +703,7 @@ async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_kept_stacks_setup_commands(monkeypatch):
     """Q3: a runnable KEEP also records the setup commands it relied on."""
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
     fake.shared_state.enablement.setup_commands = ["apt-get install -y gh"]
     fake._maybe_rearm_enablement(
         {
@@ -793,7 +802,9 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(enablement_dispatched=True)
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    # Simulate the task being actively running in the registry.
+    fake.tasks = _FakeTasks(running=[types.SimpleNamespace(task_id="spec-1")])
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == ""
     assert len(fake.tasks.created) == 0

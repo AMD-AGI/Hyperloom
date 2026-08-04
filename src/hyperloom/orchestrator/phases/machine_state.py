@@ -1583,7 +1583,7 @@ def enablement_engaged(state: Any) -> bool:
         return False
     return bool(
         (getattr(state.enablement, "kept_patches", None) or [])
-        or getattr(state.enablement, "dispatched", False)
+        or getattr(state.enablement, "inflight_task_id", "")
         or int(getattr(state.enablement, "attempts", 0) or 0) > 0
     )
 

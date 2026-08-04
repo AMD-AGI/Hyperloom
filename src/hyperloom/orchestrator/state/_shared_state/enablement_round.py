@@ -34,17 +34,14 @@ class EnablementRound:
     # must revalidate accuracy before the run is considered enabled.
     validation_pending: bool = False
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
-    # ``dispatched``: in-flight guard for a queued/running authoring attempt; cleared when the attempt REVERTs.
     # ``attempts``: number of dispatches (candidate rotation / idempotency).
     # ``succeeded``: terminal KEEP guard.
     launch_log: str = ""
-    dispatched: bool = False
     attempts: int = 0
     succeeded: bool = False
-    # Watchdog bookkeeping for the in-flight enablement round: the dispatched
-    # specialist task id and the tick it was dispatched on.
+    # Identity of the currently-running authoring specialist; empty when no round
+    # is in flight. In-flight status is derived from the task registry, not stored.
     inflight_task_id: str = ""
-    dispatch_tick: int = -1
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""
     # Ordered, deduped patch paths from prior enablement rounds that made forward

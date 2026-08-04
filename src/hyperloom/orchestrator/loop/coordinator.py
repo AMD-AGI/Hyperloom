@@ -1003,7 +1003,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_discover_enablement_candidate_refs": "phase_framework",
         "_maybe_enqueue_enablement_specialist": "phase_framework",
         "_maybe_record_enablement_human_review": "phase_framework",
-        "_enablement_round_silently_finished": "phase_framework",
+        "_enablement_in_flight": "phase_framework",
         "_maybe_rearm_enablement": "phase_framework",
         "_maybe_escalate_to_targeted_build": "phase_framework",
         "_maybe_enqueue_specialist_requested_build": "phase_framework",

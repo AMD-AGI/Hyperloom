@@ -1444,12 +1444,11 @@ class PolicyGate:
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
-        dispatched = bool(getattr(ss.enablement, "dispatched", False))
-        if dispatched:
-            tid = str(getattr(ss.enablement, "inflight_task_id", "") or "")
+        _en = getattr(ss, "enablement", None)
+        inflight_tid = str(getattr(_en, "inflight_task_id", "") or "") if _en is not None else ""
+        if inflight_tid:
             raise PolicyDenied(
-                "baseline: an enablement authoring round is currently in flight"
-                + (f" (task={tid})" if tid else ""),
+                f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
                 rule="enablement_round_in_flight",
                 hint=(
                     "Wait for the enablement specialist to finish and rearm "

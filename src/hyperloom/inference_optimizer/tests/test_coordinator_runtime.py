@@ -1118,7 +1118,7 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
         # it must not hold the baseline_failed budget open.
         c.shared_state.enablement_mode = "off"
         c.shared_state.enablement.attempts = 2
-        c.shared_state.enablement.dispatched = True
+        c.shared_state.enablement.inflight_task_id = "spec-off"
         for i in range(3):
             await c._handle_unpromotable_result(
                 _mk_task("baseline", f"t-off-{i}"),

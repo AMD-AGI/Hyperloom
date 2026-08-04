@@ -386,7 +386,6 @@ def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
     v3_state = {
         "schema_version": 3,
         "enablement_launch_log": "RuntimeError: Engine core initialization failed.",
-        "enablement_dispatched": True,
         "enablement_attempts": 2,
         "enablement_stall_streak": 1,
         "enablement_kept_patches": ["/p/001.patch"],
@@ -398,7 +397,6 @@ def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
     loaded = SharedState.load_or_init(sd)
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
     assert loaded.enablement.launch_log == "RuntimeError: Engine core initialization failed."
-    assert loaded.enablement.dispatched is True
     assert loaded.enablement.attempts == 2
     assert loaded.enablement.stall_streak == 1
     assert loaded.enablement.kept_patches == ["/p/001.patch"]

@@ -575,7 +575,6 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
 
 def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path, monkeypatch)
-    gate.shared_state.enablement.dispatched = True
     gate.shared_state.enablement.inflight_task_id = "spec-abc"
     intent = Intent(
         type=IntentType.DELEGATE,
@@ -589,7 +588,6 @@ def test_enablement_round_in_flight_denies_baseline(tmp_path, monkeypatch):
 
 def test_enablement_round_in_flight_allows_after_cleared(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path, monkeypatch)
-    gate.shared_state.enablement.dispatched = False
     gate.shared_state.enablement.inflight_task_id = ""
     # baseline_tput == 0 means baseline_phase_singleton also does not fire
     intent = Intent(

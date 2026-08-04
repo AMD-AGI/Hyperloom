@@ -664,7 +664,7 @@ class WritebackCollaborator:
                 if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
                     self.shared_state.set_stop_reason("enablement_stalled")
                 else:
-                    self.shared_state.enablement.dispatched = False
+                    self.shared_state.enablement.inflight_task_id = ""
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log
@@ -2456,7 +2456,7 @@ class WritebackCollaborator:
                         if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
                             self.shared_state.set_stop_reason("enablement_stalled")
                         else:
-                            self.shared_state.enablement.dispatched = False
+                            self.shared_state.enablement.inflight_task_id = ""
                 else:
                     # An unrelated baseline promoted while revalidation is pending.
                     # Only anchor tput; do not consume or clear the pending state.
@@ -4148,7 +4148,7 @@ class WritebackCollaborator:
                 state.enablement.stall_streak = (
                     int(getattr(state.enablement, "stall_streak", 0) or 0) + 1
                 )
-                state.enablement.dispatched = False
+                state.enablement.inflight_task_id = ""
                 report["fixes"].append(
                     {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
                 )

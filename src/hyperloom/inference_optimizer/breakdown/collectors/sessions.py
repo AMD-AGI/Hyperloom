@@ -1424,7 +1424,7 @@ def collect_enablement(
     # also the right value to report for them.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
     attempts = _as_int(_eg(state, "attempts"))
-    dispatched = bool(_eg(state, "dispatched"))
+    dispatched = bool(_eg(state, "inflight_task_id"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
