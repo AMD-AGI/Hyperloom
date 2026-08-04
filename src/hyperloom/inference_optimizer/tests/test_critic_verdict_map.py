@@ -688,6 +688,55 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     assert create_calls[0]["params"]["grid"] == grid
 
 
+@pytest.mark.asyncio
+async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
+    """A delegate explore carries current_best's args/envs, not just its throughput.
+
+    Seeding the anchor alone launched every variant on a bare config and graded it
+    against the established recipe, so a whole round read as a ~40% regression.
+    """
+    coord = _delegate_coord(tmp_path)
+    coord.shared_state.baseline_tput = 4663.79
+    coord.shared_state.current_best = {
+        "tput": 7725.6,
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3 --max-num-seqs 64",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    created: list[dict[str, Any]] = []
+
+    class _TaskRegistry:
+        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+            created.append(dict(kwargs["params"]))
+            from hyperloom.orchestrator.state.task_registry import Task
+
+            return (
+                Task(
+                    task_id="t-explore-stack",
+                    kind=kwargs["kind"],
+                    state="queued",
+                    params=kwargs["params"],
+                    idempotency_key=kwargs["idempotency_key"],
+                ),
+                False,
+            )
+
+    coord.tasks = _TaskRegistry()
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {"grid": [{"name": "v_a", "extra_args": "--flag-a"}]},
+            "idempotency_key": "explore-round-4",
+        },
+    )
+    await coord._handle_delegate("orchestration", intent)
+    assert len(created) == 1
+    params = created[0]
+    assert params["base_tput"] == 7725.6
+    assert params["base_extra_args"] == "--kv-cache-dtype fp8_e4m3 --max-num-seqs 64"
+    assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
 # 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
