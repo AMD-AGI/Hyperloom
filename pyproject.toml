@@ -221,15 +221,13 @@ hyperloom = [
 # tree-reform.MD P2.5: kernel-agent's skill assets + release-contract
 # installer, promoted alongside its package. ``tools/`` and
 # ``skills/unittest/`` are not listed here for .py sources (they're regular
-# package modules picked up by ``find_packages``); ``tools/data/`` is the one
-# non-Python data file the tools read at runtime.
+# package modules picked up by ``find_packages``); the tools resolve kernel
+# sources dynamically from the installed framework trees, so no static data
+# file is packaged.
 "hyperloom.agents.kernel" = [
     "SKILL.md",
     "scripts/*.sh",
     "skills/unittest/SKILL.md",
-]
-"hyperloom.agents.kernel.tools" = [
-    "data/*.json",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",

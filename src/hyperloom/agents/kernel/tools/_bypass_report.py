@@ -29,7 +29,7 @@ from _bypass_fusion import analyze_fusion
 from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
 from _kernel_category import canonical_category
-from _bypass_source_resolver import editable_trace_source, resolve_by_kernel_name, resolve_source
+from _bypass_source_resolver import resolve_source, resolve_triton_py
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 from _task_group_contract import (
@@ -432,17 +432,18 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution. Priority: (1) a Triton kernel_file from the trace's
-        # cpu_op args; (2) op_to_source.json lookup; (3) repo-scan by device
-        # kernel name; else unresolved.
-        source_file = editable_trace_source(k.get("op_kernel_file", "") or "", k.get("op_kernel_backend", "") or "")
-        source_method = "trace_kernel_file" if source_file else "unresolved"
+        # Source resolution. Priority: (1) a Triton .py kernel_file from the
+        # trace's cpu_op args, with the exact @triton.jit def line pinned via AST
+        # (resolve_triton_py, method "trace_kernel_file[_ast]"); (2) native .cu/.hip
+        # active-finder lookup by device kernel symbol (source_resolver, method
+        # "symbol_index"); else unresolved.
+        source_file, source_line, source_method = resolve_triton_py(
+            k.get("op_kernel_file", "") or "",
+            k.get("op_kernel_backend", "") or "",
+            symbol=kname,
+        )
         if not source_file and op_name:
             source_file, method = resolve_source(op_name, framework=framework, device_kernel_name=kname)
-            if source_file:
-                source_method = method
-        if not source_file and kname:
-            source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
 
@@ -515,6 +516,9 @@ def build_candidates(
             "backend": framework,
             "framework": framework,
             "source_file": source_file,
+            # AST-pinned @triton.jit def line for .py sources (None when unpinned
+            # or for native .cu kernels resolved by the symbol index).
+            "source_line": source_line,
             "source_resolution_method": source_method,
             "source_type": source_type,
             "kernel_kind": kernel_kind,

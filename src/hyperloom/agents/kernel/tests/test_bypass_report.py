@@ -306,7 +306,7 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     # land on the ``skipped_kernels`` side of the partition, never in neither
     # bucket. Force source resolution to fail so the reusable SDPA kernel is
     # guaranteed source-less regardless of the ambient op_to_source table.
-    monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
+    monkeypatch.setattr(report, "resolve_triton_py", lambda *a, **k: ("", None, "unresolved"))
     monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
