@@ -395,7 +395,7 @@ class ProposalsCollaborator:
         *,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Grid executors get current best tput as base_tput; approved_variant_names filters the explore grid (None keeps full).
+        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full).
 
         Args:
             pending: The approved proposal to materialise into a task.
