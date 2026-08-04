@@ -1099,6 +1099,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_resolve_serving_tp": "dispatcher",
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
+        "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
