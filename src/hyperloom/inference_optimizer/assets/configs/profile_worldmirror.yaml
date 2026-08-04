@@ -16,9 +16,9 @@ benchmark:
     # Floor only: the driver warms every timed scene regardless. See
     # baseline_worldmirror.yaml for the cold-start measurement.
     WM_WARMUP_CALLS: 3
-    # Same seven 32-image scenes as the baseline: the trace has to attribute the
-    # workload the headline number is measured on.
-    WM_SCENES: "Building Landmark Messy_Room Park_Stone Small_Room Statue_Face Tree_Building"
+    # Must match the baseline set: the trace has to attribute the workload the
+    # headline number is measured on.
+    WM_SCENES: ""
     WM_SAVE_ARTIFACTS: minimal
     WM_COND_FLAGS: "0 0 0"
     WM_USE_TORCH_COMPILE: 0
