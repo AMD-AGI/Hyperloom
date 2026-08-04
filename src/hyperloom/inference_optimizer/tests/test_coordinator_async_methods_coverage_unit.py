@@ -19,6 +19,7 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -719,17 +720,20 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 
 
 # -- _compose_prompt additional branches -----------------------------------
-class _Obj:
-    kind = "gain_pct"
-    value = 20.0
+@pytest.mark.asyncio
+async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
+    coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
+    coord.shared_state.cumulative_gain = 5.0
+    await coord._compose_prompt("orchestration")
+    assert coord.shared_state.target_gap_pct == pytest.approx(15.0)
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -> None:
-    coord._current_objective = _Obj()
+async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
+    coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain = 5.0
     await coord._compose_prompt("orchestration")
-    assert coord.shared_state.target_gap_pct == 15.0
+    assert coord.shared_state.target_gap_pct == 0.0
 
 
 @pytest.mark.asyncio
