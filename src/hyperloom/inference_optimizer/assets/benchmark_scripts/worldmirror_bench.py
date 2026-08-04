@@ -54,15 +54,23 @@ def discover_scenes(worldmirror_dir: Path, scenes_spec: str) -> list[Path]:
     return found
 
 
-def _depth_arrays(output_dir: Path) -> dict[str, np.ndarray]:
+def _depth_arrays(outputs: dict[str, Path]) -> dict[str, np.ndarray]:
+    """Depth arrays keyed by scene, not by output directory.
+
+    The directory carries the iteration index and configs differ in iteration
+    count (baseline 5, profile 2), so a directory-derived key never matches.
+    """
     arrays: dict[str, np.ndarray] = {}
-    for path in sorted(Path(output_dir).glob("**/depth/*.npy")):
-        arrays[str(path.relative_to(output_dir))] = np.asarray(np.load(path), dtype=np.float32)
+    for scene, output_dir in sorted(outputs.items()):
+        for path in sorted(Path(output_dir).glob("**/depth/*.npy")):
+            arrays[f"{scene}/{path.relative_to(output_dir)}"] = np.asarray(
+                np.load(path), dtype=np.float32
+            )
     return arrays
 
 
-def _write_quality_ref(output_dir: Path, ref_path: Path) -> dict[str, Any]:
-    arrays = _depth_arrays(output_dir)
+def _write_quality_ref(outputs: dict[str, Path], ref_path: Path) -> dict[str, Any]:
+    arrays = _depth_arrays(outputs)
     ref_path.parent.mkdir(parents=True, exist_ok=True)
     with ref_path.open("wb") as fh:
         np.savez_compressed(fh, **arrays)
@@ -74,8 +82,8 @@ def _write_quality_ref(output_dir: Path, ref_path: Path) -> dict[str, Any]:
     }
 
 
-def _compare_quality_ref(output_dir: Path, ref_path: Path, rel_max: float) -> dict[str, Any]:
-    arrays = _depth_arrays(output_dir)
+def _compare_quality_ref(outputs: dict[str, Path], ref_path: Path, rel_max: float) -> dict[str, Any]:
+    arrays = _depth_arrays(outputs)
     if not ref_path.is_file():
         return {"passed": False, "skipped": True, "reason": "reference_missing"}
     if not arrays:
@@ -105,9 +113,13 @@ def _compare_quality_ref(output_dir: Path, ref_path: Path, rel_max: float) -> di
     }
 
 
-def evaluate_quality_gate(output_dir: Path | str, quality_ref: str, quality_ref_write: str, rel_max: float) -> dict[str, Any]:
-    """Establish or compare a depth relative-L1 quality reference."""
-    out = Path(output_dir)
+def evaluate_quality_gate(outputs: dict[str, Path], quality_ref: str, quality_ref_write: str, rel_max: float) -> dict[str, Any]:
+    """Establish or compare a depth relative-L1 quality reference.
+
+    ``outputs`` maps scene name to its last-round output directory. Gating one
+    scene would leave the multi-view attention path unverified on a 1-image one.
+    """
+    out = {scene: Path(d) for scene, d in outputs.items()}
     if quality_ref_write:
         return _write_quality_ref(out, Path(quality_ref_write))
     if quality_ref:
@@ -343,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     per_iteration_e2e: list[list[float]] = []
     per_iteration_inference: list[list[float]] = []
     completed = 0
-    last_output = output_root
+    last_round_outputs: dict[str, Path] = {}
     start = time.perf_counter()
     for iteration in range(max(args.iterations, 1)):
         per_iteration_e2e.append([])
@@ -375,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
                 per_scene_inference.setdefault(scene.name, []).append(scene_inference)
                 per_iteration_inference[-1].append(scene_inference)
             completed += 1
-            last_output = run_output
+            last_round_outputs[scene.name] = run_output
     duration = time.perf_counter() - start
 
     # Fall back to wall-clock rather than reporting a partial sample: a mix of
@@ -395,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile_dir:
         _capture_profile_trace(pipeline, scenes[0], output_root, args.target_size, args.profile_dir, save_kwargs)
     quality_gate = evaluate_quality_gate(
-        last_output,
+        last_round_outputs,
         args.quality_ref,
         args.quality_ref_write,
         args.quality_rel_max,
