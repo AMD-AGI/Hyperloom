@@ -239,6 +239,51 @@ def apply_reasoning_effort(
     return params
 
 
+def stream_chat_completion_text(
+    client: object,
+    **params: object,
+) -> "tuple[str, object | None]":
+    """Create a streamed chat completion and accumulate text deltas.
+
+    Forces ``stream=True`` and ``stream_options={"include_usage": True}``.
+    Returns ``(text, usage)``; ``usage`` is the final chunk's usage object or
+    ``None`` when not emitted.
+    """
+    params["stream"] = True
+    params["stream_options"] = {"include_usage": True}
+    parts: list[str] = []
+    usage_obj: object | None = None
+    stream = client.chat.completions.create(**params)  # type: ignore[union-attr]
+    for chunk in stream:
+        if getattr(chunk, "usage", None) is not None:
+            usage_obj = chunk.usage
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta is not None and delta.content:
+                parts.append(delta.content)
+    return "".join(parts), usage_obj
+
+
+async def astream_chat_completion_text(
+    client: object,
+    **params: object,
+) -> "tuple[str, object | None]":
+    """Async counterpart of :func:`stream_chat_completion_text`."""
+    params["stream"] = True
+    params["stream_options"] = {"include_usage": True}
+    parts: list[str] = []
+    usage_obj: object | None = None
+    stream = await client.chat.completions.create(**params)  # type: ignore[union-attr]
+    async for chunk in stream:
+        if getattr(chunk, "usage", None) is not None:
+            usage_obj = chunk.usage
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta is not None and delta.content:
+                parts.append(delta.content)
+    return "".join(parts), usage_obj
+
+
 __all__ = [
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL",
@@ -246,9 +291,11 @@ __all__ = [
     "LLMConfigError",
     "OpenAIClientConfig",
     "apply_reasoning_effort",
+    "astream_chat_completion_text",
     "claude_sdk_env_options",
     "derive_openai_base_url",
     "openai_client_kwargs",
     "parse_custom_headers",
     "resolve_openai_client_config",
+    "stream_chat_completion_text",
 ]

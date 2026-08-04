@@ -365,6 +365,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
             result = _maybe_llm_refine(request, result, patch_text)
         except Exception as exc:  # noqa: BLE001 — LLM refine is best-effort
             log.warning("phase-audit: LLM refine failed; keeping static verdict: %r", exc)
+            result.setdefault("risks", []).append(f"llm refine exception: {exc!r}")
 
     _persist_audit(request, result)
     return result
@@ -377,10 +378,13 @@ def _maybe_llm_refine(
 ) -> dict[str, Any]:
     """Optionally refine the static verdict with a single chat-completion.
 
-    Opt-in (``use_llm=True``) and best-effort: requires ``SAFE_API_KEY`` +
-    ``OPENAI_BASE_URL`` (or request ``openai_base_url``). Any failure / missing
-    credential returns the static verdict unchanged. Never escalates an
-    ``already_*`` claim the static layer didn't already back with evidence.
+    Opt-in (``use_llm=True``) and best-effort: requires an API key and base URL
+    resolvable via the gateway env (``SAFE_API_KEY`` / ``OPENAI_BASE_URL``).
+    A missing base URL would fall through to ``api.openai.com``, which is
+    never the intended gateway; the call is skipped when either is absent.
+    Any failure / missing credential keeps the static verdict unchanged. Never
+    escalates an ``already_*`` claim the static layer didn't already back with
+    evidence.
 
     Args:
         request: The phase-audit request (carries ``model`` / creds overrides).
@@ -393,20 +397,36 @@ def _maybe_llm_refine(
     import json
     import os
 
-    api_key = str(request.get("api_key") or os.environ.get("SAFE_API_KEY") or "").strip()
-    base_url = str(request.get("openai_base_url") or os.environ.get("OPENAI_BASE_URL") or "").strip()
+    import hyperloom.common.llm_config as _llm_cfg
+
     model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.4").strip()
-    if not api_key or not base_url:
+
+    # Build a temporary env override so request-level creds take precedence.
+    env_override: dict[str, str] = {}
+    req_key = str(request.get("api_key") or "").strip()
+    req_url = str(request.get("openai_base_url") or "").strip()
+    if req_key:
+        env_override["SAFE_API_KEY"] = req_key
+    if req_url:
+        env_override["OPENAI_BASE_URL"] = req_url
+
+    try:
+        cfg = _llm_cfg.resolve_openai_client_config(env={**os.environ, **env_override})
+    except _llm_cfg.LLMConfigError:
+        static_result.setdefault("risks", []).append("llm refine skipped: missing SAFE_API_KEY/OPENAI_BASE_URL")
+        return static_result
+
+    if not cfg.base_url:
         static_result.setdefault("risks", []).append("llm refine skipped: missing SAFE_API_KEY/OPENAI_BASE_URL")
         return static_result
 
     try:
         from openai import OpenAI  # lazy: only when use_llm
+        client: object = OpenAI(**cfg.as_kwargs())
     except Exception:  # noqa: BLE001
         static_result.setdefault("risks", []).append("llm refine skipped: openai sdk unavailable")
         return static_result
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
     prompt = (
         "You are auditing whether an upstream PR's change is already present in "
         "a local framework source tree. Given the static analysis result and the "
@@ -417,12 +437,13 @@ def _maybe_llm_refine(
         f"STATIC_RESULT:\n{json.dumps(static_result, ensure_ascii=False)}\n\n"
         f"PR_DIFF (truncated):\n{patch_text[:6000]}\n"
     )
-    resp = client.chat.completions.create(
+    raw_text, _ = _llm_cfg.stream_chat_completion_text(
+        client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
     )
-    content = (resp.choices[0].message.content or "").strip()
+    content = raw_text.strip()
     refined = _parse_llm_json(content)
     if not refined:
         static_result.setdefault("risks", []).append("llm refine returned no parseable JSON")
