@@ -456,17 +456,9 @@ class ConversationCollaborator:
             sections.append("=== Resource pools ===")
             sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
-            # target_gap_pct is the gain still needed for --target-gain.
+            # target_gap_pct is the improvement still needed to reach the objective.
             obj = getattr(self, "_current_objective", None)
-            obj_kind = getattr(obj, "kind", "") if obj is not None else ""
-            if obj_kind == "gain_pct":
-                target_val = float(getattr(obj, "value", 0.0) or 0.0)
-                self.shared_state.target_gap_pct = max(
-                    0.0,
-                    target_val - float(self.shared_state.cumulative_gain or 0.0),
-                )
-            else:
-                self.shared_state.target_gap_pct = 0.0
+            self.shared_state.target_gap_pct = float(obj.gap_pct(self.shared_state)) if obj is not None else 0.0
             # Advisory/ledger blocks below are part of the full SEED push only.
             if push_full:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)

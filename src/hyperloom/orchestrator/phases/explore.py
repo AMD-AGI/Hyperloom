@@ -1158,7 +1158,7 @@ class ExplorePhase(PhaseHandler):
             gaps.append(
                 {
                     "canonical_id": f"{anchor}#throughput_below_target",
-                    "symptom": (f"current_best is {target_gap:.1f}% short of --target-gain"),
+                    "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
                     "domain_hint": "serving_specialist",
