@@ -2383,21 +2383,9 @@ class WritebackCollaborator:
         )
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
-                # Baseline's conclusion contract is the hot measure round; the
-                # discarded cold round is kept only as an audit field so gain math
-                # never mixes cold-before with hot-after.
-                if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(tput)
-                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
-                    log.info(
-                        "baseline anchor: using hot measure tput %.1f as "
-                        "baseline_tput (discarded cold warmup %.1f kept as "
-                        "baseline_cold_tput)",
-                        float(tput),
-                        float(warmup_anchor),
-                    )
-                else:
-                    self.shared_state.baseline_tput = float(tput)
+                # The anchor is the hot measure round; the cold warmup round is
+                # discarded so gain math never mixes cold-before with hot-after.
+                self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
                     "baseline anchor: keeping %.1f; re-baseline measured %.1f "

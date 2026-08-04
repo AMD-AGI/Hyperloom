@@ -12,7 +12,6 @@ from hyperloom.orchestrator.state.shared_state import (
     _DEFAULT_LAST_FAILURES,
     SharedState,
     resolve_grading_anchor_tput,
-    resolve_grading_base,
 )
 
 
@@ -40,65 +39,6 @@ class TestResolveGradingAnchorTput:
 
     def test_zero_when_nothing_established(self):
         assert resolve_grading_anchor_tput(SharedState()) == 0.0
-
-
-class TestResolveGradingBase:
-    def test_returns_anchor_together_with_the_config_it_was_measured_on(self):
-        s = SharedState()
-        s.baseline_tput = 800.0
-        s.current_best = {
-            "action": "explore",
-            "tput": 900.0,
-            "extra_server_args": "--enable-torch-compile",
-            "extra_envs": {"SGLANG_FOO": "1"},
-        }
-        base = resolve_grading_base(s)
-        assert base == {
-            "tput": 900.0,
-            "extra_server_args": "--enable-torch-compile",
-            "extra_envs": {"SGLANG_FOO": "1"},
-            "remove_args": [],
-            "unset_envs": [],
-            "args_mode": "",
-        }
-
-    def test_carries_removal_controls_and_replace_mode(self):
-        s = SharedState()
-        s.current_best = {
-            "tput": 1000.0,
-            "extra_server_args": "--a",
-            "remove_args": "--drop-me",
-            "unset_envs": ["STALE_ENV", ""],
-            "args_mode": "REPLACE",
-        }
-        base = resolve_grading_base(s)
-        assert base is not None
-        assert base["remove_args"] == ["--drop-me"]
-        assert base["unset_envs"] == ["STALE_ENV"]
-        assert base["args_mode"] == "replace"
-
-    def test_stringifies_env_values(self):
-        s = SharedState()
-        s.current_best = {"tput": 500.0, "extra_envs": {"TP": 8}}
-        base = resolve_grading_base(s)
-        assert base is not None
-        assert base["extra_envs"] == {"TP": "8"}
-
-    def test_none_before_any_validated_layer_so_params_stay_authoritative(self):
-        # baseline_tput is established but its args live in the baseline record,
-        # not on current_best, so there is no triple to hand back.
-        s = SharedState()
-        s.baseline_tput = 2195.86
-        assert resolve_grading_base(s) is None
-
-    def test_none_when_current_best_has_no_positive_tput(self):
-        s = SharedState()
-        s.current_best = {"action": "explore", "tput": 0.0, "extra_server_args": "--a"}
-        assert resolve_grading_base(s) is None
-
-    @pytest.mark.parametrize("state", [None, object()])
-    def test_tolerates_missing_state(self, state):
-        assert resolve_grading_base(state) is None
 
 
 class TestGridSessionDeadline:
