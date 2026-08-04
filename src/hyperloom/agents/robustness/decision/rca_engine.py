@@ -182,23 +182,17 @@ class RcaThrottle:
         self._persist()
 
 
-_SYSTEM_PROMPT_FALLBACK = (
-    "You are a Hyperloom robustness reactor RCA assistant. "
-    "Given one symptom and its evidence, write a concise root-cause summary "
-    "in <= 6 sentences. Focus on actionable remediation hints and observable "
-    "evidence. If the evidence is insufficient, reply exactly with: insufficient evidence."
-)
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "rca.md"
 
 
 @lru_cache(maxsize=1)
 def load_rca_system_prompt() -> str:
-    """Load the RCA system prompt from the package asset, with a built-in fallback."""
-    asset = Path(__file__).resolve().parents[1] / "prompts" / "rca.md"
-    try:
-        return asset.read_text(encoding="utf-8")
-    except OSError:
-        log.warning("rca_engine: could not read %s; using built-in fallback prompt", asset)
-        return _SYSTEM_PROMPT_FALLBACK
+    """Read the RCA system prompt shipped as package data.
+
+    Returns:
+        str: The prompt text.
+    """
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 @dataclass
@@ -218,8 +212,6 @@ class LlmRcaEngine:
     max_chars: int = 1500
     throttle: RcaThrottle | None = None
     client: httpx.AsyncClient | None = None
-    # Explicit system prompt; None uses the package asset via load_rca_system_prompt().
-    system_prompt: str | None = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
     _current_tick_id: int = field(default=-1, init=False, repr=False)
@@ -350,12 +342,11 @@ class LlmRcaEngine:
         Returns:
             str: The model's reply content, or an empty string on any failure.
         """
-        sys_prompt = self.system_prompt if self.system_prompt is not None else load_rca_system_prompt()
         prompt = _build_user_prompt(symptom)
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": sys_prompt},
+                {"role": "system", "content": load_rca_system_prompt()},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -435,11 +426,10 @@ class AnthropicRcaEngine(LlmRcaEngine):
 
     async def _call(self, symptom: Symptom) -> str:
         """Issue an Anthropic Messages request and extract text content."""
-        sys_prompt = self.system_prompt if self.system_prompt is not None else load_rca_system_prompt()
         prompt = _build_user_prompt(symptom)
         payload = {
             "model": self.model,
-            "system": sys_prompt,
+            "system": load_rca_system_prompt(),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 600,
             "temperature": 0.2,

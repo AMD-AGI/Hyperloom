@@ -124,10 +124,7 @@ class AgentRole:
     can_mutate_core_state: bool = False
     no_tools: bool = False  # Codex roles
     system_prompt_filename: str = ""
-    # When False the Coordinator skips loading a system prompt for this role.
-    # Use for roles whose LLM decisions are driven by a separate mechanism
-    # (e.g. robustness, which uses an embedded RCA engine).
-    prompt_driven: bool = True
+    prompt_driven: bool = True  # False = deterministic role; no system prompt is loaded
 
     @property
     def system_prompt_path(self) -> Path:

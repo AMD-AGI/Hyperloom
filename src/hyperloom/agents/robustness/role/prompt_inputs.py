@@ -245,8 +245,8 @@ class ReactorContext:
         inbox (list[InboxItem]): Parsed inbox messages for this tick.
         now_unix (float): Wall-clock timestamp for this tick.
         parse_warnings (list[str]): Non-fatal parse issues; logged once.
-        phase (str): Current pipeline phase extracted from ``=== Phase ===$``.
-            Empty string when the block is absent.
+        phase (str): Current pipeline phase from ``=== Phase ===``; ``""``
+            when the block is absent.
         phase_budget (list[PhaseBudgetRow]): Per-phase budget rows from
             ``=== Phase budget telemetry ===``; empty when absent.
         conversation_progress (ConversationProgress | None): Parsed progress
@@ -486,34 +486,26 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
 
 
 def _parse_phase(body: str) -> str:
-    """Extract the current phase name from the ``=== Phase ===`` block body.
-
-    Looks for a line starting with ``phase     :`` and returns the value
-    in upper-case. Returns ``""`` when absent or unparseable.
+    """Extract the phase name from the ``phase : <NAME>`` line.
 
     Args:
         body (str): The phase block body text.
 
     Returns:
-        str: Upper-case phase name (e.g. ``"EXPLORE"``), or ``""``
+        str: Upper-case phase name, or ``""`` when absent.
     """
     for raw in body.splitlines():
-        line = raw.strip()
-        if line.startswith("phase"):
-            _, sep, value = line.partition(":")
-            if sep:
-                phase = value.strip().upper()
-                if phase:
-                    return phase
+        key, sep, value = raw.strip().partition(":")
+        if sep and key.strip() == "phase":
+            return value.strip().upper()
     return ""
 
 
 def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
-    """Parse the ``=== Phase budget telemetry ===`` block into typed rows.
+    """Parse the phase budget block into typed rows.
 
-    Tolerates ``cap=unlimited`` (maps to ``cap_sec=-1``) and
-    ``(no phase history yet)`` (returns empty list). Malformed lines are
-    skipped silently.
+    ``cap=unlimited`` maps to ``cap_sec=-1``; unmatched lines (including the
+    ``(no phase history yet)`` sentinel) are skipped.
 
     Args:
         body (str): The phase budget block body text.
@@ -540,17 +532,14 @@ def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
 
 
 def _parse_conversation_progress(body: str) -> ConversationProgress | None:
-    """Parse the ``=== Conversation progress ===`` block.
-
-    Expects a single body line in the form emitted by the Coordinator:
-    ``ticks_without_progress=N threshold=M severity=ok last_progress_tick=K``.
-    Returns ``None`` when the body is absent or does not match.
+    """Parse the conversation progress block.
 
     Args:
         body (str): The conversation progress block body text.
 
     Returns:
-        ConversationProgress | None: Parsed progress or ``None``.
+        ConversationProgress | None: Parsed progress, or ``None`` when the
+        block is absent or the body line does not match.
     """
     for raw in body.splitlines():
         match = _CONVERSATION_PROGRESS_LINE_RE.match(raw)

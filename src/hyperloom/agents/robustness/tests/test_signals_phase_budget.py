@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from hyperloom.agents.robustness.role.prompt_inputs import (
-    ConversationProgress,
     PhaseBudgetRow,
     ReactorContext,
     SharedStateSnapshot,
@@ -52,7 +51,7 @@ def test_silent_below_threshold():
     assert evaluate_phase_budget_signals(ctx) == []
 
 
-def test_silent_at_exact_threshold():
+def test_fires_at_exact_threshold():
     ctx = _ctx(rows=[_row(used=90.0)])
     syms = evaluate_phase_budget_signals(ctx, config=PhaseBudgetConfig(warn_used_pct=90.0))
     assert len(syms) == 1

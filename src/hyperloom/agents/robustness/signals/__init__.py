@@ -15,6 +15,10 @@ from .aiter_jit import (
 from .budget import BudgetConfig, evaluate_budget_signals
 from .classifier import Classifier, SignalSpec
 from .cluster_fault import evaluate_cluster_fault_signals
+from .conversation_progress import (
+    ConversationProgressConfig,
+    evaluate_conversation_progress_signals,
+)
 from .crash import evaluate_crash_signals
 from .critic_health import (
     CriticHealthConfig,
@@ -41,6 +45,7 @@ from .kernel_pipeline import (
     evaluate_kernel_pipeline_signals,
 )
 from .local_health import evaluate_local_health_signals
+from .phase_budget import PhaseBudgetConfig, evaluate_phase_budget_signals
 from .preflight import (
     AmdahlCeilingConfig,
     AmdahlCeilingDetector,
@@ -72,6 +77,7 @@ __all__ = [
     "BudgetConfig",
     "Classifier",
     "ColdStartConfig",
+    "ConversationProgressConfig",
     "CriticHealthConfig",
     "DecisionAuditConfig",
     "ExternalDepsConfig",
@@ -80,6 +86,7 @@ __all__ = [
     "KernelPipelineConfig",
     "ModelGpuFitConfig",
     "ModelGpuFitDetector",
+    "PhaseBudgetConfig",
     "ProgressConfig",
     "ProgressDetector",
     "RayPendingDetector",
@@ -92,6 +99,7 @@ __all__ = [
     "evaluate_budget_signals",
     "evaluate_cluster_fault_signals",
     "evaluate_cold_start_signals",
+    "evaluate_conversation_progress_signals",
     "evaluate_crash_signals",
     "evaluate_critic_health_signals",
     "evaluate_decision_audit_signals",
@@ -100,6 +108,7 @@ __all__ = [
     "evaluate_health_signals",
     "evaluate_kernel_pipeline_signals",
     "evaluate_local_health_signals",
+    "evaluate_phase_budget_signals",
     "evaluate_repeated_payload_signals",
     "evaluate_stall_signals",
     "evaluate_state_integrity_signals",

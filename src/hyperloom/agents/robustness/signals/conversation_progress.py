@@ -3,13 +3,9 @@
 
 """Conversation no-progress circuit-breaker signal.
 
-Fires a HIGH ``conversation_no_progress`` symptom when the Coordinator
-reports that the orchestration conversation has been stalled for at least
-``threshold`` ticks without any measurable advancement (new KEEP / stack
-growth / validated-gain bump / phase advance).
-
-The reactor is the external safety net here.  It never auto-terminates the
-run; it raises an alert so the operator can intervene.
+Fires ``conversation_no_progress`` (HIGH) when the Coordinator reports a
+stalled orchestration conversation. Alert-only: the ladder attaches no
+recovery intent, so a stall never terminates the run on its own.
 """
 
 from __future__ import annotations
@@ -69,13 +65,9 @@ def evaluate_conversation_progress_signals(
             evidence={
                 "ticks_without_progress": cp.ticks_without_progress,
                 "threshold": cp.threshold,
-                "severity": cp.severity,
                 "last_progress_tick": cp.last_progress_tick,
             },
-            source="coordinator_prompt",
-            suggestion=(
-                "Operator intervention recommended. If the wall-clock budget is "
-                "nearly exhausted, consider triggering a report wind-down."
-            ),
+            source="shared_state",
+            suggestion="operator intervention; wind down via report if the budget is tight",
         )
     ]

@@ -55,11 +55,11 @@ from .signals.preflight import (
     ColdStartConfig,
     ModelGpuFitConfig,
 )
+from .signals.conversation_progress import ConversationProgressConfig
+from .signals.phase_budget import PhaseBudgetConfig
 from .signals.progress import ProgressConfig
 from .signals.repeated_payload import RepeatedPayloadConfig
 from .signals.state_integrity import StateIntegrityConfig
-from .signals.conversation_progress import ConversationProgressConfig
-from .signals.phase_budget import PhaseBudgetConfig
 from .signals.stall import StallConfig
 from .sources.base import DegradeRouter, Source, SourceData, SourceUnavailable
 from .sources.local_probe import LocalProbeConfig, LocalProbeSource

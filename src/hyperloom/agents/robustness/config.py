@@ -261,7 +261,6 @@ class Config:
     finalize_max_tasks_per_action: int = 50
 
     # -- phase budget / conversation progress signals --
-    phase_budget_enabled: bool = True
     phase_budget_warn_used_pct: float = 90.0
     conversation_progress_enabled: bool = True
 

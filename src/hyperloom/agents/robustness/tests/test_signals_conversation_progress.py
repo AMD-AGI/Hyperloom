@@ -78,5 +78,4 @@ def test_evidence_fields_populated():
     ev = syms[0].evidence
     assert ev["ticks_without_progress"] == 15
     assert ev["threshold"] == 12
-    assert ev["severity"] == "high"
     assert ev["last_progress_tick"] == 7

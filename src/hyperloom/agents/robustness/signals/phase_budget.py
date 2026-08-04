@@ -3,10 +3,9 @@
 
 """Phase-budget overrun signal.
 
-Fires a MEDIUM ``phase_budget_nearly_exhausted`` symptom when the current
-phase has consumed at least ``warn_used_pct`` percent of its allocated budget
-(unlimited-cap phases are skipped).  Stays silent during the closing phase
-and when a stop_reason is already set.
+Fires ``phase_budget_nearly_exhausted`` (MEDIUM) when the current phase has
+consumed at least ``warn_used_pct`` of its cap. Silent for unlimited-cap
+phases, during the closing phase, and once a stop_reason is set.
 """
 
 from __future__ import annotations
@@ -71,13 +70,9 @@ def evaluate_phase_budget_signals(
                     "elapsed_sec": row.elapsed_sec,
                     "cap_sec": row.cap_sec,
                     "used_pct": row.used_pct,
-                    "warn_used_pct": cfg.warn_used_pct,
                 },
-                source="coordinator_prompt",
-                suggestion=(
-                    "Consider wrapping up remaining work in this phase or "
-                    "emitting escalate_strategy_change if the phase is exhausted."
-                ),
+                source="shared_state",
+                suggestion="wind down this phase or escalate a phase change",
             )
         ]
     return []

@@ -717,8 +717,9 @@ class ConversationCollaborator:
             agent_name: Name of the agent/role whose prompt to load.
 
         Returns:
-            The override prompt if configured, the role's prompt file
-            contents, or a placeholder string when none exists.
+            The override prompt if configured, ``""`` for roles that are not
+            prompt-driven, the role's prompt file contents, or a placeholder
+            string when the file is missing.
         """
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
