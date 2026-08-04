@@ -675,13 +675,25 @@ def test_allowed_tools_unknown_agent_returns_empty(gate):
 
 
 # system_prompts assets
-@pytest.mark.parametrize("name", ["orchestration", "kernel_agent", "critic", "robustness"])
+@pytest.mark.parametrize("name", ["orchestration", "kernel_agent", "critic"])
 def test_system_prompt_files_exist_and_nonempty(name):
     p = asset_system_prompts_dir() / f"{name}.md"
     assert p.is_file(), f"missing system prompt: {p}"
     text = p.read_text(encoding="utf-8")
     assert len(text) > 200, f"system prompt too short: {p}"
     assert name.capitalize() in text or name in text.lower()
+
+
+def test_robustness_role_not_prompt_driven():
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+    registry = default_role_registry()
+    assert not registry["robustness"].prompt_driven
+
+
+def test_robustness_role_no_system_prompt_file():
+    p = asset_system_prompts_dir() / "robustness.md"
+    assert not p.exists(), "robustness.md should be removed; its prompt is driven by the RCA engine"
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():

@@ -123,11 +123,11 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
 
 
 def test_role_md_files_carry_phase_awareness():
-    """Static rules fragments + Robustness markdown carry phase awareness."""
+    """Static rules fragments carry phase awareness (robustness excluded: not prompt-driven)."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     root = asset_system_prompts_dir()
-    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
+    for name in ("orchestration", "kernel_agent", "critic"):
         body = (root / f"{name}.md").read_text(encoding="utf-8")
         if name == "critic":
             assert "Phase-specific rules" in body
