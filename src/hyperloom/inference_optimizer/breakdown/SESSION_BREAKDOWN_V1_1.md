@@ -1,9 +1,15 @@
-# Session Breakdown v1.1 — Design Rationale
+# Session Breakdown v1.1 — Design Rationale (superseded)
+
+> **Historical design note, not the live contract.** `breakdown/schema.py` now declares
+> `hyperloom.session_breakdown.v2` / `v3.0` / `v4.0` / `v5.0`, with
+> `SCHEMA_VERSION = SCHEMA_VERSION_V5`. For current behaviour read
+> `breakdown/SKILL.md` and `docs/reference/session-breakdown.md`. The file and symbol
+> pointers below are point-in-time; several no longer exist.
 
 This document explains **why** we extended `session_breakdown.json`, how responsibilities
 are split across the pipeline, and what “complete” export means in practice.
 
-Schema target: `hyperloom.session_breakdown.v1.1` (additive over v1).
+Schema target at the time: `hyperloom.session_breakdown.v1.1` (additive over v1).
 
 ## Problem
 
@@ -45,12 +51,13 @@ Exception: **Phase 2** adds structured promotion fields at write time in the Coo
 
 ### 4. Size control via `detail_level`
 
+Renderer-internal only, and always `standard` in practice: nothing emits a
+`detail_level` key, so the `verbose` branch is unreachable.
+
 | Mode | Behavior |
 |------|----------|
 | `standard` | `decision_journal`: all promoted/rejected + top 30 tested by \|gain\|; report caps rounds |
 | `verbose` | all variants; TraceLens CLI log tail (40 lines max) in kernel_profiling report |
-
-CLI: `dump_session_breakdown --detail-level standard|verbose`.
 
 ## Architecture
 
@@ -58,13 +65,13 @@ CLI: `dump_session_breakdown --detail-level standard|verbose`.
 state.json + runs/ + kernel-agent/
         │
         ▼
-  collectors.py          coordinator.py (Phase 2 only)
-  - collect_decision_journal     audit_extras on promote:
-  - collect_kernel_profiling       promotion_rule, rule_detail,
+  collectors/            loop/writeback.py (Phase 2 only)
+  - collect_decision_trace       audit_extras on promote:
+  - collect_kernel_lifecycle       promotion_rule, rule_detail,
   - enrich baseline / GEAK/Forge   keep_threshold_pct, …
         │
         ▼
-  exporter.build(detail_level)
+  exporter.build()
         │
         ├── session_breakdown.json
         └── reporters/ → session report markdown
@@ -74,11 +81,11 @@ state.json + runs/ + kernel-agent/
 
 | Field / behavior | Primary writer | Reader |
 |------------------|----------------|--------|
-| `explore_search.tested`, `rejected`, `last_round` | Coordinator / grid runner | `collect_decision_journal` |
+| `explore_search.tested`, `rejected`, `last_round` | Coordinator / grid runner | `collectors/explore.py` |
 | `*_attempts[].extras` (gain, best variant) | Coordinator audit | `_round_decision_from_attempt` |
 | `promotion_rule`, `variants_tested_count`, … | Coordinator Phase 2 | same |
 | variant `invocation`, `benchmark_report_path` | disk under `runs/{params,backends}/` | collector workspace walk |
-| `kernel_profiling.outputs.top_kernels` | profile report / CSV / TraceLens JSON | `collect_kernel_profiling` |
+| `kernel_profiling.outputs.top_kernels` | profile report / CSV / TraceLens JSON | none — never shipped |
 | `geak_invocations` proposal/verification | kernel-agent results | existing invocation collector |
 
 **Missing data is not always an orchestrator bug.** Gaps fall into:
@@ -90,6 +97,9 @@ state.json + runs/ + kernel-agent/
 5. **Collector gap** (e.g. duplicate `params-last` row, `baseline_ref_tput` not resolved).
 
 ## New sections
+
+> Neither section shipped a collector: `decision_journal` and `kernel_profiling` survive
+> only as renderer section ids with no producer, so both always render empty.
 
 ### `decision_journal[]`
 
@@ -117,7 +127,7 @@ Never inline `.trace.json.gz` blobs.
 |-------|-------|--------|
 | 1 | Schema + collectors + exporter; no Coordinator changes | done |
 | 2 | Coordinator `audit_extras` promotion fields | done |
-| 3 | Report renderers + `--detail-level` CLI | done |
+| 3 | Report renderers + `--detail-level` CLI | renderers done; the CLI flag was never shipped |
 | 4 | wekafs replay on real sessions | done (2/3 sessions; see below) |
 
 ## Validation criteria
@@ -160,10 +170,9 @@ Replayed sessions (2026-05-20):
 | File | Role |
 |------|------|
 | `breakdown/schema.py` | v1.1 TypedDicts, `SCHEMA_VERSION` |
-| `breakdown/collectors.py` | `collect_decision_journal`, `collect_kernel_profiling`, enrichments |
-| `breakdown/exporter.py` | wire collectors, `detail_level` |
-| `orchestrator/coordinator.py` | Phase 2 `audit_extras` |
+| `breakdown/collectors/` | package: `collect_decision_trace`, `collect_kernel_lifecycle`, `collect_kernel_optimization_summary`, enrichments |
+| `breakdown/exporter.py` | wire collectors |
+| `orchestrator/loop/writeback.py` | Phase 2 `audit_extras` |
 | `breakdown/reporters/_renderers/decision_journal.py` | markdown section |
 | `breakdown/reporters/_renderers/kernel_profiling.py` | markdown section |
 | `breakdown/reporters/compose.py` | section groups |
-| `hyperloom.inference_optimizer.tools.dump_session_breakdown` | `--detail-level` |

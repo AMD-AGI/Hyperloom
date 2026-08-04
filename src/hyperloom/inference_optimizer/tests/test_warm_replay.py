@@ -558,7 +558,7 @@ def test_promote_warm_replay_double_run_uses_hot_measure_round(tmp_path):
 
 
 def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
-    """Any replay tput above baseline seeds the stack (policy A), even below the historical reproduce bar."""
+    """Any replay tput above baseline seeds the stack, even below the historical reproduce bar."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",

@@ -21,6 +21,7 @@ from ..policy.gate import (
 )
 from ..loop.sub_agent_runner import SubAgentResult
 from ..specialists.runner import SpecialistFailureType
+from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
@@ -1140,7 +1141,7 @@ class ExplorePhase(PhaseHandler):
         )
 
     def _extract_gaps_from_baseline(self) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the M1 anchor canonical_id so traverse rows align.
+        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); reuse the workload canonical_id (``_workload_canonical_id``, matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
 
         Returns:
             A list of gap row dicts derived from the baseline; empty when no
@@ -1432,7 +1433,7 @@ class ExplorePhase(PhaseHandler):
                 params["base_unset_envs"] = cb_unset
             if str(cb.get("args_mode") or "").strip().lower() == "replace":
                 params["base_args_mode"] = "replace"
-        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        base_tput = resolve_grading_anchor_tput(state)
         if base_tput:
             params["base_tput"] = base_tput
         last_bl = state.last_baseline or {}

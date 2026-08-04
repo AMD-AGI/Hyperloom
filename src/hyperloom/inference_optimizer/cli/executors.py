@@ -75,8 +75,8 @@ async def _noop_prep(ctx) -> dict:
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
-# Declarative action_kind -> ExecutorFn map (test_action_catalogue enforces
-# consistency with session_paths._runs_actions()).
+# Declarative action_kind -> ExecutorFn map. Keep in sync with
+# session_paths._runs_actions() (not enforced by a test).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
@@ -285,8 +285,12 @@ def _register_executors(
     )
 
     # FRAMEWORK per-candidate executor — Coordinator-internal only.
+    # Key must match the kind the FRAMEWORK phase enqueues ("framework_agent",
+    # per action_surfaces.COORDINATOR_INTERNAL_ACTIONS and
+    # actions/_meta/framework_agent.yaml); registering it as "framework" left
+    # every discovered PR candidate stamped no_result_failed.
     coordinator.sub.register_executor(
-        "framework",
+        "framework_agent",
         FrameworkAgentExecutor(session_dir=session_dir),
     )
 

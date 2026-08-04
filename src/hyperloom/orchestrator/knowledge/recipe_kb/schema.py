@@ -297,10 +297,9 @@ class Recipe:
     """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the
     version + provenance metadata our atomic-archive needs.
 
-    The ``to_dict`` output is what lands in ``recipe.json``. An arbor consumer
-    pointing ``ARBOR_RECIPES_DIR`` at our store sees only a few extra keys
-    (``canonical_id`` / ``version`` / ``framework_version`` / ``precision`` /
-    ``provenance``); everything else is byte-compatible.
+    The ``to_dict`` output is what lands in ``recipe.json``: an arbor
+    ``Recipe`` plus hyperloom superset keys (see the section comments on the
+    fields below).
     """
 
     # ----- store-managed metadata -----

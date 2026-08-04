@@ -16,7 +16,8 @@ from hyperloom.common.env_safety import scrub_benchmark_process_env
 
 log = logging.getLogger(__name__)
 
-# Sentinel returncodes (distinct from -909..-912 watchdog sentinels).
+# Ray-side sentinel returncodes. -912 is also used by
+# ``_subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE``.
 _ACTOR_TIMEOUT_RC: int = -912
 _RAY_ACTOR_DIED_RC: int = -913
 
@@ -291,7 +292,7 @@ def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
 
 
 def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
-    """Create a GpuSpecialistActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
+    """Create a ServingActor handle for a GPU specialist, holding ``num_gpus`` (+ optional ``serving_slot``)."""
     actor_cls: Any = _serving_actor_body()
     resources = {"serving_slot": 1} if serving_slot else None
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()

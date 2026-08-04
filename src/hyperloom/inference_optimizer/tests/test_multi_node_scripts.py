@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``multi_node/scripts`` launch and kill helpers.
+"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the
+Infera SSH fan-out helpers, the mn CLI kernel-op routing, ``_multi_node_env``
+and the shell-quoting / credential hardening of the rendered entrypoints.
 
 A tiny ``sys.modules`` ray stub lets CI import the scripts without Ray.
 """

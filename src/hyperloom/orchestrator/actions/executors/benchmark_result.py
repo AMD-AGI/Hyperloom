@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by Magpie-backed executors.
+"""Benchmark result parsing shared by Magpie-backed executors, plus post-run
+artifact harvesting and salvage helpers.
 
 Magpie and shell wrappers can report failure after InferenceX has already
 written valid throughput numbers (for example a post-benchmark cleanup error).
-The optimizer should treat the measurement as usable whenever the benchmark
-completed requests and produced positive throughput, while preserving the
-wrapper status as diagnostics.
+The optimizer should treat the measurement as usable whenever it produced
+positive output throughput and cleared its correctness signal -- at least one
+completed request for serving runs, or a passing image-quality gate for
+scriptable (server-less) runs, which have no request counter -- while
+preserving the wrapper status as diagnostics.
 """
 
 from __future__ import annotations

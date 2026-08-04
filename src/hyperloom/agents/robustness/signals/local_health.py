@@ -5,7 +5,7 @@
 
 Fire only when DegradeRouter hands control to :class:`LocalProbeSource` (robustness-server
 unreachable); silent otherwise since the SourceData fields are empty. Covers
-``server_unreachable`` (HIGH if all targets fail), ``log_error_pattern`` (OOM/NCCL → HIGH),
+``local_server_unreachable`` (HIGH if all targets fail), ``log_error_pattern`` (OOM/NCCL → HIGH),
 ``gpu_thermal_high``, plus disk/shm/ray-head/fd pressure rules.
 """
 

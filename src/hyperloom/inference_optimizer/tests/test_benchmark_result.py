@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``orchestrator.action_executors.benchmark_result``."""
+"""Tests for ``orchestrator.actions.executors.benchmark_result``."""
 
 from __future__ import annotations
 
@@ -624,7 +624,7 @@ def test_estimate_from_sglang_server_log(tmp_path):
     log_path.write_text(_SGLANG_LOG)
     est = br.estimate_output_throughput_from_server_log(log_path)
     assert est is not None
-    # warmup_skip=1 drops the 100.0 ramp; mean(900,1000,1100,1200) = 1050.0.
+    # warmup_skip_frac 0.25 drops the 100.0 ramp; mean(900,1000,1100,1200) = 1050.0.
     assert est["output_throughput"] == pytest.approx(1050.0)
     assert est["num_samples"] == 5
     assert est["source_path"] == str(log_path)

@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Roofline comparison renderer — one block per discovered ``final.json``.
+"""Roofline comparison renderer — the baseline-vs-latest comparison built from
+``state.roofline_snapshots``.
 
-Silently skipped when ``roofline`` is absent/empty (older roofline JSONs).
+Silently skipped when ``roofline`` is absent/empty, i.e. a session that never
+ran the roofline pipeline.
 """
 
 from __future__ import annotations
@@ -74,7 +76,8 @@ def _delta_block(delta: dict[str, Any] | None) -> str:
 
 @register_renderer("roofline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the roofline-comparison section, one block per ``final.json``.
+    """Render the roofline-comparison section (one block per collected
+    comparison; the collector emits at most one).
 
     Each block shows the source path, comparison mode, baseline and latest
     snapshots, and any emitted delta values. Skipped when the breakdown has

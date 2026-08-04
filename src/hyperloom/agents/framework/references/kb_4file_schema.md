@@ -6,6 +6,10 @@
 
 ## Layout
 
+The per-domain 4-file tree is the operator-supplied schema `kb.py` reads; only
+the `framework_optimization/` partition ships with the package (seeded with
+`cross_framework_map.jsonl`).
+
 ```
 ${FRAMEWORK_AGENT_KB_DIR}/
 ├── communication/
@@ -16,18 +20,25 @@ ${FRAMEWORK_AGENT_KB_DIR}/
 ├── compiler/                  ← same 4 files
 ├── framework/                 ← same 4 files
 ├── fusion/                    ← same 4 files
-├── kernel/                    ← same 4 files
+├── kernel_agent/              ← same 4 files
 ├── systems/                   ← same 4 files
 ├── pr_intelligence/           ← special: {other_domain}_knowledge.md
-└── recipes/                   ← optional, free-form
+├── recipes/                   ← optional, free-form
+└── framework_optimization/    ← per-framework finding bags
+    └── <framework>/           ← resolved by kb.path_for_framework()
 ```
 
 `${FRAMEWORK_AGENT_KB_DIR}` is resolved by
 `hyperloom.agents.framework.kb._resolve_kb_root()` in this order:
 
 1. `FRAMEWORK_AGENT_KB_DIR` env (set by `scripts/install.sh`);
-2. `${FRAMEWORK_AGENT_ROOT}/kb` env fallback;
-3. `<repo>/src/hyperloom/agents/framework/kb` (development default).
+2. `INFERENCE_OPTIMIZER_FA_KB_PATH` env (inference_optimizer compatibility
+   override, matched by `orchestrator/knowledge/kb_writeback.py` so KB reads
+   and writes agree);
+3. `${FRAMEWORK_AGENT_ROOT}/kb`;
+4. `Path(__file__).parents[2] / "kb"`, i.e. `<repo>/src/hyperloom/kb` — a path
+   that does not exist in the tree, so this last resort never resolves to a
+   real KB.
 
 ## Per-file roles
 
@@ -35,8 +46,8 @@ ${FRAMEWORK_AGENT_KB_DIR}/
 |---|---|---|
 | `README.md` | Domain entry point; ~20 lines | rare manual edits |
 | `empirical_kb.md` | Domain-specific findings: flag tables, quantitative perf deltas, version-specific guidance | **only append target** for `contribute_to_kb` |
-| `model_taxonomy.md` | Cross-domain shared (~447 lines fixed); model archetypes | human-reviewed copy-from-Hyperloom (Arbor) |
-| `shared_pitfalls.md` | Cross-domain shared (~487 lines fixed); pitfalls catalogue | human-reviewed copy-from-Hyperloom (Arbor) |
+| `model_taxonomy.md` | Cross-domain shared; model archetypes | human-reviewed copy-from-Hyperloom (Arbor) |
+| `shared_pitfalls.md` | Cross-domain shared; pitfalls catalogue | human-reviewed copy-from-Hyperloom (Arbor) |
 
 > `model_taxonomy.md` and `shared_pitfalls.md` are intentionally
 > identical across the six standard domains in Hyperloom (the orchestration
@@ -63,7 +74,7 @@ each domain's priority files for the lower-cased query.
 
 | Domain | Keywords (subset) |
 |---|---|
-| `kernel` | kernel, gemm, moe, attention, fmoe, ck, triton |
+| `kernel_agent` | kernel_agent, gemm, moe, attention, fmoe, ck, triton |
 | `communication` | allreduce, nccl, rccl, quickreduce, collective |
 | `compiler` | compiler, inductor, codegen |
 | `framework` | vllm, sglang, framework, scheduler, cuda_graph |

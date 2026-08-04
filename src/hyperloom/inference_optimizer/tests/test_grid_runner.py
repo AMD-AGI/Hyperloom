@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Consolidated tests for ``orchestrator.action_executors._grid_runner``."""
+"""Consolidated tests for ``orchestrator.actions.executors._grid_runner``."""
 
 from __future__ import annotations
 

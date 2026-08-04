@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reverse-audit decision-quality signals (G1-G7).
+"""Reverse-audit decision-quality signals (G1-G6).
 
 Complements Critic (which only sees proposals) by inspecting the persisted result of
 decisions that bypassed Critic via programmatic paths (``integrate`` executor,
@@ -10,7 +10,7 @@ decisions that bypassed Critic via programmatic paths (``integrate`` executor,
 
 Severity: HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
 G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
-``status=baseline_failed``, G7 legacy backend expected-only. MEDIUM + alert — G2 sub-threshold
+``status=baseline_failed``. MEDIUM + alert — G2 sub-threshold
 KEEP, G6 ci_metrics schema drift. These are audit, not recovery: no auto-delegate(report).
 """
 
@@ -67,7 +67,7 @@ def evaluate_decision_audit_signals(
     *,
     config: DecisionAuditConfig | None = None,
 ) -> list[Symptom]:
-    """Run the G1-G7 reverse-audit rules over persisted decision artefacts.
+    """Run the G1-G6 reverse-audit rules over persisted decision artefacts.
 
     Inspects integrate result entries, ci_metrics, and kernel attempts collected
     into :attr:`SourceData.local_decision_audit` and aggregates any symptoms.

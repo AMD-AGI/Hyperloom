@@ -184,7 +184,12 @@ def check_rocm_toolchain_alignment(
     env: Mapping[str, str] | None = None,
     run: _RunCallable = subprocess.run,
 ) -> tuple[bool, str]:
-    """Check hipcc presence, ROCM_PATH match, and hip>=7 header.
+    """Advisory ROCm toolchain probe.
+
+    Returns ``ok=False`` only when hipcc is present and its
+    ``hip/hip_runtime_api.h`` lacks ``hipDeviceAttributePciChipId`` (a
+    ROCm-7.x-era symbol); a missing hipcc is warn-only, and the ROCM_PATH
+    comparison is computed but discarded.
 
     Args:
         env: Environment to use for subprocess calls (``None`` inherits process env).

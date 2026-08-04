@@ -27,17 +27,9 @@ _DEPRECATION_MESSAGE: str = (
 
 
 def _coerce_str(value: Any) -> str:
-    """Coerce a payload value into a string.
-
-    ``None`` collapses to the empty string; non-string, non-None values fall
-    through ``str()``.
-
-    Args:
-        value (Any): Raw payload value loaded from JSON/YAML.
-
-    Returns:
-        str: ``""`` for ``None``, the value unchanged when already a string,
-        otherwise ``str(value)``.
+    """Coerce a payload value to a string: ``None`` -> ``""``, ``str``
+    unchanged, list/tuple space-joined into shell tokens (each entry stripped,
+    blanks dropped), anything else through ``str()``.
     """
     if value is None:
         return ""

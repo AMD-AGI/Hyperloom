@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Hyperloom — unified ``hyperloom.*`` namespace.
-
-The target single namespace into which modules are migrated incrementally.
-"""
+"""Hyperloom — the single ``hyperloom.*`` namespace for the whole distribution."""
 
 from __future__ import annotations
 

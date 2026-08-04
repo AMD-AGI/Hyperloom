@@ -249,9 +249,9 @@ def _collect_lane_timeline(
 ) -> list[dict[str, Any]]:
     """Per-lane capacity/occupancy summary from ``storage/coordinator.db``.
 
-    One row per lane (capacity, live_holders, lease_expired_count). The
-    per-tick holders timeline is deferred; the aggregates suffice for the
-    ``benchmark_lane.peak ≤ 1`` invariant check.
+    One row per lane (capacity, live_holders, lease_expired_count) plus a
+    ``__total__`` aggregate. ``live_holders`` is a point-in-time count of
+    unexpired leases, not a peak; no per-tick holders timeline is recorded.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -352,7 +352,7 @@ def collect_telemetry(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the §13 telemetry section.
+    """Collect the telemetry section.
 
     Gathers references to the baseline / profile benchmark reports, torch
     traces, system profiles, and server logs on disk, aggregates GPU-monitor

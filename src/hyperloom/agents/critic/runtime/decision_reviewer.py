@@ -1004,7 +1004,9 @@ class DecisionReviewer:
             get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc({"verdict": verdict})
             self._maybe_write_kb_for_verdict(item, req, session_ctx, outcome)
 
-        # Optional advice for proposals approved with caveats.
+        # Every advisory also goes out as a standalone advice message, whatever
+        # the target's verdict (or if untargeted); targeted bodies are already
+        # inlined into the verdict's ``advice_text`` above.
         for advisory in review.get("advice") or []:
             if not isinstance(advisory, dict):
                 continue

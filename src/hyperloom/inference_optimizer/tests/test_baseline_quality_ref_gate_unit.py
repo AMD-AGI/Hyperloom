@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the quality-reference establish gate (R1).
+"""Unit tests for the quality-reference establish gate.
 
 Only a genuine ``baseline`` task may establish/overwrite the image-quality
 reference; other kinds (e.g. ``replay_warm_recipe``) compare against it.
@@ -20,7 +20,7 @@ def test_genuine_baseline_establishes_reference():
 
 
 def test_warm_replay_does_not_establish_reference():
-    """``replay_warm_recipe`` must compare, never re-establish (R1 core)."""
+    """``replay_warm_recipe`` must compare, never re-establish."""
     assert _should_establish_quality_ref("replay_warm_recipe") is False
 
 

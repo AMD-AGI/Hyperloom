@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.enablement_ops (discovery + authoring).
+"""Tests for hyperloom.agents.framework.enablement_ops (discovery + authoring).
 
 Folds the former ``test_enablement_authoring`` (mandate builder) and
 ``test_enablement_discovery`` (search plan + ranking) suites now that both

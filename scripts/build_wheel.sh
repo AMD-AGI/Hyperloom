@@ -10,8 +10,8 @@
 #   scripts/build_wheel.sh --publish
 #
 # Publishing uses `gh` (which reuses the host's GitHub auth) and uploads the
-# built wheel as a release asset with --clobber. The Hyperloom repo is
-# private/internal, so the asset is only downloadable with authentication.
+# built wheel as a release asset with --clobber. The Hyperloom repo is public,
+# so the uploaded asset is downloadable without authentication.
 
 set -euo pipefail
 
@@ -75,7 +75,8 @@ PY
 [ -n "${VERSION}" ] || die "could not read version from pyproject.toml"
 log "package version: ${VERSION}"
 
-# Default release tag is v<major.minor> (matches the existing v0.8 releases).
+# Default release tag is v<major.minor>; pass --tag for releases whose tag
+# carries a patch/pre-release suffix.
 if [ -z "${TAG}" ]; then
   _major_minor="$(printf '%s' "${VERSION}" | cut -d. -f1-2)"
   TAG="v${_major_minor}"

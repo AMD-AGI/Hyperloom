@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for the baseline cold-start "warmup artifact"."""
+"""Regression tests for the baseline cold-start "warmup artifact".
+
+Covers the cold+hot double-run and its server-lifecycle reuse, the pre-start /
+teardown cleanup around the reused port, the local InferenceX mirror, and the
+subprocess-failure classifier.
+"""
 
 from __future__ import annotations
 
@@ -130,7 +135,7 @@ def _executor(
 
 
 def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
-    """The opt-in double-run reports the HOT second-round throughput."""
+    """The double-run reports the HOT second-round throughput."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"

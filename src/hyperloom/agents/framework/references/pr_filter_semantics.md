@@ -101,7 +101,7 @@ follows:
 | `require_labels` | always rejects (empty labels missing required ones) |
 | `exclude_labels` | always passes (no labels to exclude) |
 | `authors` | always rejects (author unknown) |
-| `since` / `until` | empty `updated_at` is `""`, lex-compares as smaller than any timestamp; mainly affects `since` |
+| `since` / `until` | always passes (an empty `updated_at` short-circuits both checks; date filtering is a no-op without enrichment) |
 | `include_paths` / `exclude_paths` / `min_*` / `max_*` | rejected via the "no changed_files metadata" precheck |
 
 Operators wanting hard-filtering must configure primus_cortex.

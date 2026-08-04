@@ -9,9 +9,8 @@
 
 Computes ``bound_type`` (compute- vs memory-bound), ``arithmetic_intensity``
 (FLOPs/byte), and efficiency/utilization for EVERY hot kernel whose operand
-shapes allow a FLOP/byte estimate, including vendor kernels the opt-in rocprof
-enrichment skips. This is the analytical half of the roofline; rocprof enrichment
-remains the measured refinement for rewritable kernels.
+shapes allow a FLOP/byte estimate, including vendor precompiled kernels. This is
+the only roofline source on the bypass route.
 
 GPU-free: it uses the kernel's real per-launch ``gpu_time_us`` plus FLOPs/bytes
 estimated from the captured operand shapes and a compact AMD peak-spec table.

@@ -8,7 +8,7 @@ Run with:
   KERNEL_AGENT_RUN_LIVE=1 \
   KERNEL_AGENT_ENV_FILE=/shared/user1/AgentKernelArena/.env \
   KERNEL_AGENT_LIVE_BACKENDS=forge \
-  python3 -m unittest kernel-agent/tests/test_kernel_agent_live.py
+  python3 -m unittest src/hyperloom/agents/kernel/tests/test_kernel_agent_live.py
 """
 
 from __future__ import annotations

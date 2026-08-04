@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -1628,14 +1630,18 @@ class FrameworkPhase(PhaseHandler):
         """True when an in-flight enablement round has ended without a rearm.
 
         A round is considered silently finished when ALL hold:
+        - ``_ENABLEMENT_WATCHDOG_GRACE_TICKS`` have elapsed since dispatch (so we
+          never race a just-completed specialist whose integrate proposal is
+          about to be emitted), and
         - the dispatched specialist has written its ``specialist_done.json``
           (authoring is over), and
-        - a grace period of ticks has elapsed since dispatch (so we never race a
-          just-completed specialist whose integrate proposal is about to be
-          emitted), and
         - no enablement ``integrate_patch`` proposal for this task is still
-          pending review, and
-        - no task is currently running.
+          pending review — checked only while still within
+          ``_ENABLEMENT_WATCHDOG_HARD_TICKS``, after which a stuck proposal no
+          longer defers the verdict.
+
+        When no ``enablement_inflight_task_id`` was recorded, the grace-tick
+        check alone decides and the last two conditions do not apply.
 
         This is the phase-independent backstop for every code path that finishes
         an enablement round without calling :meth:`_maybe_rearm_enablement`
@@ -2245,7 +2251,7 @@ class FrameworkPhase(PhaseHandler):
         """Canonical FRAMEWORK candidate dedup/progress key (see ``candidate_key``).
 
         Thin wrapper over
-        :func:`framework_agent_artifacts.candidate_key` so every candidate
+        :func:`~hyperloom.orchestrator.framework.artifacts.candidate_key` so every candidate
         selection / dedup / progress-row / idempotency site derives the key
         from one place (``candidate_id or pr_url or ref``). Prevents the
         asymmetry where a candidate carrying only a ``pr_url`` failed to dedup
@@ -3544,7 +3550,7 @@ class FrameworkPhase(PhaseHandler):
         params = {
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
-            "base_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            "base_tput": resolve_grading_anchor_tput(state),
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
@@ -4595,7 +4601,7 @@ class FrameworkPhase(PhaseHandler):
                 pass
         params: dict[str, Any] = {
             "source": "coordinator_internal",
-            "reason": "enablement_eval_revalidation",
+            "reason": ENABLEMENT_REVALIDATION_REASON,
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
@@ -4675,13 +4681,13 @@ class FrameworkPhase(PhaseHandler):
         task: "Task",
         result: Any,
     ) -> None:
-        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; only kept/reverted rows.
+        """Bridge an authored-patch ``integrate_patch`` outcome into the FRAMEWORK progress ledger (else the gain is invisible). Attributed to the latest batch; every terminal status is recorded (empty/in-progress statuses and lane-owned ``apply_failed`` retries are skipped).
 
         Args:
             task: The integrate_patch task carrying the FRAMEWORK authoring
                 provenance markers.
-            result: The task result; only ``kept``/``reverted`` statuses are
-                recorded.
+            result: The task result; any non-empty terminal status is recorded
+                except ``apply_failed`` on a perf lane, which the retry loop owns.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_agent_authoring")):
@@ -5118,7 +5124,7 @@ class FrameworkPhase(PhaseHandler):
                 params["base_unset_envs"] = cb_unset
             if str(cb.get("args_mode") or "").strip().lower() == "replace":
                 params["base_args_mode"] = "replace"
-        base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        base_tput = resolve_grading_anchor_tput(state)
         if base_tput:
             params["base_tput"] = base_tput
         last_bl = state.last_baseline or {}
@@ -5298,8 +5304,9 @@ class FrameworkPhase(PhaseHandler):
         """Mark the FRAMEWORK config-exploration subphase done and persist.
 
         Args:
-            reason: Why the lane finished (``no_new_candidates`` / ``max_rounds``
-                / ``dispatch_skipped``).
+            reason: Why the lane finished (``no_candidates`` /
+                ``generation_empty`` / ``dispatch_skipped`` /
+                ``phase_budget_exhausted`` / ``max_rounds``).
         """
         state = self.shared_state
         state.framework_config_lane_state = "done"

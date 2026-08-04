@@ -1,6 +1,6 @@
 # Primus Cortex endpoints used by framework-agent
 
-> Technical reference for the four primus_cortex REST
+> Technical reference for the five primus_cortex REST
 > endpoints that `hyperloom.agents.framework.sources.primus_cortex` talks to.
 > This file is the authoritative contract from framework-agent's point of view.
 
@@ -19,6 +19,31 @@ composing paths.
 liveness probe before kicking off a run.
 
 ## Endpoints
+
+### `GET /v1/search/prs`
+
+The primary discovery path whenever keywords are present; the `/prs` list
+endpoint below is only its fallback.
+
+Query params:
+
+| Param | Type | Notes |
+|---|---|---|
+| `q` | str | Space-joined keywords; the server does word-**AND** matching, so a long query can return zero rows. |
+| `repo` | str | `owner/name` slug. |
+| `state` | `"open"` / `"all"` | `"all"` when `ExploreRequest.pr_states` includes merged/closed/all, else `"open"`. |
+| `limit` | int | Over-fetched at `3 x max_search_candidates`; the client then reranks by `score_title_with_anti_signal` and trims to `max_search_candidates`. |
+
+Response (200): the same list shapes as `/prs`, except items may be match
+records `{"summary": {...pr fields...}, "matched_field": ..., "snippet": ...}`.
+`_coerce_pr_item` unwraps `summary` to the list endpoint's payload shape.
+
+Errors: the dispatcher falls back to `GET /v1/repos/{owner}/{repo}/prs`
+(label-only listing) in two cases — a `PrimusCortexError` (e.g. a server that
+does not implement this endpoint) and an empty result set. This is the one
+place framework-agent deliberately catches `PrimusCortexError` instead of
+hard-failing; see the "Do not catch-and-fallback silently" rule under
+"Error semantics".
 
 ### `GET /v1/repos/{owner}/{repo}/prs`
 

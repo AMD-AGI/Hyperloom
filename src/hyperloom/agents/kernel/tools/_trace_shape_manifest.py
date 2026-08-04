@@ -279,9 +279,11 @@ def build_variant_rows(
     """Build variant-discriminating rows from one trace ``analyze_trace`` result.
 
     Iterates the time-ordered ``kernel_launches`` (requires the reader was called
-    with ``emit_launches=True``), assigns ``node_ordinal`` by launch order, and
-    aggregates by ``signature_key`` (identical (variant,node,signature) launches
-    within the window fold into one row with summed time and replay count).
+    with ``emit_launches=True``) and emits one row per launch, with
+    ``node_ordinal`` assigned by launch order. Because ``node_ordinal``
+    participates in ``signature_key``, rows are never merged and ``replay_count``
+    is always 1; the steady replay multiplier is recorded separately in
+    ``workload.variant_steady_replay``.
     """
     launches = sorted(
         (analysis.get("kernel_launches") or []),

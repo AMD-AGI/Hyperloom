@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``orchestrator.roofline_ceiling`` (formula correctness, graceful degrade, HF metadata parsing)."""
+"""Tests for ``orchestrator.kernel.roofline_ceiling`` (formula correctness, graceful degrade, HF metadata parsing)."""
 
 from __future__ import annotations
 
@@ -1236,7 +1236,7 @@ class TestDiffusionComputeCeiling:
     def test_read_dit_meta_flux_no_sample_size_uses_resolution(self, tmp_path):
         self._write_flux_configs(tmp_path)
         dit = _read_diffusion_dit_meta(str(tmp_path), height=1024, width=1024)
-        assert dit is not None  # current code returns None (no sample_size)
+        assert dit is not None  # resolution stands in for the absent sample_size
         dit_params, latent_tokens, num_layers, hidden = dit
         assert hidden == 24 * 128  # 3072
         # (1024 / (vae_scale 8 * pack 2))^2 = 64^2
@@ -1295,7 +1295,8 @@ class TestDiffusionComputeCeiling:
             server_args="",
         )
         bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
-        # current code: FLUX -> _read_diffusion_dit_meta None -> cmp == 0 (memory-only)
+        # FLUX resolves its DiT meta from the runtime resolution, so a compute
+        # ceiling exists instead of degrading to memory-only.
         assert bd.cmp_tok_per_sec > 0
 
     # Per denoising step only the DiT runs; memory ceiling uses DiT-only bytes.
@@ -1352,7 +1353,7 @@ class TestDiffusionComputeCeiling:
         full = rc.compute_diffusion_mem_img_per_sec(
             gpu_type="mi325x", num_gpus=1, weight_bytes=20_000_000_000, num_steps=20
         )
-        # current code feeds the full 20GB checkpoint -> too-low memory ceiling
+        # DiT-only bytes, not the full 20GB checkpoint, drive the memory ceiling.
         assert bd.mem_tok_per_sec == pytest.approx(expected, rel=1e-9)
         assert bd.mem_tok_per_sec > full
 
@@ -1651,7 +1652,7 @@ class TestPhysicalInterpretation095726Z:
             osl=256,
             concurrency=64,
         )
-        # T_cmp ≈ 375 612 ; T_mem ≈ 8 065 ; ratio ~ 46×.
+        # T_cmp ≈ 251 642 ; T_mem ≈ 8 194 ; ratio ~ 31×.
         assert cmp / mem > 10
 
     def test_breakdown_stays_memory_bound_with_cmp_visible(self, tmp_path):
@@ -2803,7 +2804,7 @@ class TestPreludeRooflineWarmReplayIntegration:
 
 
 class TestDiffusionCeiling:
-    """xDiT (diffusion) images/sec memory-bound roofline ceiling (M7a)."""
+    """xDiT (diffusion) images/sec memory-bound roofline ceiling."""
 
     def test_mem_img_per_sec_formula(self):
         # per-step = weight_bytes / (bw * gpus); img/s = 1 / (steps * per-step).

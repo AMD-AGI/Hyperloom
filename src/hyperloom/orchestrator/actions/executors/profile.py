@@ -10,15 +10,21 @@ under ``torch_trace/`` (or ``capture_traces/`` for TraceLens vLLM capture).
 Result schema (delivered on the bus as ``delegated_result``)::
 
     status:        "succeeded" | "failed"
-    framework:     "sglang"
+    framework:     "sglang" | "vllm" | "atom" | "xdit" | "hunyuan_image3"
     model:         path
     request/output/total_token_throughput, latency stats (same as baseline)
     workspace:     absolute path of the Magpie workspace
     trace_dir:     absolute path of the torch_trace dir (or None)
+    trace_files:   absolute paths of the selected trace files
+    main_trace_path: absolute path of the chosen main trace
+    trace_health:  structure-check dict (see _validate_trace_structure)
+    profile_trace_selection_reason: why that main trace was picked
     report_path:   absolute path of benchmark_report.json
+    error_class / error: set on the failure path (e.g. "no_trace_files")
 
-Downstream (Kernel-agent → tracelens_analysis.py) needs ``trace_dir``; the
-rest is surfaced so the baseline SharedState promotion works unchanged.
+In-repo consumers (roofline.py, loop/writeback.py) prefer ``main_trace_path``
+and fall back to ``trace_files[0]``; the rest is surfaced so the baseline
+SharedState promotion works unchanged.
 """
 
 from __future__ import annotations
@@ -170,14 +176,11 @@ def _validate_trace_structure(
     6. (Hyperloom-specific) ``trace_split/`` has ``_steady_state_*``
        files, NOT ``_extend_*`` / ``_decode_*`` (detects profile_by_stage
        leaking through PROFILE_EXTRA_BODY)
+    7. main trace has ``cpu_op`` / ``kernel`` events (a metadata-only trace
+       means the profiler active window recorded nothing; triggers a roofline
+       re-profile)
 
     Read-only; each check warns independently so partial signals stay actionable.
-
-    Returns a structured ``trace_health`` dict:
-    ``per_kernel_attribution_degraded`` (no execute_*/user_annotation events ->
-    per-kernel time folded, triggers eager re-profile), ``capture_traces_present``,
-    ``zero_ops`` (metadata-only trace, triggers roofline re-profile), and
-    ``issues`` (logged warning strings).
 
     Args:
         trace_dir: The profile workspace trace directory to inspect.
@@ -185,8 +188,11 @@ def _validate_trace_structure(
             framework-specific checks.
 
     Returns:
-        A ``trace_health`` dict with ``issues``,
-        ``per_kernel_attribution_degraded``, and ``capture_traces_present``.
+        A ``trace_health`` dict with ``issues`` (logged warning strings),
+        ``per_kernel_attribution_degraded`` (no ``execute_*``/
+        ``user_annotation`` events -> per-kernel time folded, triggers an eager
+        re-profile), ``capture_traces_present``, and ``zero_ops``
+        (metadata-only trace, triggers a roofline re-profile).
     """
     issues: list[str] = []
     per_kernel_attribution_degraded = False

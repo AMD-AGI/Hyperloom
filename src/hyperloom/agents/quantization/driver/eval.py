@@ -64,7 +64,7 @@ def resolve_threshold(
     *,
     acceptable_eval_gap: float | None,
 ) -> tuple[float, str]:
-    """Resolve the eval-gap threshold per the §3.1 priority chain.
+    """Resolve the eval-gap threshold per the SKILL.md §5.4 priority chain.
 
     Args:
         workspace: Workspace directory that may hold a threshold override

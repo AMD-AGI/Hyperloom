@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.sources.primus_cortex. Hermetic - no real HTTP."""
+"""Tests for hyperloom.agents.framework.sources.primus_cortex. Hermetic - no real HTTP."""
 
 from __future__ import annotations
 

@@ -254,6 +254,7 @@ def _build_backends(
             model=claude_model,
             max_turns_default=4,
             conversational=True,
+            capture_turn_diagnostics=True,
         )
 
     backends: dict[str, Any] = {

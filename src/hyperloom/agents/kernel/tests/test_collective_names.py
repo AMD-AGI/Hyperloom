@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for :mod:`kernel-agent.tools._collective_names` collective detection."""
+"""Tests for :mod:`_collective_names` collective detection."""
 
 from __future__ import annotations
 

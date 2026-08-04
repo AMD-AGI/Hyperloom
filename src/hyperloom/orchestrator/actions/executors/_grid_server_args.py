@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared helper for the ``explore`` executor's grid runs.
+"""Server-argument composition helpers.
 
-Takes a base Magpie YAML + a list of (name, extra_server_args, extra_envs)
-variants, runs Magpie once per variant, parses ``benchmark_report.json``,
-returns the winners.
+Shared by the explore / integrate_patch / grid executors and the workload-env
+builder: merge/remove/replace semantics for ``EXTRA_*_ARGS``, last-wins dedupe
+for vLLM/atom single-value flags, shell-safety validation, JSON-valued flag
+compaction/repair, the sglang watchdog / context-length / attention-backend /
+MoE-runner injections, and ``apply_runtime_benchmark_overrides`` for the
+materialized Magpie YAML. Nothing here runs a benchmark — the run/parse/
+winner-selection loop lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations

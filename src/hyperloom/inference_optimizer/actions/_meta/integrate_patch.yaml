@@ -19,8 +19,8 @@ allowed_tools:
   # requires ``Edit`` whenever ``workspace_mutation`` is in
   # ``requires_lanes``; the executor itself shells out to
   # ``git apply`` via Bash and never uses Edit. Keeping Edit in the
-  # whitelist satisfies the invariant + lets a future repair-loop
-  # specialist (PR-A7+) inherit the same yaml's tool surface if we
+  # whitelist satisfies the invariant + lets a hypothetical repair-loop
+  # specialist inherit the same yaml's tool surface if we
   # ever attach an LLM repair pass to a failed integrate.
   - emit_intent
   - Read
@@ -37,25 +37,23 @@ preferred_backend: claude
 preferred_model: claude-opus-4-7
 max_turns: 4
 lease_ttl_sec: 3600
-description: "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + accuracy gate, KEEP or REVERT. EXPLORE-phase deterministic executor."
+description: "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + accuracy gate, KEEP or REVERT. Deterministic executor for EXPLORE and FRAMEWORK_AGENT; also serves the enablement launch-only build probe and framework-agent authoring lanes."
 pipeline_phase: explore
 typical_runtime_min: 10.0
 applicable_when:
-  - "phase == 'EXPLORE'"
+  - "phase in ('EXPLORE', 'FRAMEWORK_AGENT')"
   - "specialist_done_with_patches_pending"
-# PR-A1 / PR-A4 (Arbor dispatch into Hyperloom):
-#
 # IntegratePatchExecutor reads ``params.specialist_task_id`` to look up the
 # specialist's worktree under ``runs/specialist/<task_id>/worktree/``, applies
 # its ``patches: [paths]`` to the framework source roots via ``git apply``,
 # restarts the inference server, runs a Magpie throughput benchmark plus the
 # GSM8K accuracy gate, and emits KEEP / REVERT.
 #
-# Inv-5.1 update (this PR): specialists in EXPLORE may now write source
-# patches, but only into ``runs/specialist/<task_id>/worktree/``; the
-# physical ``git apply`` against framework_source_roots is done by THIS
-# action (orchestrator-side, serving-lane-locked), preserving Inv-3 single
-# tenant GPU + Coordinator-as-sole-fact-layer-writer.
+# Inv-5.1: specialists write source patches only into
+# ``runs/specialist/<task_id>/worktree/``; the physical ``git apply`` against
+# framework_source_roots is done by THIS action (orchestrator-side,
+# serving-lane-locked), preserving Inv-3 single tenant GPU +
+# Coordinator-as-sole-fact-layer-writer.
 params_schema:
   specialist_task_id:
     type: string
@@ -86,8 +84,10 @@ params_schema:
       throughput must improve at least this much over baseline_tput to be
       kept; otherwise REVERT.
   accuracy_baseline:
-    type: object
+    type: number
     description: |
-      Optional. Per-(task, metric) baseline scores read from
-      ``$SESSION_DIR/baseline_accuracy.json``. Defaults to the file when
-      omitted; REVERT fires on any metric dropping >1pp.
+      Optional. Baseline accuracy score (GSM8K by default) the patched stack
+      is graded against. Defaults to ``SharedState.baseline_accuracy``
+      (recorded by the ``baseline`` action) when omitted; a drop greater than
+      0.05 absolute (``_accuracy_gate.ACCURACY_THRESHOLD``) blocks KEEP and
+      triggers REVERT.

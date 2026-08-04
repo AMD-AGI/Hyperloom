@@ -518,14 +518,16 @@ class CriticAgentBackend:
 
         Writes the ``coordinator_inbox`` request, runs ``prepare-review`` to get
         a judge bundle, enriches its ``review_constraints`` (action policy and
-        cross-domain rules), drives Codex reasoning when proposals exist, runs
+        cross-domain rules), drives the review inference call when proposals
+        exist (Codex chat-completions, or the native Anthropic Messages API
+        when ``protocol == 'anthropic'``), runs
         ``commit-review`` to produce the intent envelope, validates it, and
         records per-turn telemetry.
 
         Args:
             prompt (str): The Coordinator-rendered inbox prompt for this turn.
             system_prompt (str | None): Optional system prompt forwarded into
-                the Codex reasoning call.
+                the review reasoning call.
             tools (list[str] | None): Unused; the Critic exposes no tool palette
                 to the Coordinator.
             max_turns (int): Unused; the Critic is single-turn.
@@ -1147,9 +1149,12 @@ class CriticAgentBackend:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
 
-        Records the accumulated Codex token spend (and summed wall-clock
-        ``latency_ms``) under ``component=critic``, using the tick/phase from
-        :meth:`set_trace_context`. Best-effort: never raises into the review path.
+        Records the accumulated review-model token spend (and summed wall-clock
+        ``latency_ms``) under ``component=critic`` for whichever transport
+        :attr:`protocol` selected — OpenAI-compatible chat.completions or native
+        Anthropic Messages — using the tick/phase from :meth:`set_trace_context`.
+        The stamped ``model`` is :attr:`_review_model`. Best-effort: never raises
+        into the review path.
 
         Args:
             usage_acc: Accumulated token counts with ``input_tokens`` /

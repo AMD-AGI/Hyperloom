@@ -4,8 +4,9 @@
 
 # framework-agent installer (P2 PR-D).
 #
-# Idempotent. Used both standalone (developer pod setup) and chained
-# from src/hyperloom/inference_optimizer/assets/install.sh on Hyperloom sandboxes.
+# Idempotent. Standalone developer-pod setup; the inference_optimizer
+# installer does not chain to it (framework-agent ships inside the
+# hyperloom distribution).
 # Targets a single Python venv (PEP 660 editable install) so the `fa`
 # console script is on PATH alongside `inference_optimizer`.
 #

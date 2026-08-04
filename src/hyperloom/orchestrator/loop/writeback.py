@@ -22,7 +22,8 @@ from ..state.optimization_journal import (
     operation_kind_for,
     summarize_change,
 )
-from ..state.shared_state import SharedState
+from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -31,6 +32,7 @@ from .coordinator_helpers import (
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
+    _geak_result_has_material,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
@@ -156,11 +158,11 @@ class WritebackCollaborator:
         *,
         action_name: str | None = None,
     ) -> None:
-        """Record a PolicyGate denial and apply escalation side effects.
+        """Record a PolicyGate denial.
 
-        Publishes a ``policy_denied`` observation, records the denial streak,
-        auto-prunes the action family at streak >= 5, and sets the
-        ``policy_loop`` stop reason at streak >= 10.
+        Publishes a ``policy_denied`` observation and records the denial streak.
+        The streak is a fact for LLM self-correction only: there is no
+        auto-prune and no ``policy_loop`` stop triggered from it.
 
         Args:
             source (str): The agent whose intent was denied.
@@ -646,7 +648,7 @@ class WritebackCollaborator:
             # pending state, preserve the frozen trigger identity, increment stall.
             reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
             is_revalidation = bool(
-                (task.params or {}).get("reason") == "enablement_eval_revalidation"
+                (task.params or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
@@ -851,7 +853,13 @@ class WritebackCollaborator:
         self,
         result_dict: dict[str, Any] | None,
     ) -> str | None:
-        """Decide whether a failed result warrants a pitfall row (Threshold-B): crash/oom/hang → SEVERITY_CRASH; gain_pct ≤ -5% → SEVERITY_REGRESS; else None.
+        """Decide whether a failed result warrants a pitfall row.
+
+        ``crash`` / ``oom`` / ``hang`` / ``detokenizer_stall`` on ``error_class``,
+        or ``crash`` / ``oom`` / ``hang`` on ``status``, yield
+        ``SEVERITY_CRASH``; a ``gain_pct`` at or below
+        ``PITFALL_REGRESS_THRESHOLD_PCT`` (-5.0) yields ``SEVERITY_REGRESS``;
+        otherwise ``None``.
 
         Args:
             result_dict: The failed task's result dict; non-dict yields ``None``.
@@ -1810,12 +1818,8 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # route session_steward_specialist verdicts. Done payload
-        # carries extra fields beyond the standard schema; see
-        # ``actions/assess_remaining_gaps.md`` and the prompt builder
-        # focus template. Coerce out-of-vocab recommendations to
-        # ``stop_session`` (defense in depth — the LLM is allowed to
-        # write any string but we only honour the closed enum).
+        # ``_route_steward_verdict`` has no definition anywhere, so this branch
+        # cannot succeed — the except below swallows the AttributeError.
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
@@ -2028,8 +2032,8 @@ class WritebackCollaborator:
         bv: dict[str, Any],
         *,
         gap_canonical_id: str = "",
-    ) -> None:
-        """Update SharedState.current_best + recompute cumulative_gain; gap_canonical_id (when known) is stamped onto the stack entry so provenance resolves by gap id not name.
+    ) -> bool:
+        """Lift a winner only when it improves the current throughput anchor.
 
         Args:
             task_kind: The action kind that produced the winner (stamped on the
@@ -2038,7 +2042,20 @@ class WritebackCollaborator:
             bv: The winning variant dict (args, envs, metrics, provenance).
             gap_canonical_id: When known, stamped onto the stack entry so
                 provenance resolves by gap id rather than name.
+
+        Returns:
+            ``True`` when the winner was lifted, ``False`` when it was refused
+            for not beating the current anchor.
         """
+        anchor = resolve_grading_anchor_tput(self.shared_state)
+        if anchor > 0 and float(best_tput) <= anchor:
+            log.info(
+                "current_best held at %.1f: %s winner measured %.1f (no lift)",
+                anchor,
+                task_kind,
+                float(best_tput),
+            )
+            return False
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
@@ -2207,6 +2224,7 @@ class WritebackCollaborator:
             self.shared_state.cumulative_gain = (
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
+        return True
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
         """Whether to enqueue the post-baseline PRELUDE bootstrap chain.
@@ -2337,7 +2355,7 @@ class WritebackCollaborator:
         promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         is_revalidation = bool(
-            task_params.get("reason") == "enablement_eval_revalidation"
+            task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
         # The anchor is the best measurement of the unmodified stack. A later,
@@ -2501,14 +2519,19 @@ class WritebackCollaborator:
             # Stamp canonical params fingerprint for the self-loop denial helper.
             "fingerprint": _baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
-            "is_revalidation": bool(task_params.get("reason") == "enablement_eval_revalidation"),
+            "is_revalidation": bool(task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON),
             "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
             "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+        # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
+        if result.get("eval_probe"):
+            audit_extras["eval_probe"] = result["eval_probe"]
         # seed the gaps[] ledger from baseline (best-effort).
         await self._refresh_gaps(reason="baseline_done")
+        if self.shared_state.baseline_tput > 0:
+            await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
         # snapshot ceiling in case the later roofline step fails.
         if isinstance(tput, (int, float)) and tput > 0:
@@ -2553,6 +2576,61 @@ class WritebackCollaborator:
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+
+    async def _drain_queued_baselines(self, *, reason: str) -> list[str]:
+        """Cancel redundant queued baselines, preserving enablement revalidation.
+
+        Args:
+            reason: Stamped onto the cancellation history and the observation.
+
+        Returns:
+            The cancelled task ids (empty when the queue held none).
+        """
+        spared = await self._enablement_revalidation_task_ids()
+        try:
+            cancelled = await self.tasks.cancel_family(
+                ["baseline"],
+                reason=reason,
+                exclude_task_ids=spared,
+            )
+        except Exception:  # noqa: BLE001 — draining is best-effort
+            log.exception("baseline drain: cancel_family failed")
+            return []
+        if not cancelled:
+            return []
+        log.info(
+            "baseline drain: cancelled %d queued baseline task(s) (reason=%s, spared=%d)",
+            len(cancelled),
+            reason,
+            len(spared),
+        )
+        await self._record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "baseline_drain",
+                "reason": reason,
+                "cancelled_task_ids": cancelled,
+                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+            },
+        )
+        return cancelled
+
+    async def _enablement_revalidation_task_ids(self) -> set[str]:
+        """Return queued enablement-revalidation baseline task IDs."""
+        spared: set[str] = set()
+        tracked = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        if tracked:
+            spared.add(tracked)
+        try:
+            for task in await self.tasks.queued():
+                if str(getattr(task, "kind", "") or "") != "baseline":
+                    continue
+                if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
+                    spared.add(str(getattr(task, "task_id", "") or ""))
+        except Exception:  # noqa: BLE001 — fall back to the tracked id alone
+            log.exception("baseline drain: queued-task scan failed")
+        return {t for t in spared if t}
 
     async def _promote_replay_warm_recipe(
         self,
@@ -2828,20 +2906,101 @@ class WritebackCollaborator:
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=cb_tput,
                 )
+                ps = (
+                    self.shared_state.geak_result
+                    if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                    else {}
+                )
+                # A rebench that beats current_best is only a KERNEL gain when
+                # GEAK actually produced something. Without a material product
+                # (kernel/head/overlay/patch or a config delta vs the pre-KERNEL
+                # best) the win is same-config measurement noise; drop it.
+                # An empty geak_result cannot be judged by the helper, so
+                # disambiguate here: a pre-existing ``geak_e2e`` stack entry
+                # means this is a resume revalidation of an already-material win
+                # (let it through); otherwise there is no material to validate.
+                if decision == "validated":
+                    stack_now = self.shared_state.optimization_stack or []
+                    has_prior_geak_e2e = any(
+                        isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now
+                    )
+                    # Escape hatch first: a pre-existing geak_e2e stack entry is
+                    # an already-proven win, so this is a resume revalidation.
+                    # It must short-circuit the material check regardless of
+                    # geak_result (which is persisted and thus non-empty on
+                    # resume) — by now current_best already carries the GEAK
+                    # accepted_config, so the fingerprint would match and be
+                    # mis-judged no_material, reverting a real win. Only apply
+                    # the material gate on the FIRST validation (no prior entry),
+                    # where current_best is still the pre-KERNEL config.
+                    if not has_prior_geak_e2e:
+                        if not ps:
+                            decision = "no_material"
+                        elif not _geak_result_has_material(
+                            ps,
+                            prev_best_flags=str(cb_now.get("extra_server_args") or ""),
+                            prev_best_envs=cb_now.get("extra_envs") or {},
+                        ):
+                            decision = "no_material"
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
-                    ps = (
-                        self.shared_state.geak_result
-                        if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                        else {}
-                    )
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
                     )
+                elif decision == "no_material":
+                    # No material GEAK product; the rebench beating current_best
+                    # is same-config measurement noise. Do not touch the
+                    # headline / stack / gain; record + clear the candidate.
+                    log.info(
+                        "geak 2b rebench beat current_best but GEAK shipped no "
+                        "material product (measured=%r current_best=%r) -> "
+                        "no_material drop",
+                        measured,
+                        cb_tput,
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_no_material",
+                                "measured_tput": float(measured),
+                                "current_best_tput": (
+                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
+                                ),
+                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak no_material: observation emit failed")
+                    # Stamp the drop on geak_result (always, so an empty {} is
+                    # distinguishable from never-populated on resume/debug and
+                    # acts as a tombstone against KERNEL crash-recovery
+                    # re-enqueue) and reject any provisional KEEP in
+                    # kernel_journey so a session audit does not read a dropped
+                    # candidate as an accepted kernel (no-op when the journey
+                    # has no KEEP / the file is absent).
+                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
+                    ps_stamped["revalidation_status"] = "no_material"
+                    self.shared_state.geak_result = ps_stamped
+                    try:
+                        self.phase_kernel._reject_geak_kernel_journey(
+                            ps_stamped,
+                            measured_tput=float(measured),
+                            current_best_tput=(
+                                float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
+                            ),
+                            provenance="geak_no_material",
+                            rejection_reason="geak_no_material_product",
+                        )
+                    except Exception:  # noqa: BLE001 - journey reject is best-effort
+                        log.exception("geak no_material: journey rejection failed")
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
                 elif decision == "no_promote":
                     # Well-measured + engaged over baseline, but does not beat
                     # current_best. This is a real result, NOT inconclusive, so
@@ -2990,13 +3149,12 @@ class WritebackCollaborator:
                 explore_gap_cid = (
                     str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
                 )
-                self._lift_to_current_best(
+                promoted = self._lift_to_current_best(
                     "explore",
                     float(best_tput),
                     best_winner,
                     gap_canonical_id=explore_gap_cid,
                 )
-                promoted = True
                 changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
@@ -3013,7 +3171,12 @@ class WritebackCollaborator:
                 )
         else:
             changed = True
-        audit_decision = "promoted" if promoted else "discarded"
+        if promoted:
+            audit_decision = "promoted"
+        elif winners and not is_revalidation_task:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "round_id": round_id,
             "winners_count": (len(winners) if isinstance(winners, list) else 0),
@@ -3052,6 +3215,7 @@ class WritebackCollaborator:
                 or task_params.get("enablement_landing")
             )
         )
+        lifted = False
         if kept_flag:
             specialist_task_id = str(
                 result.get("specialist_task_id")
@@ -3111,12 +3275,11 @@ class WritebackCollaborator:
             if prebaseline_enablement:
                 lift["baseline_enablement"] = True
                 lift["attribution_eligible"] = False
-            if prebaseline_enablement:
                 # This patch establishes the runnable baseline environment. Keep
                 # it in the configuration stack for reproducibility, but mark it
                 # ineligible for gain attribution because no runnable before
                 # measurement exists.
-                self._lift_to_current_best(
+                lifted = self._lift_to_current_best(
                     "integrate_patch",
                     float(new_tput),
                     lift,
@@ -3130,13 +3293,13 @@ class WritebackCollaborator:
                     specialist_task_id,
                 )
             else:
-                self._lift_to_current_best(
+                lifted = self._lift_to_current_best(
                     "integrate_patch",
                     float(new_tput),
                     lift,
                     gap_canonical_id=gap_canonical_id,
                 )
-                if self.shared_state.baseline_tput > 0:
+                if lifted and self.shared_state.baseline_tput > 0:
                     self._update_cumulative_gain_validated(new_tput)
                     self.shared_state.resume_pending_revalidation = False
                     await self._maybe_enqueue_watermark_roofline(
@@ -3152,13 +3315,14 @@ class WritebackCollaborator:
             }:
                 self.shared_state.pending_integrate = {}
                 changed = True
-        audit_decision = (
-            "enablement_accepted"
-            if prebaseline_enablement
-            else "promoted"
-            if kept_flag
-            else "discarded"
-        )
+        if prebaseline_enablement:
+            audit_decision = "enablement_accepted" if lifted else "no_promote"
+        elif lifted:
+            audit_decision = "promoted"
+        elif kept_flag:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "status": status,
             "specialist_task_id": result.get("specialist_task_id"),
@@ -3253,6 +3417,7 @@ class WritebackCollaborator:
                         entry["max_gain_pct_observed_in_batch"] = gain
                     break
         changed = True
+        lifted = False
         if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
             lift = {
                 "name": f"framework:{cand_id}",
@@ -3266,13 +3431,18 @@ class WritebackCollaborator:
                 "source_phase": "FRAMEWORK_AGENT",
                 "provenance": "framework_agent",
             }
-            self._lift_to_current_best("framework", float(new_tput), lift)
-            if self.shared_state.baseline_tput > 0:
+            lifted = self._lift_to_current_best("framework", float(new_tput), lift)
+            if lifted and self.shared_state.baseline_tput > 0:
                 self._update_cumulative_gain_validated(new_tput)
                 await self._maybe_enqueue_watermark_roofline(
                     reason="framework_keep_watermark",
                 )
-        audit_decision = "promoted" if kept_flag else "discarded"
+        if lifted:
+            audit_decision = "promoted"
+        elif kept_flag:
+            audit_decision = "no_promote"
+        else:
+            audit_decision = "discarded"
         audit_extras = {
             "candidate_id": cand_id,
             "batch_id": batch_id,
@@ -3730,12 +3900,13 @@ class WritebackCollaborator:
         else:
             return False
         before = len(self.shared_state.optimization_stack or [])
-        self._lift_to_current_best(
+        if not self._lift_to_current_best(
             kind,
             float(tput),
             bv,
             gap_canonical_id=str(result.get("gap_canonical_id") or ""),
-        )
+        ):
+            return False
         return len(self.shared_state.optimization_stack or []) > before
 
     def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
@@ -4109,6 +4280,8 @@ class WritebackCollaborator:
                             "note": "same-harness config-identity revalidation of the geak e2e win",
                         }
                     ],
+                    # Revalidation reproduces the whole stack, so its gain is
+                    # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
                     "enable_stack_rebench": False,
                 }
@@ -4171,6 +4344,7 @@ class WritebackCollaborator:
                     "note": "post-resume full-stack end-to-end revalidation",
                 }
             ],
+            # Cumulative-vs-baseline, same as the geak revalidation above.
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
             "enable_stack_rebench": False,
         }
@@ -4196,10 +4370,13 @@ class WritebackCollaborator:
         winner kind (tuned-config / kernel / overlay / flag). Because the replay
         reproduces the optimized config from ``result.json`` directly, a
         ``succeeded`` status is itself the engagement proof. The validated gain
-        is the SAME-harness A/B ``hot_geak_speedup`` (numerator + denominator
-        both measured by GEAK), which is harness-internal and clean - recorded
-        under a distinct provenance because it is a same-harness MARGINAL, not an
-        over-raw total. Used only when 2b (orchestrator harness) is inconclusive.
+        is the MEASURED replay throughput over the orchestrator's raw baseline
+        (``(measured - baseline) / baseline``); GEAK's own ``throughput_speedup``
+        / ``hot_geak_speedup`` serves only as a ``> 1.0`` sanity gate, not as the
+        reported number. Recorded under a distinct provenance
+        (``geak_same_harness_geak``) because the measurement came from GEAK's
+        harness rather than the orchestrator's. Used only when 2b (orchestrator
+        harness) is inconclusive.
 
         Args:
             reason: Human-readable reason stamped in logs/return.
@@ -4224,12 +4401,11 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.debug("geak v4 fallback recording failed", exc_info=True)
         am = ps.get("alignment_metrics") or {}
-        # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
+        # Read GEAK's OWN within-harness speedup on the SAME basis it promoted
         # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
-        # else the hot within-GEAK ratio; see run_e2e final-basis selection). This
-        # makes Hyperloom's same-harness validated gain EQUAL to GEAK's headline
-        # number - using the raw hot A/B instead would report a higher figure than
-        # GEAK itself claims and reopen the alignment gap this path exists to close.
+        # else the hot within-GEAK ratio; see run_e2e final-basis selection). It is
+        # used solely to sanity-check that GEAK claimed a win on its promoted basis
+        # before the replay measurement is promoted as the headline.
         # Falls back to the explicit within-GEAK ratios when throughput_speedup is
         # missing (older result.json), preferring the promoted basis.
         try:

@@ -8,8 +8,11 @@ orchestration executor can import them without pulling in each other's
 dependencies, tests can construct ``BaselineSummary`` directly, and the
 on-disk JSON shape is pinned by ``BaselineSummary.to_dict``.
 
-This data is report-only: only ``ReportExecutor`` reads the on-disk JSON
-to render the "External baseline (advisory)" section in ``final.md``.
+``BaselineSummary`` itself is report-only: only ``ReportExecutor`` reads the
+on-disk JSON to render the "External baseline (advisory)" section in
+``final.md``. The matched measured points are additionally derived into
+``competitor_target.json`` (``research_hints.write_competitor_target``), which
+feeds the EXPLORE gap advisory.
 """
 
 from __future__ import annotations
@@ -105,7 +108,8 @@ class BaselineSummary:
                            "no_target_gpu_configured" | "unsupported_target_gpu" |
                            "dimension_mismatch" | "precision_mismatch" |
                            "no_inferencex_data" | "fetch_error" | "no_valid_rows",
-          "warning":       "<human-readable note, empty when status=ok>",
+          "warning":       "<human-readable note; on status=ok this carries the
+                           matched rows' reference dates, empty if none>",
           "source":        "https://inferencex.semianalysis.com/api/v1"
         }
 

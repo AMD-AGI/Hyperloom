@@ -1,8 +1,7 @@
 # Review Proposal
 
 Use this action when Conductor asks Critic to review an Orchestration proposal,
-Kernel response, generated patch, config change, dispatch fix, or
-`integrate keep_proposed` decision.
+Kernel response, generated patch, config change, or dispatch fix.
 
 ## Expected Input
 
@@ -29,11 +28,14 @@ Treat absent fields as missing evidence, not as passing evidence.
 
 ## Review Triggers
 
-Critic review is required for:
-
-- Orchestration `propose_action` where `accuracy_risk > 0`.
-- Orchestration `propose_action` where `family in {"deep_kernel", "long"}`.
-- Kernel `response` where `kind="integrate"` and `status="keep_proposed"`.
+Every Orchestration `propose_action` is broadcast to Critic with
+`needs_review=True` and cannot dispatch until an `approve` or `advise`
+verdict arrives. There is no `accuracy_risk` or `family` predicate on the
+review path (`family` is a prompt-grouping label only). `integrate_patch`
+carries an extra hard gate in PolicyGate
+(`_validate_integrate_patch_critic_gate`), and the per-proposal approval
+bar comes from the action class — see
+[review_coordinator_inbox.md](review_coordinator_inbox.md).
 
 Critic does not block Robustness emergency actions such as `kill_task`
 or `prune_branch`. Review those only after the fact as advice.

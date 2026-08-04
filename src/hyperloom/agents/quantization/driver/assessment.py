@@ -455,10 +455,12 @@ def build_assessment(
 
 
 def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
-    """Map an ``Assessment`` to a public status string per design §5.4.
+    """Map an ``Assessment`` to a public status string.
 
-    Consumed by
-    :class:`quantization_agent.driver.retry.QuantSkillRunResult`.
+    The mapping keys off the ``AUTO_RECOVER`` / ``AUTO_FAIL`` / ``ASK``
+    category sets in :mod:`.outcomes`; see the "Return shape" section of the
+    agent's ``README.md``. Consumed by
+    :class:`hyperloom.agents.quantization.driver.retry.QuantSkillRunResult`.
 
     Args:
         assessment: The assembled assessment to map.

@@ -9,10 +9,10 @@ so any package may depend on it without an import cycle.
 
 Divergent readers intentionally NOT delegated here (kept local by design):
 
-* ``orchestrator/roofline_ceiling._env_int`` — reads from a *dict* mapping, not
-  from ``os.environ``.
-* ``orchestrator/trace/trace_env.env_flag`` — also treats ``0/false/no/off`` as
-  an explicit ``False`` vocabulary (superset semantics).
+* ``orchestrator/kernel/roofline_ceiling._env_int`` — reads from a *dict*
+  mapping, not from ``os.environ``.
+* ``orchestrator/trace/trace_env.env_flag`` — an unrecognised or empty set
+  value falls back to ``default`` rather than being classified ``False``.
 """
 
 from __future__ import annotations

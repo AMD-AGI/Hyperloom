@@ -7,6 +7,7 @@ reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,6 +68,57 @@ def coord(session_dir) -> Coordinator:
 def test_context_inbox_reader_empty(coord: Coordinator) -> None:
     out = coord._context_inbox_reader()
     assert out == "(no inbox events)"
+
+
+def test_trace_orchestration_turn_persists_diagnostics(coord: Coordinator) -> None:
+    backend = SimpleNamespace(
+        model="claude-test",
+        get_turn_diagnostic=lambda: {
+            "backend": "ClaudeBackend",
+            "model": "claude-test",
+            "sdk_name": "claude_agent_sdk",
+            "sdk_version": "1.2.3",
+            "resume_requested": True,
+            "previous_session_id_hash": "old",
+            "session_id_hash": "new",
+            "new_session": False,
+            "max_turns": 12,
+            "timeout_sec": 300.0,
+            "prompt": "prompt",
+            "system_prompt": "system",
+            "allowed_tools": ["mcp__inference_optimizer__emit_intent"],
+            "mcp_servers": ["inference_optimizer"],
+            "emit_intent_registered": True,
+            "messages": [{"type": "ResultMessage", "is_error": False, "result": "done"}],
+            "result": "done",
+            "raw_text": "done",
+            "tool_blocks": [],
+            "parse_errors": [],
+            "usage": {"input_tokens": 3},
+            "stderr_tail": [],
+        },
+        get_mcp_setup_diagnostic=lambda: {
+            "sdk_name": "claude_agent_sdk",
+            "emit_intent": {"registered": True},
+        },
+    )
+
+    coord._trace_orchestration_turn(
+        agent_name="orchestration",
+        backend=backend,
+        prompt="prompt",
+        system_prompt="system",
+        tools=["emit_intent"],
+        outcome="no_intent",
+        error=RuntimeError("missing intent"),
+    )
+
+    row = json.loads((coord.session_dir / "reports" / "trace" / "orchestration_turns.jsonl").read_text())
+    setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
+    assert row["outcome"] == "no_intent"
+    assert row["resume_requested"] is True
+    assert row["error_type"] == "RuntimeError"
+    assert setup["emit_intent"]["registered"] is True
 
 
 @pytest.mark.asyncio
@@ -640,7 +692,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
     assert p1.msg_id not in coord.state.pending_proposals
 
 
-# -- _format_analysis_md fallback (path read) -------------------------------
+# -- _context_analysis_reader fallback (path read) --------------------------
 def test_context_analysis_reader_path_fallback_on_format_error(
     coord: Coordinator,
     tmp_path,
@@ -1422,7 +1474,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     assert "roofline_evidence" in params
 
 
-# -- _record_fact_per_task (recipe KB KB path) ---------------------------------
+# -- _record_fact_per_task (recipe KB amend path) ------------------------------
 @pytest.mark.asyncio
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
@@ -2036,7 +2088,7 @@ async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkey
     assert any(s.get("session_id") == "other-session" for s in overrides["sessions"])
 
 
-# -- _on_enter_close 5-step sequencer ---------------------------------------
+# -- _on_enter_close 7-step sequencer ---------------------------------------
 @pytest.mark.asyncio
 async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch) -> None:
     async def _fake_run(task, **kw):

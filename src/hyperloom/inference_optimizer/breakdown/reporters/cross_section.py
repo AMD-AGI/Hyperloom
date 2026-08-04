@@ -33,7 +33,7 @@ class GlobalFacts:
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
     data_quality_flags: list[str]
-    attribution_method: str  # "validated" | "best-effort reconstructed" | "missing"
+    attribution_method: str  # "validated" | "unattributed" | "unattributed (stack listed for reference, not verified as KEEP)" | "missing"
 
     def as_prompt_dict(self) -> dict[str, Any]:
         """Serialize the fact pack to a plain dict for the LLM prompt.

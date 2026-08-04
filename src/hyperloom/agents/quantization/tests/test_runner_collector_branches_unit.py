@@ -1,4 +1,4 @@
-"""Branch coverage for quantization_agent.driver.runner / result_collector."""
+"""Branch coverage for hyperloom.agents.quantization.driver.runner / result_collector."""
 
 from __future__ import annotations
 

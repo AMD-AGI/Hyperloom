@@ -189,13 +189,17 @@ def _bench_remote(
 
 
 def _pick_gpu_node() -> str:
-    """Return the head-pod node id (GPU-bearing, co-located with the caller); fall back to any alive GPU node.
+    """Return the co-located head-pod node id, matched by IP; fall back to any alive node with GPU >= 1.
+
+    GPU capacity is not verified for the IP match, so a GPU-less head pod is
+    returned without error and the ``num_gpus=1`` actor is then unschedulable.
 
     Returns:
         str: The Ray ``NodeID`` to pin the bench actor to.
 
     Raises:
-        RuntimeError: If there are no alive nodes, or none with a GPU.
+        RuntimeError: If there are no alive nodes, or if no node matches our IP
+            and no alive node has GPU >= 1.
     """
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:

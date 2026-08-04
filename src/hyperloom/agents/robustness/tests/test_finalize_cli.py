@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the ``finalize`` subcommand of robustness_agent.runtime.cli."""
+"""Tests for the ``finalize`` subcommand of hyperloom.agents.robustness.runtime.cli."""
 
 from __future__ import annotations
 

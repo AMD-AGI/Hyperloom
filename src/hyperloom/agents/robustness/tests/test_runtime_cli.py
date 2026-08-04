@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the subprocess transport CLI: the in-process ``_run_tick`` helper and the real ``python -m robustness_agent.runtime.cli tick`` invocation. Pins the request.json/emit.json contract the Coordinator host-side wrapper depends on."""
+"""Tests for the subprocess transport CLI: the in-process ``_run_tick`` helper and the real ``python -m hyperloom.agents.robustness.runtime.cli tick`` invocation. Pins the request.json/emit.json contract the Coordinator host-side wrapper depends on."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
-    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only."""
+    """Strategic HIGH symptoms (crash_count=10 → crash_count_emergency) emit alert(high) only."""
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request({**_REQUEST_HIGH_SEVERITY, "options": {"session_dir": str(tmp_path)}})
@@ -128,7 +128,7 @@ def test_coerce_request_rejects_empty_raw_prompt():
 
 
 # ---------------------------------------------------------------------------
-# Subprocess: python -m robustness_agent.runtime.cli tick
+# Subprocess: python -m hyperloom.agents.robustness.runtime.cli tick
 # ---------------------------------------------------------------------------
 
 

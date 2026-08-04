@@ -1,11 +1,14 @@
 # inference_optimizer
 
 The **inference_optimizer** package is the canonical entry point for
-Hyperloom's autonomous LLM inference optimization on AMD GPUs. It
-houses the Coordinator (a Python state machine) that drives the
-four-agent architecture — Orchestration, Kernel, Critic, and
-Robustness — through baseline measurement, profiling, parameter
-search, kernel optimization, and validated promotion.
+Hyperloom's autonomous LLM inference optimization on AMD GPUs. It is
+the CLI/session layer — CLI, session paths, action `_meta` specs,
+protocol surfaces, and breakdown export — that launches the Coordinator
+(a Python state machine) living in the sibling `hyperloom.orchestrator`
+package, which drives the four-agent architecture — Orchestration,
+Kernel, Critic, and Robustness — through baseline measurement,
+profiling, parameter search, kernel optimization, and validated
+promotion.
 
 This is the package referenced by `src/hyperloom/inference_optimizer/SKILL.md`;
 it is installed from the `hyperloom-inference_optimizer` wheel published on
@@ -17,10 +20,10 @@ GitHub Releases (see `examples/README.md`), not from PyPI.
   optimization protocol, prompt templates, failure handling, and
   knowledge-base usage. Cursor and Claw load this on demand.
 * **[../../../README.md](../../../README.md)** — repository-level overview,
-  hosted and local quickstart, results table, and migration notes.
+  quickstart links, and the documentation index.
 * **[../../../docs/conceptual/optimization-loop.md](../../../docs/conceptual/optimization-loop.md)**
-  — the conversational orchestration loop, phase chain, and KB-driven
-  priors with a worked example.
+  — the conversational orchestration loop, the phase chain and per-phase
+  contracts, RecipeKB feedback loops, and the retired-names list.
 * **[../../../docs/reference/authentication.md](../../../docs/reference/authentication.md)** — credential
   and environment configuration.
 * **[../../../docs/reference/environment-variables.md](../../../docs/reference/environment-variables.md)**
@@ -60,9 +63,11 @@ src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
 ├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
 ├── cli/                        # `python -m hyperloom.inference_optimizer.cli optimize` entry point
-│   ├── __init__.py             # main()/_build_parser()/_preflight()/_run_optimize()
-│   ├── backends/bootstrap/executors/kb/model_gate/model_config_utils.py
+│   ├── __init__.py             # main()/_run_optimize()
+│   ├── parser.py               # _build_parser()
+│   ├── backends/bootstrap/executors/kb/model_gate/preflight.py
 │   └── credentials/multi_node/quantization/recover.py
+├── model_config_utils.py       # stdlib-only model-config leaf shared by cli/ and the orchestrator
 ├── session/                    # Session paths, manifest writer, single-optimizer lock
 │   ├── manifest.py             # Session manifest writer
 │   ├── paths.py                # USER_DATA_PATH-rooted path helpers
@@ -74,7 +79,6 @@ src/hyperloom/inference_optimizer/
 ├── tools/                      # Operator CLIs (dump_session_breakdown/event_counts/…)
 ├── experiments/                # A/B and roofline-audit scripts
 ├── assets/                     # install.sh + bare-metal/profile configs
-├── data/                       # Framework/recipe reference data (framework/, recipes/)
 └── tests/                      # Unit + regression tests
 ```
 

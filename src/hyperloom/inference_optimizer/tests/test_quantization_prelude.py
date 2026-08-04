@@ -1,8 +1,11 @@
 """Tests for the --quantize quantization prelude.
 
-Three groups, all offline (no Quark / Claude SDK / GPU):
+All offline (no Quark / Claude SDK / GPU):
 
-* Parser     — ``--quantize`` flag parses (default None / value when passed).
+* Parser     — ``--quantize`` / ``--quantize-scheme`` flags parse (default None
+               / value when passed).
+* Schemes    — the scheme registry, GPU-constrained validation, and
+               ``build_quantization_prompt`` rendering.
 * Adapter    — ``run_quantization_prelude_async`` maps quantization_agent's
                QuantSkillRunResult status -> decision (return dir vs SystemExit(3)).
 * CLI hook   — ``cli_quantization._run_quantization_prelude`` is a no-op without the flag,

@@ -24,13 +24,16 @@ from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...state.shared_state import resolve_grading_anchor_tput
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
     accuracy_meets_floor,
     accuracy_passed,
     classify_accuracy_failure,
+    eval_probe_summary,
     parse_eval_results,
+    read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
@@ -53,7 +56,6 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._grid_server_args import merge_server_args, split_config_changes
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -399,7 +401,8 @@ def _preflight_missing_targets(
     build) can never apply; flagging it here yields an actionable advisory
     instead of an opaque ``git_apply_failed`` after a wasted apply attempt.
     Patches supplied directly via ``params.patches`` bypass the
-    authoring-time ``specialist_patch_safety`` gate, so they are checked here.
+    authoring-time ``specialists.patch_safety`` vetting gate
+    (:func:`vet_patches`), so they are checked here.
 
     Args:
         framework_root: The git checkout the patches target.
@@ -1419,7 +1422,6 @@ class IntegratePatchExecutor:
         # _stage_resolve populates these onto ctx for stage communication.
         specialist_task_id: str = ctx._ip_specialist_task_id  # type: ignore[attr-defined]
         shared_state = ctx._ip_shared_state  # type: ignore[attr-defined]
-        specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         done_payload: dict[str, Any] = ctx._ip_done_payload  # type: ignore[attr-defined]
 
         # Provision an attempt-scoped runtime AFTER the Critic gate (in
@@ -2656,15 +2658,16 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Throughput KEEP / REVERT decision with optional stack rebench."""
         base_tput = float(params.get("base_tput") or 0.0)
-        if base_tput <= 0 and shared_state is not None:
-            cb = getattr(shared_state, "current_best", None)
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                base_tput = float(cb_tput)
-            else:
-                ss_base = getattr(shared_state, "baseline_tput", 0.0)
-                if isinstance(ss_base, (int, float)) and ss_base > 0:
-                    base_tput = float(ss_base)
+        # Grade against the current live anchor, not a stale task snapshot.
+        live_anchor = resolve_grading_anchor_tput(shared_state)
+        if live_anchor > base_tput:
+            if base_tput > 0:
+                log.warning(
+                    "integrate_patch: anchor drift, params base_tput=%.1f but live anchor is %.1f; using live",
+                    base_tput,
+                    live_anchor,
+                )
+            base_tput = live_anchor
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
         new_tput = bench_result.get("output_throughput")
@@ -2712,6 +2715,9 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
+            if _probe_reason:
+                reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
@@ -3184,9 +3190,6 @@ class IntegratePatchExecutor:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
-        Returns ``(bench_result_dict, gate_evidence)`` where gate_evidence
-        carries ``accuracy_pass`` (True / False / None).
-
         Args:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
@@ -3197,7 +3200,8 @@ class IntegratePatchExecutor:
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
-            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None).
+            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
+            and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
@@ -3336,12 +3340,16 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
+        # Guarded: an empty root would send the recursive scan over the cwd.
+        eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
+
         return bench, {
             "accuracy_pass": accuracy_pass,
             "accuracy": measured_accuracy,
             "enablement_accuracy": enablement_accuracy,
             "enablement_accuracy_task": enablement_accuracy_task,
             "enablement_accuracy_metric": enablement_accuracy_metric,
+            "eval_probe": eval_probe,
         }
 
     @staticmethod

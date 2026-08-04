@@ -69,9 +69,12 @@ _SESSION_SKELETON: tuple[str, ...] = (
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by
 # install.sh + reused for every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",  # pod-local env files (kernel-agent.env.sh, etc.)
-    # Recipe KB per-session bookkeeping (.kb_sid / .kb_warm.json / ...);
-    # created up-front so the KB client never mkdir's on the hot path.
+    "runtime",  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
+    # Workspace-level KB root; it only coincides with the KB path when
+    # session_dir == workspace_root. The per-session bookkeeping
+    # (.kb_warm.json / .kb_pitfalls.json / .kb_lessons.json) lives at
+    # <session_dir>/runtime/recipe_kb (session_paths.recipe_kb_dir) and is
+    # mkdir-ed by its writers in recipe_kb_t0.
     "runtime/recipe_kb",
     "logs",  # launcher stdout (workspace-shared)
 )

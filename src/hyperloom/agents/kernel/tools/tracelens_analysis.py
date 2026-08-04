@@ -135,7 +135,8 @@ class OpResolution:
         status: ``resolved`` / ``non_rewritable`` / ``no_kernel`` / ``unresolved``.
         patchable: The curated patchability verdict (may be ``None``).
         framework: Framework that owns the source (``aiter``/``vllm``/...).
-        sources: Absolute editable ``.cu`` path(s) this resolution owns;
+        sources: Absolute editable source path(s) this resolution owns
+            (``.cu``/``.cuh``/``.hip``/``.h`` or repo-resident ``.py``);
             empty when there is no editable source.
         reason: Skip reason (``triton``/``aten``/...) or the entry ``label``.
         matched_route: For ``dispatch``, the ``match`` glob that fired.
@@ -166,7 +167,7 @@ class OpResolution:
 
     @property
     def primary_source(self) -> str:
-        """The editable ``.cu`` this leaf optimizes (the GEAK ``--kernel-path``), or ``""``."""
+        """The editable kernel source this leaf optimizes (``.cu``/``.cuh``/``.hip``/``.h`` or a repo-resident Triton/TileLang ``.py``), or ``""``."""
         if 0 <= self.target_index < len(self.sources):
             return self.sources[self.target_index]
         return self.sources[0] if self.sources else ""
@@ -191,12 +192,12 @@ class OpResolution:
         return self.status == _ROUTABLE_STATUS and bool(self.patchable) and bool(self.sources)
 
     def leaf_resolutions(self) -> list["OpResolution"]:
-        """Expand into one routable leaf per editable ``.cu`` to optimize.
+        """Expand into one routable leaf per editable source file to optimize.
 
         ``composite`` flattens its routable sub-routes; a routable
         ``single``/``dispatch`` with N ``sources`` yields N leaves (one per
-        ``.cu``); a non-routable resolution yields none. Each leaf routes to its
-        own GEAK run via :attr:`primary_source`.
+        editable source file); a non-routable resolution yields none. Each leaf
+        routes to its own GEAK run via :attr:`primary_source`.
 
         ``single`` (N flat ``sources``) and ``composite`` (N ``fanout``
         sub-routes) therefore expand to the same set of leaves -- one per
@@ -4622,7 +4623,7 @@ def run_command(
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 # Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "545396501e4024055b72a254e97306860f3f090d"
+_TRACELENS_REF_DEFAULT = "c3405111a2f9270fd820a1baa8edaaf6f61e7646"
 
 
 def _default_tracelens_root() -> Path:
@@ -6002,7 +6003,8 @@ def main() -> int:
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
                 )
-            # A dir that exists but is not a git checkout is unusable; fail fast.
+            # A dir that exists but has neither git metadata nor the TraceLens
+            # skill tree is unusable; fail fast.
             if not _tracelens_checkout_complete(tl_root):
                 raise FileNotFoundError(
                     f"TraceLens root incomplete (not a git checkout): {tl_root} "

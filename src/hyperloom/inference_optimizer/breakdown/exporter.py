@@ -2089,7 +2089,7 @@ def write_minimal_final_report(
     lines = [
         "# Inference Optimizer — emergency final report",
         "",
-        "> **Auto-generated safety-net.** The CLOSE phase 5-step "
+        "> **Auto-generated safety-net.** The CLOSE phase 7-step "
         + "sequencer did not run to completion (process exited before "
         + "phase transition, or ``report`` executor failed). For the "
         + "full audit trail open `session_breakdown.json` next to this "

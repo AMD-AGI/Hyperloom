@@ -190,7 +190,6 @@ Before writing, explicitly tell the user:
   even when a different `ANTHROPIC_BASE_URL` already exists.
 - Preserve existing keys unrelated to this setup.
 - Never print secret values back to the user.
-- Do not write `HYPERLOOM_INSTALL_SOURCE`.
 - Do not overwrite an existing non-placeholder secret key.
 
 Write the Anthropic keys plus the common keys:
@@ -252,7 +251,7 @@ For `none`:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
 ```
 
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already

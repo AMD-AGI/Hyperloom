@@ -3,13 +3,12 @@
 
 """ActionRegistry
 
-Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per
-action); the markdown body at ``actions/<name>.md`` is loaded lazily.
+Loads action metadata from ``actions/_meta/<name>.yaml`` (one file per action).
 
 Operational fields gate execution/dispatch (``allowed_tools``,
 ``requires_lanes``, ``lease_ttl_sec``, ``preferred_backend`` /
-``preferred_model``, ``max_turns``, ``side_effects``); all other fields are
-prompt-advisory only.
+``preferred_model``, ``max_turns``, ``side_effects``, ``pipeline_phase``);
+all other fields are prompt-advisory only.
 
 Schema::
 
@@ -25,14 +24,16 @@ Schema::
     requires_lanes:      list[str]    # operational
     allowed_tools:       list[str]    # operational
     side_effects:        list[str]    # operational
-    preferred_backend:   "claude" | "codex"   # operational
+    preferred_backend:   "claude" | "codex" | "forge"   # operational
     preferred_model:     str          # operational
     max_turns:           int          # operational
     lease_ttl_sec:       int          # operational
     applicable_when:     list[str]    # prompt-advisory predicate list
     description:         str          # prompt rendering; defaults to name.
     pipeline_phase:      str          # one of VALID_PIPELINE_PHASES;
-                                      # prompt grouping only.
+                                      # operational -- selects which actions
+                                      # own a runs/<action>/<task_id>/
+                                      # workspace, plus prompt grouping.
     typical_runtime_min: float        # display-only; defaults to
                                       # cost_minutes_p50.
     verdict_class:       "archival" | "exploration" | "promotion"
@@ -64,11 +65,12 @@ VALID_FAMILIES: frozenset[str] = frozenset(
 
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "codex", "forge"})
 
-# Coarse-grained pipeline phase for prompt_builder grouping; prompt-advisory only.
+# Coarse-grained pipeline phase: prompt_builder grouping plus the source for
+# session_paths._RUNS_WORKSPACE_PHASES (runs-workspace ownership).
 VALID_PIPELINE_PHASES: frozenset[str] = frozenset(
     {
-        "prep",  # target_analysis / baseline / warm replay
-        "measure",  # baseline (gates explore)
+        "prep",  # target_analysis
+        "measure",  # baseline / replay_warm_recipe (gates explore)
         "explore",  # explore / specialists / patch integration
         "analysis",  # profile / roofline / deep_kernel_analysis
         "deep",  # kernel_opt / integrate / operator_tuning / vendor_kernel_config

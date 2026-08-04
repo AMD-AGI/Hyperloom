@@ -67,13 +67,13 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
 # wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# MAGPIE_PATH is the single override shared with the Python runtime; a standalone
-# run never clones upstream Magpie when MAGPIE_PATH is set.
+# MAGPIE_PATH is the single override shared with the Python runtime; this
+# installer never fetches Magpie itself, it only records the path.
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_PATH}/venv/bin/python assumed a Magpie-private venv, but
-# src/hyperloom/inference_optimizer/assets/install.sh's ensure_magpie() does
-# `pip install -e $MAGPIE_PATH` into the driver Python's site-packages
+# src/hyperloom/inference_optimizer/assets/install.sh's ensure_magpie() pip
+# installs Magpie into the driver Python's site-packages
 # (or the container image pre-installs it that way) — no venv is ever
 # created at $MAGPIE_PATH/venv. Mirrors _resolve_magpie_python() in
 # src/hyperloom/orchestrator/actions/executors/_grid_runner.py:
@@ -152,7 +152,7 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # the matching release/hyperloom_integration_v1.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="545396501e4024055b72a254e97306860f3f090d"
+TRACELENS_REF="c3405111a2f9270fd820a1baa8edaaf6f61e7646"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -565,7 +565,7 @@ ensure_python() {
 # Apt-installing here is the cheap, framework-agnostic safety net for the
 # TraceLens server patcher, so it carries no new failure modes.
 ensure_patch_tools() {
-  log "ensuring git + patch (required by src/hyperloom/inference_optimizer/_server_patcher fuzzy-fallback path)"
+  log "ensuring git + patch (required by src/hyperloom/orchestrator/actions/executors/_server_patcher.py fuzzy-fallback path)"
   local need_git=0 need_patch=0
   command -v git >/dev/null 2>&1   || need_git=1
   command -v patch >/dev/null 2>&1 || need_patch=1
@@ -828,8 +828,8 @@ PY
   log "starting ray head with --num-gpus=${num_gpus} port=${ray_gcs_port}"
   # Declare the ``serving_slot`` custom resource so serving-family GPU work
   # (baseline / profile / explore / sweep / gpu_research) routed through the
-  # Ray execution backend can hold the whole-machine mutex (ray_modify.plan.md
-  # §12 T6). Without it those tasks request an undeclared resource and deadlock
+  # Ray execution backend can hold the whole-machine mutex serialising
+  # GPU work. Without it those tasks request an undeclared resource and deadlock
   # PENDING forever, since ensure_ray_cluster connects to this existing head
   # instead of starting its own with the resource.
   if ! ray start --head --disable-usage-stats \
@@ -1015,7 +1015,7 @@ ensure_tracelens() {
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal lets both
+  # and mirroring to $TRACELENS_MIRROR_DIR lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
   # the pod-local kernel-agent env so subsequent CLI subprocesses inherit

@@ -24,7 +24,7 @@ def test_fresh_session_has_latest_schema_version():
 
 
 def test_save_writes_schema_version_to_state_json(tmp_path):
-    """Top-level ``schema_version=2`` visible in a fresh state.json."""
+    """Top-level ``schema_version`` visible in a fresh state.json."""
     sd = tmp_path / "session"
     sd.mkdir()
     s = SharedState()
@@ -209,7 +209,7 @@ def test_v2_ungrouped_kernel_uses_runtime_legacy_task_key():
     assert len(state.pending_kernel_integrations) == 1
 
 
-# 6. --reset-state behavior
+# 4. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
     """``--reset-state`` renames state.json so the next load starts blank."""
     import hyperloom.inference_optimizer.cli as optimizer_cli
@@ -237,7 +237,7 @@ def test_reset_state_is_safe_when_no_state_file(tmp_path):
     assert not (sd / "state.json").exists()
 
 
-# 7. CLI flag wiring
+# 5. CLI flag wiring
 def test_cli_exposes_reset_state_flag():
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
@@ -261,7 +261,7 @@ def test_cli_exposes_reset_state_flag():
     assert args2.reset_state is False
 
 
-# 8. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
+# 6. Inv-10.2 — CORE_STATE_FIELDS blocks LLM update_state phase change
 def test_core_state_fields_contains_v08_new_additions():
     """The new fields are locked in CORE_STATE_FIELDS."""
     from hyperloom.orchestrator.policy.gate import CORE_STATE_FIELDS

@@ -235,7 +235,7 @@ def test_plateau_kernel_zero_lookback_returns_false():
 
 
 def test_plateau_kernel_empty_attempts_does_not_trigger():
-    """Fix A: zero kernel attempts must NOT flip plateau via the ``recent_keep_gain == 0.0 < 0.5`` arm."""
+    """Zero kernel attempts must NOT flip plateau via the ``recent_keep_gain == 0.0 < 0.5`` arm."""
     state = SimpleNamespace(kernel_integrate_attempts={})
     triggered, ev = compute_plateau_kernel(state)
     assert triggered is False
@@ -244,7 +244,7 @@ def test_plateau_kernel_empty_attempts_does_not_trigger():
 
 
 def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
-    """Same Fix-A invariant when the ledger has keys but every entry is structurally empty."""
+    """Same invariant when the ledger has keys but every entry is structurally empty."""
     state = SimpleNamespace(
         kernel_integrate_attempts={
             "k_pruned": {"attempts": []},

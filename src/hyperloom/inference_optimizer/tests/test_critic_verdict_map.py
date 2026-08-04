@@ -506,7 +506,7 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "advice=" not in line
 
 
-# 5. _materialize_approved_proposal — filter semantics (unit)
+# 4. _materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     """Pin the ``approved_variant_names`` filter contract independently."""
@@ -618,7 +618,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
-# 6. _handle_delegate — explore grid runs directly (no Critic pre-review)
+# 5. _handle_delegate — explore grid runs directly (no Critic pre-review)
 def _delegate_coord(tmp_path: Path):
     """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
@@ -688,7 +688,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     assert create_calls[0]["params"]["grid"] == grid
 
 
-# 7. Specialist prompt — proposal self-curation contract (Section 1 + 8)
+# 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
     from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
