@@ -128,6 +128,21 @@ _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
 )
 
 
+def stack_base_params(current_best: Any) -> dict[str, Any]:
+    """``base_*`` params projected from the fields ``current_best`` carries.
+
+    Args:
+        current_best: A ``current_best`` snapshot (non-dicts read as empty).
+
+    Returns:
+        The normalized ``base_*`` params; keys absent from ``current_best`` are
+        omitted rather than defaulted, so a caller can tell "no config" from
+        "empty config".
+    """
+    cb = current_best if isinstance(current_best, dict) else {}
+    return {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
+
+
 def inject_stack_base_params(
     params: dict[str, Any],
     state: Any,
@@ -161,12 +176,7 @@ def inject_stack_base_params(
         anchor_tput = resolve_grading_anchor_tput(state)
         if anchor_tput > 0:
             _put("base_tput", anchor_tput)
-    current_best = getattr(state, "current_best", None)
-    current_best = current_best if isinstance(current_best, dict) else {}
-    for key, source, normalize in _STACK_BASE_FIELDS:
-        if source not in current_best:
-            continue
-        value = normalize(current_best[source])
+    for key, value in stack_base_params(getattr(state, "current_best", None)).items():
         # Empty means "no config"; on a rebind it is what clears a superseded layer.
         if value or overwrite:
             _put(key, value)
