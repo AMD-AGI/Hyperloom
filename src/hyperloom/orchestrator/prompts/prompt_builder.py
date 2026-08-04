@@ -438,9 +438,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode) — rename alone does NOT "
-            "bypass dedup. Use remove_args/unset_envs to ablate harmful "
-            "base flags; args_mode='replace' to drop inherited server args. "
+            "remove_args+unset_envs+args_mode); only exact duplicates within "
+            "the same submitted grid are collapsed. Historical results are "
+            "evidence — any fingerprint may be re-proposed. "
+            "Use remove_args/unset_envs to ablate harmful base flags; "
+            "args_mode='replace' to drop inherited server args. "
             "provenance values: 'llm_direct', 'default_grid', "
             "'specialist:<domain-or-tag>' (audit/advisory, not a gate)."
         )
@@ -633,11 +635,13 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
             "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
             "  attempt salvages the leak.",
-            "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-            "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-            "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-            "  switch action families just to dodge the failure; Robustness'",
-            "  escalation policy needs the heartbeat to fire its RCA.",
+            "* **RULE F3 — `error_class='subprocess_nonzero'` on `baseline` with same",
+            "  fingerprint ⇒ stop retrying baseline.** Heartbeat with",
+            "  `body_md='blocked: subprocess repeatedly nonzero baseline'` and let",
+            "  Robustness intervene. (For explore variants, re-proposing with the same",
+            "  fingerprint is allowed when conditions have changed; let the failure log",
+            "  and log path from the last attempt guide whether to retry or change the",
+            "  config.)",
             "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
             "  `why_denied` context tool (and the `Recent policy denials` block on a",
             "  seed turn) shows repeated (action, rule) collisions. The system no",
@@ -668,9 +672,11 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   sweep a winning boolean's related `*_AITER_*` family.",
             "2. **Synergy** — combine last round's winners via",
             "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
-            "3. **Retry rejects** — for each `explore_search.rejected` variant,",
-            "   change the value or pair it with a winner (a `-2%` reject is a",
-            "   dead flag; `-0.3%` just needs a different value).",
+            "3. **Re-examine rejects** — for each `explore_search.rejected` variant,",
+            "   decide whether the failure is stale (different config now in effect),",
+            "   fixable (patch applied), or definitively ruled out. Re-propose with",
+            "   the same config to revalidate, or change the value to test a variant.",
+            "   A `-2%` reject is a dead flag; `-0.3%` may clear the bar after patching.",
             "4. **Mine flags** — when winners are empty, pull untested boolean",
             "   toggles from `discovered_flags.<framework>.backend_flags`.",
             "5. **Ablate harmful base config** — when a user/base flag or env may",
@@ -678,7 +684,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   `unset_envs` instead of only adding more knobs.",
             "",
             "Variant identity is content-based (args+envs+remove_args+",
-            "unset_envs+args_mode) — rename alone does NOT bypass dedup.",
+            "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
             "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
             "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
             "",
