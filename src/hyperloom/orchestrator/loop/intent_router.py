@@ -406,7 +406,7 @@ class IntentRouter:
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Parity with _materialize_approved_proposal: direct delegates need the same knobs.
+        # Delegates skip _materialize_approved_proposal, so seed the same explore params here.
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)

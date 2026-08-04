@@ -46,6 +46,7 @@ import logging
 import os
 import shlex
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,25 +118,13 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
-def _normalize_envs(value: Any) -> dict[str, str]:
-    """Coerce a ``current_best`` env mapping into ``str -> str``."""
-    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
-
-
-def _normalize_args_mode(value: Any) -> str:
-    """Keep only the ``replace`` opt-out; everything else defaults to append."""
-    mode = str(value or "").strip().lower()
-    return mode if mode == "replace" else ""
-
-
-# ``base_*`` task-param key -> the ``current_best`` field it mirrors, plus the
-# normalizer that puts that field in task-param shape.
-_STACK_BASE_FIELDS: tuple[tuple[str, str, Any], ...] = (
+# ``base_*`` task param -> the ``current_best`` field it mirrors and its normalizer.
+_STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("base_extra_args", "extra_server_args", lambda v: str(v or "").strip()),
-    ("base_extra_envs", "extra_envs", _normalize_envs),
+    ("base_extra_envs", "extra_envs", lambda v: {str(k): str(x) for k, x in (v or {}).items()}),
     ("base_remove_args", "remove_args", to_str_list),
     ("base_unset_envs", "unset_envs", to_str_list),
-    ("base_args_mode", "args_mode", _normalize_args_mode),
+    ("base_args_mode", "args_mode", lambda v: "replace" if str(v or "").strip().lower() == "replace" else ""),
 )
 
 
@@ -148,19 +137,17 @@ def inject_stack_base_params(
 ) -> None:
     """Seed a task's base config from ``current_best``, in place.
 
-    The anchor and the config it was measured on are one unit: a candidate is
-    graded by comparing its throughput against the anchor while being launched
-    on top of that anchor's args/envs, so seeding one without the other compares
-    a measurement to a configuration it was never taken on. Callers that grade
-    pass ``anchor=True`` so both halves come from the same snapshot.
+    A candidate is graded against an anchor while being launched on top of that
+    anchor's args/envs, so the two are one unit; ``anchor=True`` takes both from
+    the same snapshot rather than leaving a caller to seed one and omit the other.
 
     Args:
         params: Task params, mutated in place.
         state: Any object exposing ``current_best`` / ``baseline_tput``
             (``None`` and partial test doubles are tolerated).
         anchor: Also seed ``base_tput``.
-        overwrite: Replace keys already present in ``params``. Execution-time
-            rebinds need this; dispatch-time seeding must not clobber an
+        overwrite: Replace keys already present in ``params``, for an
+            execution-time rebind; dispatch-time seeding must not clobber an
             operator- or LLM-supplied value.
     """
 
@@ -180,8 +167,7 @@ def inject_stack_base_params(
         if source not in current_best:
             continue
         value = normalize(current_best[source])
-        # An empty value carries no config, so writing it would only add noise --
-        # except on a rebind, where it is what clears a superseded layer.
+        # Empty means "no config"; on a rebind it is what clears a superseded layer.
         if value or overwrite:
             _put(key, value)
 

@@ -1548,9 +1548,8 @@ class IntegratePatchExecutor:
                     "the patches to integrate)"
                 ),
             }
-        # Rebind execution-time base from live current_best so a task queued
-        # before an Explore KEEP always measures against the real stack top.
-        # (``shared_state`` and the accuracy_baseline fill are already resolved above.)
+        # Rebind from live current_best so a task queued before an Explore KEEP
+        # still measures against the real stack top.
         if shared_state is not None:
             inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
         # Specialist workspace conventionally at runs/specialist/<id>/.
