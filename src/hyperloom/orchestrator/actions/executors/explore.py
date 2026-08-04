@@ -799,62 +799,7 @@ class ExploreExecutor:
                 **_entry_control_fields(entry),
             )
 
-        # Conditional dedup. KEEP'd variants are permanently blocked. A variant
-        # that ran but did not promote (REVERT / KEEP_UNSTABLE / no_promote) only
-        # stays blocked while its prior measured gain is below the current KEEP
-        # bar; once the bar drops to or below that gain it unblocks for re-test.
-        # Infra failures stay blocked regardless of gain. Unblocking only lifts
-        # the hard skip — the variant still re-runs the full gate.
-        gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
-
-        def _is_blocked(entry: Any) -> bool:
-            """Whether a tested-ledger entry should still be skipped this round.
-
-            KEEP'd and infra-failed entries stay blocked; gain-unlockable
-            outcomes (REVERT / KEEP_UNSTABLE / no_promote) unblock once the
-            current KEEP bar drops to or below their prior measured gain.
-
-            Args:
-                entry (Any): A ``tested`` ledger entry (expected dict).
-
-            Returns:
-                bool: ``True`` when the variant should remain skipped, ``False``
-                when it may be re-tested this round.
-            """
-            if not isinstance(entry, dict):
-                return True
-            if str(entry.get("outcome") or "") in gain_unlockable:
-                try:
-                    prior_gain = float(entry.get("gain_pct"))
-                except (TypeError, ValueError):
-                    return True
-                return prior_gain < keep_threshold_pct
-            return True
-
         tested_dict = search.get("tested") or {}
-        seen_fps: set[str] = set()
-        unlocked_reference: list[dict[str, Any]] = []
-        for fp_key, v in tested_dict.items():
-            if _is_blocked(v):
-                seen_fps.add(str(fp_key))
-                seen_fps.add(_entry_fp(v))
-            elif isinstance(v, dict):
-                unlocked_reference.append(v)
-        # accepted == KEEP'd: always blocked.
-        for v in search.get("accepted") or []:
-            seen_fps.add(_entry_fp(v))
-        for v in search.get("rejected") or []:
-            if _is_blocked(v):
-                seen_fps.add(_entry_fp(v))
-            elif isinstance(v, dict):
-                unlocked_reference.append(v)
-        seen_fps.discard("")
-        if unlocked_reference:
-            log.info(
-                "explore: %d prior sub-threshold variant(s) unblocked at keep_threshold=%.3f%% for re-test",
-                len(unlocked_reference),
-                keep_threshold_pct,
-            )
         name_index = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
@@ -883,15 +828,6 @@ class ExploreExecutor:
                 **identity_controls,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in seen_fps:
-                skipped_dup.append(
-                    {
-                        "name": gv.name,
-                        "fingerprint": fp,
-                        "reason": "ledger_dup",
-                    }
-                )
-                continue
             if fp in unique_in_round:
                 # In-round duplicate — keep the first occurrence.
                 skipped_dup.append(
@@ -906,7 +842,7 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
         log.info(
-            "explore dedup: payload=%d → runnable=%d (ledger_dup+round_dup=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
