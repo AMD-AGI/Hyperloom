@@ -321,20 +321,24 @@ class ConversationCollaborator:
         """Append one ``conversations.jsonl`` row for a reactor turn.
 
         Persists the full (redacted) prompt + completion from the backend
-        ``metadata`` (``prompt`` / ``response``). Only rows that carry
-        conversation text are written. Best-effort: any failure degrades to a
-        logged warning rather than breaking the tick loop.
+        ``metadata`` (``prompt`` / ``response``) together with the turn's emitted
+        intents. The intents matter because a tool-calling backend's ``response``
+        is only the prose it happened to narrate: the decision itself travels as
+        an ``emit_intent`` call, and a row without it records what the model said
+        instead of what it did. Best-effort: any failure degrades to a logged
+        warning rather than breaking the tick loop.
 
         Args:
             agent_name: The reactor role; doubles as trace component and role.
             result: The backend turn result whose metadata carries the redacted
-                prompt/response text.
+                prompt/response text and whose ``intents`` carry the decision.
         """
         try:
             metadata = result.metadata or {}
             prompt = metadata.get("prompt")
             response = metadata.get("response")
-            if not prompt and not response:
+            intents = result.intents or []
+            if not prompt and not response and not intents:
                 return
             record = ConversationRecord(
                 session_id=self.session_dir.name,
@@ -345,6 +349,7 @@ class ConversationCollaborator:
                 model=metadata.get("model"),
                 prompt=prompt or "",
                 response=response or "",
+                intents=[{"intent_type": i.type.value, "payload": i.payload} for i in intents],
             )
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the loop

@@ -34,8 +34,14 @@ def ctx():
             "hardware": "mi300x"}
 
 
-def _fake_artifact(tmp_path, version="0.5.12", drop_flag="__schedule_conservativeness"):
-    """A minimal artifact whose model is a real booster over two features."""
+def _fake_artifact(tmp_path, version="0.5.12", drop_flag="__schedule_conservativeness",
+                   dest=None, hardware=None):
+    """A minimal artifact whose model is a real booster over two features.
+
+    ``hardware`` adds the categorical column and its vocabulary, which is what
+    the hardware guard reads; leaving it None reproduces an artifact from before
+    the guard existed.
+    """
     lgb = pytest.importorskip("lightgbm")
     np = pytest.importorskip("numpy")
 
@@ -46,16 +52,22 @@ def _fake_artifact(tmp_path, version="0.5.12", drop_flag="__schedule_conservativ
     for _ in range(80):
         rows += [[1, 0], [0, 1]]
         labels += [1, 0]
+    if hardware:
+        cols = cols + ["hardware"]
+        rows = [r + [0] for r in rows]
     ds = lgb.Dataset(np.array(rows, dtype=np.float32), label=np.array(labels),
                      feature_name=cols)
     booster = lgb.train({"objective": "binary", "verbose": -1, "num_threads": 2,
                          "min_data_in_leaf": 1, "min_data_in_bin": 1},
                         ds, num_boost_round=20)
-    d = tmp_path / "ranker"
-    d.mkdir()
+    d = dest if dest is not None else tmp_path / "ranker"
+    d.mkdir(parents=True)
     booster.save_model(str(d / "ranker.txt"))
-    (d / "schema.json").write_text(json.dumps(
-        {"columns": cols, "categorical": [], "vocab": {}}))
+    (d / "schema.json").write_text(json.dumps({
+        "columns": cols,
+        "categorical": ["hardware"] if hardware else [],
+        "vocab": {"hardware": {hardware: 0}} if hardware else {},
+    }))
     (d / "manifest.json").write_text(json.dumps(
         {"valid_only_for_version": version, "framework": "sglang"}))
     return d
@@ -145,7 +157,7 @@ class TestLLMBackend:
     @staticmethod
     def _reply(order: str):
         """Patch the ranker call to return a fixed ordering."""
-        return lambda variants, identity_text: (
+        return lambda variants, identity_text, lora="": (
             [int(t) - 1 for t in order.split(",")] if order else None)
 
     def test_keeps_the_top_fraction(self, monkeypatch, grid, ctx, checkpoint):
@@ -255,7 +267,7 @@ class TestUnionBackend:
     @staticmethod
     def _reply(order: str):
         """Patch the ranker call to return a fixed ordering."""
-        return lambda variants, identity_text: [int(t) - 1 for t in order.split(",")]
+        return lambda variants, identity_text, lora="": [int(t) - 1 for t in order.split(",")]
 
     def test_ranker_top_pick_survives_a_failing_score(
             self, monkeypatch, tmp_path, grid, ctx, checkpoint):
@@ -301,7 +313,7 @@ class TestUnionBackend:
         monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
         monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
-        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity: None)
+        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity, lora="": None)
         kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert info["reason"] == "ok"
         assert info["backend"] == "gbdt"
@@ -323,7 +335,7 @@ class TestUnionBackend:
             self, monkeypatch, tmp_path, grid, ctx, checkpoint):
         monkeypatch.setenv(df.ENV_DIR, str(tmp_path / "absent"))
         monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
-        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity: None)
+        monkeypatch.setattr(df, "_rank_with_llm", lambda variants, identity, lora="": None)
         kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
         assert kept == grid
         assert info["applied"] is False
@@ -338,7 +350,8 @@ class TestContextFeatures:
 
     An artifact trained with them scores wrong rather than failing if the caller
     computes them differently, so the arithmetic is pinned here against the
-    training-side definition in recipe-rank/try_context_features.py.
+    training-side definition in
+    claw-dev/docs-zh/post-training/recipe-rank/try_context_features.py.
     """
 
     def test_relative_position_spans_the_field(self):
@@ -429,3 +442,184 @@ class TestRelativeCut:
         monkeypatch.setenv(df.ENV_RELATIVE, "0.08")
         monkeypatch.setenv(df.ENV_THRESHOLD, "0.030")
         assert df._cut_for([0.0, 0.0])[0] == 0.030
+
+
+class TestHardwareAxis:
+    """The GPU guard, and the runner-label normalisation it depends on.
+
+    Version got a guard because a stale model was measured below chance. Hardware
+    is the same shape of mistake with none of the evidence yet: an unseen GPU
+    encodes to -1, which no tree ever split on, so the scores come out confident
+    and meaningless.
+    """
+
+    @pytest.mark.parametrize("gpu,label", [
+        ("mi325x", "mi300x"), ("mi308x", "mi300x"), ("MI325X", "mi300x"),
+        ("mi300x", "mi300x"), ("mi355x", "mi355x"), ("", ""),
+    ])
+    def test_collapses_to_the_corpus_runner_label(self, gpu, label):
+        """The corpus spells gfx942 cards mi300x, so mi325x must not reach it raw."""
+        assert df._runner_label(gpu) == label
+
+    def test_mi325x_session_uses_the_mi300x_artifact(self, monkeypatch, tmp_path, grid, ctx):
+        """Without normalisation this session would score against an OOV sentinel."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path, hardware="mi300x")))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        kept, info = df.filter_variants(grid, **{**ctx, "hardware": "mi325x"})
+        assert info["reason"] == "ok"
+        assert info["cell"] == "0.5.12/mi300x"
+        assert "cons" not in {v.name for v in kept}
+
+    def test_uncovered_gpu_disables_filtering(self, monkeypatch, tmp_path, grid, ctx):
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path, hardware="mi300x")))
+        kept, info = df.filter_variants(grid, **{**ctx, "hardware": "mi355x"})
+        assert kept == grid
+        assert info["reason"] == "hardware_mismatch"
+
+    def test_artifact_without_the_column_is_not_gated(self, monkeypatch, tmp_path, grid, ctx):
+        """An artifact predating the vocabulary gives no basis to refuse."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        _, info = df.filter_variants(grid, **{**ctx, "hardware": "mi355x"})
+        assert info["reason"] == "ok"
+
+    def test_unknown_running_gpu_is_not_gated(self, monkeypatch, tmp_path, grid, ctx):
+        """Mirrors the version guard: only compare when both sides are known."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path, hardware="mi300x")))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        _, info = df.filter_variants(grid, **{**ctx, "hardware": ""})
+        assert info["reason"] == "ok"
+
+
+class TestArtifactRegistry:
+    """Selecting one artifact per (version, GPU) cell in a mixed deployment.
+
+    Preferences do not transfer across an sglang bump -- kappa 0.15 over 1,467
+    paired models -- so a deployment running several versions needs one artifact
+    each rather than one model that saw them all.
+    """
+
+    @staticmethod
+    def _registry(tmp_path):
+        root = tmp_path / "rankers"
+        _fake_artifact(tmp_path, version="0.5.12", hardware="mi300x",
+                       dest=root / "sglang-0.5.12-mi300x")
+        _fake_artifact(tmp_path, version="0.5.11", hardware="mi300x",
+                       dest=root / "sglang-0.5.11-mi300x")
+        _fake_artifact(tmp_path, version="0.5.12", hardware="mi355x",
+                       dest=root / "sglang-0.5.12-mi355x")
+        return root
+
+    @pytest.mark.parametrize("version,hardware,expected", [
+        ("0.5.12", "mi300x", "sglang-0.5.12-mi300x"),
+        ("0.5.11", "mi300x", "sglang-0.5.11-mi300x"),
+        ("0.5.12", "mi355x", "sglang-0.5.12-mi355x"),
+        # mi325x is a gfx942 card, so it resolves to the mi300x cell.
+        ("0.5.12", "mi325x", "sglang-0.5.12-mi300x"),
+    ])
+    def test_each_cell_picks_its_own_artifact(self, monkeypatch, tmp_path, grid, ctx,
+                                             version, hardware, expected):
+        monkeypatch.setenv(df.ENV_DIR, str(self._registry(tmp_path)))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        _, info = df.filter_variants(
+            grid, **{**ctx, "framework_version": version, "hardware": hardware})
+        assert info["gbdt_artifact"] == expected
+        assert info["reason"] == "ok"
+
+    def test_uncovered_cell_keeps_everything(self, monkeypatch, tmp_path, grid, ctx):
+        """A version with no artifact yet must not borrow a neighbour's."""
+        monkeypatch.setenv(df.ENV_DIR, str(self._registry(tmp_path)))
+        kept, info = df.filter_variants(grid, **{**ctx, "framework_version": "0.5.13"})
+        assert kept == grid
+        assert info["reason"] == "registry_miss"
+
+    def test_two_matches_refuse_rather_than_choose(self, monkeypatch, tmp_path, grid, ctx):
+        """Picking one silently is the bug this whole guard exists to prevent."""
+        root = tmp_path / "rankers"
+        _fake_artifact(tmp_path, version="0.5.12", hardware="mi300x", dest=root / "a")
+        _fake_artifact(tmp_path, version="0.5.12", hardware="mi300x", dest=root / "b")
+        monkeypatch.setenv(df.ENV_DIR, str(root))
+        kept, info = df.filter_variants(grid, **ctx)
+        assert kept == grid
+        assert info["reason"] == "registry_ambiguous"
+
+    def test_single_artifact_root_is_unchanged(self, monkeypatch, tmp_path, grid, ctx):
+        """An existing single-cell deployment must behave exactly as before."""
+        monkeypatch.setenv(df.ENV_DIR, str(_fake_artifact(tmp_path)))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        kept, info = df.filter_variants(grid, **ctx)
+        assert info["reason"] == "ok"
+        assert info["gbdt_artifact"] == "ranker"
+        assert "cons" not in {v.name for v in kept}
+
+    def test_malformed_entry_is_skipped_not_fatal(self, monkeypatch, tmp_path, grid, ctx):
+        root = self._registry(tmp_path)
+        broken = root / "half-written"
+        broken.mkdir()
+        (broken / "manifest.json").write_text("{not json")
+        monkeypatch.setenv(df.ENV_DIR, str(root))
+        monkeypatch.setenv(df.ENV_THRESHOLD, "0.5")
+        _, info = df.filter_variants(grid, **ctx)
+        assert info["gbdt_artifact"] == "sglang-0.5.12-mi300x"
+
+
+class TestServedAdapterRegistry:
+    """One endpoint holds every cell's adapter; the cell picks which to request."""
+
+    def test_maps_a_cell_to_its_adapter(self, monkeypatch):
+        monkeypatch.setenv(df.ENV_LLM_ADAPTERS,
+                           "0.5.12/mi300x=ranker-0512, 0.5.11/mi300x=ranker-0511")
+        assert df._llm_adapter_for("0.5.12", "mi300x") == ("ranker-0512", "")
+        assert df._llm_adapter_for("0.5.11", "mi300x") == ("ranker-0511", "")
+
+    def test_version_only_key_covers_every_gpu(self, monkeypatch):
+        monkeypatch.setenv(df.ENV_LLM_ADAPTERS, "0.5.12=ranker-0512")
+        assert df._llm_adapter_for("0.5.12", "mi355x") == ("ranker-0512", "")
+
+    def test_uncovered_cell_reports_a_miss(self, monkeypatch):
+        monkeypatch.setenv(df.ENV_LLM_ADAPTERS, "0.5.12/mi300x=ranker-0512")
+        assert df._llm_adapter_for("0.5.13", "mi300x") == ("", "adapter_cell_miss")
+
+    def test_single_cell_form_still_works(self, monkeypatch):
+        """The pre-registry pair stays valid for a one-version deployment."""
+        monkeypatch.delenv(df.ENV_LLM_ADAPTERS, raising=False)
+        monkeypatch.setenv(df.ENV_LLM_LORA, "ranker")
+        monkeypatch.setenv(df.ENV_LLM_VERSION, "0.5.12")
+        assert df._llm_adapter_for("0.5.12", "mi300x") == ("ranker", "")
+        assert df._llm_adapter_for("0.5.11", "mi300x") == ("", "version_mismatch")
+
+    def test_resolved_adapter_reaches_the_request(self, monkeypatch, grid, ctx, checkpoint):
+        """The adapter has to land in lora_path, or every cell serves the base model."""
+        seen: dict = {}
+
+        class _Resp:
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": "1, 2, 3"}}]}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            seen.update(json.loads(req.data))
+            return _Resp()
+
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_LLM_ADAPTERS, "0.5.12/mi300x=ranker-0512")
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert seen["lora_path"] == "ranker-0512"
+
+    def test_cell_miss_skips_ranking_entirely(self, monkeypatch, grid, ctx, checkpoint):
+        called = []
+        monkeypatch.setenv(df.ENV_LLM_URL, "http://ranker.invalid")
+        monkeypatch.setenv(df.ENV_LLM_ADAPTERS, "0.5.11/mi300x=ranker-0511")
+        monkeypatch.setattr(df, "_rank_with_llm",
+                            lambda *a, **k: called.append(1) or [0, 1, 2])
+        kept, info = df.filter_variants(grid, **{**ctx, "model_path": checkpoint})
+        assert kept == grid
+        assert info["reason"] == "adapter_cell_miss"
+        assert not called, "an uncovered cell must not reach the endpoint"

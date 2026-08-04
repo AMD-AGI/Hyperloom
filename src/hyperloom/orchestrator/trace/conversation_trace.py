@@ -15,6 +15,12 @@ Design contract:
 * **Full text, redacted**: ``prompt`` / ``response`` are stored in full but
   passed through :func:`redact_secrets` first so a credential value never lands
   on disk.
+* **Structured output alongside the text**: a backend that answers with tool
+  calls has its real output in ``intents``, not in ``response`` -- the text
+  channel only carries whatever prose came with the call. Storing just the prose
+  records what the model said and loses what it did, which is the half a
+  distillation corpus needs. ``intents`` is redacted leaf-by-leaf under the same
+  contract, since an intent payload can carry server args.
 * **Self-contained redaction**: the redactor strips secret *values* (Bearer
   tokens, ``ak-`` / ``sk-`` / ``pk-`` keys, ``ghp_`` GitHub tokens,
   ``KEY=value`` shapes), not just env-var names.
@@ -56,6 +62,7 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "model",
         "prompt",
         "response",
+        "intents",
     }
 )
 
@@ -126,6 +133,29 @@ def _coerce_text(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _redact_json(value: Any) -> Any:
+    """Apply :func:`redact_secrets` to every string leaf of a JSON-shaped value.
+
+    Intent payloads are nested dicts rather than flat text, so redacting the
+    serialized form would either mangle the structure or have to be undone by
+    every reader. Walking the leaves keeps the field usable as structured data
+    while honouring the module's no-credentials-on-disk contract.
+
+    Args:
+        value: A JSON-shaped value (dict / list / str / scalar).
+
+    Returns:
+        The same shape with secret values inside strings replaced.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: _redact_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_json(v) for v in value]
+    return value
+
+
 @dataclass
 class ConversationRecord:
     """One LLM call's full prompt + completion, plus the join keys.
@@ -133,6 +163,8 @@ class ConversationRecord:
     Identity (``session_id`` + ``component``) is required; everything else
     is an optional join key filled when the call site has it. ``prompt`` /
     ``response`` hold the full text and are redacted at serialization time.
+    ``intents`` holds the emitted intent envelopes for tool-calling backends and
+    stays ``None`` for the text-only ones.
     """
 
     session_id: str
@@ -146,10 +178,11 @@ class ConversationRecord:
     model: str | None = None
     prompt: str = ""
     response: str = ""
+    intents: list[dict[str, Any]] | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting
-        the prompt / response text.
+        the prompt / response text and the intent payloads.
 
         Returns:
             The on-disk conversation row dict.
@@ -167,6 +200,9 @@ class ConversationRecord:
             "model": _coerce_optional_str(self.model),
             "prompt": redact_secrets(_coerce_text(self.prompt)),
             "response": redact_secrets(_coerce_text(self.response)),
+            # An empty list and an absent field both mean "no structured
+            # output", so normalize to null rather than carrying both shapes.
+            "intents": _redact_json(list(self.intents)) if self.intents else None,
         }
 
 

@@ -322,3 +322,124 @@ def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeyp
     rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
     ct.append_conversation(session_dir=tmp_path, record=rec)  # target=None -> mirror path
     assert written["row"]["component"] == "orchestration"
+
+
+# --- conversation_trace: structured intents --------------------------------
+
+
+def test_conversation_row_carries_intents_structured():
+    # A tool-calling backend's decision must survive as data, not as prose.
+    rec = ct.ConversationRecord(
+        session_id="s1",
+        component="orchestration",
+        prompt="p",
+        response="Standing by.",
+        intents=[{"intent_type": "delegate", "payload": {"task_id": "t1", "action": "profile"}}],
+    )
+    row = rec.to_row()
+    assert row["intents"] == [{"intent_type": "delegate", "payload": {"task_id": "t1", "action": "profile"}}]
+
+
+def test_conversation_row_intents_absent_and_empty_both_null():
+    # The four text-only writers pass nothing; an empty list must not read
+    # differently from an absent one.
+    assert ct.ConversationRecord(session_id="s1", component="critic").to_row()["intents"] is None
+    assert ct.ConversationRecord(session_id="s1", component="critic", intents=[]).to_row()["intents"] is None
+
+
+def test_conversation_row_redacts_secrets_inside_intent_payloads():
+    # An intent payload can carry server args, so it goes through the same
+    # no-credentials-on-disk contract as the text fields.
+    rec = ct.ConversationRecord(
+        session_id="s1",
+        component="orchestration",
+        intents=[
+            {
+                "intent_type": "delegate",
+                "payload": {"envs": {"note": "API_KEY=supersecretvalue"}, "tags": ["Bearer abcd1234efgh"]},
+            }
+        ],
+    )
+    payload = rec.to_row()["intents"][0]["payload"]
+    assert "supersecretvalue" not in payload["envs"]["note"]
+    assert "abcd1234efgh" not in payload["tags"][0]
+    assert "[REDACTED]" in payload["envs"]["note"]
+
+
+def test_redact_json_passes_through_non_string_leaves():
+    assert ct._redact_json({"n": 1, "f": 1.5, "b": True, "z": None}) == {"n": 1, "f": 1.5, "b": True, "z": None}
+
+
+def test_reactor_conversation_records_emitted_intents(tmp_path, monkeypatch):
+    # End-to-end for the fill side: the coordinator hands over prompt/response
+    # in metadata and the intents on the result, and both halves must land.
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+
+    class _State:
+        tick = 4
+        phase = "EXPLORE"
+
+    class _Coord:
+        session_dir = tmp_path / "s1"
+        shared_state = _State()
+
+    collaborator = ConversationCollaborator(_Coord())
+    result = BackendTurnResult(
+        intents=[Intent(type=IntentType.DELEGATE, payload={"task_id": "t1"})],
+        raw_text="Delegated.",
+        metadata={"prompt": "P", "response": "Delegated.", "model": "claude-opus-5"},
+    )
+    collaborator._record_reactor_conversation("orchestration", result)
+
+    assert len(rows) == 1
+    assert rows[0]["intents"] == [{"intent_type": "delegate", "payload": {"task_id": "t1"}}]
+    assert rows[0]["tick"] == 4 and rows[0]["model"] == "claude-opus-5"
+
+
+def test_reactor_conversation_records_intent_only_turn(tmp_path, monkeypatch):
+    # A turn that emitted a decision but narrated nothing is the case the old
+    # text-only guard dropped, and it is the most valuable row of all.
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+
+    class _Coord:
+        session_dir = tmp_path / "s1"
+        shared_state = type("S", (), {"tick": 1, "phase": None})()
+
+    collaborator = ConversationCollaborator(_Coord())
+    result = BackendTurnResult(
+        intents=[Intent(type=IntentType.ALERT, payload={"severity": "high"})],
+        raw_text="",
+        metadata={},
+    )
+    collaborator._record_reactor_conversation("orchestration", result)
+
+    assert len(rows) == 1
+    assert rows[0]["intents"] == [{"intent_type": "alert", "payload": {"severity": "high"}}]
+
+
+def test_reactor_conversation_skips_fully_empty_turn(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+
+    class _Coord:
+        session_dir = tmp_path / "s1"
+        shared_state = type("S", (), {"tick": 1, "phase": None})()
+
+    collaborator = ConversationCollaborator(_Coord())
+    collaborator._record_reactor_conversation(
+        "orchestration", BackendTurnResult(intents=[], raw_text="", metadata={})
+    )
+    assert rows == []

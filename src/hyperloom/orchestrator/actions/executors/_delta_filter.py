@@ -13,16 +13,31 @@ available gain still reachable, and the single best candidate lost for 1.5% of
 identities. On a hand-built pool of seven configurations measured end to end on
 Qwen3-14B-FP8, it kept all seven including the +327.7% winner.
 
-Three limits are enforced rather than documented, because each one has been
+Four limits are enforced rather than documented, because each one has been
 measured to matter:
 
   * The model is valid for exactly one framework version. Preferences invert
     across a single sglang minor bump -- a 0.5.11 model scores 0.4844 on 0.5.12,
     below chance -- so a mismatch disables filtering instead of degrading it.
+    Measured on 1,467 models paired across 0.5.11/0.5.12, whether a flag helps
+    agrees only 78.4% of the time against 74.5% by chance, a kappa of 0.15, and
+    ``--kv-cache-dtype`` inverts outright: never useful on 0.5.11, useful in
+    half of 0.5.12's identities. Version is a partition key, not a feature.
+  * The model is valid only for GPUs its corpus covered, which the schema's
+    ``hardware`` vocabulary states exactly. An unseen GPU would encode to the
+    out-of-vocabulary sentinel the trees never split on, so it declines instead.
   * The grid is never emptied. A filter that discards everything converts a
     slow search into no search.
   * Everything is opt-in via ``HYPERLOOM_DELTA_FILTER_DIR``. Unset, or with the
     artifact or lightgbm unavailable, behaviour is byte-identical to no filter.
+
+Because version and GPU partition rather than generalise, one deployment
+serving several of both needs one artifact per cell. ``HYPERLOOM_DELTA_FILTER_DIR``
+therefore accepts either a single artifact directory or a root of them, resolved
+per session against the running framework, version and GPU; see
+:func:`_resolve_artifact`. The GPU axis is narrower than it looks, since the
+corpus is keyed on Magpie's runner label and mi325x/mi308x collapse into
+mi300x.
 
 A served-LLM backend is also available. It orders candidates better than the
 GBDT (95.5% vs 91.4% precision@1) but prunes worse, because an ordering has no
@@ -87,6 +102,11 @@ ENV_LLM_URL = "HYPERLOOM_DELTA_FILTER_LLM_URL"
 ENV_LLM_MODEL = "HYPERLOOM_DELTA_FILTER_LLM_MODEL"
 ENV_LLM_LORA = "HYPERLOOM_DELTA_FILTER_LLM_LORA"
 ENV_LLM_VERSION = "HYPERLOOM_DELTA_FILTER_LLM_VERSION"
+# One endpoint can hold several adapters, so a deployment serving several
+# versions or GPUs maps each cell to its own: "0.5.12/mi300x=ranker-0512,
+# 0.5.11/mi300x=ranker-0511". Takes precedence over the single-cell
+# ENV_LLM_LORA + ENV_LLM_VERSION pair, which stays valid for one cell.
+ENV_LLM_ADAPTERS = "HYPERLOOM_DELTA_FILTER_LLM_ADAPTERS"
 ENV_KEEP_FRACTION = "HYPERLOOM_DELTA_FILTER_KEEP_FRACTION"
 # Measured over 200 held-out identities on the served adapter: keeping half the
 # list drops 48.4% of candidates while 98.4% of the best available gain survives
@@ -132,6 +152,143 @@ def _backstop() -> int:
         log.warning("delta_filter: %s=%r is not an integer; using %d",
                     ENV_BACKSTOP, raw, DEFAULT_BACKSTOP)
         return DEFAULT_BACKSTOP
+
+
+def _runner_label(gpu_type: str) -> str:
+    """Collapse a GPU model to the runner label the corpus is keyed on.
+
+    The corpus records ``hardware`` as Magpie's runner label, where mi325x and
+    mi308x are mi300x -- same gfx942, same 304 CUs, same benchmark script. The
+    caller may hand over either spelling, since it reads ``runner_type`` from the
+    session config and falls back to ``GPU_TYPE``, so normalising here is what
+    keeps a mi325x session from encoding as out-of-vocabulary against a corpus
+    that never spells mi325x. Collapsing does discard the HBM difference, which
+    is not nothing for memory-fraction flags, but that is the corpus's own
+    assumption and this only stops the filter from disagreeing with it.
+    """
+    try:
+        from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
+
+        return _gpu_runner_type(gpu_type)
+    except Exception:  # noqa: BLE001 -- a missing helper must not disable the filter
+        return str(gpu_type or "").strip().lower()
+
+
+def _hardware_known(schema: dict, hardware: str) -> bool:
+    """Whether the artifact's corpus covered this GPU runner.
+
+    The schema's vocabulary is the authoritative record of what the model saw:
+    an absent value encodes to -1, a sentinel no tree ever split on, so scoring
+    would be confident nonsense. Returns True when there is no basis to refuse --
+    an unknown running GPU, or an artifact predating the column -- which mirrors
+    the version guard's rule of only comparing when both sides are known.
+    """
+    hw = str(hardware or "").strip()
+    if not hw:
+        return True
+    vocab = (schema.get("vocab") or {}).get("hardware")
+    if not isinstance(vocab, dict) or not vocab:
+        return True
+    return hw in vocab
+
+
+def _cell_matches(manifest: dict, schema: dict, framework: str,
+                  version: str, hardware: str) -> bool:
+    """Whether one registry entry was trained for this session's cell."""
+    if str(manifest.get("framework") or "").strip().lower() != str(framework or "").strip().lower():
+        return False
+    trained_for = str(manifest.get("valid_only_for_version") or "").strip()
+    if trained_for and version and trained_for != version:
+        return False
+    return _hardware_known(schema, hardware)
+
+
+def _resolve_artifact(root: str, framework: str, version: str,
+                      hardware: str) -> tuple[Path | None, str]:
+    """Pick this session's artifact directory under ``root``.
+
+    ``root`` holding a ``manifest.json`` is a single artifact and is returned
+    unchanged, so an existing single-cell deployment behaves exactly as before
+    and the guards downstream still decide whether it applies. Otherwise its
+    immediate subdirectories are read as a registry and matched on framework,
+    version and GPU.
+
+    Two matches is an operator error, not a choice to make silently: picking one
+    arbitrarily is the same class of bug as scoring a mi355x run with a mi300x
+    model, so it declines and says so.
+
+    Returns:
+        ``(directory, reason)``; the directory is None when no single entry
+        applies, and ``reason`` is empty on success.
+    """
+    d = Path(root)
+    if (d / "manifest.json").is_file():
+        return d, ""
+    if not d.is_dir():
+        # Neither an artifact nor a registry. Reported as an unreadable artifact
+        # because that is what it is from the caller's side, and because the
+        # single-artifact path said exactly this before the registry existed.
+        log.warning("delta_filter: %s is neither an artifact nor a registry", d)
+        return None, "artifact_unreadable"
+    try:
+        subs = sorted(p for p in d.iterdir() if p.is_dir())
+    except OSError as exc:
+        log.warning("delta_filter: cannot list registry %s: %r", d, exc)
+        return None, "registry_unreadable"
+
+    matches: list[Path] = []
+    for sub in subs:
+        try:
+            manifest = json.loads((sub / "manifest.json").read_text())
+            schema = json.loads((sub / "schema.json").read_text())
+        except Exception:  # noqa: BLE001 -- a malformed entry is skipped, not fatal
+            log.debug("delta_filter: registry entry %s unreadable", sub, exc_info=True)
+            continue
+        if _cell_matches(manifest, schema, framework, version, hardware):
+            matches.append(sub)
+
+    if not matches:
+        log.info("delta_filter: no ranker for %s %s on %s under %s; not filtering",
+                 framework, version or "?", hardware or "?", d)
+        return None, "registry_miss"
+    if len(matches) > 1:
+        log.warning("delta_filter: %d rankers claim %s %s on %s (%s); refusing to "
+                    "choose one, not filtering", len(matches), framework,
+                    version or "?", hardware or "?",
+                    ", ".join(p.name for p in matches))
+        return None, "registry_ambiguous"
+    return matches[0], ""
+
+
+def _llm_adapter_for(version: str, hardware: str) -> tuple[str, str]:
+    """Resolve the served adapter for this cell.
+
+    Returns:
+        ``(adapter, reason)``. An empty adapter with an empty reason means the
+        base model is served with no adapter; an empty adapter with a reason
+        means this cell has none and ranking must be skipped.
+    """
+    raw = os.environ.get(ENV_LLM_ADAPTERS, "").strip()
+    if not raw:
+        # Single-cell form: one adapter, valid for the version it declares.
+        declared = os.environ.get(ENV_LLM_VERSION, "").strip()
+        if declared and version and declared != version:
+            return "", "version_mismatch"
+        return os.environ.get(ENV_LLM_LORA, "").strip(), ""
+
+    table: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        key, name = entry.split("=", 1)
+        table[key.strip()] = name.strip()
+    adapter = table.get("%s/%s" % (version, hardware)) or table.get(version)
+    if not adapter:
+        log.info("delta_filter: no served adapter for %s/%s in %s; not ranking",
+                 version or "?", hardware or "?", ENV_LLM_ADAPTERS)
+        return "", "adapter_cell_miss"
+    return adapter, ""
 
 
 def _threshold() -> float:
@@ -286,8 +443,14 @@ def _keep_fraction() -> float:
     return min(max(v, 0.0), 1.0)
 
 
-def _rank_with_llm(variants: list, identity_text: str) -> list[int] | None:
-    """Ask the served ranker for an ordering. None on any failure."""
+def _rank_with_llm(variants: list, identity_text: str, lora: str = "") -> list[int] | None:
+    """Ask the served ranker for an ordering. None on any failure.
+
+    Args:
+        variants: Candidates to order.
+        identity_text: The identity rendered as the prose the adapter was tuned on.
+        lora: Served adapter name for this cell; empty serves the base model.
+    """
     import json as _json
     import urllib.error
     import urllib.request
@@ -313,7 +476,6 @@ def _rank_with_llm(variants: list, identity_text: str) -> list[int] | None:
         # all of it.
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    lora = os.environ.get(ENV_LLM_LORA, "").strip()
     if lora:
         payload["lora_path"] = lora
 
@@ -379,9 +541,9 @@ def filter_variants(
         logging or for a task result field.
     """
     info: dict[str, Any] = {"applied": False, "reason": "", "dropped": []}
-    model_dir = os.environ.get(ENV_DIR, "").strip()
+    model_root = os.environ.get(ENV_DIR, "").strip()
     llm_url = os.environ.get(ENV_LLM_URL, "").strip()
-    if not model_dir and not llm_url:
+    if not model_root and not llm_url:
         info["reason"] = "disabled"
         return variants, info
     if (framework or "").strip().lower() != "sglang":
@@ -392,25 +554,35 @@ def filter_variants(
         return variants, info
 
     running = str(framework_version or "").strip()
+    # Normalise before anything reads it: both the identity feature and the
+    # registry lookup have to agree with the corpus's runner-label spelling.
+    hardware = _runner_label(hardware)
     ident = _identity_features(model_path, precision, hardware, framework, running)
+    info["cell"] = "%s/%s" % (running or "?", hardware or "?")
 
     scores: list[float] | None = None
     gbdt_version = ""
-    if model_dir:
-        scores, gbdt_reason, gbdt_version = _gbdt_scores(
-            model_dir, variants, ident, framework, running)
-        if scores is None:
-            info["gbdt_reason"] = gbdt_reason
+    if model_root:
+        model_dir, resolve_reason = _resolve_artifact(
+            model_root, framework, running, hardware)
+        if model_dir is None:
+            info["gbdt_reason"] = resolve_reason
+        else:
+            info["gbdt_artifact"] = model_dir.name
+            scores, gbdt_reason, gbdt_version = _gbdt_scores(
+                str(model_dir), variants, ident, framework, running)
+            if scores is None:
+                info["gbdt_reason"] = gbdt_reason
 
     order: list[int] | None = None
     llm_version = os.environ.get(ENV_LLM_VERSION, "").strip()
+    llm_lora, adapter_reason = _llm_adapter_for(running, hardware)
     if llm_url:
         # Same version guard as the GBDT: the adapter was fine-tuned on one
-        # sglang version's corpus, and preferences invert across a bump.
-        if llm_version and running and llm_version != running:
-            log.warning("delta_filter: ranker is for %s %s but this run is %s; "
-                        "not filtering", framework, llm_version, running)
-            info["llm_reason"] = "version_mismatch"
+        # sglang version's corpus, and preferences invert across a bump. With
+        # several cells served from one endpoint the guard becomes a lookup.
+        if adapter_reason:
+            info["llm_reason"] = adapter_reason
         elif not ident.get("hidden_size"):
             # Without the checkpoint the identity collapses to a couple of
             # labels, which is a prompt the ranker never saw. Ranking from it
@@ -420,7 +592,9 @@ def filter_variants(
                         model_path)
             info["llm_reason"] = "identity_unavailable"
         else:
-            order = _rank_with_llm(variants, _describe_identity(model_path, ident))
+            info["llm_adapter"] = llm_lora or None
+            order = _rank_with_llm(variants, _describe_identity(model_path, ident),
+                                   llm_lora)
             if order is None:
                 info["llm_reason"] = "llm_unavailable"
 
@@ -530,8 +704,9 @@ def _keep_by_fraction(variants, order, info, version) -> tuple[list, dict]:
     return kept, info
 
 # Shape measures that get a within-identity counterpart. Must stay in step with
-# recipe-rank/try_context_features.py: a context feature computed differently
-# here than during training scores silently wrong rather than failing.
+# claw-dev/docs-zh/post-training/recipe-rank/try_context_features.py: a context
+# feature computed differently here than during training scores silently wrong
+# rather than failing.
 _CONTEXT_SHAPE_KEYS = ("shape_n_flags", "shape_n_num", "shape_max_num",
                        "shape_n_chars", "shape_n_env", "shape_has_env")
 
@@ -611,6 +786,16 @@ def _gbdt_scores(
         log.warning("delta_filter: ranker is for %s %s but this run is %s; not filtering",
                     framework, trained_for, running)
         return None, "version_mismatch", trained_for
+
+    if not _hardware_known(schema, ident.get("hardware")):
+        # An unseen GPU encodes to -1, a value no tree ever split on, so the
+        # scores would be confident and meaningless. The version axis learned
+        # this the expensive way; the hardware axis inherits the guard.
+        log.warning("delta_filter: ranker's corpus covers %s but this run is on "
+                    "%s; not filtering",
+                    sorted((schema.get("vocab") or {}).get("hardware") or {}),
+                    ident.get("hardware"))
+        return None, "hardware_mismatch", trained_for
 
     cols, cat, vocab = schema["columns"], set(schema["categorical"]), schema["vocab"]
     rows = []
