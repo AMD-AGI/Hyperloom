@@ -664,7 +664,8 @@ class _RenderMixin:
 
         Args:
             entry (dict[str, Any]): A search-variant entry (name, gain_pct,
-                tput, extra args / envs).
+                tput, extra args / envs, and — for rejected rows — ``reason`` /
+                ``wall_clock_ratio_vs_baseline``).
 
         Returns:
             str: A single fixed-width line summarizing the variant.
@@ -672,12 +673,23 @@ class _RenderMixin:
         name = str(entry.get("name") or "?")
         gain = entry.get("gain_pct")
         tput = entry.get("tput") or entry.get("output_throughput")
-        gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
+        has_gain = isinstance(gain, (int, float))
+        gain_s = f"{gain:+.2f}%" if has_gain else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        # A bare ``no_meas`` is indistinguishable from a measured zero gain, so an
+        # overtime kill reads as "the variant helped nothing" instead of "the
+        # variant ran too long to be judged" — opposite follow-up moves.
+        reason_s = ""
+        if not has_gain:
+            reason = str(entry.get("reason") or "").strip()
+            if reason:
+                ratio = entry.get("wall_clock_ratio_vs_baseline")
+                ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
+                reason_s = f" [{reason[:60]}{ratio_s}]"
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
+        return f"{name:28s} {gain_s:>9}{tput_s}{reason_s}  {args}{envs_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(

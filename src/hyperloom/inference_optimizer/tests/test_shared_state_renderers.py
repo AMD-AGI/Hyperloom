@@ -38,6 +38,24 @@ def test_format_variant_line():
     assert "(no-flag)" in line2
 
 
+def test_format_variant_line_no_measurement_carries_reason():
+    line = SharedState._format_variant_line(
+        {
+            "name": "slow",
+            "reason": "killed_overtime",
+            "wall_clock_ratio_vs_baseline": 2.06,
+        }
+    )
+    assert "no_meas" in line
+    assert "killed_overtime" in line
+    assert "2.06x" in line
+    # A measured row needs no reason: the gain already carries the verdict.
+    measured = SharedState._format_variant_line(
+        {"name": "low", "gain_pct": 0.4, "reason": "gain_below_threshold"},
+    )
+    assert "gain_below_threshold" not in measured
+
+
 def test_enrich_with_tested_gain():
     entry = {"fingerprint": "fp1"}
     tested = {"fp1": {"gain_pct": 3.0, "result": {"output_throughput": 99.0}}}
