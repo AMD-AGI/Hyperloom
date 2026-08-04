@@ -131,21 +131,61 @@ def test_summarize_latencies_reports_mean_and_spread():
     assert bench.summarize_latencies([5.0])["stdev_ms"] == 0.0
 
 
+def _write_depths(root: Path, scene: str, count: int, value: float = 1.0) -> Path:
+    depth_dir = root / scene / "depth"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        np.save(depth_dir / f"depth_{i:04d}.npy", np.full((2, 2), value, dtype=np.float32))
+    return root / scene
+
+
 def test_worldmirror_depth_quality_ref_write_and_compare(tmp_path):
     bench = _load_bench()
-    output_dir = tmp_path / "out"
-    depth_dir = output_dir / "depth"
-    depth_dir.mkdir(parents=True)
-    np.save(depth_dir / "depth_0000.npy", np.ones((2, 2), dtype=np.float32))
+    outputs = {"Building": _write_depths(tmp_path / "out", "iter_004_Building", 1)}
     ref = tmp_path / "baseline.ref"
 
-    established = bench.evaluate_quality_gate(output_dir, "", str(ref), rel_max=0.2)
-    compared = bench.evaluate_quality_gate(output_dir, str(ref), "", rel_max=0.2)
+    established = bench.evaluate_quality_gate(outputs, "", str(ref), rel_max=0.2)
+    compared = bench.evaluate_quality_gate(outputs, str(ref), "", rel_max=0.2)
 
     assert established["skipped"] is True
     assert established["reason"] == "reference_established"
     assert compared["passed"] is True
     assert compared["heads"]["depth"]["rel_l1"] == 0.0
+
+
+def test_quality_gate_covers_every_scene_not_just_the_last(tmp_path):
+    """The last scene of the 22-set is 1-image, so gating it alone left the
+    multi-view attention path -- the very thing being tuned -- unverified."""
+    bench = _load_bench()
+    root = tmp_path / "out"
+    outputs = {
+        "Building": _write_depths(root, "iter_004_Building", 32),
+        "Panda_Wild_West": _write_depths(root, "iter_004_Panda_Wild_West", 1),
+    }
+    ref = tmp_path / "baseline.ref"
+
+    established = bench.evaluate_quality_gate(outputs, "", str(ref), rel_max=0.2)
+    assert established["heads"]["depth"]["count"] == 33
+
+    _write_depths(root, "iter_004_Building", 32, value=2.0)
+    regressed = bench.evaluate_quality_gate(outputs, str(ref), "", rel_max=0.2)
+    assert regressed["passed"] is False, "a multi-view-only regression must be caught"
+    assert regressed["heads"]["depth"]["rel_l1"] == pytest.approx(1.0)
+
+
+def test_quality_gate_keys_survive_a_different_iteration_count(tmp_path):
+    """baseline runs 5 iterations and profile runs 2, so a key carrying the
+    iteration index would never match across the two configs."""
+    bench = _load_bench()
+    ref = tmp_path / "baseline.ref"
+    five = {"Building": _write_depths(tmp_path / "b5", "iter_004_Building", 2)}
+    two = {"Building": _write_depths(tmp_path / "b2", "iter_001_Building", 2)}
+
+    bench.evaluate_quality_gate(five, "", str(ref), rel_max=0.2)
+    compared = bench.evaluate_quality_gate(two, str(ref), "", rel_max=0.2)
+
+    assert compared["passed"] is True
+    assert compared["heads"]["depth"]["count"] == 2
 
 
 def test_metric_scope_defaults_to_inference(monkeypatch):
