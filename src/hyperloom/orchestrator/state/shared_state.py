@@ -812,7 +812,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
-    # Percent improvement still needed to reach the objective (0.0 => no target/reached); fact for the "Mission progress" line, not a priority.
+    # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
     target_gap_pct: float = 0.0
 
     # Phase state machine fields
