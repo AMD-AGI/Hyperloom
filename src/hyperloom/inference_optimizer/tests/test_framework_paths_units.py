@@ -248,6 +248,45 @@ class TestDefaultSourceRootsIncludesXdit:
         assert any("/app/xDiT" in r for r in fp._STATIC_PATCH_FALLBACK_ROOTS)
 
 
+class TestScriptableRepoRootDiscovery:
+    """A scriptable framework runs from a checkout, not an installed package.
+
+    Session 20260803T134328Z probed ``worldplay=missing`` with the HY-WorldPlay
+    checkout on disk, so PolicyGate would have rejected any patch against
+    ``hyvideo/`` and framework-agent had no source to work on.
+    """
+
+    def test_repo_path_env_lands_in_allowlist(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "HY-WorldPlay"
+        (checkout / "hyvideo").mkdir(parents=True)
+        monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_dir_alias_also_discovered(self, tmp_path, monkeypatch):
+        checkout = tmp_path / "HY-World-2.0"
+        checkout.mkdir()
+        monkeypatch.delenv("WORLDMIRROR_REPO_PATH", raising=False)
+        monkeypatch.setenv("WORLDMIRROR_DIR", str(checkout))
+
+        assert f"{checkout}/" in fp.resolve_source_file_allowlist()
+
+    def test_missing_checkout_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+
+        assert not any("absent" in r for r in fp.resolve_source_file_allowlist())
+
+    def test_summary_accepts_repo_dirname(self, tmp_path, monkeypatch):
+        """The checkout dir is HY-WorldPlay, not worldplay — summary must still say ok."""
+        checkout = tmp_path / "HY-WorldPlay"
+        checkout.mkdir()
+        monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(checkout))
+
+        summary = fp.summarise_framework_root_discovery(fp.probe_framework_source_roots_for_env())
+
+        assert "worldplay=ok" in summary
+
+
 class TestProbeIncludesXditWhenInstalled:
     def test_xfuser_picked_up_via_find_spec(self, tmp_path, monkeypatch):
         """A real ``find_spec('xfuser')`` origin is included."""
