@@ -958,8 +958,6 @@ class ExploreExecutor:
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
 
-        last_run_tput: float | None = None  # rebench/single-variant tput
-
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a fresh cold boot for round 2).
         lifecycle = resolve_lifecycle_params(config_path)
@@ -1344,7 +1342,10 @@ class ExploreExecutor:
                         else:
                             outcome = "KEEP"
 
-                    cold_tput = r.output_throughput
+                    # Round-1 measurement. Warm whenever ``use_warm_decision``
+                    # is on (it re-attaches to the warmup's hot server), so this
+                    # is the DECISION number, not a cold one.
+                    decision_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
@@ -1354,8 +1355,8 @@ class ExploreExecutor:
                         "note": gv.note,
                         "outcome": outcome,
                         "status": r.status,
-                        "tput": cold_tput,
-                        "cold_tput": cold_tput,
+                        "tput": decision_tput,
+                        "decision_tput": decision_tput,
                         "gain_pct": gain,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
@@ -1418,8 +1419,8 @@ class ExploreExecutor:
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
-                            "cold_tput": cold_tput,
+                            "tput": decision_tput,
+                            "decision_tput": decision_tput,
                             "single_workspace": r.workspace,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
@@ -1519,7 +1520,7 @@ class ExploreExecutor:
                                         "note": gv.note,
                                         "reason": "stack_unstable",
                                         "gain_pct": gain,
-                                        "tput": cold_tput,
+                                        "tput": decision_tput,
                                         "stack_rebench_tput": stack_rebench_tput,
                                         "round_id": round_id,
                                         "ts": _now_iso(),
@@ -1540,7 +1541,6 @@ class ExploreExecutor:
                                 stack_unset_envs = list(run_unset_envs)
                                 stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
-                                last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
                                 keep_entry["tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
@@ -1559,8 +1559,7 @@ class ExploreExecutor:
                             stack_remove_args = list(run_remove_args)
                             stack_unset_envs = list(run_unset_envs)
                             stack_base_args_mode = "replace" if persist_effective_args else "append"
-                            running_base_tput = cold_tput or running_base_tput
-                            last_run_tput = cold_tput
+                            running_base_tput = decision_tput or running_base_tput
 
                         winners.append(keep_entry)
                         winners_history_update.append(
@@ -1590,7 +1589,7 @@ class ExploreExecutor:
                             "note": gv.note,
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "round_id": round_id,
                             "ts": _now_iso(),
                             "provenance": provenance,
@@ -1605,13 +1604,11 @@ class ExploreExecutor:
                             **control_fields,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "reason": reason or "not_keep",
                             "workspace": r.workspace,
                         }
                     )
-                    if cold_tput:
-                        last_run_tput = cold_tput
                 finally:
                     # Reap THIS variant's persistent server on every exit path
                     # (idempotent + no-op when reuse was ineligible). This is a
@@ -1753,10 +1750,9 @@ class ExploreExecutor:
         )
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
-        if winners:
-            output_throughput = float(running_base_tput) if last_run_tput is not None else None
-        else:
-            output_throughput = None
+        # Every KEEP advances ``running_base_tput`` to its own measurement, so
+        # with winners present this is the throughput of the final stack.
+        output_throughput = float(running_base_tput) if winners else None
 
         # Successful = at least one bench produced a measurement or was reaped
         # by the overtime gate (KILLED_OVERTIME is a real signal).
