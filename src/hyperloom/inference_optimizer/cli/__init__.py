@@ -1655,6 +1655,23 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
             print(f"  → reset start_ts to {state.start_ts} (resume budget)")
+        else:
+            # A clean stop (no stop_reason, crash_count < 3) keeps start_ts, so
+            # --max-hours is measured from the ORIGINAL session start and the
+            # earlier legs' wall-clock is already spent. Say so: an operator who
+            # stops a run by hand reads --max-hours as "from now".
+            elapsed_h = state.elapsed_minutes() / 60.0
+            budget_h = float(getattr(args, "max_hours", 0) or 0)
+            print(
+                f"  → start_ts kept at {state.start_ts} (clean stop, no stop_reason): "
+                f"--max-hours counts from the original session start"
+            )
+            print(f"  → budget: {elapsed_h:.2f}h already elapsed of {budget_h:.2f}h → {budget_h - elapsed_h:.2f}h left")
+            if budget_h and elapsed_h >= budget_h:
+                print(
+                    "  → WARNING: this budget is already exhausted; raise --max-hours "
+                    "or start a fresh session, or the run stops almost immediately"
+                )
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
