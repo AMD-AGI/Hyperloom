@@ -148,13 +148,14 @@ def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
     return current
 
 
-def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
+def _entry_family(entry: dict[str, Any]) -> str:
     """Resolve attribution family using phase/ownership metadata when needed.
 
     ``integrate_patch`` is not intrinsically a Framework action. Framework
     authoring owns explicitly marked or FRAMEWORK_AGENT entries; EXPLORE owns
     its own patch applications; PRELUDE baseline-enablement entries are
-    configuration prerequisites and remain non-attributable.
+    configuration prerequisites and remain non-attributable. Missing ownership
+    stays unattributed instead of being inferred from execution phase.
     """
 
     action = str(entry.get("action") or "").strip().lower()
@@ -164,16 +165,16 @@ def _entry_family(entry: dict[str, Any], *, inferred_phase: str = "") -> str:
         return "unattributed"
     if entry.get("framework_agent_authoring"):
         return "framework"
-    phase = str(
-        entry.get("source_phase") or entry.get("phase") or inferred_phase or ""
-    ).strip().upper()
-    return {
-        "FRAMEWORK": "framework",
-        "FRAMEWORK_AGENT": "framework",
-        "EXPLORE": "explore",
-        "KERNEL": "kernel_agent",
-        "KERNEL_AGENT": "kernel_agent",
-    }.get(phase, "unattributed")
+    phase = str(entry.get("source_phase") or entry.get("phase") or "").strip().upper()
+    provenance = str(entry.get("provenance") or "").strip().lower()
+    specialist_owned = bool(entry.get("domain")) or provenance.startswith(
+        "specialist:"
+    )
+    if phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+        return "framework"
+    if phase == "EXPLORE" or specialist_owned:
+        return "explore"
+    return "unattributed"
 
 
 def _promote_legacy_gain_entries(
@@ -226,6 +227,8 @@ def _promote_legacy_gain_entries(
         for key in (
             "source_phase",
             "phase",
+            "domain",
+            "gap_layer",
             "framework_agent_authoring",
             "baseline_enablement",
             "attribution_eligible",
@@ -308,7 +311,6 @@ def collect_attribution(
         "gemm_tuning": 0.0,
         "geak": 0.0,
     }
-    timeline = _phase_timeline(state)
     unattributed_actions: set[str] = set()
     for e in entries:
         if not isinstance(e, dict):
@@ -318,10 +320,7 @@ def collect_attribution(
         delta = _to_float(e.get("delta_pct"))
         if delta is None:
             continue
-        fam = _entry_family(
-            e,
-            inferred_phase=_phase_at(_entry_ts(e), timeline),
-        )
+        fam = _entry_family(e)
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
         if fam in {"other", "unattributed"} and delta > 0:
             unattributed_actions.add(str(e.get("action") or "<missing>"))
@@ -403,7 +402,8 @@ def _collect_phase_breakdown(
     """Per-phase gain attribution.
 
     Assigns each KEEP entry to the phase active at its acceptance
-    timestamp (explore further splits by domain, kernel by kernel_id).
+    timestamp (explore further splits by domain, kernel by kernel_id), except
+    ``integrate_patch`` which follows explicit proposal ownership.
     Missing phase_history → everything lands under ``unattributed``.
 
     Args:
@@ -467,7 +467,16 @@ def _collect_phase_breakdown(
         if phase == "framework_agent":
             phase = "framework"
         action = str(e.get("action") or "").lower()
-        fam = _entry_family(e, inferred_phase=phase)
+        fam = _entry_family(e)
+        if action.startswith("integrate_patch"):
+            # For this delayed application mechanism, proposal ownership is the
+            # attribution phase; the acceptance timestamp is only execution
+            # context and must not manufacture a kernel_agent/"?" row.
+            phase = (
+                fam
+                if fam in {"framework", "explore"}
+                else "unattributed"
+            )
         # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"
@@ -491,7 +500,13 @@ def _collect_phase_breakdown(
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
-            raw_prov = provenance_by_fp.get(fp) or str(e.get("provenance") or "") or "default_grid"
+            entry_domain = str(e.get("domain") or "").strip()
+            raw_prov = (
+                provenance_by_fp.get(fp)
+                or str(e.get("provenance") or "")
+                or (f"specialist:{entry_domain}" if entry_domain else "")
+                or "default_grid"
+            )
             domain = _normalize_specialist_key(raw_prov)
             by_domain[domain] = round(
                 float(by_domain.get(domain, 0.0)) + float(delta),

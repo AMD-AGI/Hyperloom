@@ -50,6 +50,49 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
         dst.setdefault("config_path", cfg)
 
 
+def _forward_integrate_source(
+    src: dict[str, Any],
+    dst: dict[str, Any],
+    *,
+    current_phase: str,
+) -> None:
+    """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
+
+    domain = str(src.get("domain") or src.get("source_domain") or "").strip()
+    gap_layer = str(src.get("gap_layer") or "").strip().lower()
+    recorded_phase = str(src.get("source_phase") or "").strip().upper()
+    if bool(src.get("framework_agent_authoring")) or gap_layer == "framework":
+        source_phase = "FRAMEWORK_AGENT"
+    elif recorded_phase in {"FRAMEWORK", "FRAMEWORK_AGENT", "EXPLORE"}:
+        source_phase = recorded_phase
+    elif gap_layer in {"explore", "perf_explore"} or domain:
+        # Specialist-produced runtime/source candidates are EXPLORE-owned unless
+        # explicit framework-authoring metadata says otherwise. In particular,
+        # never inherit a later KERNEL_AGENT completion phase.
+        source_phase = "EXPLORE"
+    elif str(current_phase or "").strip().upper() in {
+        "FRAMEWORK",
+        "FRAMEWORK_AGENT",
+        "EXPLORE",
+    }:
+        source_phase = str(current_phase).strip().upper()
+    else:
+        source_phase = ""
+
+    if source_phase:
+        dst["source_phase"] = source_phase
+    if domain:
+        dst["domain"] = domain
+        dst["provenance"] = f"specialist:{domain}"
+    # ``framework`` is intentionally not forwarded: integrate_patch consumes
+    # that parameter when selecting accuracy parsing/gating behavior, whereas
+    # proposal ownership only needs the gap metadata below.
+    for key in ("gap_canonical_id", "gap_layer"):
+        value = src.get(key)
+        if value not in (None, "", [], {}):
+            dst[key] = value
+
+
 class ExplorePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -1491,16 +1534,21 @@ class ExplorePhase(PhaseHandler):
         patch_name = ""
         if isinstance(proposals, list) and proposals:
             patch_name = str((proposals[0] or {}).get("name") or "")
+        spec_params = getattr(task, "params", None) or {}
         integrate_params: dict[str, Any] = {
             "specialist_task_id": sid,
             "provenance": "specialist",
             "patch_name": patch_name,
         }
+        _forward_integrate_source(
+            spec_params,
+            integrate_params,
+            current_phase=str(getattr(self.shared_state, "phase", "") or ""),
+        )
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
         # authored-outcome bridge keys the progress row on the real candidate id.
         try:
-            spec_params = getattr(task, "params", None) or {}
             if bool(spec_params.get("framework_agent_authoring")):
                 integrate_params["framework_agent_authoring"] = True
                 fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
@@ -1659,6 +1707,11 @@ class ExplorePhase(PhaseHandler):
             "extra_server_args": str(config_levers.get("extra_server_args") or ""),
             "extra_envs": dict(config_levers.get("extra_envs") or {}),
         }
+        _forward_integrate_source(
+            spec_params,
+            integrate_params,
+            current_phase=str(getattr(self.shared_state, "phase", "") or ""),
+        )
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
         fa_batch = str(spec_params.get("framework_batch_id") or "")

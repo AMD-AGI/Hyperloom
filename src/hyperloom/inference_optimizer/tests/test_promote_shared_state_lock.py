@@ -407,6 +407,48 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
 
 
 @pytest.mark.asyncio
+async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
+    session_dir,
+):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.phase = "KERNEL_AGENT"
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 110.0,
+            "specialist_task_id": "spec-framework",
+            "delta_pct": 10.0,
+            "extra_server_args_applied": "--quantization fp8_per_channel",
+            "workspace": "/w",
+        },
+        task=_task(
+            "integrate_patch",
+            task_id="t-cross-phase",
+            params={
+                "specialist_task_id": "spec-framework",
+                "source_phase": "FRAMEWORK_AGENT",
+                "domain": "serving_specialist",
+                "provenance": "specialist:serving_specialist",
+                "gap_canonical_id": "gap.framework.fp8",
+                "gap_layer": "framework",
+                "framework_agent_authoring": True,
+            },
+        ),
+    )
+
+    entry = s.optimization_stack[0]
+    assert entry["source_phase"] == "FRAMEWORK_AGENT"
+    assert entry["domain"] == "serving_specialist"
+    assert entry["provenance"] == "specialist:serving_specialist"
+    assert entry["gap_canonical_id"] == "gap.framework.fp8"
+    assert entry["framework_agent_authoring"] is True
+
+
+@pytest.mark.asyncio
 async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir):
     """A patch required to establish baseline stays reproducible but has no gain."""
     coord = _coord(session_dir)
@@ -473,6 +515,7 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.phase = "KERNEL_AGENT"
 
     await coord._promote_to_shared_state(
         "framework_agent",
@@ -496,6 +539,8 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     assert row["batch_id"] == "b1"
     assert s.current_best["action"] == "framework"
     assert s.current_best["tput"] == 130.0
+    assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
+    assert s.optimization_stack[-1]["provenance"] == "framework_agent"
     assert not hasattr(s, "last_framework_agent")
 
 
@@ -731,7 +776,7 @@ def test_lift_applies_unset_envs_before_new_envs(session_dir):
 
 @pytest.mark.asyncio
 async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
-    """source_snapshot/framework_root/base_sha from the lift bv reach the stack entry."""
+    """Source snapshot manifest and changed files reach the stack entry."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 1000.0
@@ -747,6 +792,8 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
             "tput": 1500.0,
             "scope": "source_patch",
             "source_snapshot": "/session/optimization_stack/src/abc123",
+            "source_manifest": "/session/optimization_stack/src/abc123/manifest.json",
+            "target_files": ["vllm/model_executor/layers/quantization/foo.py"],
             "framework_root": "/opt/vllm",
             "base_sha": "deadbeef",
         },
@@ -754,6 +801,12 @@ async def test_lift_copies_source_snapshot_into_stack_entry(session_dir):
 
     top = s.optimization_stack[-1]
     assert top.get("source_snapshot") == "/session/optimization_stack/src/abc123"
+    assert top.get("source_manifest") == (
+        "/session/optimization_stack/src/abc123/manifest.json"
+    )
+    assert top.get("target_files") == [
+        "vllm/model_executor/layers/quantization/foo.py"
+    ]
     assert top.get("framework_root") == "/opt/vllm"
     assert top.get("base_sha") == "deadbeef"
 

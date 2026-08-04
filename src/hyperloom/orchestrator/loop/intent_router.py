@@ -393,6 +393,14 @@ class IntentRouter:
             return
         # delegate explore runs variants directly (no Critic pre-review).
         params = dict(intent.payload.get("params") or {})
+        if action_name == "specialist":
+            # Capture proposal ownership at dispatch. Specialist work can finish
+            # after the state machine advances, so completion-time phase is not
+            # a reliable source for a later integrate_patch KEEP.
+            params.setdefault(
+                "source_phase",
+                str(getattr(self.shared_state, "phase", "") or ""),
+            )
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
