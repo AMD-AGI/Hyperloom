@@ -74,6 +74,18 @@ class Objective(ABC):
             str: Human-readable description of the configured target.
         """
 
+    def gap_pct(self, state: "SharedState") -> float:
+        """Compute the percent improvement still required to reach the goal.
+
+        Args:
+            state (SharedState): Current shared optimization state to evaluate.
+
+        Returns:
+            float: Remaining distance in percent, 0.0 once reached. Targetless
+            objectives keep the 0.0 default.
+        """
+        return 0.0
+
 
 @dataclass
 class _RatioObjective(Objective):
@@ -102,6 +114,14 @@ class _RatioObjective(Objective):
     def reached(self, state: "SharedState") -> bool:
         """Report whether the live metric meets or exceeds the target."""
         return self._current(state) >= self._target()
+
+    def gap_pct(self, state: "SharedState") -> float:
+        """Return the shortfall as a percent of the live metric (0.0 when either side is non-positive)."""
+        cur = self._current(state)
+        target = self._target()
+        if cur <= 0 or target <= 0:
+            return 0.0
+        return max(0.0, (target - cur) / cur * 100.0)
 
 
 @dataclass
@@ -134,6 +154,10 @@ class TargetGainObjective(_RatioObjective):
     def _target(self) -> float:
         """Return the configured gain-percent target."""
         return self.target_gain_pct
+
+    def gap_pct(self, state: "SharedState") -> float:
+        """Return the gain percentage points still missing (both sides are already percentages)."""
+        return max(0.0, self._target() - self._current(state))
 
     def describe(self) -> str:
         """Return a one-line summary of the configured gain target.
