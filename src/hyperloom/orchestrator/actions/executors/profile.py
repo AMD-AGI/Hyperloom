@@ -198,6 +198,10 @@ def _validate_trace_structure(
     # warnings; only check 7 (zero_ops) is meaningful and always runs below.
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
+    # A roofline-composite ctx carries no framework, and an empty name resolves
+    # to the serving default — which fires every serving-only check below against
+    # a scriptable trace. $FRAMEWORK is the session-wide lock, so fall back to it.
+    framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
     scriptable = _fw_reg.is_scriptable(framework)
 
     # --- Check 1: capture_traces/ presence (LLM/serving only) ---
