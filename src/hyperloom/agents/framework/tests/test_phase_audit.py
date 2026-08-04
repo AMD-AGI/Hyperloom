@@ -233,7 +233,6 @@ def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
 
 # opt-in LLM layer: stream_chat_completion_text is called (stream=True path)
 def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
-    """_maybe_llm_refine must route through stream_chat_completion_text."""
     import sys
     import types
 
@@ -245,14 +244,10 @@ def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
         captured.append(kw)
         return _valid_reply, None
 
-    monkeypatch.setattr(
-        "hyperloom.common.llm_config.stream_chat_completion_text",
-        _fake_stream,
-    )
+    monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _fake_stream)
     monkeypatch.setenv("SAFE_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 
-    # Provide a minimal openai stub so the lazy `from openai import OpenAI` succeeds.
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = lambda **_kw: object()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
@@ -283,10 +278,7 @@ def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
     def _boom(client, **_kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        "hyperloom.common.llm_config.stream_chat_completion_text",
-        _boom,
-    )
+    monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _boom)
     monkeypatch.setenv("SAFE_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
 

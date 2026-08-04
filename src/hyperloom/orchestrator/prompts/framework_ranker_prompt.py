@@ -9,8 +9,6 @@ so the prompt text is testable and renderable by the audit script.
 
 from __future__ import annotations
 
-_LOCAL_EXPLORE_PREFIX = "local_explore:"
-
 _FOOTER = (
     "Prefer PRs from this session's own framework repo, especially those "
     "targeting the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
@@ -42,24 +40,7 @@ def build_framework_ranker_prompt(
     has_local_explore: bool,
     memory_block: str,
 ) -> str:
-    """Build the FRAMEWORK candidate-ranker prompt.
-
-    Args:
-        model: The model id/path for the current session.
-        framework: The serving framework (e.g. ``sglang``).
-        gpu_type: GPU type string (e.g. ``MI300X``).
-        precision: Weight precision (e.g. ``fp8``).
-        tp: Tensor-parallel degree.
-        best_throughput: Current best observed throughput (tok/s), or ``None``.
-        candidate_rows: Pre-rendered candidate lines, one per entry
-            (format: ``"<i>. id=<id> repo=<repo> title=<title>[extra]"``).
-        has_local_explore: Whether any candidate is a local-exploration arm.
-        memory_block: Already-tried / failed candidates block from
-            ``_render_framework_memory_for_prompt``; empty string to omit.
-
-    Returns:
-        The assembled ranker prompt string.
-    """
+    """Build the FRAMEWORK candidate-ranker prompt."""
     lines: list[str] = [
         "You are selecting ONE upstream PR to integrate next, to maximize "
         "LLM serving throughput (tokens/s) for this exact workload:",

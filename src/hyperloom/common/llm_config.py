@@ -243,12 +243,7 @@ def stream_chat_completion_text(
     client: object,
     **params: object,
 ) -> "tuple[str, object | None]":
-    """Create a streamed chat completion and accumulate text deltas.
-
-    Forces ``stream=True`` and ``stream_options={"include_usage": True}``.
-    Returns ``(text, usage)``; ``usage`` is the final chunk's usage object or
-    ``None`` when not emitted.
-    """
+    """Streamed chat completion; returns ``(text, usage)``."""
     params["stream"] = True
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []
@@ -268,7 +263,7 @@ async def astream_chat_completion_text(
     client: object,
     **params: object,
 ) -> "tuple[str, object | None]":
-    """Async counterpart of :func:`stream_chat_completion_text`."""
+    """Async streamed chat completion; returns ``(text, usage)``."""
     params["stream"] = True
     params["stream_options"] = {"include_usage": True}
     parts: list[str] = []

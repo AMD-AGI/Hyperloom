@@ -372,15 +372,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_audit_refine_prompt(static_result: dict[str, Any], patch_text: str) -> str:
-    """Build the prompt for the opt-in LLM semantic-audit refine layer.
-
-    Args:
-        static_result: The static-layer verdict dict.
-        patch_text: The PR's unified diff; truncated to 6 000 chars before sending.
-
-    Returns:
-        The assembled prompt string.
-    """
+    """Build the prompt for the opt-in LLM semantic-audit refine layer."""
     import json as _json
 
     return (
@@ -402,30 +394,16 @@ def _maybe_llm_refine(
 ) -> dict[str, Any]:
     """Optionally refine the static verdict with a single chat-completion.
 
-    Opt-in (``use_llm=True``) and best-effort: requires an API key and base URL
-    resolvable via the gateway env (``SAFE_API_KEY`` / ``OPENAI_BASE_URL``).
-    A missing base URL would fall through to ``api.openai.com``, which is
-    never the intended gateway; the call is skipped when either is absent.
-    Any failure / missing credential keeps the static verdict unchanged. Never
-    escalates an ``already_*`` claim the static layer didn't already back with
-    evidence.
-
-    Args:
-        request: The phase-audit request (carries ``model`` / creds overrides).
-        static_result: The static-layer verdict.
-        patch_text: The PR's unified diff (truncated before sending).
-
-    Returns:
-        A possibly-refined verdict dict (``layer="llm"`` when refined).
+    Requires a gateway API key and base URL; skips when either is absent to
+    avoid falling through to api.openai.com. Never escalates ``already_*``
+    without static evidence.
     """
-    import json
     import os
 
     import hyperloom.common.llm_config as _llm_cfg
 
     model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.4").strip()
 
-    # Build a temporary env override so request-level creds take precedence.
     env_override: dict[str, str] = {}
     req_key = str(request.get("api_key") or "").strip()
     req_url = str(request.get("openai_base_url") or "").strip()
