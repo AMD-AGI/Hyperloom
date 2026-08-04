@@ -91,3 +91,6 @@ runtime-env/
 # framework-specific; not part of the product). Keep them out of the repo.
 run_kernel_forge.sh
 resume_kernel_forge.sh
+
+# Local prompt-audit scratch (rendered prompts, session dumps, audit notes)
+.prompt-audit/
