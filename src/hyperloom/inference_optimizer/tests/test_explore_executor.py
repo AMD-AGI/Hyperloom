@@ -53,6 +53,25 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
+def _force_cold_decision(monkeypatch) -> None:
+    """Make server_lifecycle reuse ineligible, so the decision round is a cold single run.
+
+    Warm-decision is tied to lifecycle eligibility and has no toggle of its own
+    (the baseline's double-run has none either, and a one-sided opt-out would
+    grade cold candidates against a hot anchor). Tests that need the single-round
+    cold path therefore express the real precondition: no reuse available.
+    """
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.resolve_lifecycle_params",
+        lambda _config_path: {
+            "eligible": False,
+            "framework": "sglang",
+            "port": 30000,
+            "reason": "test: server_lifecycle reuse disabled",
+        },
+    )
+
+
 def _write_baseline_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -817,7 +836,7 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
 @pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -891,7 +910,6 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     monkeypatch,
 ):
     """Default EXPLORE measures hot decisions, matching default hot baseline."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -959,7 +977,6 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     """The overtime deadline is anchored on a throughput-only baseline, so the
     rounds it gates must measure throughput only. The warmup round is ungated and
     remains the accuracy source."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1016,9 +1033,9 @@ async def test_explore_cold_decision_keeps_eval(
     tmp_path,
     monkeypatch,
 ):
-    """With warm-decision disabled there is no warmup eval to fall back on, so
-    the decision round must still run its own accuracy gate."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    """Without server_lifecycle reuse there is no warmup round whose eval the
+    decision round could fall back on, so it must run its own accuracy gate."""
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1072,7 +1089,6 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     monkeypatch,
 ):
     """A failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1221,7 +1237,7 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     monkeypatch,
 ):
     """A fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
