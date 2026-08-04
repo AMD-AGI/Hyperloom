@@ -46,6 +46,9 @@ class DispatcherCollaborator:
 
     def __init__(self, coordinator) -> None:
         self._coord = coordinator
+        # Task ids already charged a failure by the dead-holder reclaim path, so
+        # a late normal result for the same task cannot double-count it.
+        self._dead_holder_accounted: set[str] = set()
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
@@ -134,6 +137,7 @@ class DispatcherCollaborator:
         # Dead-holder self-heal (runs every tick, before scanning the queue):
         # detect a crashed worker's dead PID so its leased lanes free and the
         # stuck task fails (retry-eligible) this same tick.
+        dead_tasks: list[str] = []
         try:
             dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
             if dead_tasks:
@@ -144,6 +148,11 @@ class DispatcherCollaborator:
                 )
         except Exception:  # noqa: BLE001 — self-heal never aborts the pump
             log.exception("dispatcher: dead-running task reclaim failed")
+        if dead_tasks:
+            try:
+                await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
+            except Exception:  # noqa: BLE001 — bookkeeping never aborts the pump
+                log.exception("dispatcher: dead-holder failure accounting failed")
         try:
             await self.locks.reap_dead_holders()
         except Exception:  # noqa: BLE001
@@ -780,6 +789,50 @@ class DispatcherCollaborator:
             ),
         )
 
+    async def _account_dead_holder_failures(
+        self,
+        task_ids: list[str],
+        *,
+        reason: str,
+    ) -> None:
+        """Charge a failure for each task reclaimed from a dead lease holder.
+
+        A holder killed from outside this process (lease reaped,
+        ``lease_dead_holder_reaped``) never returns a result, so without this
+        the per-action streak counters never see the death and the streak-based
+        auto-terminate stays blind to the whole failure mode.
+
+        Args:
+            task_ids: Task ids just transitioned ``running -> failed`` by the
+                dead-holder reclaim.
+            reason: Reclaim reason label, echoed into the failure result.
+        """
+        for task_id in task_ids:
+            if task_id in self._dead_holder_accounted:
+                continue
+            self._dead_holder_accounted.add(task_id)
+            try:
+                task = await self.tasks.get(task_id)
+            except Exception:  # noqa: BLE001 — a missing row must not abort the pump
+                log.exception(
+                    "dispatcher: dead-holder accounting could not load task=%s",
+                    task_id,
+                )
+                continue
+            await self._handle_unpromotable_result(
+                task,
+                {
+                    "status": "failed",
+                    "error_class": "dead_holder_reaped",
+                    "error": (f"lease holder process died before reporting a result; task reclaimed by {reason}"),
+                },
+            )
+            log.warning(
+                "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
+                task_id,
+                task.kind,
+            )
+
     async def _reap_dispatched_task(
         self,
         task: Task,
@@ -952,7 +1005,7 @@ class DispatcherCollaborator:
                         result.result,
                         task=task,
                     )
-                else:
+                elif task.task_id not in self._dead_holder_accounted:
                     await self._handle_unpromotable_result(task, result.result)
             except Exception as exc:  # noqa: BLE001
                 log.exception(
