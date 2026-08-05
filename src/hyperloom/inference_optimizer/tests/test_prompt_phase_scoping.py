@@ -30,6 +30,25 @@ SPECIALIST_DIALS = "### One specialist, four dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
 WEB_SEARCH = "### Web search"
+KERNEL_REQUEST_KINDS = "### Kernel request kinds"
+ROOFLINE_BLOCK = "### Roofline / profile analysis"
+
+# One goal block per phase; FRAMEWORK_AGENT is Coordinator-driven and has none.
+PHASE_GOAL_BLOCKS = {
+    _ps.PHASE_PRELUDE: "### PRELUDE — phase goal",
+    _ps.PHASE_EXPLORE: "### EXPLORE — phase goal",
+    _ps.PHASE_KERNEL_AGENT: "### KERNEL — phase goal",
+    _ps.PHASE_SWEEP: "### SWEEP — phase goal",
+    _ps.PHASE_CLOSE: "### CLOSE — phase goal",
+}
+
+# Analysis-driven targeting is unreachable once the levers are gone.
+ROOFLINE_PHASES = {
+    _ps.PHASE_PRELUDE,
+    _ps.PHASE_FRAMEWORK_AGENT,
+    _ps.PHASE_EXPLORE,
+    _ps.PHASE_KERNEL_AGENT,
+}
 
 # Only EXPLORE lets the LLM emit `delegate{specialist}`; FRAMEWORK_AGENT
 # specialists come from the Coordinator's authoring pump but stay steerable.
@@ -141,6 +160,37 @@ def test_specialist_watching_prose_spans_both_dispatching_phases(registry):
             assert SPECIALIST_WATCH not in text, f"{SPECIALIST_WATCH} leaked into {phase}"
 
 
+def test_phase_goal_blocks_render_only_in_their_own_phase(registry):
+    """A phase states its own goal; the other phases' goals are unreachable from it."""
+    for phase in _ps.PHASE_NAMES:
+        text = _build(registry, phase)
+        for owner, marker in PHASE_GOAL_BLOCKS.items():
+            if owner == phase:
+                assert marker in text, f"{marker} missing from its own phase"
+            else:
+                assert marker not in text, f"{marker} leaked into {phase}"
+
+
+def test_kernel_request_kinds_only_in_kernel_phase(registry):
+    """The request-kind whitelist is actionable only where REQUESTs are legal."""
+    for phase in _ps.PHASE_NAMES:
+        text = _build(registry, phase)
+        if phase == _ps.PHASE_KERNEL_AGENT:
+            assert KERNEL_REQUEST_KINDS in text
+        else:
+            assert KERNEL_REQUEST_KINDS not in text, f"kernel request kinds leaked into {phase}"
+
+
+def test_roofline_targeting_drops_out_of_sweep_and_close(registry):
+    """SWEEP validates and CLOSE reports; neither can act on a bottleneck class."""
+    for phase in _ps.PHASE_NAMES:
+        text = _build(registry, phase)
+        if phase in ROOFLINE_PHASES:
+            assert ROOFLINE_BLOCK in text, f"{ROOFLINE_BLOCK} missing from {phase}"
+        else:
+            assert ROOFLINE_BLOCK not in text, f"{ROOFLINE_BLOCK} leaked into {phase}"
+
+
 def test_payload_contracts_are_scoped_to_the_proposable_set(registry):
     """A phase gets payload templates only for the actions it can propose."""
     for phase in _ps.PHASE_NAMES:
@@ -184,7 +234,10 @@ def test_unscoped_build_renders_every_module(registry):
     for marker in (
         KERNEL_REQUEST_REF,
         IDEA_GENERATION,
+        KERNEL_REQUEST_KINDS,
+        ROOFLINE_BLOCK,
         "GRID INPUT (REQUIRED)",
+        *PHASE_GOAL_BLOCKS.values(),
         *ALL_SPECIALIST_OPS,
         *ALWAYS_ON,
     ):
