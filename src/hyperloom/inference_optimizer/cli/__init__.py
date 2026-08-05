@@ -213,6 +213,8 @@ def _build_orchestration_prompt(
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
+        phase (str): Current pipeline phase; omits the prompt modules whose
+            behaviour that phase cannot reach. Empty renders every module.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -234,6 +236,7 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        phase=phase,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -2044,6 +2047,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         or ""
     )
+    # A fresh session has no phase recorded yet and always begins at PRELUDE;
+    # the Coordinator re-scopes the prompt at every later phase seam.
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE as _PHASE_PRELUDE
+
+    _initial_phase = coordinator.shared_state.phase or _PHASE_PRELUDE
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
@@ -2055,6 +2063,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             max_minutes=max_minutes_for_prompt,
             macro_cycle=_initial_macro_cycle,
             cycle_directive=_initial_directive,
+            phase=_initial_phase,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }

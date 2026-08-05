@@ -296,7 +296,7 @@ class ExplorePhase(PhaseHandler):
         if not directive:
             directive = self._cycle_directive_fallback()
             source = "deterministic"
-        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive, phase=state.phase)
         overrides = getattr(self, "system_prompt_overrides", None)
         if not isinstance(overrides, dict):
             return False

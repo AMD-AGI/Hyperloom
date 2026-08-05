@@ -885,6 +885,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_explore_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
         "_on_phase_entered": "phase_machine",
+        "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
         "_internal_analysis_kind": "phase_prelude",
         "_warm_recipe_proven_items": "phase_prelude",

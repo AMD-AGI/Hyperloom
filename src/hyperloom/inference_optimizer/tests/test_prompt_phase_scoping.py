@@ -247,3 +247,72 @@ def test_filter_strips_tag_comments_and_leading_blockquote():
 
 def test_phase_argument_is_case_insensitive(registry):
     assert _build(registry, "kernel_agent") == _build(registry, _ps.PHASE_KERNEL_AGENT)
+
+
+# ---------------------------------------------------------------------------
+# Coordinator re-scopes the override at the phase seam
+# ---------------------------------------------------------------------------
+def _machine_with_stub_coordinator(*, user_supplied: bool = False):
+    """Build a MachinePhase over a minimal coordinator stub.
+
+    Returns ``(phase_handler, coord, rebuild_calls)`` where ``rebuild_calls``
+    records the kwargs handed to the stubbed prompt rebuilder.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.phases.machine import MachinePhase
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(session_id="t", macro_cycle=3)
+    state.orchestration_memory = {"next_cycle_directive": "keep pushing MoE dispatch"}
+    rebuild_calls: list[dict] = []
+
+    def _rebuild(**kwargs) -> str:
+        rebuild_calls.append(kwargs)
+        return f"PROMPT[phase={kwargs.get('phase')}]"
+
+    coord = SimpleNamespace(
+        shared_state=state,
+        system_prompt_overrides={"orchestration": "ORIGINAL"},
+        _rebuild_orch_prompt=_rebuild,
+        _orch_prompt_is_user_supplied=user_supplied,
+    )
+    return MachinePhase(coord), coord, rebuild_calls
+
+
+def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive():
+    handler, coord, calls = _machine_with_stub_coordinator()
+
+    assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
+    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
+    assert calls == [
+        {
+            "macro_cycle": 3,
+            "cycle_directive": "keep pushing MoE dispatch",
+            "phase": "KERNEL_AGENT",
+        }
+    ]
+
+
+def test_phase_seam_never_clobbers_a_user_supplied_prompt():
+    handler, coord, calls = _machine_with_stub_coordinator(user_supplied=True)
+
+    assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
+    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert calls == []
+
+
+def test_phase_seam_ignores_a_blank_phase():
+    handler, coord, calls = _machine_with_stub_coordinator()
+
+    assert handler._reseed_orch_prompt_for_phase("") is False
+    assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
+    assert calls == []
+
+
+def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
+    """The collaborator method must be routed, or the seam hook is a no-op."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
+    assert "phase_machine" in Coordinator._COLLAB_MODULES
