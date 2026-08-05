@@ -124,12 +124,6 @@ The following inference frameworks are supported:
    * - vLLM
      - 7.2.0
      - Do not mix frameworks within one session
-   * - Atom
-     - 7.2.0
-     - Single-node only (multi-node rejected by the IR-8 guard)
-   * - xDiT (diffusion)
-     - 7.2.0
-     - Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency ``e2el_mean_ms`` (ms).
 
 Container images
 ----------------
