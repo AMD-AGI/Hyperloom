@@ -250,44 +250,43 @@ def _is_stale_proxy_url(value: str | None) -> bool:
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
 
-    Each side keeps an explicit operator value. Official provider keys may omit
-    the base URL and use the SDK default endpoint. A missing side only falls
-    back to the other for non-official gateway URLs; official OpenAI and
-    official Anthropic endpoints are not protocol-interchangeable.
+    Routing is driven by the base URLs. An explicit custom (non-official)
+    gateway on one side serves both providers, so the missing side is derived
+    from it; this takes priority over defaulting an unset side to its official
+    endpoint. Only when there is no gateway base URL to derive from does a side
+    with an explicit key fall back to its official SDK endpoint. Official OpenAI
+    and official Anthropic endpoints are never protocol-interchangeable.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     deepseek_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
-    anthropic_explicit = bool(anthropic_url)
-    openai_explicit = bool(openai_url)
 
+    # 1) Both sides explicitly configured: respect each as-is (true dual entry).
+    if anthropic_url and openai_url:
+        return anthropic_url, openai_url
+    # 2) Single OpenAI-style custom gateway: derive the Anthropic base from it
+    #    (strip the trailing /v1 the SDK re-appends). Wins over official default.
+    if openai_url and not anthropic_url and not _is_official_openai_url(openai_url):
+        return _derive_anthropic_base_url(openai_url), openai_url
+    # 3) Single Anthropic-compatible custom gateway: the OpenAI/Codex side reuses
+    #    the same gateway with a different chat-completions path. Derive it so
+    #    OPENAI_BASE_URL isn't left without ``/v1`` (which 404s).
+    if (
+        anthropic_url
+        and not openai_url
+        and not _is_official_anthropic_url(anthropic_url)
+        and not _is_deepseek_anthropic_url(anthropic_url)
+    ):
+        return anthropic_url, derive_openai_base_url(anthropic_url) or anthropic_url
+    # 4) No gateway to derive from: a side with an explicit key falls back to its
+    #    official SDK endpoint (official provider keys may omit the base URL).
     if not anthropic_url and _has_explicit_anthropic_key():
         anthropic_url = _OFFICIAL_ANTHROPIC_BASE_URL
     if not anthropic_url and _has_explicit_deepseek_key():
         anthropic_url = deepseek_url or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
     if not openai_url and _has_explicit_openai_key():
         openai_url = _OFFICIAL_OPENAI_BASE_URL
-
-    if anthropic_url and openai_url:
-        # Both explicitly configured: respect each as-is (true dual entry).
-        return anthropic_url, openai_url
-    if openai_url and not anthropic_url and openai_explicit and not _is_official_openai_url(openai_url):
-        # Single OpenAI-style gateway: derive the Anthropic base from it.
-        return _derive_anthropic_base_url(openai_url), openai_url
-    if (
-        anthropic_url
-        and not openai_url
-        and anthropic_explicit
-        and not _is_official_anthropic_url(anthropic_url)
-        and not _is_deepseek_anthropic_url(anthropic_url)
-    ):
-        # Anthropic-compatible gateway: the OpenAI/Codex side reuses the same
-        # gateway with a different chat-completions path. Derive it so
-        # OPENAI_BASE_URL isn't left without ``/v1`` (which 404s).
-        return anthropic_url, derive_openai_base_url(anthropic_url) or anthropic_url
-    if anthropic_url or openai_url:
-        return anthropic_url, openai_url
-    return "", ""
+    return anthropic_url, openai_url
 
 
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:

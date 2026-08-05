@@ -126,6 +126,54 @@ def test_resolve_llm_endpoints_official_openai_key_only(clean_creds_env):
     assert openai_url == "https://api.openai.com/v1"
 
 
+def test_resolve_llm_endpoints_single_gateway_mirrored_keys_derive_not_official(clean_creds_env):
+    """Single gateway: mirroring the gateway key into ANTHROPIC_API_KEY must NOT
+    route Claude to the official endpoint. The Anthropic base is derived from the
+    custom OpenAI gateway (a base URL drives routing, the mirrored key does not)."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/api/v1/llm-proxy/v1")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://gw.example.com/api/v1/llm-proxy"
+    assert openai_url == "https://gw.example.com/api/v1/llm-proxy/v1"
+
+
+def test_resolve_llm_endpoints_anthropic_gateway_mirrored_keys_derive_not_official(clean_creds_env):
+    """Anthropic-compatible gateway: mirroring the key into OPENAI_API_KEY must
+    NOT route Codex to official OpenAI. The OpenAI base is derived from the
+    custom Anthropic gateway."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://gw.example.com/anthropic"
+    assert openai_url == "https://gw.example.com/Unified/v1"
+
+
+def test_resolve_llm_endpoints_single_gateway_mirrored_keys_not_official(clean_creds_env):
+    """Single OpenAI gateway with the key mirrored into ANTHROPIC_API_KEY must
+    derive the Anthropic base from the gateway, never route to the official
+    api.anthropic.com endpoint (which would leak the gateway key upstream)."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://gateway.example"
+    assert openai_url == "https://gateway.example/v1"
+
+
+def test_resolve_llm_endpoints_anthropic_gateway_mirrored_keys_not_official(clean_creds_env):
+    """Single Anthropic-compatible gateway with the key mirrored into
+    OPENAI_API_KEY must derive the OpenAI base from the gateway, never route to
+    the official api.openai.com endpoint."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://gateway.example/anthropic"
+    assert openai_url == "https://gateway.example/Unified/v1"
+
+
 def test_openai_key_only_makes_claude_follow_codex_before_preflight(clean_creds_env):
     """Key-only official OpenAI must select Codex orchestration before preflight writes OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
