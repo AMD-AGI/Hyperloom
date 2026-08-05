@@ -1071,6 +1071,41 @@ class ExplorePhase(PhaseHandler):
                             "severity": str(gap.get("severity") or ""),
                         }
 
+        # Run-status snapshot: baseline/current throughput, validated gain, KEEP threshold.
+        if "baseline_tput" not in params:
+            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+            if _bt > 0:
+                params["baseline_tput"] = _bt
+        if "current_tput" not in params:
+            cb = getattr(state, "current_best", None)
+            _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
+            if _ct > 0:
+                params["current_tput"] = _ct
+        if "cumulative_gain_validated" not in params:
+            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            if _cgv != 0:
+                params["cumulative_gain_validated"] = _cgv
+        if "keep_threshold_pct" not in params:
+            try:
+                from ..phases.machine_state import decaying_keep_threshold_pct
+                from ..actions.executors._multi_node_env import is_multi_node
+
+                _kth = decaying_keep_threshold_pct(
+                    int(getattr(state, "macro_cycle", 0) or 0),
+                    multi_node=is_multi_node(),
+                )
+                params["keep_threshold_pct"] = _kth
+            except Exception:  # noqa: BLE001
+                pass
+        if "applied_stack" not in params:
+            _stack = list(getattr(state, "optimization_stack", None) or [])
+            if _stack:
+                params["applied_stack"] = [
+                    {"variant_name": str(e.get("variant_name") or ""), "gain_pct": float(e.get("gain_pct") or 0.0)}
+                    for e in _stack
+                    if isinstance(e, dict)
+                ]
+
         # Pack bottleneck signals into roofline_evidence for the specialist.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         if isinstance(last_ta, dict) and last_ta.get("analysis_md_text") and "roofline_evidence" not in params:

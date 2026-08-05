@@ -788,6 +788,16 @@ class SpecialistPromptInputs:
     wall_budget_sec: float = 0.0
     started_at_iso: str = ""
 
+    # Run-status snapshot injected by the Coordinator so the specialist
+    # understands where the session stands. All default to "absent" (0 / [])
+    # so the mandate section renders gracefully when the fields are missing.
+    baseline_tput: float = 0.0
+    current_tput: float = 0.0
+    cumulative_gain_validated: float = 0.0
+    keep_threshold_pct: float = 0.0
+    # Compact applied stack: each entry carries {variant_name, gain_pct}.
+    applied_stack: list[dict[str, Any]] = field(default_factory=list)
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -1024,6 +1034,72 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
         + "cross-domain review rules. Never self-report numeric speedups — the "
         + "Coordinator measures gain.",
     ]
+
+
+# Section 0 — Mandate (deliverable contract + run status)
+def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the mandate block: what to deliver, how the session stands, and how judgement works.
+
+    Args:
+        inp: Assembled prompt inputs.
+
+    Returns:
+        Prompt lines for the mandate section, or ``[]`` when all status
+        fields are absent (avoids a content-free section on cold starts).
+    """
+    from hyperloom.inference_optimizer.framework_registry import format_primary_metric
+
+    # Deliverable line based on scope × mode.
+    scope = (inp.scope or "domain").lower()
+    mode = (inp.mode or "patch").lower()
+    if scope == "freeform":
+        anchor = (inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else "")
+        deliverable = "freeform investigation — see task description"
+    else:
+        anchor = inp.gap_canonical_id or ""
+        if scope == "domains":
+            deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
+        elif mode == "patch":
+            deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
+        else:
+            deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
+
+    rows: list[str] = [
+        "## 0. MANDATE",
+        "",
+        f"- deliverable: {deliverable}",
+    ]
+    if anchor:
+        rows.append(f"- anchor: `{anchor}`")
+
+    # Run status — render only when at least one metric is available.
+    has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
+    if has_status:
+        rows.append("")
+        rows.append("Run status (read-only context; do NOT re-state these as your own measurements):")
+        fw = inp.framework or None
+        if inp.baseline_tput > 0:
+            rows.append(f"- baseline: {format_primary_metric(fw, inp.baseline_tput)}")
+        if inp.current_tput > 0:
+            rows.append(f"- current best: {format_primary_metric(fw, inp.current_tput)}")
+        if inp.cumulative_gain_validated != 0:
+            rows.append(f"- validated cumulative gain: {inp.cumulative_gain_validated:+.2f}%")
+        if inp.keep_threshold_pct > 0:
+            rows.append(f"- KEEP threshold this cycle: {inp.keep_threshold_pct:.2f}%")
+        if inp.applied_stack:
+            stack_items = ", ".join(
+                f"{e.get('variant_name', '?')} ({e.get('gain_pct', 0):+.2f}%)"
+                for e in inp.applied_stack[:6]
+            )
+            rows.append(f"- applied stack: {stack_items}")
+
+    rows.extend([
+        "",
+        "Judged by: the Coordinator benches your proposals end-to-end against",
+        "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
+        "alongside. You are not asked to prove the number.",
+    ])
+    return rows
 
 
 # Section 2 — Hardware context
@@ -2085,6 +2161,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         # or the baseline fails its accuracy eval. Carry only the failure, the
         # tiered playbook, and the tools to discover + navigate a fix.
         user_sections = [
+            _section_mandate(inp),
             _section_hardware(inp),
             _section_pd_disaggregation(inp),  # § 1a (omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget
@@ -2095,6 +2172,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
         ]
     else:
         user_sections = [
+            _section_mandate(inp),
             _section_hardware(inp),
             _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget
