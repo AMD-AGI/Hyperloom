@@ -19,7 +19,7 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1
+    TP: 8
     WORLDPLAY_MODEL_TYPE: ar
     WORLDPLAY_NUM_STEPS: 50
     WORLDPLAY_NUM_FRAMES: 125
@@ -32,6 +32,24 @@ benchmark:
     WORLDPLAY_OFFLOADING: 0
     WORLDPLAY_USE_TORCH_COMPILE: 0
     WORLDPLAY_USE_FP8_GEMMS: 0     # LOCKED (precision = BF16)
+    # ── Optimized framework baseline ─────────────────────────────────────────
+    # Must mirror baseline_worldplay.yaml: the roofline profiles whatever this
+    # config launches, so omitting these switches makes the trace describe the
+    # unoptimized code path while the baseline measures the optimized one.
+    WORLDPLAY_FUSED_ATTN: aiter
+    WORLDPLAY_A2A_SEQLEN_CACHE: 1
+    WORLDPLAY_COMBINE_QKV: 1
+    WORLDPLAY_HTOD_CACHE: 1
+    WORLDPLAY_NOSYNC: 1
+    WORLDPLAY_LOOP_HOIST: 1
+    WORLDPLAY_GEOM_CACHE: 1
+    WORLDPLAY_PROPE_HOIST: 1
+    WORLDPLAY_TXTKV_CACHE: 1
+    WORLDPLAY_CAUSAL_MASK_CACHE: 1
+    WORLDPLAY_KVBUF_CACHE: 1
+    WORLDPLAY_GLUE_FUSE: 1
+    WORLDPLAY_QKV_FUSE: 1
+    WORLDPLAY_HIPGRAPH: 0
     # Quality gate off under profiling (calibrate=0; choke point forces ref empty).
     WORLDPLAY_QUALITY_CALIBRATE: 0
     XDIT_QUALITY_REF: ""
