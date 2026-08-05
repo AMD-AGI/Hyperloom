@@ -218,7 +218,7 @@ class TestIntegrateRebaselineTimeout:
             == 900
         )
 
-    def test_benchmark_contract_is_capped_at_one_hour(self, tmp_path):
+    def test_benchmark_contract_replaces_legacy_cap(self, tmp_path):
         config = tmp_path / "config.yaml"
         config.write_text("benchmark:\n  timeout_seconds: 7200\n")
 
@@ -227,7 +227,7 @@ class TestIntegrateRebaselineTimeout:
                 {"config_path": str(config)},
                 default_timeout_sec=7800,
             )
-            == 3600
+            == 7200
         )
 
     def test_shorter_benchmark_contract_is_preserved(self, tmp_path):
@@ -242,13 +242,13 @@ class TestIntegrateRebaselineTimeout:
             == 2400
         )
 
-    def test_executor_default_is_capped_at_one_hour(self):
+    def test_executor_default_is_preserved(self):
         assert (
             krh._integrate_rebaseline_timeout_sec(
                 {},
                 default_timeout_sec=7800,
             )
-            == 3600
+            == 7800
         )
 
 

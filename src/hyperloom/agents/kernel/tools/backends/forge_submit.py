@@ -2383,32 +2383,74 @@ def _canonical_forge_artifacts(
     artifact locations only after containment validation.
     """
     if not isinstance(published, dict):
+        log.warning(
+            "canonical Forge bundle unavailable: published manifest payload "
+            "is missing or invalid; compatibility artifact fallback may be used"
+        )
         return {}
     campaign_root = (Path(workspace) / "forge_experiments").resolve()
     manifest_path = campaign_root / "best" / "manifest.json"
+    artifact_relative = str(published.get("artifact_dir") or "")
     artifact_dir = _path_within(
         campaign_root,
-        str(published.get("artifact_dir") or ""),
+        artifact_relative,
     )
+    patch_relative = str(published.get("patch_path") or "")
     patch_path = _path_within(
         campaign_root,
-        str(published.get("patch_path") or ""),
+        patch_relative,
     )
     changed_files: list[str] = []
     for raw in published.get("changed_files") or []:
         rel = Path(str(raw))
         if rel.is_absolute() or ".." in rel.parts:
+            log.warning(
+                "canonical Forge bundle unavailable: changed file path escapes "
+                "the campaign root (%s); compatibility artifact fallback may "
+                "be used",
+                raw,
+            )
             return {}
         changed_files.append(rel.as_posix())
-    files_root = artifact_dir / "files" if artifact_dir is not None else None
-    if (
-        not manifest_path.is_file()
-        or patch_path is None
-        or not patch_path.is_file()
-        or files_root is None
-        or not files_root.is_dir()
-        or not changed_files
-    ):
+    if not manifest_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: best manifest does not exist "
+            "at %s; compatibility artifact fallback may be used",
+            manifest_path,
+        )
+        return {}
+    if artifact_dir is None:
+        log.warning(
+            "canonical Forge bundle unavailable: artifact_dir %r is not a "
+            "safe campaign-relative path under %s; compatibility artifact "
+            "fallback may be used",
+            artifact_relative,
+            campaign_root,
+        )
+        return {}
+    if patch_path is None or not patch_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: patch_path %r did not resolve "
+            "to a file under %s; compatibility artifact fallback may be used",
+            patch_relative,
+            campaign_root,
+        )
+        return {}
+    files_root = artifact_dir / "files"
+    if not files_root.is_dir():
+        log.warning(
+            "canonical Forge bundle unavailable: expected files directory does "
+            "not exist at %s (artifact_dir=%s); compatibility artifact fallback "
+            "may be used",
+            files_root,
+            artifact_dir,
+        )
+        return {}
+    if not changed_files:
+        log.warning(
+            "canonical Forge bundle unavailable: manifest changed_files is "
+            "empty; compatibility artifact fallback may be used"
+        )
         return {}
     return {
         "best_manifest": str(manifest_path),

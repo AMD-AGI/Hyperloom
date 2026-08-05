@@ -68,7 +68,6 @@ log = logging.getLogger(__name__)
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
-INTEGRATE_REBASELINE_TIMEOUT_CAP_SEC = 3600
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -5926,7 +5925,7 @@ def _integrate_rebaseline_timeout_sec(
     *,
     default_timeout_sec: int,
 ) -> int:
-    """Resolve integrate E2E timeout, capping inherited defaults at one hour."""
+    """Resolve the E2E timeout from explicit input or benchmark contract."""
     explicit = payload.get("timeout_sec")
     if explicit is not None:
         try:
@@ -5963,27 +5962,13 @@ def _integrate_rebaseline_timeout_sec(
             if isinstance(benchmark, dict):
                 value = int(benchmark.get("timeout_seconds") or 0)
                 if value > 0:
-                    capped = min(
-                        value,
-                        INTEGRATE_REBASELINE_TIMEOUT_CAP_SEC,
-                    )
-                    if capped != value:
-                        log.info(
-                            "integrate_handler: capped benchmark timeout "
-                            "from %ds to %ds",
-                            value,
-                            capped,
-                        )
-                    return capped
+                    return value
         except (OSError, TypeError, ValueError, yaml.YAMLError):
             log.debug(
                 "integrate_handler: invalid benchmark timeout config; using executor default",
                 exc_info=True,
             )
-    return min(
-        max(1, int(default_timeout_sec)),
-        INTEGRATE_REBASELINE_TIMEOUT_CAP_SEC,
-    )
+    return max(1, int(default_timeout_sec))
 
 
 async def integrate_handler(

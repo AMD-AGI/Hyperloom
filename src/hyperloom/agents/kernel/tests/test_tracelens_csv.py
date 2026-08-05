@@ -69,6 +69,33 @@ def test_rocm_paged_attention_dispatch_resolves_runtime_implementation():
     assert resolution.matched_route == "kernel_paged_attention_2d"
 
 
+def test_non_rewritable_dispatch_still_records_runtime_backend():
+    resolution = tla.OpResolver(
+        {
+            "vllm::dispatch_op": {
+                "kind": "dispatch",
+                "vllm": {
+                    "runtime_kernel": {
+                        "kernel_source_path": "vllm/ops/runtime.py",
+                        "kernel_kind": "triton",
+                        "backend": "ROCM_ATTN",
+                        "patchable": False,
+                    }
+                },
+            }
+        }
+    ).resolve_op_source(
+        "vllm::dispatch_op",
+        framework="vllm",
+        device_kernel_name="runtime_kernel",
+    )
+    assert resolution is not None
+    assert resolution.status == "non_rewritable"
+    item: dict = {}
+    resolution.stamp_onto(item)
+    assert item["runtime_backend"] == "ROCM_ATTN"
+
+
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {

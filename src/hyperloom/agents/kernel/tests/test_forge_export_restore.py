@@ -210,7 +210,7 @@ def test_canonical_forge_artifacts_resolve_from_campaign_root(tmp_path):
     assert normalized["changed_files"] == ["a.py"]
 
 
-def test_canonical_forge_artifacts_reject_path_escape(tmp_path):
+def test_canonical_forge_artifacts_reject_path_escape(tmp_path, caplog):
     workspace = tmp_path / "worktree"
     campaign = workspace / "forge_experiments" / "best"
     campaign.mkdir(parents=True)
@@ -227,6 +227,36 @@ def test_canonical_forge_artifacts_reject_path_escape(tmp_path):
         )
         == {}
     )
+    assert "changed file path escapes" in caplog.text
+
+
+def test_canonical_forge_artifacts_logs_missing_files_root(tmp_path, caplog):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    bundle.mkdir(parents=True)
+    (bundle / "forge.patch").write_text(
+        "diff --git a/a.py b/a.py\n",
+        encoding="utf-8",
+    )
+    (campaign / "best" / "manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "best/iter_003",
+                "patch_path": "best/iter_003/forge.patch",
+                "changed_files": ["a.py"],
+            },
+        )
+        == {}
+    )
+    assert "expected files directory does not exist" in caplog.text
+    assert str(bundle / "files") in caplog.text
 
 
 def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):

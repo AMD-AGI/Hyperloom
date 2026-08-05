@@ -227,6 +227,9 @@ class OpResolution:
         item["op_to_source_reason"] = self.reason
         if self.matched_route:
             item["op_to_source_matched_route"] = self.matched_route
+        runtime_backend = self.primary_runtime_backend
+        if runtime_backend:
+            item["runtime_backend"] = runtime_backend
 
     def apply_to(self, item: dict[str, Any]) -> None:
         """Override an item's source with this leaf's editable ``.cu`` (ground truth).
@@ -250,9 +253,6 @@ class OpResolution:
         pb = self.primary_prebuilt_binary
         if pb:
             item["prebuilt_binary"] = pb
-        runtime_backend = self.primary_runtime_backend
-        if runtime_backend:
-            item["runtime_backend"] = runtime_backend
         self.stamp_onto(item)
 
 
@@ -538,6 +538,7 @@ class OpResolver:
                         sources=[],
                         reason="dispatch route has no editable source",
                         matched_route=kname,
+                        runtime_backends=[str(info.get("backend") or "")],
                     )
         return OpResolution(
             op_name=op_name,
