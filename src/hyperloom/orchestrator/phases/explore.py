@@ -21,7 +21,7 @@ from ..policy.gate import (
 )
 from ..loop.sub_agent_runner import SubAgentResult
 from ..specialists.runner import SpecialistFailureType
-from ..state.shared_state import resolve_grading_anchor_tput
+from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
@@ -1455,32 +1455,7 @@ class ExplorePhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
-            _raw_remove = cb.get("remove_args")
-            _raw_unset = cb.get("unset_envs")
-            cb_remove = (
-                [_raw_remove]
-                if isinstance(_raw_remove, str) and _raw_remove.strip()
-                else [str(v) for v in (_raw_remove or []) if str(v).strip()]
-            )
-            cb_unset = (
-                [_raw_unset]
-                if isinstance(_raw_unset, str) and _raw_unset.strip()
-                else [str(v) for v in (_raw_unset or []) if str(v).strip()]
-            )
-            if cb_remove:
-                params["base_remove_args"] = cb_remove
-            if cb_unset:
-                params["base_unset_envs"] = cb_unset
-            if str(cb.get("args_mode") or "").strip().lower() == "replace":
-                params["base_args_mode"] = "replace"
-        base_tput = resolve_grading_anchor_tput(state)
-        if base_tput:
-            params["base_tput"] = base_tput
+        inject_stack_base_params(params, state, anchor=True)
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()

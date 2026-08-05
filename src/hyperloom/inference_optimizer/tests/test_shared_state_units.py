@@ -11,6 +11,7 @@ from hyperloom.orchestrator.state.shared_state import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
+    inject_stack_base_params,
     resolve_grading_anchor_tput,
 )
 
@@ -39,6 +40,73 @@ class TestResolveGradingAnchorTput:
 
     def test_zero_when_nothing_established(self):
         assert resolve_grading_anchor_tput(SharedState()) == 0.0
+
+
+class TestInjectStackBaseParams:
+    @staticmethod
+    def _state():
+        s = SharedState()
+        s.baseline_tput = 800.0
+        s.current_best = {
+            "tput": 1000.0,
+            "extra_server_args": "--live-layer 1",
+            "extra_envs": {"LIVE_ENV": "1"},
+            "remove_args": "--dropped",
+            "args_mode": "replace",
+        }
+        return s
+
+    def test_seeds_the_anchor_together_with_its_config(self):
+        params: dict = {}
+        inject_stack_base_params(params, self._state(), anchor=True)
+        assert params == {
+            "base_tput": 1000.0,
+            "base_extra_args": "--live-layer 1",
+            "base_extra_envs": {"LIVE_ENV": "1"},
+            "base_remove_args": ["--dropped"],
+            "base_args_mode": "replace",
+        }
+
+    def test_omits_the_anchor_unless_asked(self):
+        params: dict = {}
+        inject_stack_base_params(params, self._state())
+        assert "base_tput" not in params
+        assert params["base_extra_args"] == "--live-layer 1"
+
+    def test_keeps_a_caller_supplied_value(self):
+        params = {"base_extra_args": "--operator-pinned"}
+        inject_stack_base_params(params, self._state(), anchor=True)
+        assert params["base_extra_args"] == "--operator-pinned"
+
+    def test_overwrite_replaces_a_superseded_layer(self):
+        params = {"base_extra_args": "--stale-layer 1", "base_tput": 800.0}
+        state = self._state()
+        state.current_best = {"tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+        inject_stack_base_params(params, state, anchor=True, overwrite=True)
+        assert params["base_tput"] == 1000.0
+        assert params["base_extra_args"] == ""
+        assert params["base_extra_envs"] == {}
+
+    def test_skips_fields_current_best_does_not_carry(self):
+        params: dict = {}
+        state = SharedState()
+        state.baseline_tput = 800.0
+        state.current_best = {"action": "baseline", "tput": 800.0}
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {"base_tput": 800.0}
+
+    def test_falls_back_to_the_baseline_anchor_with_no_stack(self):
+        params: dict = {}
+        state = SharedState()
+        state.baseline_tput = 800.0
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {"base_tput": 800.0}
+
+    @pytest.mark.parametrize("state", [None, object()])
+    def test_tolerates_missing_state(self, state):
+        params: dict = {}
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {}
 
 
 class TestGridSessionDeadline:
