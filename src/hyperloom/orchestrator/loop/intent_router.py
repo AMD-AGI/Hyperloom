@@ -40,7 +40,7 @@ from ..policy.gate import (
 )
 from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import IllegalTransition, TaskNotFound
-from ..kernel.request_handlers import get_handler
+from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -552,33 +552,56 @@ class IntentRouter:
         )
         await self.bus.append_and_seq(request_msg)
 
-        # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel).
-        if target_agent not in self.role_registry:
-            await self.bus.append_and_seq(
-                Message.new(
-                    target_agent,
-                    source,
-                    "response",
-                    {
-                        "in_reply_to": request_msg.msg_id,
-                        "kind": f"{kind}_done",
-                        "status": "failed",
-                        "result": {
-                            "status": "failed",
-                            "error_class": "agent_disabled",
-                            "error": f"{target_agent} agent is disabled for this session",
-                        },
-                        "source": "coordinator_auto_reject",
-                    },
-                    in_reply_to=request_msg.msg_id,
-                    priority=1,
-                )
-            )
-            return
-
-        # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE without burning an LLM turn.
+        # All kernel requests are served by registered programmatic handlers.
         if target_agent == "kernel_agent":
+            if not bool(getattr(self.shared_state, "kernel_enabled", True)):
+                await self.bus.append_and_seq(
+                    Message.new(
+                        target_agent,
+                        source,
+                        "response",
+                        {
+                            "in_reply_to": request_msg.msg_id,
+                            "kind": f"{kind}_done",
+                            "status": "failed",
+                            "result": {
+                                "status": "failed",
+                                "error_class": "agent_disabled",
+                                "error": "kernel_agent is disabled for this session (--no-kernel)",
+                            },
+                            "source": "coordinator_auto_reject",
+                        },
+                        in_reply_to=request_msg.msg_id,
+                        priority=1,
+                    )
+                )
+                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                return
             handler = get_handler(kind)
+            if handler is None:
+                await self.bus.append_and_seq(
+                    Message.new(
+                        target_agent,
+                        source,
+                        "response",
+                        {
+                            "in_reply_to": request_msg.msg_id,
+                            "kind": f"{kind}_done",
+                            "status": "failed",
+                            "result": {
+                                "status": "failed",
+                                "error_class": "unknown_kernel_kind",
+                                "error": f"no programmatic handler for kind={kind!r}",
+                                "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                            },
+                            "source": "coordinator_auto_reject",
+                        },
+                        in_reply_to=request_msg.msg_id,
+                        priority=1,
+                    )
+                )
+                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                return
             if handler is not None:
                 params = intent.payload.get("params") or {}
                 merged_payload = {**intent.payload, **params}
