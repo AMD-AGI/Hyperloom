@@ -46,11 +46,13 @@ import logging
 import os
 import shlex
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
@@ -71,7 +73,7 @@ _now_iso = _kernel_decision_settings._now_iso
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
-def _first_positive_tput(d: Any) -> float:
+def first_positive_tput(d: Any) -> float:
     """Return the first positive ``tput``/``output_throughput`` from a dict.
 
     Args:
@@ -109,11 +111,80 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     """
     if state is None:
         return 0.0
-    best = _first_positive_tput(getattr(state, "current_best", None))
+    best = first_positive_tput(getattr(state, "current_best", None))
     if best > 0:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
+
+
+def _normalize_envs(value: Any) -> dict[str, str]:
+    """Coerce an env mapping to ``str -> str``; a resumed non-dict reads as empty."""
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+# ``base_*`` task param -> the ``current_best`` field it mirrors and its normalizer.
+_STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("base_extra_args", "extra_server_args", lambda v: str(v or "").strip()),
+    ("base_extra_envs", "extra_envs", _normalize_envs),
+    ("base_remove_args", "remove_args", to_str_list),
+    ("base_unset_envs", "unset_envs", to_str_list),
+    ("base_args_mode", "args_mode", lambda v: "replace" if str(v or "").strip().lower() == "replace" else ""),
+)
+
+
+def stack_base_params(current_best: Any) -> dict[str, Any]:
+    """``base_*`` params projected from the fields ``current_best`` carries.
+
+    Args:
+        current_best: A ``current_best`` snapshot (non-dicts read as empty).
+
+    Returns:
+        The normalized ``base_*`` params; keys absent from ``current_best`` are
+        omitted rather than defaulted, so a caller can tell "no config" from
+        "empty config".
+    """
+    cb = current_best if isinstance(current_best, dict) else {}
+    return {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
+
+
+def inject_stack_base_params(
+    params: dict[str, Any],
+    state: Any,
+    *,
+    anchor: bool = False,
+    overwrite: bool = False,
+) -> None:
+    """Seed a task's base config from ``current_best``, in place.
+
+    A candidate is graded against an anchor while being launched on top of that
+    anchor's args/envs, so the two are one unit; ``anchor=True`` takes both from
+    the same snapshot rather than leaving a caller to seed one and omit the other.
+
+    Args:
+        params: Task params, mutated in place.
+        state: Any object exposing ``current_best`` / ``baseline_tput``
+            (``None`` and partial test doubles are tolerated).
+        anchor: Also seed ``base_tput``.
+        overwrite: Replace keys already present in ``params``, for an
+            execution-time rebind; dispatch-time seeding must not clobber an
+            operator- or LLM-supplied value.
+    """
+
+    def _put(key: str, value: Any) -> None:
+        if overwrite:
+            params[key] = value
+        else:
+            params.setdefault(key, value)
+
+    if anchor:
+        anchor_tput = resolve_grading_anchor_tput(state)
+        if anchor_tput > 0:
+            _put("base_tput", anchor_tput)
+    for key, value in stack_base_params(getattr(state, "current_best", None)).items():
+        # Empty means "no config"; on a rebind it is what clears a superseded layer.
+        if value or overwrite:
+            _put(key, value)
 
 
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
@@ -396,12 +467,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Internal-only baseline cold+hot double-run switch; default-on keeps EXPLORE
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
-    # Discarded first-round tput from the baseline cold-start double-run
-    # (audit/debugging only; gain math uses the hot ``baseline_tput``).
-    baseline_cold_tput: float = 0.0
-    # Mirror of the hot measure-round tput; matches ``baseline_tput`` when the
-    # double-run path is eligible.
-    baseline_hot_tput: float = 0.0
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline
     # lands; backs up snapshot ceiling so the frontend has data even when the
@@ -2273,7 +2338,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         if isinstance(self.baseline_tput, (int, float)) and self.baseline_tput > 0:
             return float(self.baseline_tput)
-        return _first_positive_tput(self.last_baseline)
+        return first_positive_tput(self.last_baseline)
 
     def _resolve_current_best_achieved_tput(self) -> float:
         """Optimized-arm throughput for a current_best roofline snapshot.
@@ -2286,7 +2351,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             float: The resolved current_best throughput, or ``0.0`` when none
                 is available.
         """
-        return _first_positive_tput(self.current_best)
+        return first_positive_tput(self.current_best)
 
     def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
         """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run.

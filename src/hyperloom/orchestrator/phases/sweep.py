@@ -6,7 +6,7 @@
 from __future__ import annotations
 import logging as _logging
 from typing import Any
-from ..state.shared_state import SharedState
+from ..state.shared_state import SharedState, inject_stack_base_params
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -215,11 +215,7 @@ class SweepPhase(PhaseHandler):
         ps_result = getattr(state, "geak_result", None) or {}
         if isinstance(ps_result, dict) and ps_result.get("status") == "ok" and ps_result.get("bench_script"):
             params["geak_result"] = ps_result
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
+        inject_stack_base_params(params, state)
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             # Mirror baseline's benchmark_script so re-launch uses the same wrapper.

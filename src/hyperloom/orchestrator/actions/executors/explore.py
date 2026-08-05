@@ -40,7 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...state.shared_state import resolve_grading_anchor_tput
+from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -589,24 +589,27 @@ class ExploreExecutor:
             }
 
         # ----- Inputs ------------------------------------------------------
+        # Params snapshot the anchor and the stack it was measured on together;
+        # a KEEP landing while this task queued invalidates both, so refresh them
+        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
+        ss = extra.get("shared_state") or extra.get("state")
+        snapshot_tput = float(params.get("base_tput") or 0.0)
+        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
+        if live_anchor > snapshot_tput:
+            if snapshot_tput > 0:
+                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, live_anchor)
+            params["base_tput"] = live_anchor
+            cb = getattr(ss, "current_best", None)
+            # Only current_best carries args; a baseline_tput anchor leaves the
+            # params stack (seeded from the baseline record) authoritative.
+            if first_positive_tput(cb) > 0:
+                params.update(stack_base_params(cb))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
         base_remove_args = to_str_list(params.get("base_remove_args"))
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Grade candidates against the live anchor; revalidation uses baseline.
-        ss = extra.get("shared_state") or extra.get("state")
-        live_anchor = resolve_grading_anchor_tput(ss)
-        revalidating_stack = params.get("source") == "resume_stack_revalidate"
-        if not revalidating_stack and live_anchor > base_tput:
-            if base_tput > 0:
-                log.warning(
-                    "explore: anchor drift, params base_tput=%.1f but live anchor is %.1f; grading against live",
-                    base_tput,
-                    live_anchor,
-                )
-            base_tput = live_anchor
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
@@ -958,8 +961,6 @@ class ExploreExecutor:
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
 
-        last_run_tput: float | None = None  # rebench/single-variant tput
-
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a fresh cold boot for round 2).
         lifecycle = resolve_lifecycle_params(config_path)
@@ -969,13 +970,11 @@ class ExploreExecutor:
 
         # Warm-decision mode. Run a discarded cold warmup round first so the
         # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``. Requires
-        # server_lifecycle reuse; otherwise fall back to a single cold-decision
-        # run. Opt out with INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
-        warm_decision_enabled = os.environ.get(
-            "INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1"
-        ).strip().lower() not in {"0", "false", "no", "off"}
-        use_warm_decision = warm_decision_enabled and lifecycle_eligible
+        # warm — apples-to-apples with ``baseline_tput``. Mirrors both conjuncts
+        # the baseline gates its cold+hot double-run on, so the two sides measure
+        # hot together or cold together: a session that opted out of the double
+        # run has a COLD ``baseline_tput`` and must be graded cold.
+        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1344,7 +1343,7 @@ class ExploreExecutor:
                         else:
                             outcome = "KEEP"
 
-                    cold_tput = r.output_throughput
+                    decision_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
@@ -1354,8 +1353,8 @@ class ExploreExecutor:
                         "note": gv.note,
                         "outcome": outcome,
                         "status": r.status,
-                        "tput": cold_tput,
-                        "cold_tput": cold_tput,
+                        "tput": decision_tput,
+                        "decision_tput": decision_tput,
                         "gain_pct": gain,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
@@ -1418,8 +1417,8 @@ class ExploreExecutor:
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
-                            "cold_tput": cold_tput,
+                            "tput": decision_tput,
+                            "decision_tput": decision_tput,
                             "single_workspace": r.workspace,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
@@ -1431,7 +1430,7 @@ class ExploreExecutor:
                         stack_rebench_workspace: str | None = None
                         stack_rebench_warnings: list[str] = []
 
-                        if enable_stack_rebench and base_tput > 0:
+                        if enable_stack_rebench and running_base_tput > 0:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
@@ -1466,7 +1465,9 @@ class ExploreExecutor:
                                 config_path=config_path,
                                 base_extra_args=stack_extra_args,
                                 variant=rebench_variant,
-                                base_tput=base_tput,
+                                # Floor sits on the anchor round 1 graded against,
+                                # which advances with each in-batch KEEP.
+                                base_tput=running_base_tput,
                                 stable_threshold_pct=stack_stable_threshold_pct,
                                 output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
@@ -1490,11 +1491,11 @@ class ExploreExecutor:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
                                     "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                    "with base_tput=%.2f * (1+%.2f%%))",
+                                    "with running_base_tput=%.2f * (1+%.2f%%))",
                                     gv.name,
                                     stack_rebench_tput,
                                     stable_floor,
-                                    base_tput,
+                                    running_base_tput,
                                     stack_stable_threshold_pct,
                                 )
                                 tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
@@ -1519,7 +1520,7 @@ class ExploreExecutor:
                                         "note": gv.note,
                                         "reason": "stack_unstable",
                                         "gain_pct": gain,
-                                        "tput": cold_tput,
+                                        "tput": decision_tput,
                                         "stack_rebench_tput": stack_rebench_tput,
                                         "round_id": round_id,
                                         "ts": _now_iso(),
@@ -1540,7 +1541,6 @@ class ExploreExecutor:
                                 stack_unset_envs = list(run_unset_envs)
                                 stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
-                                last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
                                 keep_entry["tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
@@ -1559,8 +1559,7 @@ class ExploreExecutor:
                             stack_remove_args = list(run_remove_args)
                             stack_unset_envs = list(run_unset_envs)
                             stack_base_args_mode = "replace" if persist_effective_args else "append"
-                            running_base_tput = cold_tput or running_base_tput
-                            last_run_tput = cold_tput
+                            running_base_tput = decision_tput or running_base_tput
 
                         winners.append(keep_entry)
                         winners_history_update.append(
@@ -1590,7 +1589,7 @@ class ExploreExecutor:
                             "note": gv.note,
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "round_id": round_id,
                             "ts": _now_iso(),
                             "provenance": provenance,
@@ -1605,13 +1604,11 @@ class ExploreExecutor:
                             **control_fields,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "reason": reason or "not_keep",
                             "workspace": r.workspace,
                         }
                     )
-                    if cold_tput:
-                        last_run_tput = cold_tput
                 finally:
                     # Reap THIS variant's persistent server on every exit path
                     # (idempotent + no-op when reuse was ineligible). This is a
@@ -1753,10 +1750,8 @@ class ExploreExecutor:
         )
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
-        if winners:
-            output_throughput = float(running_base_tput) if last_run_tput is not None else None
-        else:
-            output_throughput = None
+        # Each KEEP advances ``running_base_tput``, so this is the final stack.
+        output_throughput = float(running_base_tput) if winners else None
 
         # Successful = at least one bench produced a measurement or was reaped
         # by the overtime gate (KILLED_OVERTIME is a real signal).
