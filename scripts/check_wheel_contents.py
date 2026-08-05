@@ -25,8 +25,21 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _check_no_test_packages(names: list[str]) -> list[str]:
-    leaked = sorted(n for n in names if "tests" in Path(n).parts)
+def _excluded_dir_names(cfg: dict) -> set[str]:
+    """Literal directory names in the packages.find exclude patterns.
+
+    Derived rather than hardcoded so this cannot narrow while the exclude list
+    widens: ``*.testing.*`` contributes ``testing``, the ``*`` segments nothing.
+    """
+    patterns = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
+    return {segment for pattern in patterns for segment in pattern.split(".") if segment != "*"}
+
+
+def _check_no_test_packages(cfg: dict, names: list[str]) -> list[str]:
+    excluded = _excluded_dir_names(cfg)
+    if not excluded:
+        return ["packages.find declares no exclude, so nothing keeps test trees out of the wheel"]
+    leaked = sorted(n for n in names if excluded & set(Path(n).parts))
     if not leaked:
         return []
     return [f"{len(leaked)} test entries shipped in the wheel, e.g. {leaked[:5]}"]
@@ -81,7 +94,7 @@ def main() -> int:
     with zipfile.ZipFile(args.wheel) as zf:
         names = zf.namelist()
         errors = [
-            *_check_no_test_packages(names),
+            *_check_no_test_packages(cfg, names),
             *_check_declared_package_data_is_present(cfg, names),
             *_check_data_files_are_present(cfg, names),
             *_check_license_metadata(zf, names),
