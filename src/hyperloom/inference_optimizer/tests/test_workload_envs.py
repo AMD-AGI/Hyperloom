@@ -16,6 +16,26 @@ import yaml
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Roll back direct ``os.environ`` writes between tests in this module.
+
+    Materialization deliberately publishes the resolved checkout into the
+    orchestrator's own environment (that is how PolicyGate sees a scriptable
+    framework's source root), and monkeypatch cannot undo a direct write. Without
+    this, one test's published ``WORLDPLAY_DIR`` satisfies the next test's
+    resolution and the repo-URL fallback silently never runs.
+    """
+    import os
+
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
 def _clear_env(monkeypatch):
     for k in (
         "TP",
@@ -33,7 +53,9 @@ def _clear_env(monkeypatch):
         "INFERENCEX_PATH",
         "WORLDPLAY_REPO",
         "WORLDPLAY_REPO_PATH",
+        "WORLDPLAY_DIR",
         "WORLDPLAY_REPO_URL",
+        "FRAMEWORK_REPO_PATH",
         "WORLDPLAY_BENCH",
         "WORLDPLAY_ACTION_CKPT",
         "WORLDMIRROR_REPO_PATH",

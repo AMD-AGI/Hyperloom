@@ -284,9 +284,11 @@ def _register_executors(
         IntegratePatchExecutor(session_dir=session_dir),
     )
 
-    # FRAMEWORK per-candidate executor — Coordinator-internal only.
+    # FRAMEWORK per-candidate executor — Coordinator-internal only. The kind must
+    # match what FrameworkPhase enqueues (``framework_agent``); the phase
+    # allowlist and the promote-handler map use the same name.
     coordinator.sub.register_executor(
-        "framework",
+        "framework_agent",
         FrameworkAgentExecutor(session_dir=session_dir),
     )
 

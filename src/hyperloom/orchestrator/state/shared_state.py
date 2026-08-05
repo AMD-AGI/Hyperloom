@@ -572,6 +572,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     discovered_flags_error: str = ""
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
+    # Per-kernel GPU time breakdown JSON from the most recent profile. Read by
+    # ``_framework_gap_composer`` to add a bottleneck keyword to the framework
+    # arm's gap description.
+    last_profile_kernel_breakdown: str = ""
+    # Merged host-side rewrite evidence document from the most recent profile
+    # (see ``_framework_rewrite_evidence``). Distinct from the kernel breakdown:
+    # it reports redundant *host* work — collective round-trips, device-to-host
+    # syncs, repeated host-to-device copies, recomputed loop invariants — none of
+    # which appears in a kernel timeline, and which is where framework-level
+    # source rewrites (as opposed to kernel rewrites) find their wins.
+    last_framework_rewrite_evidence: str = ""
+    # Environment switches behind accepted framework-level source rewrites,
+    # registered as search levers. Each row carries its rewrite category, its
+    # dependency edges, whether it is currently on (``default_on``), and its
+    # individually measured contribution once the explore phase has attributed
+    # it. This is what turns an authored bundle of rewrites into per-rewrite
+    # numbers and a searchable combination space, instead of a patch that is
+    # kept or reverted whole.
+    authored_framework_levers: list[dict[str, Any]] = field(default_factory=list)
 
     # Roofline-v2 trace-analyze cache written by record_trace_analyze; ``roofline_snapshot_id`` mirrors the nested value for hot-path access.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)

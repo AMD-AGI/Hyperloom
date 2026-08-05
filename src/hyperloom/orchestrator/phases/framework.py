@@ -903,8 +903,13 @@ class FrameworkPhase(PhaseHandler):
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
-            # Cross-framework ports route to a dedicated rewrite domain.
-            "domain": ("cross_framework_rewrite_specialist" if is_cross_framework else "serving_specialist"),
+            # Cross-framework ports route to a dedicated rewrite domain; the
+            # same-framework case follows the session's framework kind.
+            "domain": (
+                "cross_framework_rewrite_specialist"
+                if is_cross_framework
+                else self._authoring_specialist_domain()
+            ),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
@@ -2359,6 +2364,53 @@ class FrameworkPhase(PhaseHandler):
         # Deterministic fallback: discovery order (never the pseudo-candidate).
         return unprocessed[0]
 
+    def _authoring_specialist_domain(self) -> str:
+        """Pick the authoring domain that matches the session's framework kind.
+
+        A request-serving framework and an iterative model pipeline have almost
+        no optimization surface in common: one is scheduling, batching and
+        KV-cache admission, the other is redundant work created by running the
+        same stack once per block per denoising step. Dispatching a scriptable
+        pipeline to ``serving_specialist`` steers it at a hot path that does not
+        exist there, so the domain follows the framework kind.
+
+        Returns:
+            ``"framework_rewrite_specialist"`` for a scriptable (server-less)
+            framework, else ``"serving_specialist"``.
+        """
+        framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
+        try:
+            from hyperloom.inference_optimizer import framework_registry
+
+            if framework and framework_registry.is_scriptable(framework):
+                return "framework_rewrite_specialist"
+        except Exception:  # noqa: BLE001 — fall back to the serving default
+            log.debug("FRAMEWORK: authoring domain resolution failed", exc_info=True)
+        return "serving_specialist"
+
+    def _render_rewrite_evidence_for_prompt(self) -> str:
+        """Render the measured host-side rewrite evidence as prompt lines.
+
+        Returns:
+            The evidence block, or ``""`` when no profile has produced one yet.
+            Empty is normal on the first FRAMEWORK pass (the arm can run before
+            any profile has landed), and the specialist's own reading of the
+            source is the fallback.
+        """
+        path = str(getattr(self.shared_state, "last_framework_rewrite_evidence", "") or "").strip()
+        if not path:
+            return ""
+        try:
+            import json as _json
+
+            from ..actions.executors._framework_rewrite_evidence import summarize_for_prompt
+
+            document = _json.loads(Path(path).read_text(encoding="utf-8"))
+            return summarize_for_prompt(document)
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
+            return ""
+
     def _framework_local_explore_arm_enabled(self) -> bool:
         """True when the candidate-free local-exploration arm may run.
 
@@ -2393,6 +2445,7 @@ class FrameworkPhase(PhaseHandler):
                 model_class=str(getattr(state, "model_class", "") or ""),
                 precision=str(getattr(state, "precision", "") or ""),
                 profile_kernel_breakdown_path=getattr(state, "last_profile_kernel_breakdown", None),
+                rewrite_evidence_path=getattr(state, "last_framework_rewrite_evidence", None),
             )
         except Exception:  # noqa: BLE001 — advisory only
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
@@ -2492,6 +2545,8 @@ class FrameworkPhase(PhaseHandler):
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+        domain = self._authoring_specialist_domain()
+        rewrite_arm = domain == "framework_rewrite_specialist"
         notes_lines = [
             "FRAMEWORK LOCAL-EXPLORATION TASK (no upstream PR lead).",
             "",
@@ -2503,22 +2558,79 @@ class FrameworkPhase(PhaseHandler):
             f"- framework: {framework or '(session framework)'}",
             "",
             "How to work:",
-            "- Read installed package source (your framework_source_roots) and the",
-            "  latest profiling breakdown to locate the serving hot path",
-            "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
-            "- You MAY use WebSearch / WebFetch to compare the live tree against the",
-            "  LATEST upstream code (e.g. the framework's main branch) and port a",
-            "  newer optimisation when the local checkout is behind.",
-            "- You MAY inspect and patch installed package source. State expected",
-            "  reload, JIT, or rebuild behavior in the deliverable.",
-            "",
-            "Deliverable — EITHER is valid (pick what actually moves throughput):",
-            "- a unified-diff source patch in your worktree (``patches_written``), OR",
-            "- when the win is reachable via serving flags / env vars, a",
-            "  ``proposal_set`` entry carrying ``extra_args`` / ``extra_envs``.",
-            "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
-            "not benchmark. A config-lever deliverable is a full result, not empty.",
         ]
+        if rewrite_arm:
+            notes_lines.extend(
+                [
+                    "- Read the framework source (your framework_source_roots) and the",
+                    "  measured host-side evidence below to locate redundant work in the",
+                    "  iterative loop: step-invariant recomputation, collectives that",
+                    "  round-trip through the host, tables rebuilt and re-uploaded,",
+                    "  adjacent same-shape collectives.",
+                    "- Work the ranked evidence top-down. It is measured on THIS workload,",
+                    "  so it beats intuition about where the time goes.",
+                ]
+            )
+        else:
+            notes_lines.extend(
+                [
+                    "- Read installed package source (your framework_source_roots) and the",
+                    "  latest profiling breakdown to locate the serving hot path",
+                    "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
+                ]
+            )
+        notes_lines.extend(
+            [
+                "- You MAY use WebSearch / WebFetch to compare the live tree against the",
+                "  LATEST upstream code (e.g. the framework's main branch) and port a",
+                "  newer optimisation when the local checkout is behind.",
+                "- You MAY inspect and patch installed package source. State expected",
+                "  reload, JIT, or rebuild behavior in the deliverable.",
+                "",
+            ]
+        )
+        if rewrite_arm:
+            notes_lines.extend(
+                [
+                    "Deliverable — a unified-diff source patch in your worktree",
+                    "(``patches_written``) PLUS a ``framework_switches`` manifest. Every",
+                    "rewrite must sit behind its own default-off environment switch, and",
+                    "the manifest declares one entry per switch with ``switch``,",
+                    "``category``, ``target``, ``evidence``, ``depends_on`` and ``enables``",
+                    "(see your domain focus for the contract and why it is enforced).",
+                    "A config-lever-only deliverable (``proposal_set`` with",
+                    "``extra_args`` / ``extra_envs``) is also valid but has a low ceiling",
+                    "here: the config surface of an iterative pipeline is small, and the",
+                    "wins are in the source.",
+                    "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
+                    "not benchmark.",
+                ]
+            )
+        else:
+            notes_lines.extend(
+                [
+                    "Deliverable — EITHER is valid (pick what actually moves throughput):",
+                    "- a unified-diff source patch in your worktree (``patches_written``), OR",
+                    "- when the win is reachable via serving flags / env vars, a",
+                    "  ``proposal_set`` entry carrying ``extra_args`` / ``extra_envs``.",
+                    "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
+                    "not benchmark. A config-lever deliverable is a full result, not empty.",
+                ]
+            )
+        if rewrite_arm:
+            evidence_block = self._render_rewrite_evidence_for_prompt()
+            if evidence_block:
+                notes_lines.extend(["", evidence_block])
+            else:
+                notes_lines.extend(
+                    [
+                        "",
+                        "No host-side rewrite evidence has been collected yet for this",
+                        "session, so locate the candidates by reading the source: find the",
+                        "denoising / rollout loop and ask, for each call inside it, whether",
+                        "the result can change across iterations.",
+                    ]
+                )
         try:
             mem_block = self._render_framework_memory_for_prompt(self._build_framework_working_memory())
         except Exception:  # noqa: BLE001 — advisory only
@@ -2527,7 +2639,7 @@ class FrameworkPhase(PhaseHandler):
             notes_lines.extend(["", mem_block])
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
-            "domain": "serving_specialist",
+            "domain": domain,
             "gap_canonical_id": gap_cid,
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
@@ -3095,7 +3207,7 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(result_dict, dict):
             return
         status = str(result_dict.get("status") or "")
-        if status not in ("kept", "reverted"):
+        if status not in ("kept", "kept_inert", "reverted"):
             return
         # Extract patch info from result
         patches_applied = result_dict.get("patches_applied") or []
@@ -3106,7 +3218,9 @@ class FrameworkPhase(PhaseHandler):
         repo = candidate.get("repo") or ""
         error_class = result_dict.get("error_class") or ""
         # Build prs_tested entry
-        outcome = "KEEP" if status == "kept" else "REVERT"
+        # An inert KEEP is not a throughput win: the code is applied but every
+        # switch is off, so warm replay must not reuse it as a proven recipe.
+        outcome = "KEEP" if status == "kept" else "KEEP_INERT" if status == "kept_inert" else "REVERT"
         ss = self.shared_state
         entry = {
             "repo": repo
@@ -3317,6 +3431,11 @@ class FrameworkPhase(PhaseHandler):
                 profile_kernel_breakdown_path=getattr(
                     state,
                     "last_profile_kernel_breakdown",
+                    None,
+                ),
+                rewrite_evidence_path=getattr(
+                    state,
+                    "last_framework_rewrite_evidence",
                     None,
                 ),
             )
@@ -3617,7 +3736,7 @@ class FrameworkPhase(PhaseHandler):
         outcomes: list[dict[str, Any]] = []
         try:
             raw_progress = getattr(state, "framework_agent_phase_progress", None) or []
-            terminal = {"kept", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
+            terminal = {"kept", "kept_inert", "reverted", "no_patch", "enqueue_failed", "critic_denied"}
             tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
             for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
                 outcomes.append(

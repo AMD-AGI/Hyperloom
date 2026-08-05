@@ -663,8 +663,119 @@ def _focus_enablement_specialist(
     ]
 
 
+def _focus_framework_rewrite_specialist(
+    inp: SpecialistPromptInputs,
+) -> list[str]:
+    """Build the domain-focus block for framework-level source rewrites.
+
+    Carries the rewrite-pattern taxonomy as a *prior* — the categories, the
+    cache-key recipe, the correctness invariants and the switch-manifest
+    contract — while leaving the landing points to be found from the measured
+    evidence. That split is deliberate: a prior that named specific functions
+    would only ever work on one model, whereas the pattern vocabulary transfers
+    to any iterative pipeline.
+
+    Args:
+        inp: Assembled prompt inputs for the current dispatch (used only for the
+            framework name; the taxonomy itself is workload-independent).
+
+    Returns:
+        Markdown lines for the framework-rewrite specialist's focus block.
+    """
+    framework = (inp.framework or "the framework").strip()
+    return [
+        "You are the **framework rewrite specialist** — an AUTHORING sub-agent",
+        f"for **{framework}**, an iterative model pipeline: the same transformer",
+        "stack runs once per block, per denoising step, per chunk. Nothing about",
+        "request serving applies here (no scheduler, no continuous batching, no",
+        "KV-cache admission policy). The wins are the redundant work the loop",
+        "structure creates.",
+        "",
+        "**Where the wins are**",
+        "A single step's cost is multiplied by (blocks x steps x chunks), so any",
+        "work whose result does not change across that product is dead weight,",
+        "and any host round-trip inside it stalls the whole pipeline. Two classes",
+        "of cost dominate and neither one owns a GPU kernel, so neither appears in",
+        "a kernel breakdown: **redundant recomputation** and **host stalls**.",
+        "",
+        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with)",
+        "- **(a) memoize a step- or block-invariant computation.** A pure function",
+        "  called with arguments it already received. Cache the result.",
+        "- **(b) hoist a loop-invariant computation out of the loop.** The value is",
+        "  logically the same each iteration but rebuilt from scratch, so a cache",
+        "  keyed on tensor identity would never hit. Compute once per outer",
+        "  iteration and pass it in. **This is usually an enabler**: on its own it",
+        "  measures flat, and its value is that it makes (a) start hitting.",
+        "- **(c) eliminate a host round-trip or a device-to-host sync.** An object",
+        "  collective agreeing on a shape the ranks could derive locally; an",
+        "  `.item()` / `.tolist()` / `.cpu()` on the hot path.",
+        "- **(d) fuse adjacent collectives, GEMMs or concatenations.** Several",
+        "  same-shape payloads issued separately; pack them and issue one.",
+        "- **(e) swap an operator implementation for a vendor kernel.** Read this",
+        "  off the GPU kernel breakdown, not the host evidence.",
+        "- **(f) keep a tensor resident on the device.** A table rebuilt on the",
+        "  host and re-uploaded on every use.",
+        "- **(g) drop no-op glue.** A dtype cast to the dtype the tensor already",
+        "  has; an intermediate materialised only to be immediately consumed.",
+        "",
+        "**Cache-key recipe (get this wrong and you ship a correctness bug)**",
+        "- Key on the COMPLETE argument identity: for a tensor,",
+        "  `(data_ptr, shape, dtype, device, _version)`; plus every scalar that",
+        "  changes the result. A key missing one input returns another input's",
+        "  answer.",
+        "- **Pin the source tensors in the cache entry.** Under a caching",
+        "  allocator a freed tensor's address is handed straight back to the next",
+        "  allocation, so `data_ptr` alone will report a brand-new tensor as a hit.",
+        "  Holding a reference to the keyed tensors prevents that.",
+        "- Check `_version` so an in-place mutation invalidates the entry.",
+        "- Do NOT hash tensor *contents* to build a key: that forces a",
+        "  device-to-host sync per call and costs more than it saves.",
+        "- Bound the cache (small LRU) and size it for the calling pattern: under",
+        "  classifier-free guidance the positive and negative branches alternate,",
+        "  so a single-entry cache thrashes to a 0% hit rate.",
+        "",
+        "**Deliverable contract — every rewrite is a default-off switch**",
+        "Each rewrite MUST be gated by its own environment switch that defaults",
+        "OFF, so that with no switches set the code path is byte-for-byte the",
+        "original. This is not a style preference; it is what makes each rewrite",
+        "independently measurable and composable, and it is checked:",
+        "- a parity leg runs with every switch unset and must reproduce the",
+        "  baseline within its noise band, so a rewrite that changes behaviour",
+        "  when disabled is rejected;",
+        "- accepted switches become search levers, so the orchestrator measures",
+        "  each one's own contribution and searches combinations rather than",
+        "  taking your bundle as given.",
+        "",
+        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
+        "switch, each with: `switch` (the env var name), `category` (a taxonomy id",
+        "above), `target` (file and symbol), `evidence` (which measured candidate",
+        "it addresses), `depends_on` (switches that must also be on for this one",
+        "to pay), and `enables` (switches that only pay once this one is on).",
+        "",
+        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
+        "An enabler measured alone shows no gain. If you do not declare the",
+        "relationship, it is judged on its standalone number, rejected, and every",
+        "rewrite that depended on it is silently devalued along with it. Declared,",
+        "the whole bundle is benchmarked together and survives on its joint gain.",
+        "",
+        "**Always keep a fallback path.** Guard the fast path on the shapes and",
+        "dtypes it actually requires and fall through to the original code",
+        "otherwise, so an unexpected input degrades in speed and not in",
+        "correctness.",
+        "",
+        "**Pitfalls**",
+        "- Graph capture (HIP/CUDA graphs) conflicts with lazily populated",
+        "  caches: the first call allocates inside the capture. Do not combine.",
+        "- Caching across a chunk boundary needs the chunk identity in the key;",
+        "  geometry alone repeats between chunks with different contents.",
+        "- A switch name that collides with an upstream variable will be honoured",
+        "  by upstream code too. Namespace yours.",
+    ]
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
+    "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
     "cross_framework_rewrite_specialist": _focus_cross_framework_rewrite_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
     "comm_specialist": _focus_comm_specialist,

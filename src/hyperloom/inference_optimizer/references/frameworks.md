@@ -75,11 +75,42 @@ stubs; `--action_ckpt` defaults to
 `<model_parent>/HY-WorldPlay/<ar|bidirectional>_model/diffusion_pytorch_model.safetensors`.
 
 `WORLDPLAY_REPO_PATH` is the HY-WorldPlay **code** checkout (the `hyvideo`
-package), separate from the weights under `--model`. Setting it also registers
-the checkout as a framework source root, which PolicyGate requires before any
-specialist or framework-agent patch against `hyvideo/` can land — the probe
-cannot find a git checkout on its own, only pip-installed packages. Leave it
-unset and the entrypoint clones into `$HYPERLOOM_CACHE_DIR`.
+package), separate from the weights under `--model`. It registers the checkout as
+a framework source root, which PolicyGate requires before any specialist or
+framework-agent patch against `hyvideo/` can land — the probe cannot find a git
+checkout on its own, only pip-installed packages. Materialization now publishes
+the resolved path into the orchestrator's own environment, so a session that did
+not export it still gets the source root (an operator-set value always wins).
+Leave it unset and the entrypoint clones into `$HYPERLOOM_CACHE_DIR`.
+
+### Naming the source tree without the framework prefix
+
+`FRAMEWORK_REPO_PATH` is the framework-agnostic spelling of the same thing, and it
+works for **any** framework rather than only the scriptable ones. Resolution order
+is `<FRAMEWORK>_REPO_PATH` > `<FRAMEWORK>_DIR` > `FRAMEWORK_REPO_PATH`, so a
+prefixed value keeps precedence and nothing existing changes behaviour.
+
+Prefer the generic form. A session is single-framework by construction (the CLI
+locks `$FRAMEWORK` for the run), so the prefix resolves no possible collision — it
+only requires the operator to know the framework's name before setting the right
+variable, and to change variable names when switching frameworks.
+
+```bash
+export FRAMEWORK_REPO_PATH=/path/to/checkout    # any framework
+```
+
+The prefixed and generic forms cover different situations by default rather than by
+kind:
+
+- **A pip-installed framework** (`sglang`, `vllm`, `atom`) needs neither. Its source
+  root is discovered from the import machinery and the site-packages scan, which is
+  why patching those has never required a path.
+- **A scriptable framework** (`worldplay`, `worldmirror`, `xdit`) runs from a git
+  checkout that neither mechanism can see, so one of the two variables is required.
+- **An editable checkout of a normally-installed framework** — a `vllm` source tree
+  you build yourself rather than the wheel — is equally invisible, and the generic
+  variable is the supported way to point at it. Previously that case had to be
+  handled by hand through `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`.
 
 The FRAMEWORK phase works here (the registry carries the HY-WorldPlay
 `repo_url`) and is the only phase that can restructure the pipeline itself —
@@ -87,6 +118,49 @@ sequence-parallel all-to-all, per-step host-to-device copies, repeated work
 hoisted out of the AR rollout. `explore` cannot reach any of that: a variant is
 only CLI flags plus env, and the accepted flag surface is four knobs. Pass
 `--no-framework-agent` to skip it, but do not assume it is the default.
+
+#### Framework-level source rewrites (the high-ceiling path)
+
+Because worldplay is scriptable, the FRAMEWORK phase's authoring arm dispatches
+`framework_rewrite_specialist` rather than `serving_specialist`. The two share no
+optimization surface: an AR video rollout has no scheduler, no continuous
+batching and no KV-cache admission policy, and its wins are the redundant work
+its loop structure creates. See `references/framework_rewrite_patterns.md` for
+the pattern catalogue the specialist works from.
+
+Evidence. A `profile` leg arms a host-side probe
+(`assets/host_probe/hl_host_probe.py`, injected via a `PYTHONPATH` prefix so the
+customer's entrypoint is untouched) and writes
+`framework_rewrite_evidence.json` next to the workspace. It measures what the GPU
+kernel breakdown structurally cannot: object collectives round-tripping through
+the host, device-to-host syncs, repeated host-to-device copies, and — with
+`HYPERLOOM_FRAMEWORK_REWRITE_EVIDENCE_DEEP=1` — per-function call counts with
+argument-repeat rates that separate a memoization candidate from a loop-hoist
+enabler. Tier 1 is on by default and cheap;
+`HYPERLOOM_FRAMEWORK_REWRITE_EVIDENCE=0` disables the probe entirely. The deep
+tier inflates host time enough to skew a co-collected torch trace, so give it its
+own leg.
+
+Deliverable. Every rewrite must sit behind its own environment switch that
+defaults OFF, declared in a `framework_switches` manifest with `category`,
+`target`, `depends_on` and `enables`. That discipline buys three things:
+
+- a **switch-off parity leg** runs with every switch unset and must reproduce the
+  base within ±2%, so a patch that is not genuinely inert when disabled is
+  reverted rather than silently poisoning every later measurement;
+- a bundle that passes correctness but misses the throughput threshold is
+  **kept inert** instead of reverted — default-off code costs nothing, and
+  reverting would discard the rewrites that do pay along with the one that does
+  not;
+- accepted switches are registered as **search levers**, so `explore` measures
+  each rewrite's own contribution (additive when the levers are dormant,
+  leave-one-out when they are already on) and searches combinations, following
+  the declared dependency closure so an enabler is never judged alone.
+
+That last point is not a nicety. A hoist whose only value is making a downstream
+cache hit measures flat on its own; a greedy accept/reject loop rejects it and
+then measures every dependent rewrite against a permanently cold cache, losing
+the bundle rather than the lever.
 
 Locked / workload-spec (blacklisted in `_WORLDPLAY_ENV_BLACKLIST`, never explored):
 precision is BF16 (`WORLDPLAY_USE_FP8_GEMMS`/`FP4_GEMMS`/`SAGEATTN` forced off),

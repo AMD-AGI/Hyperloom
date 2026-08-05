@@ -34,6 +34,7 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root, deps_cache_root
+from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from ._grid_runner import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -244,6 +245,75 @@ def _sync_worldplay_action_ckpt(bench: dict[str, Any], envs: dict[str, Any]) -> 
         envs["WORLDPLAY_ACTION_CKPT"] = action_ckpt
 
 
+def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
+    """Publish a scriptable framework's checkout into the orchestrator's own env.
+
+    A scriptable framework runs out of a repo checkout rather than a pip-installed
+    package, so ``resolve_source_file_allowlist`` can only find it through
+    ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` in ``os.environ``. Writing the
+    resolved path into the materialized YAML reaches the *benchmark* subprocess
+    but not the orchestrator, and it is the orchestrator that runs PolicyGate — so
+    without this the source root is absent from the allowlist and every patch a
+    specialist writes against the framework's own code is rejected, on a session
+    that otherwise looks correctly configured.
+
+    An operator-provided value always wins; this only fills the gap when the
+    checkout was resolved (or is about to be cloned) by Hyperloom itself. The path
+    is published even when it does not exist yet, because the benchmark wrapper
+    clones on first use and the allowlist is recomputed per call.
+
+    Args:
+        framework: Framework name, used for the env prefix.
+        repo_path: The resolved checkout path.
+    """
+    name = str(framework or "").strip().upper()
+    path = str(repo_path or "").strip()
+    if not name or not path:
+        return
+    for var in (f"{name}_REPO_PATH", f"{name}_DIR"):
+        if not os.environ.get(var, "").strip():
+            os.environ[var] = path
+            log.info(
+                "%s: published %s=%s so the framework source root reaches PolicyGate",
+                framework,
+                var,
+                path,
+            )
+
+
+def _resolve_framework_repo_path(
+    envs: dict[str, Any],
+    *,
+    framework: str,
+    extra_aliases: tuple[str, ...] = (),
+) -> str:
+    """Resolve the framework checkout a session may patch, prefixed forms first.
+
+    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` > any
+    per-framework alias > :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
+    ahead of the materialized ``envs`` at each rung. The prefixed names keep
+    precedence because they are the more specific statement, so adding the generic
+    form changes no existing behaviour; it exists because a session is
+    single-framework by construction and an operator should not have to know the
+    framework's name to point at its source.
+
+    Args:
+        envs: The materialized ``benchmark.envs`` mapping.
+        framework: Framework name, used for the env prefix.
+        extra_aliases: Additional per-framework spellings to accept, in order.
+
+    Returns:
+        The resolved path, or ``""`` when nothing was supplied.
+    """
+    prefix = str(framework or "").strip().upper()
+    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", *extra_aliases, GENERIC_FRAMEWORK_ROOT_ENV)
+    for name in names:
+        value = os.environ.get(name, "").strip() or str(envs.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _apply_worldplay_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -260,11 +330,10 @@ def _apply_worldplay_runtime_defaults(
     if not explicit_benchmark_script:
         bench["benchmark_script"] = str(_worldplay_script_path(runner_type))
 
-    repo_path = (
-        os.environ.get("WORLDPLAY_REPO_PATH", "").strip()
-        or os.environ.get("WORLDPLAY_REPO", "").strip()
-        or str(envs.get("WORLDPLAY_REPO_PATH") or "").strip()
-        or str(envs.get("WORLDPLAY_REPO") or "").strip()
+    repo_path = _resolve_framework_repo_path(
+        envs,
+        framework="worldplay",
+        extra_aliases=("WORLDPLAY_REPO",),
     )
     if not repo_path:
         repo_path = str(deps_cache_root() / _WORLDPLAY_REPO_DIRNAME)
@@ -276,6 +345,7 @@ def _apply_worldplay_runtime_defaults(
     envs["WORLDPLAY_REPO_PATH"] = repo_path
     envs["WORLDPLAY_DIR"] = repo_path
     envs.pop("WORLDPLAY_REPO", None)
+    _publish_scriptable_repo_root("worldplay", repo_path)
 
     bench_py = (
         os.environ.get("WORLDPLAY_BENCH", "").strip()
@@ -305,12 +375,7 @@ def _apply_worldmirror_runtime_defaults(
     if not explicit_benchmark_script:
         bench["benchmark_script"] = str(_worldmirror_script_path(runner_type))
 
-    repo_path = (
-        os.environ.get("WORLDMIRROR_REPO_PATH", "").strip()
-        or os.environ.get("WORLDMIRROR_DIR", "").strip()
-        or str(envs.get("WORLDMIRROR_REPO_PATH") or "").strip()
-        or str(envs.get("WORLDMIRROR_DIR") or "").strip()
-    )
+    repo_path = _resolve_framework_repo_path(envs, framework="worldmirror")
     if not repo_path:
         repo_path = str(deps_cache_root() / _WORLDMIRROR_REPO_DIRNAME)
     envs["WORLDMIRROR_REPO_URL"] = (
@@ -320,6 +385,7 @@ def _apply_worldmirror_runtime_defaults(
     )
     envs["WORLDMIRROR_REPO_PATH"] = repo_path
     envs["WORLDMIRROR_DIR"] = repo_path
+    _publish_scriptable_repo_root("worldmirror", repo_path)
     envs["WORLDMIRROR_BENCH"] = (
         os.environ.get("WORLDMIRROR_BENCH", "").strip()
         or str(envs.get("WORLDMIRROR_BENCH") or "").strip()

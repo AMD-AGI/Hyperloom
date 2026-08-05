@@ -175,6 +175,29 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
+        key="framework_rewrite_specialist",
+        layer="iterative-model pipeline source rewrites (diffusion / autoregressive video)",
+        kb_anchor="framework",
+        available_in="M6",
+        description=(
+            "Authoring specialist for framework-level source rewrites on an "
+            "ITERATIVE model pipeline — a diffusion or autoregressive rollout "
+            "that runs the same transformer stack once per block per denoising "
+            "step per chunk. The wins there are not the serving concerns "
+            "serving_specialist targets (there is no scheduler, no continuous "
+            "batching, no KV-cache admission policy); they are redundant work "
+            "the loop structure creates: step-invariant computations repeated "
+            "every step, collectives that round-trip through the host to agree "
+            "on a shape, tables rebuilt on the host and re-uploaded, adjacent "
+            "same-shape collectives that could be one. Works from measured "
+            "host-side evidence plus a rewrite-pattern taxonomy, and must "
+            "deliver every rewrite behind a default-off environment switch with "
+            "a declared manifest so each one can be attributed and composed "
+            "independently. Distinct from serving_specialist (request-serving "
+            "frameworks) and kernel_switch_specialist (operator kernels)."
+        ),
+    ),
+    SpecialistDomain(
         key="cross_framework_rewrite_specialist",
         layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
         kb_anchor="framework",

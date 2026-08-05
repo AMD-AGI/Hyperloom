@@ -173,6 +173,10 @@ hyperloom = [
     "assets/configs/*.yaml",
     "assets/benchmark_scripts/*.sh",
     "assets/benchmark_scripts/*.py",
+    # Host-side evidence probe, injected into the benchmark process via a
+    # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
+    # installs can arm it.
+    "assets/host_probe/*.py",
     # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
     # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
     "assets/slurm/*.sh",

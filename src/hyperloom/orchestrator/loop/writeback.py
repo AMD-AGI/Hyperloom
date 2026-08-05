@@ -2615,6 +2615,16 @@ class WritebackCollaborator:
             changed = True
             audit_extras["trace_path"] = str(trace_path)
             audit_extras["profile_args"] = profile_args
+        # Host-side rewrite evidence is independent of the trace: it answers
+        # "which host-side work is redundant", which no kernel timeline can, and
+        # a run whose trace was unusable can still have produced good evidence.
+        # So promote it on its own, outside the trace_path branch.
+        evidence_path = str(result.get("framework_rewrite_evidence") or "").strip()
+        if evidence_path:
+            self.shared_state.last_framework_rewrite_evidence = evidence_path
+            audit_extras["framework_rewrite_evidence"] = evidence_path
+            audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
+            changed = True
         # profile result may include a tput; promote into current_best on the +1% rule.
         tput = result.get("output_throughput")
         cb = self.shared_state.current_best or {}
@@ -2767,6 +2777,19 @@ class WritebackCollaborator:
             if err:
                 self.shared_state.discovered_flags_error = str(err)
             changed = True
+        # Per-lever attribution from this round. Recorded regardless of whether
+        # the lever variant won: a rewrite measured at +0.1% is as useful to know
+        # as one measured at +8%, and without the number the lever would be
+        # re-benched every round.
+        for attribution in result.get("framework_lever_attributions") or []:
+            if not isinstance(attribution, dict):
+                continue
+            if self.shared_state.record_framework_lever_attribution(
+                str(attribution.get("switch") or ""),
+                gain_pct=attribution.get("gain_pct"),
+                source=str(attribution.get("source") or ""),
+            ):
+                changed = True
         # 3. Per-winner record_explore_accepted (Coordinator is sole writer).
         winners = result.get("winners") or []
         round_id = str(result.get("round_id") or "")
@@ -3022,6 +3045,24 @@ class WritebackCollaborator:
         status = str(result.get("status") or "")
         new_tput = result.get("output_throughput")
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        # Register framework-rewrite switches as search levers. Done for both KEEP
+        # verdicts: a bundle that cleared the gate is on and gets leave-one-out
+        # attribution, while an inert KEEP is dormant and gets additive
+        # attribution. ``kept_inert`` deliberately does not lift current_best —
+        # the code is applied but every switch is off, so the running
+        # configuration is unchanged.
+        levers = result.get("framework_levers")
+        if isinstance(levers, list) and levers:
+            lever_outcome = str(result.get("framework_lever_outcome") or "")
+            if self.shared_state.record_authored_framework_levers(
+                levers,
+                default_on=(lever_outcome == "default_on"),
+                specialist_task_id=str(result.get("specialist_task_id") or ""),
+                stack_delta_pct=result.get("delta_pct"),
+            ):
+                changed = True
+            audit_extras["framework_levers"] = [str(row.get("switch") or "") for row in levers]
+            audit_extras["framework_lever_outcome"] = lever_outcome
         if kept_flag:
             specialist_task_id = str(result.get("specialist_task_id") or "")
             lift = {
@@ -3060,8 +3101,9 @@ class WritebackCollaborator:
             }:
                 self.shared_state.pending_integrate = {}
                 changed = True
-        audit_decision = "promoted" if kept_flag else "discarded"
+        audit_decision = "promoted" if kept_flag else ("kept_inert" if status == "kept_inert" else "discarded")
         audit_extras = {
+            **audit_extras,
             "status": status,
             "specialist_task_id": result.get("specialist_task_id"),
             "output_throughput": new_tput,
