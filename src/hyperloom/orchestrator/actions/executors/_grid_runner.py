@@ -718,6 +718,65 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# How long to keep re-reading ``benchmark_report.json`` when the process exited
+# cleanly but the report does not yet parse into a valid measurement.
+#
+# The report is written by the benchmark subprocess as it shuts down, and the
+# reader runs the moment that subprocess is reaped — so on a loaded filesystem the
+# two race. Measured on a live 24-hour session: six of thirteen variants aborted
+# as ``benchmark_report_invalid_metric`` while every one of those reports, read
+# afterwards, held valid throughput. Two of the six were authored patches worth
+# +4.4% and +4.7% whose switch-off parity legs had already passed, so the race
+# did not just cost measurements, it discarded accepted work.
+#
+# Only a clean exit is worth waiting on: a non-zero return code means the run
+# genuinely failed and there is nothing to settle.
+REPORT_SETTLE_SECONDS = 30.0
+REPORT_SETTLE_POLL_SECONDS = 1.0
+
+
+async def _settled_measurement(
+    workspace: Path,
+    *,
+    subprocess_started_unix: float | None,
+    settle_seconds: float = REPORT_SETTLE_SECONDS,
+    poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Read the benchmark report, re-reading briefly while it is still settling.
+
+    Args:
+        workspace: Benchmark workspace holding ``benchmark_report.json``.
+        subprocess_started_unix: Launch time, forwarded to the leak-salvage pass.
+        settle_seconds: How long to keep retrying an invalid measurement. Pass
+            ``0`` to read exactly once (the run already failed, so waiting only
+            delays the verdict).
+        poll_seconds: Delay between attempts.
+
+    Returns:
+        The parsed report (or ``None``) and the extracted measurement, from the
+        first attempt that yielded a valid measurement, else from the last.
+    """
+    deadline = time.monotonic() + max(0.0, float(settle_seconds))
+    attempts = 0
+    while True:
+        report = _parse_report(workspace)
+        measurement = extract_benchmark_measurement(
+            report,
+            workspace=workspace,
+            subprocess_started_unix=subprocess_started_unix,
+        )
+        attempts += 1
+        if measurement.get("valid_measurement") or time.monotonic() >= deadline:
+            if attempts > 1 and measurement.get("valid_measurement"):
+                log.info(
+                    "grid_runner: benchmark_report became valid after %d read(s); "
+                    "the report was still being written when the subprocess was reaped",
+                    attempts,
+                )
+            return report, measurement
+        await asyncio.sleep(max(0.01, float(poll_seconds)))
+
+
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
     raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
@@ -1444,12 +1503,18 @@ async def run_grid(
                 warmup_workspace,
                 subprocess_started_unix=warmup_started_unix,
             )
-            warmup_report = _parse_report(warmup_workspace) if warmup_candidates else None
-            warmup_measurement = extract_benchmark_measurement(
-                warmup_report,
-                workspace=warmup_workspace,
-                subprocess_started_unix=warmup_started_unix,
-            )
+            if warmup_candidates:
+                _, warmup_measurement = await _settled_measurement(
+                    warmup_workspace,
+                    subprocess_started_unix=warmup_started_unix,
+                    settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
+                )
+            else:
+                warmup_measurement = extract_benchmark_measurement(
+                    None,
+                    workspace=warmup_workspace,
+                    subprocess_started_unix=warmup_started_unix,
+                )
             if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
                 from ._server_lifecycle import teardown_lifecycle_server
 
@@ -1899,12 +1964,13 @@ async def run_grid(
                 break
             continue
         workspace = candidates[-1]
-        report = _parse_report(workspace)
         report_path = workspace / "benchmark_report.json"
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
+        # A clean exit is worth waiting on: the report is written during shutdown
+        # and the reader runs the moment the subprocess is reaped.
+        report, measurement = await _settled_measurement(
+            workspace,
             subprocess_started_unix=variant_started_unix,
+            settle_seconds=REPORT_SETTLE_SECONDS if rc == 0 else 0.0,
         )
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         if rc != 0:
