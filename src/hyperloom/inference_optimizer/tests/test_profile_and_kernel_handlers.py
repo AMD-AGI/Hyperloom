@@ -467,6 +467,111 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     assert envs["RANDOM_RANGE_RATIO"] == 0.5
 
 
+def test_materialize_profile_bounds_survive_a_replacing_candidate(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """A candidate with args_mode="replace" must not strip the profiler bounds.
+
+    Once ``current_best`` carries ``args_mode="replace"``, the candidate's flag
+    string overwrote EXTRA_VLLM_ARGS wholesale and took the injected
+    ``max_iterations`` with it. vLLM reads a missing ``max_iterations`` as
+    "profile until stop_profile", which grew host RAM at ~60 MiB/s until the
+    cgroup OOM-killer took the engine process out mid-roofline.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True",
+        },
+    )
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--no-enable-prefix-caching",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    # The frontend profiler tracks no iterations, so it has to come back too.
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    # The candidate's own flag must still take effect.
+    assert "--no-enable-prefix-caching" in extra, extra
+    assert "lost the torch-profiler bounds" in caplog.text
+
+
+def test_materialize_profile_bounds_survive_an_extra_envs_override(
+    tmp_path,
+    monkeypatch,
+):
+    """``extra_envs`` is applied last and unconditionally, so an EXTRA_VLLM_ARGS entry there is the other way the bounds can vanish."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--quantization fp8" in extra, extra
+
+
+def test_materialize_profile_states_ignore_frontend_exactly_once(
+    tmp_path,
+    monkeypatch,
+):
+    """The bounds imply ignore_frontend, but the YAML usually already sets it and vLLM warns on duplicate keys."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True",
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
+
+
+def test_materialize_profile_adds_ignore_frontend_when_yaml_omits_it(
+    tmp_path,
+    monkeypatch,
+):
+    """Bounding only the worker profiler leaves AsyncLLM capturing the whole range, so the flag is injected alongside the bounds."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+
+
 def test_materialize_profile_window_sglang_skill_formula(
     tmp_path,
     monkeypatch,

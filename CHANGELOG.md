@@ -36,6 +36,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   suppresses a pointless re-run. The verdict is matched tolerantly and only honoured
   when the manifest reports no KEEP, so it can never discard a validated fusion.
 
+- **Roofline runs no longer launch an unbounded torch profiler**: the profile
+  path injects `--profiler-config.delay_iterations/max_iterations` into
+  `EXTRA_VLLM_ARGS`, but the per-task merge that follows applies the candidate's
+  `extra_server_args` and `extra_envs` afterwards. A candidate carrying
+  `args_mode="replace"` (which `writeback` sets automatically as soon as a KEEP
+  needs `remove_args`) overwrote the whole flag string and took the bounds with
+  it, along with the `--profiler-config.ignore_frontend True` the profile YAML
+  supplies. vLLM reads a missing `max_iterations` as "profile until
+  `stop_profile`", so the worker accumulated every profiler event in host
+  anonymous memory — measured at 60 MiB/s with the production option set — until
+  the cgroup OOM-killer took the engine or worker process out mid-roofline, at
+  107–137 GiB RSS. Because `args_mode` is sticky on `current_best`, one such KEEP
+  turned *every* later roofline in that session into an OOM candidate.
+
+  `materialize_config_with_envs` now re-asserts the bounds after the
+  `extra_server_args`/`extra_envs` merges and warns when it had to restore them,
+  and it states `ignore_frontend` alongside the bounds (the AsyncLLM-side
+  profiler tracks no iterations and would otherwise capture the entire
+  `start_profile`..`stop_profile` range). Candidate flags still win for
+  everything else, and the append path is unchanged apart from no longer relying
+  on the YAML to carry `ignore_frontend`.
+
 ### Removed
 
 - **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
