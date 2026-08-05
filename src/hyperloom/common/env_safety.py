@@ -69,7 +69,6 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
-        "SAFE_API_KEY",
     }
 )
 
@@ -122,7 +121,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "OPENAI_BASE_URL",
         "NO_PROXY",
         "ROCM_PATH",
-        "SAFE_API_KEY",
         "SGLANG_ROCM_EXTRA",
         "SGLANG_ROCM_INDEX_URL",
         "SGLANG_ROCM_PYPI_VERSION",

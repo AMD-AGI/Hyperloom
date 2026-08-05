@@ -5,7 +5,7 @@
 
 Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``), the
 robustness-server endpoint (``ROBUSTNESS_SERVER_URL``) and the LLM endpoint /
-credentials (``OPENAI_BASE_URL`` / ``SAFE_API_KEY``, plus Anthropic and
+credentials (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``, plus Anthropic and
 DeepSeek variants) fall back to probing well-known paths and endpoints when
 unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE``,
 ``ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`` and ``ROBUSTNESS_NODES`` are env-only
@@ -418,8 +418,7 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     if openai_key:
         return openai_base or "https://api.openai.com/v1", openai_key, "openai"
     gateway_key = (
-        os.environ.get("SAFE_API_KEY", "").strip()
-        or os.environ.get("LLM_API_KEY", "").strip()
+        os.environ.get("LLM_API_KEY", "").strip()
         or os.environ.get("LLM_GATEWAY_KEY", "").strip()
     )
     if gateway_key and openai_base:

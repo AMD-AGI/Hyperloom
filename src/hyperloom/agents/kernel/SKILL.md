@@ -42,7 +42,7 @@ what `install.sh` is for.
 
 ### Credentials (env > .env, env always wins)
 
-`SAFE_API_KEY` and `OPENAI_BASE_URL` are the only credentials needed.
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` are the only credentials needed.
 `install.sh` resolves them in this order:
 
 1. If both are in env → use them, do not touch `.env`.
@@ -129,7 +129,7 @@ the gateway rejected the request. Re-source
 
 ```bash
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
-curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
+curl -sS -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
 If a pod or venv was rebuilt and `ray --version` fails / Ray CLI rejects

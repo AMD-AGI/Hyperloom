@@ -75,7 +75,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "stale-openai-key")
-    monkeypatch.setenv("SAFE_API_KEY", "stale-safe-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "stale-deepseek-key")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "stale-gateway-key")
     monkeypatch.setenv("CLAUDE_MODEL", "stale-claude-model")
@@ -98,7 +97,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
         "ANTHROPIC_CUSTOM_HEADERS",
         "OPENAI_BASE_URL",
         "OPENAI_API_KEY",
-        "SAFE_API_KEY",
         "DEEPSEEK_API_KEY",
         "LLM_GATEWAY_KEY",
         "CLAUDE_MODEL",
@@ -181,7 +179,6 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=stale-openai-key",
                 "OPENAI_CUSTOM_HEADERS=stale-header: stale",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
             ]
         )
@@ -195,10 +192,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 f"DOTENV={dotenv}",
-                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
-                "SAFE_API_KEY_ARG=",
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
@@ -211,13 +206,11 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=ambient-openai-key",
                 "OPENAI_CUSTOM_HEADERS='ambient-header: stale'",
-                "SAFE_API_KEY=ambient-safe-key",
                 "LLM_GATEWAY_KEY=ambient-gateway-key",
                 "resolve_credentials",
                 f"printf 'OPENAI_BASE_URL=%s\n' \"${{OPENAI_BASE_URL-}}\" > {tmp_path / 'resolved-env.txt'}",
                 f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
                 f"printf 'OPENAI_CUSTOM_HEADERS=%s\n' \"${{OPENAI_CUSTOM_HEADERS-}}\" >> {tmp_path / 'resolved-env.txt'}",
-                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
                 f"printf 'LLM_GATEWAY_KEY=%s\n' \"${{LLM_GATEWAY_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
             ]
         )
@@ -233,11 +226,10 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     assert "OPENAI_BASE_URL=" not in text
     assert "OPENAI_API_KEY=" not in text
     assert "OPENAI_CUSTOM_HEADERS=" not in text
-    assert "SAFE_API_KEY=" not in text
     assert "LLM_GATEWAY_KEY=" not in text
     resolved_env = (tmp_path / "resolved-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
-        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nSAFE_API_KEY=\nLLM_GATEWAY_KEY=\n"
+        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nLLM_GATEWAY_KEY=\n"
     )
 
 
@@ -258,7 +250,6 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "OPENAI_API_KEY=stale-openai-key",
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "ANTHROPIC_API_KEY=stale-anthropic-key",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
             ]
         )
@@ -272,10 +263,8 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 f"DOTENV={dotenv}",
-                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
-                "SAFE_API_KEY_ARG=",
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
@@ -287,14 +276,12 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "OPENAI_API_KEY=ambient-openai-key",
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "ANTHROPIC_API_KEY=ambient-anthropic-key",
-                "SAFE_API_KEY=ambient-safe-key",
                 "LLM_GATEWAY_KEY=ambient-gateway-key",
                 "resolve_credentials",
                 f"printf 'OPENAI_BASE_URL=%s\n' \"${{OPENAI_BASE_URL-}}\" > {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'ANTHROPIC_BASE_URL=%s\n' \"${{ANTHROPIC_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'ANTHROPIC_API_KEY=%s\n' \"${{ANTHROPIC_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
-                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'DEEPSEEK_API_KEY=%s\n' \"${{DEEPSEEK_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'DEEPSEEK_BASE_URL=%s\n' \"${{DEEPSEEK_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
             ]
@@ -312,14 +299,12 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
     assert "OPENAI_API_KEY=" not in text
     assert "ANTHROPIC_BASE_URL=" not in text
     assert "ANTHROPIC_API_KEY=" not in text
-    assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "deepseek-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
         "OPENAI_BASE_URL=\n"
         "OPENAI_API_KEY=\n"
         "ANTHROPIC_BASE_URL=\n"
         "ANTHROPIC_API_KEY=\n"
-        "SAFE_API_KEY=\n"
         "DEEPSEEK_API_KEY=deepseek-test-key\n"
         "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
     )
@@ -624,13 +609,13 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
 
     # The gateway credentials may be *read* in memory -- the single-gateway
     # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
-    # OPENAI_BASE_URL + SAFE_API_KEY, mirroring the CLI's
+    # OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
     # _resolve_llm_endpoints(). What must never happen is persisting them:
     # neither exported into kernel-agent.env.sh nor written back to .env.
-    assert "export SAFE_API_KEY" not in write_text
-    assert "upsert_dotenv_var SAFE_API_KEY" not in write_text
-    # ... and the generated env file scrubs any stale copy left by an older run.
-    assert "remove_dotenv_var SAFE_API_KEY" in write_text
+    assert "export OPENAI_API_KEY" not in write_text
+    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
+    # ... and the installer no longer references SAFE_API_KEY anywhere.
+    assert "SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
     assert "remove_dotenv_var OPENAI_API_KEY" in write_text
 
@@ -772,7 +757,6 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "HYPERLOOM_RUN_MODE=baremetal",
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=stale-openai-key",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
             ]
         )
@@ -836,10 +820,8 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
     assert "export OPENAI_BASE_URL=" not in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
-    assert "export SAFE_API_KEY=" not in kernel_text
     assert "OPENAI_BASE_URL=" not in dotenv_text
     assert "OPENAI_API_KEY=" not in dotenv_text
-    assert "SAFE_API_KEY=" not in dotenv_text
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
 
 

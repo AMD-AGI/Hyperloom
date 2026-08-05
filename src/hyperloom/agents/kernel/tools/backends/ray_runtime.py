@@ -395,7 +395,6 @@ SAFE_ENV_KEYS = (
     "KERNEL_AGENT_ENV",
     "MAGPIE_PATH",
     "INFERENCEX_PATH",
-    "SAFE_API_KEY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -435,20 +434,19 @@ def safe_runtime_env() -> dict:
 
     Copies only the keys in :data:`SAFE_ENV_KEYS` from the current
     environment, then fills sensible fallbacks (e.g. deriving the
-    per-provider API keys and base URLs from ``SAFE_API_KEY`` /
-    ``OPENAI_BASE_URL``). GPU-visibility variables are deliberately
-    excluded so Ray manages device assignment itself.
+    per-provider API keys and base URLs from ``OPENAI_API_KEY`` /
+    ``ANTHROPIC_API_KEY`` / ``OPENAI_BASE_URL``). GPU-visibility variables are
+    deliberately excluded so Ray manages device assignment itself.
 
     Returns:
         dict: A ``{"env_vars": {...}}`` mapping suitable for passing as
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # SAFE_API_KEY is primary; a split deploy falls back to the per-provider
-    # key. GEAK speaks the OpenAI protocol, so it takes the OpenAI-side key.
+    # GEAK speaks the OpenAI protocol, so it takes the OpenAI-side key; a split
+    # deploy falls back to the Anthropic-side key.
     openai_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("OPENAI_API_KEY")
+        env.get("OPENAI_API_KEY")
         or env.get("ANTHROPIC_AUTH_TOKEN")
         or env.get("ANTHROPIC_API_KEY")
     )
@@ -459,8 +457,7 @@ def safe_runtime_env() -> dict:
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
     anthropic_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("ANTHROPIC_API_KEY")
+        env.get("ANTHROPIC_API_KEY")
         or env.get("ANTHROPIC_AUTH_TOKEN")
         or env.get("OPENAI_API_KEY")
     )

@@ -74,7 +74,6 @@ def test_ensure_client_no_api_key(monkeypatch):
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "LLM_GATEWAY_KEY",
-        "SAFE_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     scorer = ProposalScorer(models=("m",))

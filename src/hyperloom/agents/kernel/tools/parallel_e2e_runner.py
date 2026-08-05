@@ -53,11 +53,10 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
-    # SAFE_API_KEY is the primary source; a split deploy falls back to the
-    # per-provider key. GEAK takes the OpenAI-side key.
+    # GEAK takes the OpenAI-side key; a split deploy falls back to the
+    # Anthropic-side key.
     openai_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("OPENAI_API_KEY")
+        env.get("OPENAI_API_KEY")
         or env.get("ANTHROPIC_AUTH_TOKEN")
         or env.get("ANTHROPIC_API_KEY")
         or env.get("AMD_API_KEY")
@@ -68,8 +67,7 @@ def load_env_file(path: Path) -> dict[str, str]:
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
     anthropic_key = (
-        env.get("SAFE_API_KEY")
-        or env.get("ANTHROPIC_API_KEY")
+        env.get("ANTHROPIC_API_KEY")
         or env.get("ANTHROPIC_AUTH_TOKEN")
         or env.get("OPENAI_API_KEY")
     )

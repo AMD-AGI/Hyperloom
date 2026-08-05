@@ -45,8 +45,8 @@ def _inject_author_gateway_env() -> None:
     """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
 
     forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
-    via ``ANTHROPIC_*``. Hyperloom's session env only carries ``OPENAI_BASE_URL`` /
-    ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
+    via ``ANTHROPIC_*``. Hyperloom's session env carries ``OPENAI_BASE_URL`` /
+    ``OPENAI_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
     ``ANTHROPIC_*`` equivalents here. Only fills what is absent; explicit operator
     values always win.
     """
@@ -54,7 +54,7 @@ def _inject_author_gateway_env() -> None:
     if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
         # Strip trailing /v1 (claude appends its own).
         os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
-    token = str(os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    token = str(os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if token:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)

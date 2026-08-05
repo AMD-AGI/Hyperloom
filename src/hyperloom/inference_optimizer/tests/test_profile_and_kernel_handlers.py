@@ -2240,7 +2240,7 @@ benchmark:
     EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
     SGLANG_USE_TRITON: "1"
     ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
-    SAFE_API_KEY: "should-not-leak"
+    OPENAI_API_KEY: "should-not-leak"
 """,
         encoding="utf-8",
     )
@@ -2289,7 +2289,7 @@ benchmark:
     assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
     assert enriched["env_vars"]["TP"] == "8"
     assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
-    assert "SAFE_API_KEY" not in enriched["env_vars"]
+    assert "OPENAI_API_KEY" not in enriched["env_vars"]
     assert enriched["runtime_args"]["framework"] == "sglang"
     assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
     assert enriched["runtime_args"]["workload"] == {

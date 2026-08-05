@@ -1359,7 +1359,6 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     output_dir = tmp_path / "out"
     captured: dict[str, Any] = {}

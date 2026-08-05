@@ -21,7 +21,6 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 @pytest.fixture
 def clean_creds_env(monkeypatch):
     for var in (
-        "_".join(("SAFE", "API", "KEY")),
         "OPENAI_BASE_URL",
         "ANTHROPIC_BASE_URL",
         "_".join(("OPENAI", "API", "KEY")),
@@ -34,9 +33,9 @@ def clean_creds_env(monkeypatch):
     return monkeypatch
 
 
-def test_validate_credentials_passes_legacy_single_gateway(clean_creds_env):
-    """Legacy AMD single-gateway pair (SAFE API key + OPENAI_BASE_URL) still passes."""
-    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
+def test_validate_credentials_passes_single_gateway(clean_creds_env):
+    """Single-gateway pair (OPENAI_API_KEY + OPENAI_BASE_URL) passes."""
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "fake-token")
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     cli_credentials._validate_credentials()
 
@@ -65,16 +64,6 @@ def test_validate_credentials_passes_official_openai_key_only(clean_creds_env):
     """Official OpenAI SDK default endpoint works without OPENAI_BASE_URL."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
     cli_credentials._validate_credentials()
-
-
-def test_validate_credentials_exits_2_when_safe_key_has_no_base_url(clean_creds_env, capsys):
-    """SAFE API key is a gateway key and still needs an explicit gateway URL."""
-    clean_creds_env.setenv("_".join(("SAFE", "API", "KEY")), "fake-token")
-    with pytest.raises(SystemExit) as exc_info:
-        cli_credentials._validate_credentials()
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    assert "usable endpoint/key pair" in err
 
 
 def test_validate_credentials_exits_2_when_no_key(clean_creds_env, capsys):

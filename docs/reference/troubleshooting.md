@@ -29,9 +29,9 @@ configured upstream gateway.
 
 **Fix**:
 
-1. Confirm `SAFE_API_KEY` is set without printing the secret:
+1. Confirm `OPENAI_API_KEY` is set without printing the secret:
    ```bash
-   test -n "${SAFE_API_KEY:-}"
+   test -n "${OPENAI_API_KEY:-}"
    ```
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):

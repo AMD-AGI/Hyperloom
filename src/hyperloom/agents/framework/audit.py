@@ -377,7 +377,7 @@ def _maybe_llm_refine(
 ) -> dict[str, Any]:
     """Optionally refine the static verdict with a single chat-completion.
 
-    Opt-in (``use_llm=True``) and best-effort: requires ``SAFE_API_KEY`` +
+    Opt-in (``use_llm=True``) and best-effort: requires ``OPENAI_API_KEY`` +
     ``OPENAI_BASE_URL`` (or request ``openai_base_url``). Any failure / missing
     credential returns the static verdict unchanged. Never escalates an
     ``already_*`` claim the static layer didn't already back with evidence.
@@ -393,11 +393,11 @@ def _maybe_llm_refine(
     import json
     import os
 
-    api_key = str(request.get("api_key") or os.environ.get("SAFE_API_KEY") or "").strip()
+    api_key = str(request.get("api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
     base_url = str(request.get("openai_base_url") or os.environ.get("OPENAI_BASE_URL") or "").strip()
     model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.4").strip()
     if not api_key or not base_url:
-        static_result.setdefault("risks", []).append("llm refine skipped: missing SAFE_API_KEY/OPENAI_BASE_URL")
+        static_result.setdefault("risks", []).append("llm refine skipped: missing OPENAI_API_KEY/OPENAI_BASE_URL")
         return static_result
 
     try:

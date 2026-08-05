@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Complete reference for all environment variables read by the Hyperloom runtime, grouped by purpose: credentials, paths, workload parameters, backend selection, and observability."
-        "keywords": "Hyperloom, environment variables, configuration, SAFE_API_KEY, USER_DATA_PATH, ROCm, AMD GPU, LLM inference, kernel optimization, LLM gateway, Langfuse, session"
+        "keywords": "Hyperloom, environment variables, configuration, OPENAI_API_KEY, USER_DATA_PATH, ROCm, AMD GPU, LLM inference, kernel optimization, LLM gateway, Langfuse, session"
 ---
 # Environment variables
 
@@ -26,15 +26,14 @@ These variables configure LLM gateway access and optional backend credentials.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments can instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
+| `OPENAI_API_KEY`       | Conditional | —    | OpenAI-compatible LLM gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments can instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
 | `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments can provide provider-specific base URLs instead. Example: `https://<your-gateway-host>/api/v1/llm-proxy/v1`.                                                                                                                  |
 | `ANTHROPIC_BASE_URL`   | No       | Derived from `OPENAI`<br>`_BASE_URL` | Claude-side base URL for split-gateway deployments.                                                                                                        |
-| `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
-| `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
+| `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `OPENAI_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
+| `GEAK_API_KEY`         | No       | Inherits `OPENAI_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | Inherits `OPENAI`<br>`_BASE_URL` | Only set explicitly to override the default inheritance.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
-| `ANTHROPIC_API_KEY`    | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
-| `OPENAI_API_KEY`       | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
+| `ANTHROPIC_API_KEY`    | No       | Inherits `OPENAI_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
 | `LANGFUSE`<br>`_PUBLIC_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project public key (`pk-...`).                                                                                                                  |
 | `LANGFUSE`<br>`_SECRET_KEY`  | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Langfuse project secret key (`sk-...`).                                                                                                                  |
