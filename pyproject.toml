@@ -130,8 +130,22 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 # Test trees are not part of the distribution: their fixture data is not
-# package-data, so a shipped copy could never run. See test_packaging_lint.py.
-exclude = ["*.tests", "*.tests.*", "tests", "tests.*"]
+# package-data, so a shipped copy could never run. Singular/gerund spellings
+# are covered too; test_packaging_lint.py fails if a new one escapes.
+exclude = [
+    "*.tests",
+    "*.tests.*",
+    "tests",
+    "tests.*",
+    "*.test",
+    "*.test.*",
+    "test",
+    "test.*",
+    "*.testing",
+    "*.testing.*",
+    "testing",
+    "testing.*",
+]
 
 [tool.setuptools.data-files]
 # Install the setup skill under every agent's discovery dir so /hyperloom-setup
@@ -185,6 +199,9 @@ hyperloom = [
     "assets/slurm/*.sbatch",
     "assets/slurm/*.tsv",
     "assets/slurm/*.template",
+    # run_hyperloom.sbatch copies this template into the container at launch,
+    # so it has to ship alongside the .sbatch that references it.
+    "assets/slurm/*.sh.in",
     "references/*.md",
     "tools/*.sh.example",
 ]
@@ -237,6 +254,15 @@ hyperloom = [
 ]
 "hyperloom.agents.kernel.tools" = [
     "data/*.json",
+]
+# ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
+# and raises FileNotFoundError when they are absent from the install.
+"hyperloom.inference_optimizer.assets.agentx" = [
+    "*.sh",
+]
+# Breakdown skill assets; the only SKILL.md under src/ that did not ship.
+"hyperloom.inference_optimizer.breakdown" = [
+    "*.md",
 ]
 "hyperloom.inference_optimizer.multi_node" = [
     "SKILL.md",
