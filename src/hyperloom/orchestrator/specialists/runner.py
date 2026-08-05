@@ -626,6 +626,8 @@ class SpecialistRunner:
                 task_kind=str(params.get("task_kind") or ""),
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
+                # Channel A = in-process (emit_intent), Channel B = subprocess (file write).
+                exit_channel=("B" if self.subprocess_config is not None else "A"),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)

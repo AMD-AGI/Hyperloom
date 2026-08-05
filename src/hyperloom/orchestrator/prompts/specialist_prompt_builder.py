@@ -838,6 +838,9 @@ class SpecialistPromptInputs:
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Upstream PR lead for authoring tasks: {title, url, diff_url}.
     pr_lead: dict[str, Any] = field(default_factory=dict)
+    # Active exit channel: "A" (emit_intent tool), "B" (file write), or ""
+    # (render both for render-script / unknown runtime).
+    exit_channel: str = ""
 
 
 # Section 1 — Identity & autonomy
@@ -1891,24 +1894,27 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: Markdown lines for the output-protocol section.
     """
     workspace = inp.workspace_path or "<workspace>"
+    channel = (inp.exit_channel or "").upper().strip()
+
+    exit_lines: list[str] = []
+    if channel == "A" or channel == "":
+        exit_lines.extend([
+            "**Exit — ``emit_intent`` tool:** call ``emit_intent`` exactly once",
+            "with intent type ``specialist_done`` and the payload schema below.",
+        ])
+    if channel == "B" or channel == "":
+        if channel == "":
+            exit_lines.append("")
+        exit_lines.extend([
+            "**Exit — file write (subprocess runtime):** write the same payload to",
+            f"``{workspace}/specialist_done.json`` as your **absolute last action**.",
+            "The dispatcher polls for that file as the exit signal; stop after writing.",
+        ])
+
     return [
         "## 8. OUTPUT PROTOCOL",
         "",
-        "Your run terminates by producing **exactly one** specialist_done",
-        "record. The Hyperloom runner accepts either of two equivalent",
-        "exit channels — use whichever your tool surface supports:",
-        "",
-        "**Channel A — ``emit_intent`` tool (in-process / SDK runtime):**",
-        "Call the ``emit_intent`` tool exactly once with an intent of type",
-        "``specialist_done`` and the payload schema below.",
-        "",
-        "**Channel B — file write (subprocess / production runtime,",
-        "PR-A2 Arbor-into-Hyperloom):** When ``emit_intent`` is not in",
-        "your tool list, write the same payload to",
-        f"``{workspace}/specialist_done.json`` via the ``Write`` tool as",
-        "your **absolute last action**. The Hyperloom dispatcher polls",
-        "for that file and treats its appearance as the run's exit",
-        "signal. After writing it, stop — do not call any further tools.",
+        *exit_lines,
         "",
         "**Messages from the Orchestrator (check this as you work):** read",
         f"``{workspace}/inbox.json`` whenever you finish a step. It is a JSON",
@@ -2083,44 +2089,26 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "",
         *gpu_rule,
         "2. **You MAY** produce changes for integration, but stage them ONLY",
-        f"   inside your own worktree at ``{workspace}/`` (a git checkout",
-        "   branched off the framework HEAD just for this task). Two output",
-        "   kinds are accepted by the orchestrator's ``integrate_patch`` gate:",
+        f"   inside your own worktree at ``{workspace}/``. Two output kinds:",
         "   - Unified-diff patches: ``git diff > patches/NNN_<slug>.patch``",
-        "     from inside the worktree; list paths in ``patches_written``.",
+        "     from the worktree; list paths in ``patches_written``.",
         "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
-        "     the file under your worktree and list it in ``artifacts_written``",
-        "     as ``{source, target, kind, description}`` (``source`` relative to",
-        "     the worktree, ``target`` the framework-relative install path).",
-        "   You **MUST NEVER** ``git apply`` / ``git commit`` against or",
-        "   otherwise mutate the main ``framework_source_roots`` directly —",
-        "   the orchestrator's ``integrate_patch`` action is the single",
-        "   integration point that applies your patches/artifacts with the",
-        "   throughput + accuracy gate. (Starting/stopping YOUR OWN servers on",
-        "   YOUR OWN leased cards per rule 1 is fine; the prohibition here is",
-        "   only about mutating the shared framework tree directly.)",
-        "3. **NEVER** write to the Recipe KB directly. Its only write paths",
-        "   (``RecipeKB.put_recipe`` and the framework-record writeback) are",
-        "   in-process Coordinator calls. The Coordinator owns all KB writes. KB",
-        "   read context is pre-warmed into Section 4 of this prompt; the",
-        "   specialist subprocess has no live KB connection.",
-        "4. **NEVER** emit any intent other than ``specialist_done``,",
-        "   ``send_message`` (heartbeat), or ``alert``. Other intent types",
-        "   are dropped and recorded as a tool violation.",
-        "5. You **MUST** finish within ``max_turns`` LLM turns and end with",
-        "   a single ``specialist_done`` exit signal (intent OR",
-        "   ``specialist_done.json`` file write per Section 8). Sub-agent",
-        "   silence past the cap is treated as stale (an empty",
-        "   ``specialist_done`` is synthesized for you so the EXPLORE",
-        "   round still progresses).",
-        f"6. Use ``{workspace}/`` for ALL writes (patches, transcript notes,",
-        "   heartbeat). Do not write anywhere else in the filesystem; the",
-        "   dispatcher only exposes this directory + read-only access to",
-        "   ``framework_source_roots`` and SESSION_DIR.",
-        "7. If you hit a tool error or run out of useful actions, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}`` rather than",
-        "   stalling.",
-        f"8. {BASH_KILL_SAFETY_PREAMBLE}",
+        "     under the worktree and list in ``artifacts_written`` as",
+        "     ``{source, target, kind, description}``.",
+        "   **NEVER** ``git apply`` / ``git commit`` against the shared",
+        f"   ``framework_source_roots`` directly — ``integrate_patch`` is",
+        "   the single integration point.",
+        "3. Only ``specialist_done``, ``send_message``, and ``alert`` are",
+        "   accepted intents; all others are dropped.",
+        "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
+        "   exactly one ``specialist_done`` exit signal. Silence past the cap",
+        "   synthesizes an empty done.",
+        f"5. Use ``{workspace}/`` for ALL writes. The dispatcher exposes only",
+        "   this directory + read-only access to ``framework_source_roots``",
+        "   and ``SESSION_DIR``.",
+        "6. On tool error or no useful action left, emit",
+        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 
 
