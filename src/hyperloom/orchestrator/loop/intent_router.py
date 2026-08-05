@@ -38,7 +38,7 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
-from ..state.shared_state import resolve_grading_anchor_tput
+from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import get_handler
 
@@ -406,10 +406,12 @@ class IntentRouter:
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Parity with _materialize_approved_proposal: direct delegates need the same knobs.
+        # Delegates skip _materialize_approved_proposal, so seed the same params here.
+        # Both grid actions launch on top of current_best per their action contract.
+        if action_name in ("sweep", "explore"):
+            inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-            params.setdefault("base_tput", resolve_grading_anchor_tput(self.shared_state))
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
         # into N standard freeform specialist tasks, each dispatched through the
         # normal SpecialistRunner + TaskRegistry + lease + reap path.
