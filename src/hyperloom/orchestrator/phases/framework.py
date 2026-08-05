@@ -1602,17 +1602,36 @@ class FrameworkPhase(PhaseHandler):
         return spec_tid
 
     async def _enablement_in_flight(self) -> bool:
-        """True when the recorded inflight_task_id maps to a queued or running task."""
+        """True while the current enablement round has not settled.
+
+        A round spans the authoring specialist AND the ``integrate_patch`` that
+        consumes its deliverable. The specialist goes terminal a full tick before
+        the Critic even sees the integrate proposal, so the specialist task state
+        alone would declare the round finished while it is still resolving.
+        """
         from ..state.task_registry import TaskNotFound
 
         tid = self.shared_state.enablement.inflight_task_id
         if not tid:
             return False
         try:
-            task = await self.tasks.get(tid)
+            spec = await self.tasks.get(tid)
         except TaskNotFound:
-            return False
-        return task.state in ("queued", "running")
+            spec = None
+        if spec is not None and spec.state in ("queued", "running"):
+            return True
+        # An undecided integrate proposal keeps the round open. Once the Critic
+        # rules, approve materialises the task below and reject rearms directly,
+        # so a dropped proposal cannot defer forever.
+        for p in self.state.pending_proposals.values():
+            if p.action_name != "integrate_patch" or p.decided:
+                continue
+            if ((p.payload or {}).get("params") or {}).get("specialist_task_id") == tid:
+                return True
+        for t in (await self.tasks.queued()) + (await self.tasks.running()):
+            if t.kind == "integrate_patch" and (t.params or {}).get("specialist_task_id") == tid:
+                return True
+        return False
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
         """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
