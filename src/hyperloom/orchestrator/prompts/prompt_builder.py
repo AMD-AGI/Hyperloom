@@ -897,18 +897,14 @@ _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
 
 
 def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
-    """Render the on-demand reference index for ``## 8.``
-
-    Each ``*.md`` file in *references_dir* whose ``<!-- phase: ... -->`` tag
-    includes *phase* (or that carries no phase tag) gets one line in the
-    index. An absent or empty directory produces no section.
+    """Build ``## 8.`` from the reference docs that apply to *phase*.
 
     Args:
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
 
     Returns:
-        Markdown lines for the section, or an empty list when no entries apply.
+        Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []

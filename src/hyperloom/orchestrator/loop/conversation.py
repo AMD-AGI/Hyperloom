@@ -147,19 +147,7 @@ class ConversationCollaborator:
             log.exception("Coordinator: failed to attach orchestration context tools")
 
     def _context_reference_reader(self, name: str = "") -> str:
-        """Return the text of a named prompt reference document.
-
-        Accepts only bare stems to prevent path traversal. Unknown names
-        return a list of available names rather than an error.
-
-        Args:
-            name: Bare stem of the reference file (no path separators or
-                extension).
-
-        Returns:
-            The document text, or an error/available-list string when the
-            name is invalid or the file is absent.
-        """
+        """Resolve a reference doc by stem; reject path traversal."""
         from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
 
         refs_dir = asset_prompt_references_dir()

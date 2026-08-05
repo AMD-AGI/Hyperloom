@@ -207,15 +207,7 @@ class ContextProvider:
         )
 
     def read_reference(self, name: str = "") -> str:
-        """Return the full text of a named on-demand reference document.
-
-        Args:
-            name: Stem of the reference file (e.g. ``"failure_recovery"``).
-
-        Returns:
-            The document text, an error string when the name is unknown or
-            the reader is not wired.
-        """
+        """Return the full text of a named on-demand reference document."""
         if self.reference_reader is None:
             return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")

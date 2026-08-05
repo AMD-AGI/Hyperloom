@@ -286,11 +286,7 @@ def asset_system_prompts_dir() -> Path:
 
 
 def asset_prompt_references_dir() -> Path:
-    """Return the directory of shipped on-demand prompt reference documents.
-
-    Returns:
-        Path: ``<asset_system_prompts_dir>/references``.
-    """
+    """Return the directory of shipped on-demand prompt reference documents."""
     return asset_system_prompts_dir() / "references"
 
 
