@@ -2726,6 +2726,7 @@ def _run_loop_via_cli(
     framework: str = "",
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
+    num_gpus: int = 1,
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
@@ -2826,6 +2827,12 @@ def _run_loop_via_cli(
     # case forge-loop infers it from the kernel path (soft, never fatal).
     if framework:
         cmd += ["--framework", framework]
+    # Collective kernels: the driver self-launches this many ranks under
+    # torchrun, and forge profiles each rank separately. Wrapping the launcher
+    # instead would profile a process that runs no kernel at all. Omitted at 1
+    # so single-GPU tasks keep the exact command they had before.
+    if num_gpus > 1:
+        cmd += ["--nproc-per-node", str(num_gpus)]
 
     loop_exc = None
     out = ""
@@ -3368,6 +3375,7 @@ def submit(
                 timeout_s / 60.0,
             )
         loop_outcome = _run_loop_via_cli(
+            num_gpus=num_gpus,
             worktree_kernel=worktree_kernel,
             driver=driver,
             workspace=workspace,

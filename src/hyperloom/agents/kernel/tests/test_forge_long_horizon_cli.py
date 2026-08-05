@@ -2004,3 +2004,74 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
     assert prepared is not None
     workspace, _kernel, _base = prepared
     assert _git(workspace, "branch", "--show-current") == branch
+
+
+def _run_cli_capturing_command(tmp_path, monkeypatch, *, num_gpus):
+    """Invoke _run_loop_via_cli with a stubbed Popen and return the argv."""
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    driver = workspace / "driver.py"
+    program = tmp_path / "program.md"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    program.write_text("# Task\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    captured = {}
+
+    class FakeProcess:
+        pid = 43211
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            payload = {"baseline_ms": 2.0, "best_ms": 1.0, "improved": True}
+            return f"__FORGE_RESULT__{json.dumps(payload)}__FORGE_RESULT__", ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    forge_submit._run_loop_via_cli(
+        worktree_kernel=str(kernel),
+        driver=str(driver),
+        workspace=str(workspace),
+        shapes={"primary": {"M": 128}},
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/kernel",
+        gpu_target="gfx950",
+        fellow="triton-fellow",
+        program_md_file=str(program),
+        invocation_spec_file="",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=120,
+        deadline_unix=time.time() + 120.0,
+        experience_id="attempt-1",
+        num_gpus=num_gpus,
+    )
+    return captured["command"]
+
+
+def test_collective_tasks_request_one_rank_per_gpu(tmp_path, monkeypatch):
+    """A collective kernel has to reach forge as a multi-rank launch.
+
+    TraceLens already decides how many GPUs a collective needs, but that number
+    stopped at this backend's signature: the loop then ran single-rank, and its
+    profiler wrapped the torchrun launcher, a process that executes no kernel.
+    """
+    command = _run_cli_capturing_command(tmp_path, monkeypatch, num_gpus=4)
+    assert "--nproc-per-node" in command
+    assert command[command.index("--nproc-per-node") + 1] == "4"
+
+
+def test_single_gpu_tasks_keep_their_previous_command(tmp_path, monkeypatch):
+    """One rank is the default, so the flag must not appear at all."""
+    command = _run_cli_capturing_command(tmp_path, monkeypatch, num_gpus=1)
+    assert "--nproc-per-node" not in command
