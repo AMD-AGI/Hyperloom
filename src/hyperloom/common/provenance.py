@@ -94,11 +94,23 @@ def detect_gfx_arch(env: Mapping[str, str], *, probe: bool = True) -> str | None
 
     env override first; else, when ``probe`` is set, a guarded ``rocminfo``
     invocation. Returns ``None`` when neither resolves (never raises).
+
+    A multi-arch env value is ignored rather than sampled. ``PYTORCH_ROCM_ARCH``
+    lists the archs a wheel was *built* for ("gfx90a;gfx942;gfx950;..."), which
+    says nothing about the installed device; taking its first match labelled
+    MI355X nodes ``gfx90a`` (MI200, two generations off) and suppressed the
+    ``rocminfo`` probe that would have answered correctly.
     """
-    raw = _env_first(env, *_GFX_ENVS)
-    if raw:
-        m = _GFX_RE.search(raw)
-        return m.group(0).lower() if m else raw
+    for name in _GFX_ENVS:
+        raw = (env.get(name) or "").strip()
+        if not raw:
+            continue
+        found = {m.lower() for m in _GFX_RE.findall(raw)}
+        if len(found) > 1:
+            continue  # build-target list, not this node's arch
+        if found:
+            return found.pop()
+        return raw  # set but unparseable: honour the operator's override
     if not probe:
         return None
     try:
