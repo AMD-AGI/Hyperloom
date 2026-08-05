@@ -1889,12 +1889,17 @@ def _resolve_forge_shapes(
     session_dir: Path,
     *,
     require_fresh_profile: bool = False,
+    precision: str = "",
 ) -> str:
     """Find TraceLens shapes JSON if available and in forge-compatible format.
 
     Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
     Only passes files that match this schema; incompatible formats are
     silently skipped so forge falls back to config.json shape derivation.
+
+    ``precision`` scopes the traced shapes to the dtype the tuner will actually
+    tune (a trace carries every GEMM dtype the model runs, e.g. FP8 projections
+    alongside BF16 router heads). Empty means "no dtype scoping".
     """
     if require_fresh_profile and not _profile_shapes_are_fresh(state):
         log.info(
@@ -1937,6 +1942,7 @@ def _resolve_forge_shapes(
     extracted = _extract_gemm_shapes_from_candidates(
         str(last_trace.get("candidates_path") or ""),
         session_dir,
+        precision=precision,
     )
     if extracted:
         return extracted
@@ -1944,14 +1950,29 @@ def _resolve_forge_shapes(
     return ""
 
 
+def _dtype_token_for_precision(precision: str) -> str:
+    """Map a tuning precision onto the dtype token TraceLens renders in shapes.
+
+    Returns "" when the precision does not scope to a single traced dtype, which
+    the caller treats as "keep every dtype" (the historical behaviour).
+    """
+    normalized = str(precision or "").strip().lower()
+    return {"fp8": "fp8", "bf16": "bf16", "fp16": "fp16"}.get(normalized, "")
+
+
 def _extract_gemm_shapes_from_candidates(
-    candidates_path_str: str, session_dir: Path
+    candidates_path_str: str, session_dir: Path, *, precision: str = ""
 ) -> str:
     """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
 
-    Parses the TraceLens shape format "(M,K) fp8<br>(N,K) fp8<br>..." to derive
-    the actual GEMM dimensions observed during serving. Writes a forge-compatible
-    shapes JSON beside the candidates file and returns its path.
+    Derives the GEMM dimensions actually observed during serving and writes a
+    forge-compatible shapes JSON beside the candidates file, returning its path.
+
+    ``precision`` scopes the result to one traced dtype. A trace records every
+    GEMM the model runs, so an FP8 tuner would otherwise also receive the BF16
+    router/head shapes; those rows are never looked up at serve time and they
+    displace real FP8 shapes in the call-count ordering below. Empty keeps every
+    dtype (historical behaviour).
     """
     import json as _json
     import re as _re
@@ -1975,9 +1996,21 @@ def _extract_gemm_shapes_from_candidates(
     # before the tuple; TraceLens formats vary. .search() rather than .match() so
     # a leading dtype/name does not defeat it.
     dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+    # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
+    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_]*)")
+    wanted_dtype = _dtype_token_for_precision(precision)
+
+    def _dtype_matches(a_text: str) -> bool:
+        """Whether the A tensor's traced dtype is the one being tuned."""
+        if not wanted_dtype:
+            return True
+        found = dtype_pattern.search(a_text)
+        return bool(found) and found.group(1).lower() == wanted_dtype
 
     def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
         """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
+        if not _dtype_matches(a_text):
+            return None
         m0 = dim_pattern.search(a_text)
         m1 = dim_pattern.search(b_text)
         if not m0 or not m1:
@@ -3043,6 +3076,7 @@ async def _run_forge_gemm_tuning(
             state,
             session_dir,
             require_fresh_profile=True,
+            precision=precision,
         )
         if not shapes_json:
             untuned_csv = _resolve_forge_untuned_csv(

@@ -3162,6 +3162,69 @@ class TestRunGemmTuningHandler:
             {"M": 3126, "N": 3072, "K": 512},
         ]
 
+    @staticmethod
+    def _mixed_dtype_candidates(path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 360, "shape": "(64,3072) fp8"},
+                                {"call_num": 360, "shape": "(8704,3072) fp8"},
+                            ],
+                        },
+                        {
+                            # BF16 router head: most-called, so without dtype
+                            # scoping it displaces the FP8 shape being tuned.
+                            "name": "vllm::rocm_unquantized_gemm",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) bf16"},
+                                {"call_num": 1440, "shape": "(256,3072) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_extract_gemm_shapes_scopes_to_tuned_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(
+            str(candidates), tmp_path, precision="fp8"
+        )
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 8704, "K": 3072}
+        ]
+
+    def test_extract_gemm_shapes_scopes_to_bf16_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(
+            str(candidates), tmp_path, precision="bf16"
+        )
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 256, "K": 3072}
+        ]
+
+    def test_extract_gemm_shapes_keeps_every_dtype_without_precision(self, tmp_path):
+        candidates = tmp_path / "kernel_candidates.json"
+        self._mixed_dtype_candidates(candidates)
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert json.loads(Path(out).read_text(encoding="utf-8")) == [
+            {"M": 64, "N": 256, "K": 3072},
+            {"M": 64, "N": 8704, "K": 3072},
+        ]
+
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
 class TestDefaultKernelBatchParallel:
