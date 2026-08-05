@@ -1249,14 +1249,14 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
-    # --- Auth alias export (derived keys only) ---
+    # --- Auth alias export (internal derived keys only) ---
     # The provider key (ANTHROPIC_API_KEY, else OPENAI_API_KEY) is the single
-    # source the derived GEAK / LLM aliases fall back to; an explicitly set alias
-    # is kept. These aliases do not participate in provider detection, so filling
-    # them here is safe. The per-provider primary keys (OPENAI_API_KEY /
-    # ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN) are cross-filled later, gated on
-    # the resolved endpoints, so an explicit single-provider deploy is never
-    # flipped to a dual entrypoint.
+    # source the internal GEAK / LLM aliases fall back to; an explicitly set
+    # alias is kept. Only these non-provider aliases are filled. The per-provider
+    # primary keys (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)
+    # are never cross-filled between providers, so an explicit single-provider
+    # deploy is never flipped to a dual entrypoint; endpoint routing is resolved
+    # from the base URLs by _resolve_llm_endpoints.
     provider_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if provider_key:
         for alias in (
