@@ -1052,6 +1052,9 @@ def _maybe_apply_kernel_patch(
         dry_run=bool(payload.get("dry_run_patch", False)),
         snapshot_dir=snapshot_dir,
         repo_root=repo_root,
+        producer_manifest=(
+            str(payload.get("producer_manifest") or "").strip() or None
+        ),
     )
 
 
@@ -1278,6 +1281,27 @@ def _fill_integrate_defaults_from_state(
         cb_args = current_best.get("extra_server_args") or ""
         if cb_args:
             resolved["extra_server_args"] = cb_args
+    if isinstance(current_best, dict):
+        current_envs = current_best.get("extra_envs")
+        current_envs = (
+            dict(current_envs)
+            if isinstance(current_envs, dict)
+            else {}
+        )
+        requested_envs = resolved.get("extra_envs")
+        requested_envs = (
+            dict(requested_envs)
+            if isinstance(requested_envs, dict)
+            else {}
+        )
+        if current_envs or requested_envs:
+            # The candidate stacks onto current_best. Candidate-specific
+            # overrides win, but omitting an env must not silently drop the
+            # accepted recipe during E2E validation.
+            resolved["extra_envs"] = {
+                **current_envs,
+                **requested_envs,
+            }
 
     kernel_id = str(resolved.get("kernel_id") or "")
     if kernel_id and not resolved.get("task_group_key"):
@@ -1299,6 +1323,13 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         resolved["patch_path"] = str(bundle["patch_path"])
     if not resolved.get("kernel_repo") and bundle.get("repo_root"):
         resolved["kernel_repo"] = str(bundle["repo_root"])
+    if (
+        not resolved.get("producer_manifest")
+        and bundle.get("producer_manifest")
+    ):
+        resolved["producer_manifest"] = str(
+            bundle["producer_manifest"]
+        )
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
@@ -5893,6 +5924,48 @@ def _grade_integrate_accuracy(
     }
 
 
+def _integrate_rebaseline_timeout_sec(
+    payload: dict,
+    *,
+    default_timeout_sec: int,
+) -> int:
+    """Resolve the E2E timeout from explicit input or the benchmark contract."""
+    explicit = payload.get("timeout_sec")
+    if explicit is not None:
+        try:
+            value = int(explicit)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    if "budget_minutes" in payload:
+        try:
+            value = int(float(payload["budget_minutes"]) * 60)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    config_path = str(payload.get("config_path") or "")
+    if config_path and Path(config_path).is_file():
+        try:
+            import yaml  # type: ignore[import-untyped]
+
+            config = (
+                yaml.safe_load(
+                    Path(config_path).read_text(encoding="utf-8")
+                )
+                or {}
+            )
+            benchmark = config.get("benchmark")
+            if isinstance(benchmark, dict):
+                value = int(benchmark.get("timeout_seconds") or 0)
+                if value > 0:
+                    return value
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            pass
+    return max(1, int(default_timeout_sec))
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -5911,8 +5984,9 @@ async def integrate_handler(
     SharedState when a baseline has been recorded, so a bare ``{kernel_id}`` (or
     ``{integration_id}``) payload is accepted. Optional: patch_path,
     target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
-    extra_envs, source, task_group_key, keep_threshold_pct (1.0),
-    budget_minutes (20). Returns ``{status, decision, base_tput, new_tput,
+    extra_envs, source, task_group_key, keep_threshold_pct (1.0), timeout_sec,
+    or budget_minutes. Without an explicit timeout, the benchmark config's
+    timeout contract is used. Returns ``{status, decision, base_tput, new_tput,
     gain_pct, kernel_id, patch_path, report_path, workspace}``.
 
     Args:
@@ -5926,7 +6000,10 @@ async def integrate_handler(
         ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
         ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
     """
-    from ..actions.executors.baseline import BaselineExecutor
+    from ..actions.executors.baseline import (
+        BASELINE_DEFAULT_TIMEOUT_SEC,
+        BaselineExecutor,
+    )
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
@@ -5978,6 +6055,8 @@ async def integrate_handler(
             "apply_result": apply_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
+            "target_file": payload.get("target_file")
+            or payload.get("source_file"),
         }
     if apply_result.get("status") != "ok":
         return {
@@ -6004,6 +6083,15 @@ async def integrate_handler(
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
     workspace = runs_dir(session_dir, "integrate", fake_task_id)
     workspace.mkdir(parents=True, exist_ok=True)
+    baseline_executor = BaselineExecutor(session_dir=session_dir)
+    rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
+        payload,
+        default_timeout_sec=getattr(
+            baseline_executor,
+            "default_timeout_sec",
+            BASELINE_DEFAULT_TIMEOUT_SEC,
+        ),
+    )
     fake_task = Task(
         task_id=fake_task_id,
         kind="baseline",
@@ -6011,13 +6099,12 @@ async def integrate_handler(
         params={
             "config_path": payload.get("config_path"),
             "output_dir": str(workspace),
-            "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
+            "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
-            # Synthetic kind="baseline": a throughput-only A/B probe of the
-            # patched kernel against the already-anchored baseline. It never
-            # establishes the quality reference, so it is exempt from the
-            # genuine-baseline accuracy guard.
+            # Synthetic kind="baseline": candidate A/B validation against the
+            # already-anchored reference. It runs eval for the kernel accuracy
+            # gate but never establishes a replacement quality reference.
             "quality_ref_exempt": True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
@@ -6087,7 +6174,7 @@ async def integrate_handler(
 
     try:
         bench_result = await _run_integrate_rebaseline_with_lock_retry(
-            BaselineExecutor(session_dir=session_dir),
+            baseline_executor,
             ctx,
             workspace=workspace,
             reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
@@ -6100,6 +6187,8 @@ async def integrate_handler(
             "error": repr(exc),
             "kernel_id": kernel_id,
             "patch_path": patch_path,
+            "target_file": payload.get("target_file")
+            or payload.get("source_file"),
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
@@ -6125,6 +6214,8 @@ async def integrate_handler(
             "rebaseline_detail": bench_result,
             "kernel_id": kernel_id,
             "patch_path": patch_path,
+            "target_file": payload.get("target_file")
+            or payload.get("source_file"),
             "apply_result": apply_result,
             "revert_result": revert_result,
         }
@@ -6245,7 +6336,7 @@ async def integrate_handler(
                 params={
                     "config_path": payload.get("config_path"),
                     "output_dir": str(paired_ws),
-                    "timeout_sec": int(payload.get("budget_minutes", 20)) * 60,
+                    "timeout_sec": rebaseline_timeout_sec,
                     "extra_server_args": extra_args,
                     "extra_envs": dict(payload.get("extra_envs") or {}),
                     # Pristine arm of the paired A/B: compares against the
@@ -6255,7 +6346,7 @@ async def integrate_handler(
                 idempotency_key=f"{fake_task_id}-pairedbase",
             )
             paired_bench = await _run_integrate_rebaseline_with_lock_retry(
-                BaselineExecutor(session_dir=session_dir),
+                baseline_executor,
                 RunnerContext(task=paired_task, lease=None),
                 workspace=paired_ws,
                 reason=f"integrate {kernel_id or 'anonymous'} paired pristine baseline",

@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import subprocess
 import sys
 import tempfile
-import logging
 from pathlib import Path
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
@@ -174,6 +175,58 @@ def test_export_from_best_commit_ignores_unvalidated_worktree(tmp_path):
     assert exported.read_text() == "KERNEL_VALIDATED_BEST\n"
     assert "KERNEL_VALIDATED_BEST" in patch
     assert "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE" not in patch
+
+
+def test_canonical_forge_artifacts_resolve_from_campaign_root(tmp_path):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    files = bundle / "files"
+    files.mkdir(parents=True)
+    (bundle / "forge.patch").write_text("diff --git a/a.py b/a.py\n")
+    (files / "a.py").write_text("VALUE = 2\n")
+    manifest = {
+        "schema_version": 1,
+        "artifact_dir": "best/iter_003",
+        "patch_path": "best/iter_003/forge.patch",
+        "changed_files": ["a.py"],
+    }
+    (campaign / "best" / "manifest.json").write_text(
+        json.dumps(manifest)
+    )
+
+    normalized = forge_submit._canonical_forge_artifacts(
+        str(workspace),
+        manifest,
+    )
+
+    assert normalized["best_manifest"] == str(
+        campaign / "best" / "manifest.json"
+    )
+    assert normalized["canonical_patch_path"] == str(
+        bundle / "forge.patch"
+    )
+    assert normalized["canonical_files_root"] == str(files)
+    assert normalized["changed_files"] == ["a.py"]
+
+
+def test_canonical_forge_artifacts_reject_path_escape(tmp_path):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments" / "best"
+    campaign.mkdir(parents=True)
+    (campaign / "manifest.json").write_text("{}")
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "../outside",
+                "patch_path": "../outside.patch",
+                "changed_files": ["../escape.py"],
+            },
+        )
+        == {}
+    )
 
 
 def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):

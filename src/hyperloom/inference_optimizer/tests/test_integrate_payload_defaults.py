@@ -26,15 +26,17 @@ def _seed_state(
     baseline_tput: float = 0.0,
     baseline_config_path: str = "",
     current_best_args: str = "",
+    current_best_envs: dict[str, str] | None = None,
 ) -> SharedState:
     state = SharedState.load_or_init(session_dir)
     state.baseline_tput = baseline_tput
     state.baseline_config_path = baseline_config_path
-    if current_best_args:
+    if current_best_args or current_best_envs:
         state.current_best = {
             "action": "kernel_opt",
             "tput": 900.0,
             "extra_server_args": current_best_args,
+            "extra_envs": dict(current_best_envs or {}),
         }
     state.save(session_dir)
     return state
@@ -94,6 +96,32 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         assert out["extra_server_args"] == "--from-payload"
+
+    def test_current_best_envs_are_preserved_and_payload_wins(self, session_dir):
+        _seed_state(
+            session_dir,
+            current_best_envs={
+                "VLLM_ROCM_USE_AITER": "1",
+                "SHARED": "state",
+            },
+        )
+
+        out = krh._fill_integrate_defaults_from_state(
+            {
+                "kernel_id": "k_abc",
+                "extra_envs": {
+                    "CANDIDATE_ONLY": "1",
+                    "SHARED": "candidate",
+                },
+            },
+            session_dir=session_dir,
+        )
+
+        assert out["extra_envs"] == {
+            "VLLM_ROCM_USE_AITER": "1",
+            "CANDIDATE_ONLY": "1",
+            "SHARED": "candidate",
+        }
 
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
@@ -172,6 +200,35 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         assert out["base_tput"] == 800.0
+
+
+class TestIntegrateRebaselineTimeout:
+    def test_explicit_budget_wins(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
+
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {
+                    "config_path": str(config),
+                    "budget_minutes": 15,
+                },
+                default_timeout_sec=7800,
+            )
+            == 900
+        )
+
+    def test_benchmark_contract_replaces_legacy_cap(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
+
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {"config_path": str(config)},
+                default_timeout_sec=7800,
+            )
+            == 7200
+        )
 
 
 class TestIntegrateHandlerHonoursStateDefault:
