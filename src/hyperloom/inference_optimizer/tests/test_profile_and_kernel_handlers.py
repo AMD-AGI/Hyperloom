@@ -495,10 +495,14 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
         },
     )
     caplog.set_level("WARNING")
+    # Verbatim from the gemma-4-26B-A4B roofline that was OOM-killed, JSON flag
+    # included -- the restore has to survive a string the arg merger refuses to
+    # tokenize.
+    candidate = '--no-enable-prefix-caching --compilation-config {"cudagraph_capture_sizes":[17,34,1088]}'
     out = _materialize_config_with_envs(
         src,
         tmp_path,
-        extra_server_args="--no-enable-prefix-caching",
+        extra_server_args=candidate,
         args_mode="replace",
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
@@ -507,8 +511,9 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     # The frontend profiler tracks no iterations, so it has to come back too.
     assert "--profiler-config.ignore_frontend True" in extra, extra
     assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
-    # The candidate's own flag must still take effect.
+    # The candidate's own flags must still take effect, JSON value unmangled.
     assert "--no-enable-prefix-caching" in extra, extra
+    assert '--compilation-config {"cudagraph_capture_sizes":[17,34,1088]}' in extra, extra
     assert "lost the torch-profiler bounds" in caplog.text
 
 
