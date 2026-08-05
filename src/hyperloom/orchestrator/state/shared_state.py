@@ -1351,8 +1351,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """
         return asdict(self)
 
-    def _snapshot_tick_state(self, session_dir: Path, blob: dict[str, Any]) -> None:
-        """Keep a per-tick copy of the state under ``states/`` when asked to.
+    def snapshot_tick_state(self, session_dir: Path) -> None:
+        """Copy the state to ``states/tick-NNNNN.json`` when asked to.
 
         ``state.json`` is overwritten in place, so a finished session retains only
         its final state while having recorded one prompt per tick. Anything that
@@ -1360,16 +1360,20 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         replaying tick 3 against the final state yields a prompt full of data that
         did not exist yet.
 
-        Off by default: this writes a full copy of the state on every save, which
-        is roughly 176 KB per tick on a real session, and only a run whose purpose
-        is collecting training data needs it. Best-effort like the other derived
-        artifacts here -- a failure must never block the authoritative write that
-        already happened.
+        Call this at the top of a tick, before any agent composes. A tick keeps
+        running long after its agents have spoken -- dispatched work lands in the
+        same tick and writes back -- so a copy taken when that work settles holds
+        results the tick's own prompts could not have seen. Taking it at tick
+        start is also enough: the agents of one tick read the same state, having
+        been measured composing within seconds of each other and rendering byte
+        identical state sections, so one copy per tick serves all of them.
+
+        Off by default: roughly 176 KB per tick on a real session, which only a
+        run collecting training data needs. Best-effort -- a failed copy must
+        never disturb the tick that is starting.
 
         Args:
             session_dir (Path): The session root directory.
-            blob (dict[str, Any]): The already-serialized state, reused so the
-                copy cannot drift from what ``state.json`` received.
         """
         raw = os.environ.get("HYPERLOOM_STATE_TICK_SNAPSHOTS", "").strip().lower()
         if raw in ("", "0", "false", "no", "off"):
@@ -1378,8 +1382,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             out = Path(session_dir) / "states"
             out.mkdir(parents=True, exist_ok=True)
             atomic_write_json(out / ("tick-%05d.json" % int(self.tick or 0)),
-                              blob, indent=2, sort_keys=True)
-        except Exception:  # noqa: BLE001 — a snapshot must never block save
+                              self.to_dict(), indent=2, sort_keys=True)
+        except Exception:  # noqa: BLE001 — a snapshot must never disturb the tick
             log.debug("state tick snapshot failed", exc_info=True)
 
     def save(self, session_dir: Path) -> None:
@@ -1399,7 +1403,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         path = self.state_path(session_dir)
         blob = self.to_dict()
         atomic_write_json(path, blob, indent=2, sort_keys=True)
-        self._snapshot_tick_state(session_dir, blob)
         # Author-time breakdown capture: snapshot state-owned sections into the
         # recorder spool right after persisting. Best-effort; never blocks save.
         self._session_dir = Path(session_dir)

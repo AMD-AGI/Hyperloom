@@ -725,6 +725,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
         # No-progress circuit-breaker telemetry; threshold = high-severity cutoff.
         self._progress_marker: dict[str, Any] = {}
+        # agent -> the (after_seq, high_water) bus window its last prompt's inbox
+        # was rendered from, carried from composition to the trace row.
+        self._inbox_window: dict[str, tuple[int, int]] = {}
         try:
             self._no_progress_threshold: int = max(
                 1,
@@ -1425,6 +1428,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
+            # Off unless collecting training data: the state as the tick's agents
+            # will read it, before dispatched work writes results back into it.
+            self.shared_state.snapshot_tick_state(self.session_dir)
             # A phase-entry hook may have finished by setting a pending phase
             # hint (for example current GEAK returning no_gain -> skip_to_sweep).
             # Consume that before prompting agents again so stale phase prompts
@@ -1554,6 +1560,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 try:
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
+                    # Off unless collecting training data: the state as this
+                    # tick's agents will read it, before dispatched work lands.
+                    self.shared_state.snapshot_tick_state(self.session_dir)
                     try:
                         await self._advance_phase_if_needed()
                         if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():

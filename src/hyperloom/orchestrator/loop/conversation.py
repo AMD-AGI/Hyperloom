@@ -340,6 +340,9 @@ class ConversationCollaborator:
             intents = result.intents or []
             if not prompt and not response and not intents:
                 return
+            # A turn recorded without a preceding compose has no window; null
+            # reads as "unknown", which a replay must not mistake for seq 0.
+            window = (getattr(self, "_inbox_window", None) or {}).get(agent_name) or (None, None)
             record = ConversationRecord(
                 session_id=self.session_dir.name,
                 component=agent_name,
@@ -350,6 +353,8 @@ class ConversationCollaborator:
                 prompt=prompt or "",
                 response=response or "",
                 intents=[{"intent_type": i.type.value, "payload": i.payload} for i in intents],
+                inbox_after_seq=window[0],
+                inbox_high_water=window[1],
             )
             append_conversation(session_dir=self.session_dir, record=record)
         except Exception:  # noqa: BLE001 — trace must never break the loop
@@ -654,6 +659,18 @@ class ConversationCollaborator:
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
         msgs = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
+        # Bracket the bus window this block was rendered from, for the trace row
+        # the caller writes: the cursor table keeps only its latest position and
+        # the event log outlives this turn, so nothing else preserves it. Keyed
+        # by agent because a tick's agents message each other, moving the bus
+        # between their turns.
+        after_seq = int(cursor.last_processed_seq or 0)
+        if getattr(self._coord, "_inbox_window", None) is None:
+            self._coord._inbox_window = {}
+        self._coord._inbox_window[agent_name] = (
+            after_seq,
+            max((int(m.seq or 0) for m in msgs), default=after_seq),
+        )
         # Full unread batch: events arriving in one tick must not be dropped.
         rendered = list(msgs)
         # Durable at-least-once-until-decided delivery of proposals to the

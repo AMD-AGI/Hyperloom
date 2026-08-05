@@ -340,6 +340,28 @@ def test_conversation_row_carries_intents_structured():
     assert row["intents"] == [{"intent_type": "delegate", "payload": {"task_id": "t1", "action": "profile"}}]
 
 
+def test_conversation_row_carries_the_inbox_window():
+    # Recomposing this prompt needs the bus window its inbox came from: the
+    # cursor table keeps only its latest position and the event log outlives
+    # the turn, so without the bracket the whole log renders into the inbox.
+    row = ct.ConversationRecord(
+        session_id="s1",
+        component="kernel_agent",
+        prompt="p",
+        inbox_after_seq=157,
+        inbox_high_water=164,
+    ).to_row()
+    assert row["inbox_after_seq"] == 157
+    assert row["inbox_high_water"] == 164
+
+
+def test_conversation_row_inbox_window_absent_when_not_supplied():
+    # Writers that never render an inbox leave it null rather than claiming a
+    # window at seq 0, which would replay as "every message ever sent".
+    row = ct.ConversationRecord(session_id="s1", component="specialist").to_row()
+    assert row["inbox_after_seq"] is None and row["inbox_high_water"] is None
+
+
 def test_conversation_row_intents_absent_and_empty_both_null():
     # The four text-only writers pass nothing; an empty list must not read
     # differently from an absent one.
@@ -425,6 +447,50 @@ def test_reactor_conversation_records_intent_only_turn(tmp_path, monkeypatch):
 
     assert len(rows) == 1
     assert rows[0]["intents"] == [{"intent_type": "alert", "payload": {"severity": "high"}}]
+
+
+def test_reactor_conversation_reads_the_window_off_the_coordinator(tmp_path, monkeypatch):
+    # Composition and the row are written by two different calls, so the pair
+    # travels on the Coordinator. Keyed by agent: a tick's agents message each
+    # other, so one agent's window must not be handed to the next.
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+
+    class _Coord:
+        session_dir = tmp_path / "s1"
+        shared_state = type("S", (), {"tick": 9, "phase": None})()
+        _inbox_window = {"critic": (158, 165), "kernel_agent": (157, 164)}
+
+    collaborator = ConversationCollaborator(_Coord())
+    collaborator._record_reactor_conversation(
+        "critic", BackendTurnResult(intents=[], raw_text="ok", metadata={"prompt": "P"}))
+
+    assert len(rows) == 1
+    assert rows[0]["inbox_after_seq"] == 158 and rows[0]["inbox_high_water"] == 165
+
+
+def test_reactor_conversation_window_is_null_when_compose_did_not_run(tmp_path, monkeypatch):
+    # Null reads as "unknown"; a replay must not mistake it for a cursor at 0,
+    # which would render every message the run ever sent into the inbox.
+    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    rows: list[dict] = []
+    monkeypatch.setattr(ct, "append_jsonl", lambda dest, row, **k: rows.append(row))
+
+    class _Coord:
+        session_dir = tmp_path / "s1"
+        shared_state = type("S", (), {"tick": 9, "phase": None})()
+
+    collaborator = ConversationCollaborator(_Coord())
+    collaborator._record_reactor_conversation(
+        "critic", BackendTurnResult(intents=[], raw_text="ok", metadata={"prompt": "P"}))
+
+    assert len(rows) == 1
+    assert rows[0]["inbox_after_seq"] is None and rows[0]["inbox_high_water"] is None
 
 
 def test_reactor_conversation_skips_fully_empty_turn(tmp_path, monkeypatch):

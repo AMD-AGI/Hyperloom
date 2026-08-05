@@ -395,8 +395,14 @@ class TestPersistence:
     def test_tick_snapshots_are_off_by_default(self, tmp_path, monkeypatch):
         """A full state copy per tick is ~176 KB; only a data-collection run wants it."""
         monkeypatch.delenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", raising=False)
-        s = SharedState(tick=3)
-        s.save(tmp_path)
+        SharedState(tick=3).snapshot_tick_state(tmp_path)
+        assert not (tmp_path / "states").exists()
+
+    def test_save_does_not_snapshot(self, tmp_path, monkeypatch):
+        """A tick saves many times; snapshotting on each keeps only the last."""
+        monkeypatch.setenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", "1")
+        SharedState(tick=3).save(tmp_path)
+        assert (tmp_path / "state.json").is_file()
         assert not (tmp_path / "states").exists()
 
     def test_tick_snapshots_keep_one_file_per_tick(self, tmp_path, monkeypatch):
@@ -404,39 +410,40 @@ class TestPersistence:
         monkeypatch.setenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", "1")
         s = SharedState(session_id="abc")
         s.tick = 3
-        s.save(tmp_path)
+        s.snapshot_tick_state(tmp_path)
         s.tick = 4
-        s.save(tmp_path)
+        s.snapshot_tick_state(tmp_path)
         names = sorted(p.name for p in (tmp_path / "states").iterdir())
         assert names == ["tick-00003.json", "tick-00004.json"]
-        # The snapshot is the same blob state.json received, not a re-render.
         snap = json.loads((tmp_path / "states" / "tick-00003.json").read_text())
         assert snap["tick"] == 3 and snap["session_id"] == "abc"
+
+    def test_tick_snapshot_holds_the_state_as_of_the_call(self, tmp_path, monkeypatch):
+        """The point of taking it at tick start: later writes must not leak in."""
+        monkeypatch.setenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", "1")
+        s = SharedState(tick=7, baseline_tput=1.0)
+        s.snapshot_tick_state(tmp_path)
+        s.baseline_tput = 2.0
+        s.save(tmp_path)
+        snap = json.loads((tmp_path / "states" / "tick-00007.json").read_text())
+        assert snap["baseline_tput"] == 1.0
 
     @pytest.mark.parametrize("off", ["0", "false", "no", "off", ""])
     def test_tick_snapshots_respect_the_off_switch(self, tmp_path, monkeypatch, off):
         monkeypatch.setenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", off)
-        SharedState(tick=1).save(tmp_path)
+        SharedState(tick=1).snapshot_tick_state(tmp_path)
         assert not (tmp_path / "states").exists()
 
-    def test_tick_snapshot_failure_does_not_block_save(self, tmp_path, monkeypatch):
-        """The authoritative write already happened; a derived copy must not undo it."""
+    def test_tick_snapshot_failure_is_swallowed(self, tmp_path, monkeypatch):
+        """A derived copy must never disturb the tick that is starting."""
         monkeypatch.setenv("HYPERLOOM_STATE_TICK_SNAPSHOTS", "1")
         import hyperloom.orchestrator.state.shared_state as ss
 
-        real = ss.atomic_write_json
-        calls = {"n": 0}
+        def boom(path, blob, **kw):
+            raise OSError("disk full")
 
-        def flaky(path, blob, **kw):
-            calls["n"] += 1
-            if "states" in str(path):
-                raise OSError("disk full")
-            return real(path, blob, **kw)
-
-        monkeypatch.setattr(ss, "atomic_write_json", flaky)
-        SharedState(tick=1).save(tmp_path)
-        assert (tmp_path / "state.json").is_file()
-        assert calls["n"] >= 2, "the snapshot was attempted and swallowed"
+        monkeypatch.setattr(ss, "atomic_write_json", boom)
+        SharedState(tick=1).snapshot_tick_state(tmp_path)  # must not raise
 
     def test_from_dict_drops_unknown_keys(self):
         raw = {"session_id": "abc", "unknown_field": "ignored"}

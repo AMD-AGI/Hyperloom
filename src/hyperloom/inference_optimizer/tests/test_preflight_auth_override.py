@@ -103,6 +103,14 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
 
 
 def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
+    # Without REPO_ROOT the resolver falls back to the package's own repo root,
+    # not the cwd -- which is the property under test. That also means it reads
+    # the real checkout's .env and loads whatever it is missing, and because the
+    # writes come from the code under test rather than from monkeypatch they do
+    # not roll back. Left alone this test seeds real ANTHROPIC_* credentials into
+    # os.environ and every later test that resolves a provider sees them; four
+    # tests in this file failed only when run after it. Snapshotting the
+    # environment around the call keeps the assertion and drops the leak.
     monkeypatch.delenv("REPO_ROOT", raising=False)
     monkeypatch.delenv("LD_PRELOAD", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -110,9 +118,14 @@ def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
         "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
         encoding="utf-8",
     )
-    cli_preflight._load_dotenv_fallback()
-    assert "LD_PRELOAD" not in os.environ
-    assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
+    before = dict(os.environ)
+    try:
+        cli_preflight._load_dotenv_fallback()
+        assert "LD_PRELOAD" not in os.environ
+        assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
 
 
 def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):

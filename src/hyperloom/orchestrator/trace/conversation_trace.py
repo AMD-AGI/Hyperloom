@@ -67,6 +67,8 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "prompt",
         "response",
         "intents",
+        "inbox_after_seq",
+        "inbox_high_water",
     }
 )
 
@@ -169,6 +171,14 @@ class ConversationRecord:
     ``response`` hold the full text and are redacted at serialization time.
     ``intents`` holds the emitted intent envelopes for tool-calling backends and
     stays ``None`` for the text-only ones.
+
+    ``inbox_after_seq`` / ``inbox_high_water`` bracket the message-bus window the
+    prompt's inbox block was rendered from. Neither survives a run otherwise: the
+    cursor table keeps one row per agent, overwritten, and the event log keeps
+    every message the run produced, including those written after this turn.
+    Recomposing this prompt without the bracket renders the whole log into the
+    inbox, which measured six times the prompt's own size. Equal values mean the
+    window held no messages.
     """
 
     session_id: str
@@ -183,6 +193,8 @@ class ConversationRecord:
     prompt: str = ""
     response: str = ""
     intents: list[dict[str, Any]] | None = None
+    inbox_after_seq: int | None = None
+    inbox_high_water: int | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting
@@ -207,6 +219,8 @@ class ConversationRecord:
             # An empty list and an absent field both mean "no structured
             # output", so normalize to null rather than carrying both shapes.
             "intents": _redact_json(list(self.intents)) if self.intents else None,
+            "inbox_after_seq": _coerce_optional_int(self.inbox_after_seq),
+            "inbox_high_water": _coerce_optional_int(self.inbox_high_water),
         }
 
 
