@@ -3108,6 +3108,60 @@ class TestRunGemmTuningHandler:
             {"M": 1024, "N": 34816, "K": 5120}
         ]
 
+    def test_extract_gemm_shapes_parses_per_tensor_input_shapes(self, tmp_path):
+        # Current TraceLens emits one entry per tensor ({"call_num": .., "shape":
+        # "(M,K) fp8"}) instead of a single <br>-joined string. The old parser
+        # skipped every such entry and returned no shapes, so GEMM tuning fell
+        # back to a lossy profile capture that recorded only a large prefill M
+        # and missed the throughput-dominant decode M (observed on
+        # Qwen3.5-122B-A10B-FP8: tuned M=2095 only -> -18.45% E2E).
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 48, "shape": "(3126,512) fp8"},
+                                {"call_num": 48, "shape": "(3072,512) fp8"},
+                                {"call_num": 48, "shape": "(0,) fp32"},
+                            ],
+                        },
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) fp8"},
+                                {"call_num": 1440, "shape": "(10240,3072) fp8"},
+                                {"call_num": 1440, "shape": "(0,) fp32"},
+                            ],
+                        },
+                        {
+                            # Matrix-vector head: highest call count, but N==1 is
+                            # not a tunable GEMM tile and must be dropped.
+                            "name": "vllm::rocm_unquantized_gemm",
+                            "input_shapes": [
+                                {"call_num": 9999, "shape": "(64,3072) bf16"},
+                                {"call_num": 9999, "shape": "(1,3072) bf16"},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        out = krh._extract_gemm_shapes_from_candidates(str(candidates), tmp_path)
+
+        assert out, "per-tensor input_shapes yielded no GEMM shapes"
+        shapes = json.loads(Path(out).read_text(encoding="utf-8"))
+        # The decode shape is present (it was dropped entirely before) and, being
+        # the most-called, is tuned first when the tuner runs out of budget.
+        assert shapes == [
+            {"M": 64, "N": 10240, "K": 3072},
+            {"M": 3126, "N": 3072, "K": 512},
+        ]
+
 
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
 class TestDefaultKernelBatchParallel:

@@ -1971,8 +1971,38 @@ def _extract_gemm_shapes_from_candidates(
     if not isinstance(hot_kernels, list):
         return ""
 
-    shapes: list[dict[str, int]] = []
+    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token
+    # before the tuple; TraceLens formats vary. .search() rather than .match() so
+    # a leading dtype/name does not defeat it.
+    dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+
+    def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
+        """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
+        m0 = dim_pattern.search(a_text)
+        m1 = dim_pattern.search(b_text)
+        if not m0 or not m1:
+            return None
+        M, K = int(m0.group(1)), int(m0.group(2))
+        b0, b1 = int(m1.group(1)), int(m1.group(2))
+        # B is stored either (N,K) or (K,N); pick the orientation whose
+        # contracted dim matches K, else keep the legacy first-dim reading.
+        N = b0 if b1 == K else (b1 if b0 == K else b0)
+        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
+        # tunable GEMM tile; it would otherwise sort first on call count and
+        # burn a tuning slot.
+        return (M, N, K) if min(M, K) > 0 and N > 1 else None
+
+    # ``weight`` is the observed call count: decode GEMMs are invoked far more
+    # often than prefill ones, so ordering by it puts the throughput-dominant
+    # shapes first and they still get tuned when the tuner runs out of budget.
+    weighted: list[tuple[int, tuple[int, int, int]]] = []
     seen: set[tuple[int, int, int]] = set()
+
+    def _record(key: tuple[int, int, int] | None, weight: int) -> None:
+        if key is None or key in seen:
+            return
+        seen.add(key)
+        weighted.append((weight, key))
 
     for kernel in hot_kernels:
         name = str(kernel.get("name", ""))
@@ -1981,32 +2011,30 @@ def _extract_gemm_shapes_from_candidates(
         input_shapes = kernel.get("input_shapes", [])
         if not isinstance(input_shapes, list):
             continue
-        for entry in input_shapes:
-            shape_str = entry.get("shape", "") if isinstance(entry, dict) else ""
-            if not shape_str:
-                continue
-            # Parse "(M,K) dtype<br>(N,K) dtype<br>..." — first two tensors give M,N,K
-            parts = [p.strip() for p in shape_str.split("<br>") if p.strip()]
+        entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
+
+        # Legacy format: one entry carries every tensor, "<br>"-joined.
+        matched_joined = False
+        for entry in entries:
+            parts = [p.strip() for p in str(entry["shape"]).split("<br>") if p.strip()]
             if len(parts) < 2:
                 continue
-            # Tolerate whitespace after the comma ("(1024, 5120)") and any
-            # leading token before the tuple; TraceLens formats vary. .search()
-            # rather than .match() so a leading dtype/name does not defeat it.
-            dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
-            m0 = dim_pattern.search(parts[0])
-            m1 = dim_pattern.search(parts[1])
-            if not m0 or not m1:
-                continue
-            M = int(m0.group(1))
-            K = int(m0.group(2))
-            N = int(m1.group(1))
-            key = (M, N, K)
-            if key not in seen:
-                seen.add(key)
-                shapes.append({"M": M, "N": N, "K": K})
+            matched_joined = True
+            _record(_mnk(parts[0], parts[1]), int(entry.get("call_num") or 0))
+        if matched_joined or len(entries) < 2:
+            continue
 
-    if not shapes:
+        # Current format: one entry per tensor, so A and B are the first two.
+        weight = max(int(e.get("call_num") or 0) for e in entries[:2])
+        _record(_mnk(str(entries[0]["shape"]), str(entries[1]["shape"])), weight)
+
+    if not weighted:
         return ""
+
+    # Most-called first; ties keep discovery order so output stays deterministic.
+    order = {key: i for i, (_, key) in enumerate(weighted)}
+    weighted.sort(key=lambda item: (-item[0], order[item[1]]))
+    shapes = [{"M": M, "N": N, "K": K} for _, (M, N, K) in weighted]
 
     out_path = cand_file.parent / "traced_gemm_shapes.json"
     try:
