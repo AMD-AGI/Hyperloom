@@ -797,7 +797,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry.
-        _CANONICAL_ORDER = ("orchestration", "kernel_agent", "critic", "robustness")
+        _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Action registry — yaml catalogue mapping action_name -> metadata.

@@ -267,48 +267,10 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
     )
 
 
-def auto_respond_kernel(name: str = "kernel-mock") -> MockRowScanBackend:
-    """Build the auto-respond mock Kernel backend.
-
-    Emits one ``response{status="ok"}`` per visible request row (echoing the
-    request ``kind`` as ``<kind>_done``), or a heartbeat when none are present.
-
-    Args:
-        name (str): Human-readable backend name used in logs and metadata.
-
-    Returns:
-        MockRowScanBackend: A backend configured to auto-respond to requests.
-    """
-
-    def _respond(match: re.Match[str]) -> Intent:
-        msg_id = match.group(2)
-        raw_payload = match.group(4)
-        kind_match = _KIND_RE.search(raw_payload)
-        kind = kind_match.group(1) if kind_match else "unknown"
-        return Intent(
-            type=IntentType.RESPONSE,
-            payload={
-                "in_reply_to": msg_id,
-                "kind": f"{kind}_done",
-                "status": "ok",
-                "result": {"source": "mock", "chosen": ["mock_kernel_1"]},
-            },
-        )
-
-    return MockRowScanBackend(
-        name=name,
-        row_regex=_REQUEST_RE,
-        intent_builder=_respond,
-        heartbeat_body="ok (mock kernel)",
-        raw_text="(mock kernel)",
-    )
-
-
 __all__ = [
     "MockBackend",
     "MockRowScanBackend",
     "MockTurn",
     "ScriptedPlan",
     "auto_approve_critic",
-    "auto_respond_kernel",
 ]

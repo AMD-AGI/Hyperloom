@@ -247,32 +247,6 @@ def _load_critic_prompt() -> str:
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
-_DEFAULT_KERNEL_PROMPT = (
-    "You are the Kernel-agent — responder-only. You receive `request`\n"
-    "events from Orchestration in your inbox.\n\n"
-    "For every un-answered request, emit ONE `response` intent in reply.\n"
-    "Schema:\n"
-    "  intent_type: response\n"
-    "  payload: {\n"
-    "    in_reply_to: <request msg_id>,\n"
-    "    kind:        '<request.kind>_done',\n"
-    "    status:      'ok' | 'failed' | 'needs_review',\n"
-    "    result:      { /* whatever the request asked for */ }\n"
-    "  }\n\n"
-    "Native-only rule: run_optimization must refuse runtime-generated\n"
-    "torch.compile/Inductor/Triton cache kernels. Only reusable framework\n"
-    "sources under stable repos (aiter/sglang/vllm source trees) are valid\n"
-    "kernel-opt targets; otherwise return status='failed' with a clear reason.\n\n"
-    "SESSION_DIR contract: every path you emit in result.* must be either\n"
-    "verbatim from the request payload, prefixed by SESSION_DIR (injected\n"
-    "per tick), or under one of `/sgl-workspace/aiter/`, `/sgl-workspace/\n"
-    "sglang/`, `/sgl-workspace/vllm/` (the framework source allowlists).\n"
-    "PolicyGate rejects responses whose path fields escape this set.\n\n"
-    "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
-    "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
-)
-
-
 # Per-attempt read timeout for the gateway /models catalog probe. Operator
 # override via env (default 5.0s) for slow-gateway windows.
 try:
@@ -864,16 +838,14 @@ def _smoke_test_codex_model(
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
-            ``no_kernel``).
+            ``codex_model`` / ``critic_backend`` / ``no_kernel``).
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
-    # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
     if _codex_model_should_follow_claude():
         return
     critic_uses_codex = args.critic_backend == "agent"
-    needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
+    needs_codex = critic_uses_codex
     if not needs_codex:
         return
 
@@ -905,7 +877,7 @@ def _smoke_test_codex_model(
         f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
-        f"value in the catalog or use --critic-mock / --kernel-claude to "
+        f"value in the catalog or use --critic-mock to "
         f"avoid the Codex path entirely."
     )
 
@@ -1990,7 +1962,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
-        kernel_codex=args.kernel_codex,
         critic_choice=critic_choice,
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
@@ -2023,17 +1994,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
-    # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
-    role_registry = None
-    if no_kernel:
-        from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
-
     coordinator = Coordinator(
         session_dir,
         backends=backends,
-        role_registry=role_registry,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
@@ -2095,8 +2058,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    if not no_kernel:
-        prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
     # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the
     # orchestration prompt without reaching back into argparse. A user-supplied
@@ -2344,7 +2305,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
+        for attr in ("orch_prompt", "critic_prompt"):
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))

@@ -94,14 +94,12 @@ class MachinePhase(PhaseHandler):
             )
 
     def _kernel_enabled(self) -> bool:
-        """Whether the kernel_agent role is registered and enabled.
+        """Whether kernel optimization is enabled for this run.
 
         Returns:
-            ``True`` if the kernel_agent role exists and the persisted
-            ``kernel_enabled`` flag is set.
+            ``True`` when the persisted ``kernel_enabled`` flag is set.
         """
-        # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel_agent role.
-        return "kernel_agent" in self.role_registry and bool(self.shared_state.kernel_enabled)
+        return bool(self.shared_state.kernel_enabled)
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
