@@ -200,7 +200,6 @@ def test_build_backends_uses_claude_critic_when_codex_follows_claude(
     built = cli_backends._build_backends(
         claude_model="claude-opus-4-8",
         codex_model="stale-codex-model",
-        kernel_codex=True,
         critic_choice="agent",
         session_dir=tmp_path,
         critic_agent_root=None,

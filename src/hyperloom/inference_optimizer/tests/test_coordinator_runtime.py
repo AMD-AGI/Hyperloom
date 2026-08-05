@@ -51,7 +51,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     backends: dict[str, Backend] = {}
-    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
+    for name in ("orchestration", "critic", "robustness"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
 
@@ -157,9 +157,9 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 4 agents × 2 ticks × 1 heartbeat = 8 send_message events
+        # 3 agents × 2 ticks × 1 heartbeat = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="heartbeat")
-        assert len(msgs) == 8
+        assert len(msgs) == 6
     finally:
         await c.stop()
 
@@ -479,41 +479,39 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_response_routes_back_to_requester(session_dir):
+    """Programmatic handler emits RESPONSE to orchestration without an LLM turn."""
+    from unittest.mock import patch
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
     req = Intent(
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
             "kind": "trace_analyze",
+            "params": {"trace_input": "/tmp/trace.json.gz"},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
-        assert kernel_inbox, "no request mirrored to kernel"
-        request_msg_id = kernel_inbox[0].msg_id
 
-        await c._handle_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.RESPONSE,
-                payload={
-                    "in_reply_to": request_msg_id,
-                    "kind": "trace_analyze_done",
-                    "status": "ok",
-                    "result": {"chosen": ["k1", "k2"]},
-                },
-            ),
-        )
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert responses
-        assert responses[0].payload["status"] == "ok"
-    finally:
-        await c.stop()
+    async def _fake_handler(payload, *, session_dir, **_kw):
+        return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": _fake_handler}):
+        try:
+            c.shared_state.baseline_tput = 100.0
+            c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+            c.shared_state.kernel_enabled = True
+            c.shared_state.save(session_dir)
+            await c.tick(1)
+            kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+            assert kernel_inbox, "no request mirrored to kernel"
+            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            assert responses
+            assert responses[0].payload["status"] == "ok"
+            assert responses[0].payload["source"] == "programmatic_handler"
+        finally:
+            await c.stop()
 
 
 @pytest.mark.asyncio

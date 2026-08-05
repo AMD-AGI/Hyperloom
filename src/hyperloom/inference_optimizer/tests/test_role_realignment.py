@@ -127,7 +127,7 @@ def test_role_md_files_carry_phase_awareness():
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
     root = asset_system_prompts_dir()
-    for name in ("orchestration", "kernel_agent", "critic"):
+    for name in ("orchestration", "critic"):
         body = (root / f"{name}.md").read_text(encoding="utf-8")
         if name == "critic":
             assert "Phase-specific rules" in body

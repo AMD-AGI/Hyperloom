@@ -257,7 +257,7 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
 
 def test_kernel_and_explore_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
-    assert coord._kernel_enabled() == ("kernel_agent" in coord.role_registry)
+    assert coord._kernel_enabled() is True
     coord.shared_state.kernel_enabled = False
     assert coord._kernel_enabled() is False
 

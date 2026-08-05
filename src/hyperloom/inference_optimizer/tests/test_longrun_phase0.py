@@ -341,7 +341,6 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         MockCriticBackend,
         MockRobustnessBackend,
         ScriptedPlan,
-        auto_respond_kernel,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -349,7 +348,6 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": auto_respond_kernel(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
