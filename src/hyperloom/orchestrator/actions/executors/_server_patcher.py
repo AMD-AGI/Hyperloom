@@ -43,31 +43,71 @@ _GIT_TIMEOUT_SEC = 30
 # ``HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (csv, wins over minors).
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
 
-# TraceLens-shipped manifest filename(s). When present, the manifest is the
+# Vendor-shipped manifest filename(s). When present, the manifest is the
 # source of truth for supported versions (operator env pins still win). Format:
 # one version per line, ``#`` comments, blank lines ignored.
-_SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
+_SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
     "SUPPORTED_VERSIONS.txt",
     "SUPPORTED_VERSIONS",
 )
 
 
-def _load_sglang_supported_versions_from_manifest(
+@dataclass(frozen=True)
+class _VersionGate:
+    """Per-framework policy for :func:`_version_accepted`.
+
+    Each framework owns its env-var names, so an operator pin for one engine
+    can never silently reject the other, and its built-in fallback, so a tree
+    that ships no manifest gets the right default.
+    """
+
+    exact_env: str
+    minors_env: str
+    default_minors: tuple[str, ...]
+
+
+_SGLANG_VERSION_GATE = _VersionGate(
+    exact_env="HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS",
+    minors_env="HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
+    default_minors=_SGLANG_DEFAULT_ALLOWED_MINORS,
+)
+
+# vLLM cuts minors too often for a built-in allowlist to stay honest, so an
+# empty default fails closed: a vLLM patch tree must ship a SUPPORTED_VERSIONS
+# manifest (or the operator must pin) before anything is applied.
+_VLLM_VERSION_GATE = _VersionGate(
+    exact_env="HYPERLOOM_VLLM_SERVING_PATCH_EXACT_VERSIONS",
+    minors_env="HYPERLOOM_VLLM_SERVING_PATCH_ALLOWED_MINORS",
+    default_minors=(),
+)
+
+_VERSION_GATES: dict[str, _VersionGate] = {
+    "sglang": _SGLANG_VERSION_GATE,
+    "vllm": _VLLM_VERSION_GATE,
+}
+
+
+def _version_gate_for(framework: str) -> _VersionGate:
+    """The version-gate policy a framework's patch trees are held to."""
+    return _VERSION_GATES.get((framework or "").lower(), _SGLANG_VERSION_GATE)
+
+
+def _load_supported_versions_from_manifest(
     patches_dir: Path,
 ) -> frozenset[str] | None:
-    """Read the TraceLens-shipped ``SUPPORTED_VERSIONS`` manifest if present.
+    """Read the vendor-shipped ``SUPPORTED_VERSIONS`` manifest if present.
 
-    Returns ``None`` when no manifest exists (the common case today; a
-    forward-compatible hook), or a frozenset of versions (empty = reject all).
+    Returns ``None`` when no manifest exists, or a frozenset of versions
+    (empty = reject all).
 
     Args:
-        patches_dir: SGLang patches directory that may ship the manifest.
+        patches_dir: Patches directory that may ship the manifest.
 
     Returns:
         A frozenset of supported version strings, or ``None`` when no manifest
         exists or it could not be read.
     """
-    for name in _SGLANG_SUPPORTED_VERSIONS_MANIFEST_NAMES:
+    for name in _SUPPORTED_VERSIONS_MANIFEST_NAMES:
         manifest = patches_dir / name
         if not manifest.is_file():
             continue
@@ -75,7 +115,7 @@ def _load_sglang_supported_versions_from_manifest(
             raw = manifest.read_text(encoding="utf-8")
         except OSError as e:
             log.warning(
-                "_server_patcher: cannot read SGLang version manifest %s (%s); falling back to hardcoded allowlist",
+                "_server_patcher: cannot read version manifest %s (%s); falling back to hardcoded allowlist",
                 manifest,
                 e,
             )
@@ -86,9 +126,7 @@ def _load_sglang_supported_versions_from_manifest(
             if stripped:
                 versions.add(stripped)
         log.info(
-            "_server_patcher: loaded %d SGLang version(s) from TraceLens "
-            "manifest %s (PR-D §5: decoupled from Hyperloom hardcoded "
-            "allowlist)",
+            "_server_patcher: loaded %d version(s) from vendor manifest %s",
             len(versions),
             manifest,
         )
@@ -96,22 +134,24 @@ def _load_sglang_supported_versions_from_manifest(
     return None
 
 
-def _sglang_version_accepted(
+def _version_accepted(
     version: str,
     *,
     patches_dir: Path | None = None,
+    gate: _VersionGate = _SGLANG_VERSION_GATE,
 ) -> bool:
-    """Return True iff ``version`` is in the configured allowlist.
+    """Return True iff ``version`` is in the allowlist ``gate`` resolves to.
 
-    Precedence: ``$HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS`` (exact pins) >
-    ``$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS`` (minor prefixes, ``0.5`` matches
-    ``0.5.9`` not ``0.50.0``) > TraceLens ``SUPPORTED_VERSIONS`` manifest in
-    ``patches_dir`` > :data:`_SGLANG_DEFAULT_ALLOWED_MINORS`.
+    Precedence: the gate's exact-pin env > the gate's allowed-minors env (minor
+    prefixes, ``0.5`` matches ``0.5.9`` not ``0.50.0``) > the vendor
+    ``SUPPORTED_VERSIONS`` manifest in ``patches_dir`` > the gate's built-in
+    minors.
 
     Args:
-        version: The SGLang version string to test.
-        patches_dir: Optional patches directory consulted for the TraceLens
+        version: The framework version string to test.
+        patches_dir: Optional patches directory consulted for the vendor
             ``SUPPORTED_VERSIONS`` manifest.
+        gate: Per-framework policy; defaults to SGLang.
 
     Returns:
         True iff ``version`` is accepted by the resolved allowlist.
@@ -119,38 +159,34 @@ def _sglang_version_accepted(
     text = (version or "").strip()
     if not text:
         return False
-    exact = os.environ.get("HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS", "").strip()
+    exact = os.environ.get(gate.exact_env, "").strip()
     if exact:
         allowed_exact = {v.strip() for v in exact.split(",") if v.strip()}
         return text in allowed_exact
-    minors_env = os.environ.get(
-        "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS",
-        "",
-    ).strip()
+    minors_env = os.environ.get(gate.minors_env, "").strip()
     if minors_env:
         minors = tuple(v.strip() for v in minors_env.split(",") if v.strip())
         return any(text == minor or text.startswith(f"{minor}.") for minor in minors)
     # Vendor manifest, when present, fully replaces the hardcoded default.
     if patches_dir is not None:
-        manifest_versions = _load_sglang_supported_versions_from_manifest(
-            patches_dir,
-        )
+        manifest_versions = _load_supported_versions_from_manifest(patches_dir)
         if manifest_versions is not None:
             return text in manifest_versions
-    return any(text == minor or text.startswith(f"{minor}.") for minor in _SGLANG_DEFAULT_ALLOWED_MINORS)
+    return any(text == minor or text.startswith(f"{minor}.") for minor in gate.default_minors)
 
 
 # Path within the TraceLens checkout that hosts the patch sets.
 _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 
 
-def _versioned_patches_subdir_name(version: str) -> str | None:
-    """Map ``sglang.__version__`` to the per-version patch subdir name (e.g.
+def _versioned_patches_subdir_name(version: str, *, prefix: str = "sglang") -> str | None:
+    """Map a framework version to the per-version patch subdir name (e.g.
     ``0.5.11`` -> ``sglang_0_5_11``). Returns ``None`` when ``version`` has no
     dotted numeric head.
 
     Args:
-        version: The ``sglang.__version__`` string to map.
+        version: The framework ``__version__`` string to map.
+        prefix: Framework name the subdir is prefixed with.
 
     Returns:
         The per-version patch subdir name, or ``None`` when ``version`` has no
@@ -171,19 +207,19 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
             break
     if len(numeric) < 2:
         return None
-    return "sglang_" + "_".join(numeric)
+    return f"{prefix}_" + "_".join(numeric)
 
 
-def _sglang_subdir_version_tuple(name: str) -> tuple[int, ...] | None:
+def _subdir_version_tuple(name: str, *, prefix: str = "sglang") -> tuple[int, ...] | None:
     """Parse a ``sglang_0_5_11`` patch subdir name back into ``(0, 5, 11)``.
 
-    Returns ``None`` when the name is not a versioned SGLang subdir.
+    Returns ``None`` when the name is not a versioned subdir for ``prefix``.
     """
-    prefix = "sglang_"
-    if not name.startswith(prefix):
+    head = f"{prefix}_"
+    if not name.startswith(head):
         return None
     numeric: list[int] = []
-    for part in name[len(prefix) :].split("_"):
+    for part in name[len(head) :].split("_"):
         if part.isdigit():
             numeric.append(int(part))
         else:
@@ -191,30 +227,45 @@ def _sglang_subdir_version_tuple(name: str) -> tuple[int, ...] | None:
     return tuple(numeric) if len(numeric) >= 2 else None
 
 
-def _resolve_sglang_patches_dir(
+def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
+    *,
+    prefix: str = "sglang",
+    required_patch: str | None = None,
 ) -> Path | None:
-    """Locate the SGLang patches dir for the running ``sglang`` version.
+    """Locate the per-version patches dir for a running framework version.
 
-    Order (mirrors :func:`_resolve_vllm_patch_file`): exact ``sglang_X_Y_Z``
-    subdir > highest same-minor subdir whose version is <= running > nearest
-    subdir whose version is <= running (never a newer one). Only subdirs with
-    at least one ``*.patch`` qualify; ``_apply_atomic``'s ``git apply --check``
-    still guards a genuinely incompatible pick. Returns ``None`` when nothing
-    qualifies (caller fail-softs).
+    Order: exact ``<prefix>_X_Y_Z`` subdir > highest same-minor subdir whose
+    version is <= running > nearest subdir whose version is <= running (never a
+    newer one). Only subdirs holding a matching patch qualify;
+    ``_apply_atomic``'s ``git apply --check`` still guards a genuinely
+    incompatible pick. Returns ``None`` when nothing qualifies (caller
+    fail-softs).
 
     Args:
         patches_root: Root directory holding the per-version patch subdirs.
-        version: The running ``sglang`` version string.
+        version: The running framework version string.
+        prefix: Framework name the subdirs are prefixed with.
+        required_patch: Filename that must exist in a subdir for it to qualify.
+            Defaults to any ``*.patch``, which is what a whole-directory
+            consumer wants; a consumer after one named patch must pass it, or
+            the fallback can return a dir that has other patches but not
+            the wanted one.
 
     Returns:
         The resolved patches subdir, or ``None`` when none qualifies.
     """
-    subdir_name = _versioned_patches_subdir_name(version)
+
+    def _qualifies(d: Path) -> bool:
+        if required_patch is not None:
+            return (d / required_patch).is_file()
+        return any(d.glob("*.patch"))
+
+    subdir_name = _versioned_patches_subdir_name(version, prefix=prefix)
     if subdir_name is not None:
         candidate = patches_root / subdir_name
-        if candidate.is_dir() and any(candidate.glob("*.patch")):
+        if candidate.is_dir() and _qualifies(candidate):
             return candidate
 
     # Graceful fallback to the nearest not-newer patched subdir.
@@ -225,9 +276,9 @@ def _resolve_sglang_patches_dir(
         return None
     available: dict[tuple[int, ...], Path] = {}
     for d in patches_root.iterdir():
-        if not d.is_dir() or not any(d.glob("*.patch")):
+        if not d.is_dir() or not _qualifies(d):
             continue
-        vt = _sglang_subdir_version_tuple(d.name)
+        vt = _subdir_version_tuple(d.name, prefix=prefix)
         if vt:
             available[vt] = d
     if not available:
@@ -627,7 +678,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     # Per-version subdir layout required.
-    patches_dir = _resolve_sglang_patches_dir(patches_root, version)
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
     if patches_dir is None:
         log.warning(
             "_server_patcher: no SGLang patches found under %s/%s/ for "
@@ -639,7 +690,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    if not _sglang_version_accepted(version, patches_dir=patches_dir):
+    if not _version_accepted(version, patches_dir=patches_dir):
         log.warning(
             "_server_patcher: SGLang %s not in supported version list "
             "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
@@ -822,7 +873,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    patches_dir = _resolve_sglang_patches_dir(patches_root, version)
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
     if patches_dir is None:
         log.warning(
             "_server_patcher: no KernelForge CK block-scale patch found under %s/%s/ for sglang %s; skip",
@@ -834,7 +885,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     # KernelForge ships the manifest at patches_root (one level above the
     # per-version subdir), so consult patches_root for the version gate.
-    if not _sglang_version_accepted(version, patches_dir=patches_root):
+    if not _version_accepted(version, patches_dir=patches_root):
         log.warning(
             "_server_patcher: SGLang %s not in supported version list "
             "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
@@ -1072,7 +1123,7 @@ def _apply_atomic(plan: _PatchPlan) -> bool:
 
     fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
     log.info(
-        "_server_patcher: applied %d TraceLens patch(es) for %s %s "
+        "_server_patcher: applied %d patch(es) for %s %s "
         "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
         len(applied),
         plan.framework,
