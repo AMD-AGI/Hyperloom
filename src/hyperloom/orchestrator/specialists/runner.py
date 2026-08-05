@@ -616,17 +616,14 @@ class SpecialistRunner:
                 # WS1 wall-clock budget so the specialist can self-throttle.
                 wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
-                # Run-status snapshot for the mandate section.
                 baseline_tput=float(params.get("baseline_tput") or 0.0),
                 current_tput=float(params.get("current_tput") or 0.0),
                 cumulative_gain_validated=float(params.get("cumulative_gain_validated") or 0.0),
                 keep_threshold_pct=float(params.get("keep_threshold_pct") or 0.0),
                 applied_stack=[e for e in (params.get("applied_stack") or []) if isinstance(e, dict)],
-                # Structured mandate context.
                 task_kind=str(params.get("task_kind") or ""),
                 prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
                 pr_lead=dict(params.get("pr_lead") or {}),
-                # Channel A = in-process (emit_intent), Channel B = subprocess (file write).
                 exit_channel=("B" if self.subprocess_config is not None else "A"),
             )
 
@@ -1387,11 +1384,8 @@ class SpecialistRunner:
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
-        else:
-            # Fallback for callers that don't pass a profile.
-            params = ctx.task.params or {}
-            if bool(params.get("readonly")):
-                return None, None, ""
+        elif bool((ctx.task.params or {}).get("readonly")):
+            return None, None, ""
         base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
         if base is None:
             return None, None, "no_git_framework_source_root"

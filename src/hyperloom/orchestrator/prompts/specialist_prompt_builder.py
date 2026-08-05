@@ -821,25 +821,18 @@ class SpecialistPromptInputs:
     wall_budget_sec: float = 0.0
     started_at_iso: str = ""
 
-    # Run-status snapshot injected by the Coordinator so the specialist
-    # understands where the session stands. All default to "absent" (0 / [])
-    # so the mandate section renders gracefully when the fields are missing.
+    # Run-status snapshot for §0 MANDATE; 0/[] = absent (section renders gracefully).
     baseline_tput: float = 0.0
     current_tput: float = 0.0
     cumulative_gain_validated: float = 0.0
     keep_threshold_pct: float = 0.0
-    # Compact applied stack: each entry carries {variant_name, gain_pct}.
     applied_stack: list[dict[str, Any]] = field(default_factory=list)
 
-    # Structured mandate context replacing free-text §10 preambles.
-    # ``task_kind`` routes to a brief boilerplate block in _section_mandate.
+    # Structured mandate payload; routes §0 boilerplate and per-dispatch context.
     task_kind: str = ""
-    # Prior attempts for framework tasks: {ref, status, gain_pct, why}.
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Upstream PR lead for authoring tasks: {title, url, diff_url}.
     pr_lead: dict[str, Any] = field(default_factory=dict)
-    # Active exit channel: "A" (emit_intent tool), "B" (file write), or ""
-    # (render both for render-script / unknown runtime).
+    # "A" = emit_intent, "B" = file write, "" = render both (render-script path).
     exit_channel: str = ""
 
 
@@ -1082,15 +1075,7 @@ def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 0 — Mandate (deliverable contract + run status)
 def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the mandate block: what to deliver, how the session stands, and how judgement works.
-
-    Args:
-        inp: Assembled prompt inputs.
-
-    Returns:
-        Prompt lines for the mandate section, or ``[]`` when all status
-        fields are absent (avoids a content-free section on cold starts).
-    """
+    """Render §0: deliverable contract, run status, and task-kind brief."""
     from hyperloom.inference_optimizer.framework_registry import format_primary_metric
 
     # Deliverable line based on scope × mode.
@@ -1116,7 +1101,6 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
 
-    # Run status — render only when at least one metric is available.
     has_status = inp.baseline_tput > 0 or inp.keep_threshold_pct > 0
     if has_status:
         rows.append("")
@@ -1144,13 +1128,11 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         "alongside. You are not asked to prove the number.",
     ])
 
-    # Task-kind brief (stable boilerplate per dispatch type).
     kind = (inp.task_kind or "").strip()
     brief = _TASK_KIND_BRIEFS.get(kind, "")
     if brief:
         rows.extend(["", brief])
 
-    # Upstream PR lead (framework authoring tasks).
     if inp.pr_lead:
         title = str(inp.pr_lead.get("title") or "").strip()
         url = str(inp.pr_lead.get("url") or "").strip()
@@ -1163,7 +1145,6 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         if diff_url:
             rows.append(f"Diff: {diff_url} (fetch with WebFetch)")
 
-    # Prior attempts (avoid repeating the same proposal).
     if inp.prior_attempts:
         rows.extend([
             "",
@@ -1881,18 +1862,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 8 — Output protocol
 def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
-    """Render Section 8 (output protocol) of the specialist prompt.
-
-    Describes the two equivalent ``specialist_done`` exit channels, the
-    payload schema, field contract, heartbeat rules, and the turn cap.
-
-    Args:
-        inp (SpecialistPromptInputs): The assembled prompt inputs (source
-            of workspace path, gap id, domain, and turn cap).
-
-    Returns:
-        list[str]: Markdown lines for the output-protocol section.
-    """
+    """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
     channel = (inp.exit_channel or "").upper().strip()
 
@@ -2050,20 +2020,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 9 — Iron rules
 def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
-    """Render Section 9 (iron rules) of the specialist prompt.
-
-    Emits the immutable capability boundary (full autonomy on the
-    specialist's own leased cards with the single production-serving boundary,
-    worktree-only patch/artifact staging, no KB writes, allowed intents, turn
-    cap, and workspace confinement).
-
-    Args:
-        inp (SpecialistPromptInputs): The assembled prompt inputs (source
-            of the workspace path interpolated into the rules).
-
-    Returns:
-        list[str]: Markdown lines for the iron-rules section.
-    """
+    """Render Section 9 (iron rules) of the specialist prompt."""
     workspace = inp.workspace_path or "<runs/specialist/<task_id>/>"
     if inp.allocated_gpu_ids:
         cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)

@@ -818,8 +818,6 @@ class FrameworkPhase(PhaseHandler):
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        # Build per-dispatch dynamic notes: cross-framework specifics, audit seed, and critic feedback.
-        # The stable "how to work" boilerplate lives in _TASK_KIND_BRIEFS["framework_authoring"].
         is_cross_framework = isinstance(audit, dict) and str(audit.get("layer") or "") == "cross_framework"
         cf_src_framework = ""
         cf_dst_framework = ""
@@ -1132,8 +1130,6 @@ class FrameworkPhase(PhaseHandler):
         # transformers-major skew) and environment/build acquisition is owned by
         # the isolated targeted-build path + the specialist's own setup_commands.
         base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
-        # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
-        # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         if base_patches or base_setup:
             progress_bits = []
@@ -2105,7 +2101,6 @@ class FrameworkPhase(PhaseHandler):
                 pass
         if not gap_cid:
             gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
-        # Apply errors + critic feedback are per-dispatch; boilerplate is in _TASK_KIND_BRIEFS.
         notes_lines: list[str] = list(feedback_lines)
         if critic_feedback:
             req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
@@ -2470,7 +2465,6 @@ class FrameworkPhase(PhaseHandler):
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
-        # Register this gap so find_gap() resolves it and _warm_specialist_params fills gap_evidence.
         try:
             state.upsert_gap({
                 "canonical_id": gap_cid,
@@ -2482,7 +2476,6 @@ class FrameworkPhase(PhaseHandler):
             })
         except Exception:  # noqa: BLE001
             log.debug("FRAMEWORK local-explore: upsert_gap failed", exc_info=True)
-        # Extract the "already tried" ledger into structured prior_attempts.
         prior_attempts: list[dict[str, Any]] = []
         try:
             memory = self._build_framework_working_memory()
@@ -5343,8 +5336,6 @@ class FrameworkPhase(PhaseHandler):
             direction=direction,
             direction_pct=direction_pct,
         )
-        # Boilerplate is in _TASK_KIND_BRIEFS; only the per-dispatch bottleneck
-        # context (direction + already-tried flags) goes into notes.
         notes = "\n".join(context_lines).strip()
         params: dict[str, Any] = {
             "domain": domain,

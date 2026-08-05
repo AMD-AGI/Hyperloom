@@ -1071,7 +1071,6 @@ class ExplorePhase(PhaseHandler):
                             "severity": str(gap.get("severity") or ""),
                         }
 
-        # Run-status snapshot: baseline/current throughput, validated gain, KEEP threshold.
         if "baseline_tput" not in params:
             _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
             if _bt > 0:
