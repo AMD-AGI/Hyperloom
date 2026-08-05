@@ -42,6 +42,39 @@ DEFAULT_RECIPE_SITES: tuple[str, ...] = (
 # Operator sentinels (via HYPERLOOM_RECIPE_SITES) that disable recipe-site guidance.
 RECIPE_SITES_DISABLED_VALUES: frozenset[str] = frozenset({"none", "off", "disable", "disabled"})
 
+# Per-task-kind brief appended by _section_mandate; only the per-dispatch dynamic
+# context (PR lead, critic feedback, apply errors, residual questions) lives in
+# ``inp.notes``. Boilerplate that is the same for every dispatch of a given kind
+# lives here so it is maintained in one place.
+_TASK_KIND_BRIEFS: dict[str, str] = {
+    "framework_authoring": (
+        "Read the upstream PR as inspiration, then deliver the best win for this"
+        " model / hardware / workload — go beyond the diff where the live source justifies it."
+        " Deliverable: a unified-diff patch in your worktree (``patches_written``)"
+        " OR a config/env ``proposal_set`` entry when the win is a flag toggle."
+        " The Coordinator applies and benches it; you do not benchmark."
+    ),
+    "framework_local_explore": (
+        "No upstream PR was found. Author the best throughput win directly from"
+        " the live source + profiling evidence. Read ``framework_source_roots``"
+        " and the roofline (Section 4a) to locate the hot path."
+        " You MAY use WebSearch / WebFetch to compare the local checkout against"
+        " the latest upstream code and port a newer optimisation when behind."
+        " Deliverable: a unified-diff patch (``patches_written``)"
+        " OR a config/env ``proposal_set`` entry. You do not benchmark."
+    ),
+    "explore_apply_retry": (
+        "A previous patch failed to apply against the live source tree."
+        " Study the apply errors in the notes, produce a corrected patch."
+    ),
+    "framework_config_generation": (
+        "Propose a GRID of runtime config variants (server flags and/or env vars)"
+        " that may raise throughput WITHOUT changing source. Return a"
+        " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
+        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
+    ),
+}
+
 
 # Forbids global process cleanup that could kill the optimizer's serving /
 # benchmark process. Shared by bash-enabled specialist and leaf prompts.
@@ -798,6 +831,14 @@ class SpecialistPromptInputs:
     # Compact applied stack: each entry carries {variant_name, gain_pct}.
     applied_stack: list[dict[str, Any]] = field(default_factory=list)
 
+    # Structured mandate context replacing free-text §10 preambles.
+    # ``task_kind`` routes to a brief boilerplate block in _section_mandate.
+    task_kind: str = ""
+    # Prior attempts for framework tasks: {ref, status, gain_pct, why}.
+    prior_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # Upstream PR lead for authoring tasks: {title, url, diff_url}.
+    pr_lead: dict[str, Any] = field(default_factory=dict)
+
 
 # Section 1 — Identity & autonomy
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -1099,6 +1140,45 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         "the sealed baseline and decides KEEP/REVERT; the accuracy gate runs",
         "alongside. You are not asked to prove the number.",
     ])
+
+    # Task-kind brief (stable boilerplate per dispatch type).
+    kind = (inp.task_kind or "").strip()
+    brief = _TASK_KIND_BRIEFS.get(kind, "")
+    if brief:
+        rows.extend(["", brief])
+
+    # Upstream PR lead (framework authoring tasks).
+    if inp.pr_lead:
+        title = str(inp.pr_lead.get("title") or "").strip()
+        url = str(inp.pr_lead.get("url") or "").strip()
+        diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
+        rows.append("")
+        if title:
+            rows.append(f"PR lead: {title}")
+        if url:
+            rows.append(f"PR url: {url}")
+        if diff_url:
+            rows.append(f"Diff: {diff_url} (fetch with WebFetch)")
+
+    # Prior attempts (avoid repeating the same proposal).
+    if inp.prior_attempts:
+        rows.extend([
+            "",
+            "Already tried this session — avoid the same or equivalent change:",
+        ])
+        for att in inp.prior_attempts[:20]:
+            if not isinstance(att, dict):
+                continue
+            ref = str(att.get("ref") or "").strip()
+            if not ref:
+                continue
+            status = str(att.get("status") or "?").strip()
+            gain = att.get("gain_pct")
+            gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
+            why = str(att.get("why") or "").strip()
+            why_str = f" — {why}" if why else ""
+            rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
+
     return rows
 
 

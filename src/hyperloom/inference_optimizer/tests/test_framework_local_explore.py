@@ -240,9 +240,9 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     assert params["framework_local_explore"] is True
     assert params["framework_agent_candidate_id"] == "local_explore:0"
     assert params["domain"] == "serving_specialist"
-    # No upstream PR lead: the mandate is authored from live source.
-    assert "LOCAL-EXPLORATION" in params["notes"]
-    assert "installed package source" in params["notes"]
+    # Boilerplate is in _TASK_KIND_BRIEFS; notes is empty on a fresh dispatch.
+    assert params.get("task_kind") == "framework_local_explore"
+    assert params.get("notes", "") == ""
     # WebSearch/WebFetch available so the specialist can compare upstream latest.
     assert "WebSearch" in created["allowed_tools"]
     assert "WebFetch" in created["allowed_tools"]

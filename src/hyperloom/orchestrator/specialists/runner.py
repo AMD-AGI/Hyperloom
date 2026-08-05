@@ -622,6 +622,10 @@ class SpecialistRunner:
                 cumulative_gain_validated=float(params.get("cumulative_gain_validated") or 0.0),
                 keep_threshold_pct=float(params.get("keep_threshold_pct") or 0.0),
                 applied_stack=[e for e in (params.get("applied_stack") or []) if isinstance(e, dict)],
+                # Structured mandate context.
+                task_kind=str(params.get("task_kind") or ""),
+                prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
+                pr_lead=dict(params.get("pr_lead") or {}),
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
