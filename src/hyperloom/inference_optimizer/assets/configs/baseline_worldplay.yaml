@@ -33,7 +33,11 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 1                          # sequence-parallel degree (= GPU count on this node)
+    # Sequence-parallel degree (= GPU count on this node). The customer's
+    # operating point is 8, and every published number is measured there; 1 was
+    # a placeholder that only ever worked because the CLI passes --tp 8, so a
+    # launch without it would have silently benchmarked a different model.
+    TP: 8
     # ── Workload (customer standard operating point) ──────────────────────────
     WORLDPLAY_MODEL_TYPE: ar
     WORLDPLAY_NUM_STEPS: 50
