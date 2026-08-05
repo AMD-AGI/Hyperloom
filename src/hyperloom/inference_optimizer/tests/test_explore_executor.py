@@ -1751,7 +1751,9 @@ def test_worldplay_blacklist_reason_locks_fp8_gemm_aliases(key):
 # `--warmup` (discarded full generations) and `--repeats` (timed generations
 # aggregated into mean/std) define HOW the fps is sampled, not what runs. A
 # variant that shrinks either still produces a legal-looking steady-state fps,
-# but sampled differently from the 5-repeat baseline it is compared against.
+# but sampled differently from the baseline it is compared against. The lock is
+# on the key, not on a particular count: the baseline's own repeat count is set in
+# baseline_worldplay.yaml and has changed more than once.
 
 
 @pytest.mark.parametrize(

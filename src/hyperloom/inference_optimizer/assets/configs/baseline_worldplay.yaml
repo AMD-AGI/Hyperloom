@@ -40,11 +40,17 @@ benchmark:
     WORLDPLAY_NUM_FRAMES: 125
     WORLDPLAY_HEIGHT: 480
     WORLDPLAY_WIDTH: 832
+    # The warmup generation is kept: measured 346.1s for the first timed run
+    # against 344.1s / 344.9s for the rest, so it is really absorbing first-touch
+    # cost (autotune, memory pool, first kernel compile), not ceremony.
     WORLDPLAY_WARMUP_CHUNKS: 1
-    # 3 timed repeats (the bench_fps.py default). Measured run-to-run std is
-    # 0.26-0.45%, so 3 repeats keep the standard error ~0.23% against the 1%
-    # keep threshold while saving ~11 min per leg (baseline AND every variant).
-    WORLDPLAY_REPEATS: 3
+    # One timed repeat. A 125-frame generation is ~345s, so each extra repeat is
+    # 5.75 min on every leg -- baseline AND every variant. Three repeats measured
+    # 0.348 / 0.349 / 0.349 fps, 0.3% apart against a 1-2% keep threshold, so the
+    # extra 11.5 min confirmed a number the first repeat already established, and
+    # no gate reads the resulting std (it is reported only). Raise this if a
+    # workload ever shows spread approaching the keep threshold.
+    WORLDPLAY_REPEATS: 1
     WORLDPLAY_SEED: 1
     # Offloading OFF = true compute (roofline-relevant); the customer's Arbor
     # wrapper defaults it OFF, and disabling it is the known WorldPlay winner.
@@ -62,7 +68,11 @@ benchmark:
     # threshold would false-fail — calibration is why this workload needs it.
     WORLDPLAY_QUALITY_CALIBRATE: 1
     WORLDPLAY_QUALITY_CALIB_EPS: 0.004
-    WORLDPLAY_QUALITY_CALIB_SAMPLES: 2
+    # One sample. The band takes the *worst* drift across samples, and on a real
+    # run the worst was the first (ssim 0.5792 vs 0.6139), so the second sample
+    # cost a generation and changed nothing. ``_CALIB_MARGIN`` is what widens the
+    # band; more samples only help if the drift itself is unstable.
+    WORLDPLAY_QUALITY_CALIB_SAMPLES: 1
     WORLDPLAY_QUALITY_CALIB_MARGIN: 1.25
     WORLDPLAY_QUALITY_FRAMES: 8
     # Fixed-threshold fallback (only used when WORLDPLAY_QUALITY_CALIBRATE=0).

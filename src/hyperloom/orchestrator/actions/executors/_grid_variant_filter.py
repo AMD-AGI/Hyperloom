@@ -381,14 +381,18 @@ _WORLDPLAY_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
 # Measurement-contract keys: these set HOW the fps is sampled — ``--warmup``
 # discarded full generations and ``--repeats`` timed generations aggregated into
 # mean/std — not what runs. A variant that shrinks either still emits a
-# legal-looking steady-state fps, but sampled differently from the 5-repeat
-# baseline it is ranked against. Unlike ``_WORLDPLAY_ENV_BLACKLIST`` (which only
-# fires on a truthy value) ANY override is a violation here, including ``0``:
+# legal-looking steady-state fps, but sampled differently from the baseline it is
+# ranked against. Unlike ``_WORLDPLAY_ENV_BLACKLIST`` (which only fires on a
+# truthy value) ANY override is a violation here, including ``0``:
 # ``WORLDPLAY_WARMUP_CHUNKS=0`` is precisely the harmful setting, since it folds
 # cold-start cost into the timed runs.
+#
+# The reasons deliberately do not name the values. They live in
+# ``baseline_worldplay.yaml``, have already changed twice (5 -> 3 -> 1 repeats),
+# and each time the number was restated here it went stale.
 _WORLDPLAY_ENV_MEASUREMENT_LOCK: dict[str, str] = {
-    "WORLDPLAY_REPEATS": "timed-repeat count is part of the baseline measurement contract (locked at 3)",
-    "WORLDPLAY_WARMUP_CHUNKS": "warmup-generation count is part of the baseline measurement contract (locked at 1)",
+    "WORLDPLAY_REPEATS": "timed-repeat count is part of the baseline measurement contract",
+    "WORLDPLAY_WARMUP_CHUNKS": "warmup-generation count is part of the baseline measurement contract",
 }
 
 # Known crash combinations (all keys present + truthy → drop).

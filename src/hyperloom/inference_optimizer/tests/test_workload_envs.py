@@ -764,3 +764,41 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
+
+
+# ---------------------------------------------------------------------------
+# WorldPlay baseline sampling cost (measurement contract values)
+# ---------------------------------------------------------------------------
+
+
+def test_worldplay_baseline_samples_the_fps_once_per_leg():
+    """Pin the sampling counts: every extra sample costs a full 6-minute generation.
+
+    Measured on 8x MI355X: one 125-frame generation takes ~345s, so each timed
+    repeat is 5.75 minutes of wall clock. Three repeats produced steady fps of
+    0.348 / 0.349 / 0.349 -- 0.3% apart, against a KEEP threshold of 1-2%, so the
+    second and third repeat cost 11.5 minutes to confirm a number the first one
+    already established. No gate reads the resulting std; it is reported only.
+
+    The warmup generation stays: run 1 of 3 was 346.1s against 344.1s and 344.9s
+    for the others, so it really is absorbing first-touch cost (autotune, memory
+    pool, first kernel compile) rather than being ceremonial.
+
+    Calibration samples are cheaper (8 frames, not 125) but the second one is
+    equally redundant: the band takes the *worst* drift of the samples, and on a
+    real run the worst was the first sample (ssim 0.5792 vs 0.6139), so sample 2
+    changed nothing. ``WORLDPLAY_QUALITY_CALIB_MARGIN`` is what widens the band.
+
+    If a workload ever shows run-to-run spread approaching the KEEP threshold,
+    raise ``WORLDPLAY_REPEATS`` -- that is the knob, and this test is the record
+    of why it is currently 1.
+    """
+    import yaml
+
+    from hyperloom.inference_optimizer.session.paths import asset_root
+
+    cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_worldplay.yaml").read_text())
+    envs = cfg["benchmark"]["envs"]
+    assert envs["WORLDPLAY_REPEATS"] == 1
+    assert envs["WORLDPLAY_QUALITY_CALIB_SAMPLES"] == 1
+    assert envs["WORLDPLAY_WARMUP_CHUNKS"] == 1

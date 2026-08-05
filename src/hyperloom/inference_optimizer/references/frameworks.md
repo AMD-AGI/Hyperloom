@@ -186,9 +186,15 @@ customer's headline is 8-GPU `sp=8`, so fps from a different `TP` is **not
 directly comparable**.
 
 Measured on 8×MI355X at the headline operating point: baseline lands at
-0.352 fps with run-to-run std 0.26–0.45%, and one generation takes ~341s, so a
-leg costs `(1 warmup + WORLDPLAY_REPEATS) × 5.7 min` (baseline adds two
-quality-calibration generations). Of the seed grid, `torch.compile` is a
+0.352 fps with run-to-run std 0.26–0.45%, and one generation takes ~345s, so a
+leg costs `(1 warmup + WORLDPLAY_REPEATS) × 5.75 min` plus a ~9.5 min model load
+(the probe puts the start of the hot loop at 569s), and the baseline leg adds
+`WORLDPLAY_QUALITY_CALIB_SAMPLES` cheap 8-frame calibration generations. Both
+sampling counts are 1: three repeats measured 0.348/0.349/0.349 fps, 0.3% apart
+against a 1–2% keep threshold, and the calibration band takes the worst sample,
+which on a real run was the first. A `roofline` leg costs far more than its
+generation time — with the torch profiler on, exporting a 2.6 GB trace took 31.6
+of its 55.3 minutes. Of the seed grid, `torch.compile` is a
 reproducible **regression** (−13%: attention is `@torch.compiler.disable`, so
 compile covers none of the hot path and still pays its overhead) and the
 offloading / resident / ROCm-env knobs all measured inside the noise band. The
