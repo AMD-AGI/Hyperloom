@@ -457,6 +457,19 @@ class RooflineExecutor:
             successful_profile_params or ctx.task.params or {},
             arm=roofline_arm,
         )
+        # The host-side rewrite evidence is produced by the profile sub-step and is
+        # what the framework specialist is given instead of guessing landing points
+        # from source. It is independent of the trace: no kernel timeline can say
+        # which host-side work is redundant.
+        from ._framework_rewrite_evidence import promote_evidence_path
+
+        _evidence_path = promote_evidence_path(self.shared_state, profile_result)
+        if _evidence_path:
+            log.info(
+                "roofline: promoted host-side rewrite evidence (%s candidate(s)) -> %s",
+                profile_result.get("framework_rewrite_candidate_count"),
+                _evidence_path,
+            )
 
         # ---- trace_analyze -------------------------------------------------
         # Route each roofline to its own report so the PRELUDE baseline snapshot
