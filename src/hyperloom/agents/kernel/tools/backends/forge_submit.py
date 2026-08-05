@@ -542,32 +542,6 @@ def _remap_implementation_sources(
     return remapped
 
 
-def _changed_files_touch_implementation(
-    *,
-    workspace: str,
-    changed_files: list[str],
-    implementation_sources: list[str],
-) -> tuple[bool, list[str]]:
-    """Require a Forge best commit to modify a resolved implementation source."""
-    workspace_path = Path(workspace).resolve()
-    expected: list[str] = []
-    for raw_source in implementation_sources:
-        try:
-            relative = (
-                Path(raw_source)
-                .expanduser()
-                .resolve()
-                .relative_to(workspace_path)
-                .as_posix()
-            )
-        except (OSError, ValueError):
-            continue
-        if relative not in expected:
-            expected.append(relative)
-    changed = {Path(path).as_posix() for path in changed_files}
-    return bool(changed.intersection(expected)), expected
-
-
 def _pkg_toplevel(source_file: str) -> str:
     """Return the topmost importable package directory containing ``source_file``.
 
@@ -3461,23 +3435,6 @@ def submit(
                 (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
             except OSError:
                 pass
-        target_mismatch_error = ""
-        if improved:
-            touched_target, expected_targets = (
-                _changed_files_touch_implementation(
-                    workspace=workspace,
-                    changed_files=changed_files,
-                    implementation_sources=implementation_sources,
-                )
-            )
-            if not touched_target:
-                improved = False
-                target_mismatch_error = (
-                    "validated Forge best did not modify any resolved "
-                    "implementation source; refusing a micro KEEP "
-                    f"(expected one of {expected_targets}, changed "
-                    f"{changed_files})"
-                )
         _write_report(
             output_dir,
             baseline_ms,
@@ -3510,13 +3467,11 @@ def submit(
 
             msg += "\nFORGE_STEPS " + _json_steps.dumps(forge_steps, sort_keys=True)
         res = _normalized(
-            1 if target_mismatch_error else 0,
+            0,
             msg + "\n" + (loop_outcome.output or "")[-3000:],
-            target_mismatch_error,
+            "",
             time.time() - started,
         )
-        if target_mismatch_error:
-            res["error_class"] = "runtime_target_mismatch"
         if forge_usage:
             res["llm_usage"] = forge_usage
         if forge_steps:

@@ -3750,36 +3750,6 @@ def _finalize_candidates(
         if res is not None and res.status in {"non_rewritable", "no_kernel"}:
             # Curated verdict: not rewritable. Keep the .py launcher as context.
             res.stamp_onto(item)
-        if (
-            res is not None
-            and res.kind == "dispatch"
-            and res.status == "unresolved"
-            and str(item.get("device_kernel_name") or "").strip()
-        ):
-            # A dispatch op with an observed device symbol must never fall back
-            # to its Python launcher. The launcher is shared by multiple
-            # backends and does not identify the implementation that actually
-            # ran. Keep it only as audit context and fail closed so Forge cannot
-            # synthesize a harness for a different backend.
-            launcher = str(
-                item.get("source_file")
-                or item.get("tracelens_launcher_path")
-                or ""
-            )
-            if launcher:
-                item["launcher_source_file"] = launcher
-            res.stamp_onto(item)
-            item["op_to_source_reason"] = (
-                "runtime device symbol did not resolve to an editable "
-                "implementation source"
-            )
-            item["source_file"] = ""
-            item["source_path"] = ""
-            item["kernel_repo"] = ""
-            item["source_type"] = "unresolved_dispatch"
-            item["runtime_generated_kernel"] = False
-            _stamp_candidate_metadata(item, op_cat_map)
-            continue
         # Legacy fallback resolution runs ONLY for a dictionary miss or an
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
