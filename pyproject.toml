@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools>=77 is the floor for the PEP 639 ``license``/``license-files``
+# form used below (the deprecated TOML-table form breaks on 2027-Feb-18).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +10,10 @@ version = "1.0.0a3"
 description = "Inference Optimizer — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+# PEP 639 SPDX expression. The former ``{ text = "MIT" }`` table is deprecated
+# by setuptools and slated to become a hard error on 2027-Feb-18.
+license = "MIT"
+license-files = ["LICENSE"]
 # Intentionally empty: the bare wheel carries no third-party runtime deps so a
 # ``pip install --target`` workspace stays clean. Runtime deps are installed by
 # the packaged install.sh (see the ``runtime`` extra below and the packaged
@@ -124,6 +129,9 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # package_dir mapping; both are now expressed here and setup.py is deleted).
 [tool.setuptools.packages.find]
 where = ["src"]
+# Test trees are not part of the distribution: their fixture data is not
+# package-data, so a shipped copy could never run. See test_packaging_lint.py.
+exclude = ["*.tests", "*.tests.*", "tests", "tests.*"]
 
 [tool.setuptools.data-files]
 # Install the setup skill under every agent's discovery dir so /hyperloom-setup
@@ -188,7 +196,6 @@ hyperloom = [
     "AGENTS.md",
     "actions/*.md",
     "references/*.md",
-    "kb_contributions/*.json",
 ]
 # tree-reform.MD P2.5: robustness-agent's SKILL.md, promoted alongside its
 # package (near-verbatim move; already good src-layout per tree-reform.MD).
