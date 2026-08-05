@@ -281,7 +281,6 @@ def coordinator_with_mocks(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -294,7 +293,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
 ):
     c = coordinator_with_mocks
     try:
-        for role in ("orchestration", "kernel_agent", "critic", "robustness"):
+        for role in ("orchestration", "critic", "robustness"):
             prompt = await c._compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"

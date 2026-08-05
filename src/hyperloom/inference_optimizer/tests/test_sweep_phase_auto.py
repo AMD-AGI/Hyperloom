@@ -966,7 +966,6 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }

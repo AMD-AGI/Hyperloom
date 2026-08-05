@@ -48,7 +48,6 @@ def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -321,7 +320,6 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     spy = _SpyBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="o")
     backends = {
         "orchestration": spy,
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="k"),
         "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
         "robustness": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
     }

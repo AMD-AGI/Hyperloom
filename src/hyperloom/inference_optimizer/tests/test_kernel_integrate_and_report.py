@@ -61,7 +61,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel_agent", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
