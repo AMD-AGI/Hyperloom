@@ -58,7 +58,11 @@ def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tm
     venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
     site = aiter_pkg.parent
-    akp._CACHED_KN_TARGET_ROOTS = (str(site) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
 
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     strat = akp._detect_strategy(target, allow_unknown_target=False)
@@ -67,13 +71,17 @@ def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tm
     assert strat["root"] == str(site)
     assert strat["rebuild_mode"] == "runtime_jit"
     assert strat["rebuild_command"] == []
-    assert strat["artifact_roots"] == [aiter_pkg, site / "aiter_meta"]
+    assert strat["artifact_roots"] == []
 
 
 def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_path, monkeypatch):
     venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(aiter_pkg) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(aiter_pkg) + "/",),
+    )
 
     target = aiter_pkg / "ops" / "triton" / "k.py"
     strat = akp._detect_strategy(target, allow_unknown_target=False)
@@ -84,9 +92,40 @@ def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_pa
     assert strat["artifact_roots"] == []
 
 
+def test_installed_aiter_strategy_preserves_symlinked_site_packages(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    real_site = tmp_path / "real" / "site-packages"
+    (real_site / "aiter").mkdir(parents=True)
+    (real_site / "aiter_meta" / "csrc" / "kernels").mkdir(parents=True)
+    linked_site = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    linked_site.parent.mkdir(parents=True)
+    linked_site.symlink_to(real_site, target_is_directory=True)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(linked_site) + "/",),
+    )
+    target = linked_site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+
+    strategy = akp._detect_strategy(target, allow_unknown_target=False)
+
+    assert strategy["root"] == str(linked_site.absolute())
+    assert strategy["rebuild_mode"] == "runtime_jit"
+    assert strategy["jit_build_dir"] == str(
+        linked_site.absolute() / "aiter" / "jit" / "build"
+    )
+
+
 def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     monkeypatch.setenv("VLLM_VENV_ROOT", "/opt/hyperloom/vllm-venv")
-    akp._CACHED_KNOWN_TARGET_ROOTS = ("/sgl-workspace/aiter/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        ("/sgl-workspace/aiter/",),
+    )
 
     target = Path("/sgl-workspace/aiter/csrc/kernels/foo.cu")
     strat = akp._detect_strategy(target, allow_unknown_target=False)
@@ -95,6 +134,69 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     assert strat["root"] == "/sgl-workspace/aiter"
     assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "csrc/kernels/gen_instances.py",
+        "csrc/cpp_itfs/mha_fwd.py",
+    ),
+)
+def test_editable_aiter_csrc_python_keeps_source_only_strategy(
+    akp,
+    monkeypatch,
+    relative,
+):
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        ("/sgl-workspace/aiter/",),
+    )
+
+    strategy = akp._detect_strategy(
+        Path("/sgl-workspace/aiter") / relative,
+        allow_unknown_target=False,
+    )
+
+    assert strategy["compiled"] is False
+    assert strategy["root"] == "/sgl-workspace/aiter"
+    assert strategy["rebuild_mode"] == "none"
+    assert strategy["rebuild_command"] == []
+    assert strategy["artifact_roots"] == []
+
+
+def test_rebuild_strategy_uses_target_parent_for_legacy_strategy(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    target_parent = tmp_path / "aiter_meta" / "csrc" / "kernels"
+    captured = {}
+
+    def _fake_rebuild(command, cwd, timeout_sec):
+        captured.update(
+            command=command,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr(akp, "_run_rebuild", _fake_rebuild)
+
+    result = akp._run_strategy_rebuild(
+        {"rebuild_command": []},
+        command_override=["python", "build.py"],
+        fallback_cwd=target_parent,
+        timeout_sec=123,
+    )
+
+    assert result["status"] == "ok"
+    assert captured == {
+        "command": ["python", "build.py"],
+        "cwd": target_parent,
+        "timeout_sec": 123,
+    }
 
 
 def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
@@ -106,7 +208,11 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     target.write_text(
         '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 1; }\n',
@@ -134,13 +240,14 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     assert result["rebuild"]["status"] == "deferred"
     assert result["rebuild"]["mode"] == "runtime_jit"
     assert result["jit_build_backup"]["status"] == "ok"
+    assert result["artifact_count"] == 0
     assert target.read_text(encoding="utf-8") == optimized
     manifest = json.loads(Path(result["manifest_path"]).read_text())
     assert manifest["status"] == "applied"
-    assert manifest["strategy"]["rebuild_mode"] == "runtime_jit"
-    assert manifest["strategy"]["jit_build_dir"] == str(
-        aiter_pkg / "jit" / "build"
-    )
+    assert manifest["strategy"]["rebuild_modes"] == ["runtime_jit"]
+    assert manifest["strategy"]["jit_build_dirs"] == [
+        str(aiter_pkg / "jit" / "build")
+    ]
 
     revert = akp.revert_kernel_patch(result["manifest_path"])
 
@@ -158,7 +265,11 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
     relative = Path("aiter_meta/csrc/kernels/gen_instances.py")
     target = site / relative
     target.write_text("TILE = 128\n", encoding="utf-8")
@@ -187,7 +298,6 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
         target_file=target,
         backup_root=tmp_path / "backups",
         snapshot_dir=snapshot,
-        repo_root=site,
         kernel_id="k006",
     )
 
@@ -195,7 +305,11 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     assert result["rebuild"]["status"] == "deferred"
     assert result["rebuild"]["mode"] == "runtime_jit"
     assert result["jit_build_backup"]["status"] == "ok"
+    assert result["artifact_count"] == 0
     assert target.read_text(encoding="utf-8") == "TILE = 64\n"
+    snapshot_manifest = json.loads(Path(result["manifest_path"]).read_text())
+    assert snapshot_manifest["strategy"]["root"] == str(site)
+    assert snapshot_manifest["strategy"]["rebuild_modes"] == ["runtime_jit"]
 
 
 def test_runtime_jit_uses_target_root_not_importable_aiter(
@@ -224,7 +338,11 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
         ),
     )
     site = target_aiter.parent
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
     optimized = (
@@ -261,7 +379,11 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     site = aiter_pkg.parent
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
     target.write_text(original, encoding="utf-8")

@@ -794,7 +794,10 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     into the sibling ``aiter_meta`` package. Both are runtime-JIT inputs and must
     share one deployment/rebuild strategy.
     """
-    target = target_file.resolve()
+    # Preserve the lexical install path: venv/site-packages is commonly a
+    # symlink, and resolving it here would make strategy classification disagree
+    # with the path matching performed by _detect_strategy.
+    target = target_file.absolute()
     for parent in target.parents:
         if (
             parent.name in {"aiter", "aiter_meta"}
@@ -852,8 +855,9 @@ def _invalidate_aiter_jit_build(
             Falls back to runtime discovery for non-runtime-JIT strategies.
 
     Returns:
-        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``
-        and supporting fields.
+        A status dict with ``status`` of ``ok`` (cache moved), ``clean``
+        (authoritative cache absent/empty), ``skipped``, or ``failed`` and
+        supporting fields.
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
@@ -1351,18 +1355,18 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         root = installed_aiter_root
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
         jit_build_dir = str(installed_aiter_root / "aiter" / "jit" / "build")
-        artifact_roots = [
-            package
-            for package in (
-                installed_aiter_root / "aiter",
-                installed_aiter_root / "aiter_meta",
-            )
-            if package.is_dir()
-        ]
+        # Runtime-JIT artifacts live under jit/build and are moved aside as one
+        # tree below. Recursively copying wheel .so/.co files here is redundant
+        # and can consume gigabytes per integration attempt.
+        artifact_roots = []
     elif allow_unknown_target:
         root = target_file.parent
 
-    if suffix in PYTHON_SOURCE_SUFFIXES and _target_is_in_aiter_csrc(target_file):
+    if (
+        suffix in PYTHON_SOURCE_SUFFIXES
+        and installed_aiter_root is not None
+        and _target_is_in_aiter_csrc(target_file)
+    ):
         compiled = True
     elif suffix in PYTHON_SOURCE_SUFFIXES:
         compiled = False
@@ -1370,7 +1374,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         rebuild_command = []
         artifact_roots = []
         jit_build_dir = ""
-    elif compiled and root is None:
+    if root is None:
         root = target_file.parent
 
     return {
@@ -1461,11 +1465,13 @@ def _run_strategy_rebuild(
     strategy: dict[str, Any],
     *,
     command_override: list[str],
+    fallback_cwd: Path,
     timeout_sec: int,
 ) -> dict[str, Any]:
     """Run an eager rebuild or record a runtime-JIT handoff."""
-    command = command_override or list(strategy["rebuild_command"])
-    cwd = Path(strategy["root"])
+    command = command_override or list(strategy.get("rebuild_command") or [])
+    strategy_root = str(strategy.get("root") or "").strip()
+    cwd = Path(strategy_root) if strategy_root else fallback_cwd
     if command:
         return _run_rebuild(command, cwd, timeout_sec)
     if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT:
@@ -1505,7 +1511,7 @@ def _runtime_jit_invalidation_error(
     return ""
 
 
-def _rebuild_completed(result: dict[str, Any]) -> bool:
+def _rebuild_ok_to_proceed(result: dict[str, Any]) -> bool:
     """Return whether apply may proceed after this rebuild result."""
     return result.get("status") in {"ok", "deferred"}
 
@@ -1833,8 +1839,12 @@ def apply_kernel_patch(
         "strategy": {
             "compiled": strategy["compiled"],
             "root": strategy["root"],
-            "rebuild_mode": strategy["rebuild_mode"],
-            "jit_build_dir": strategy["jit_build_dir"],
+            "rebuild_modes": [strategy["rebuild_mode"]],
+            "jit_build_dirs": (
+                [strategy["jit_build_dir"]]
+                if strategy.get("jit_build_dir")
+                else []
+            ),
         },
         "created_at": utc_now(),
     }
@@ -1979,9 +1989,10 @@ def apply_kernel_patch(
         rebuild = _run_strategy_rebuild(
             strategy,
             command_override=command_override,
+            fallback_cwd=target.parent,
             timeout_sec=rebuild_timeout_sec,
         )
-        if not _rebuild_completed(rebuild):
+        if not _rebuild_ok_to_proceed(rebuild):
             revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
@@ -2326,10 +2337,11 @@ def _apply_kernel_patch_snapshot(
             rec = _run_strategy_rebuild(
                 strat,
                 command_override=command_override,
+                fallback_cwd=target.parent,
                 timeout_sec=rebuild_timeout_sec,
             )
             rebuild_records.append(rec)
-            if not _rebuild_completed(rec):
+            if not _rebuild_ok_to_proceed(rec):
                 revert = revert_kernel_patch(manifest_path)
                 return {
                     "status": "failed",
