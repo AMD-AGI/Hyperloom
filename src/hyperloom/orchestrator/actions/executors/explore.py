@@ -589,6 +589,22 @@ def _worldplay_default_grid(
     return variants
 
 
+# Provenance of the same-harness rebench enqueued by
+# ``_enqueue_internal_stack_rebench``: a byte-for-byte replay of a config that
+# another component already measured, never a new proposal.
+_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
+
+
+def _is_config_replay_variant(variant: Any) -> bool:
+    """Whether a variant replays an already-validated config verbatim.
+
+    Such a variant carries the workload spec (resolution / frames / steps) as
+    part of the config being reproduced, so the off-spec filter — which reads
+    those keys as an attempt to move the spec — must not judge it.
+    """
+    return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
+
+
 def filter_worldplay_grid(
     grid: list[GridVariant],
     *,
@@ -1048,8 +1064,17 @@ class ExploreExecutor:
                 str(params.get("model_class") or "").strip()
                 or os.environ.get("MODEL_CLASS", "").strip()
             )
-            _n_before = len(grid)
-            grid, _wp_dropped = filter_worldplay_grid(grid, model_class=_seed_mc)
+            # A same-harness revalidation replays a config another component
+            # already validated, so it carries the workload spec verbatim
+            # (height/width/frames/steps at their baseline values). The filter
+            # reads those keys as an attempt to move the spec and drops the
+            # variant, which silently strands the win it was meant to confirm.
+            # Exempt it: it proposes nothing, it reproduces.
+            _replay = [v for v in grid if _is_config_replay_variant(v)]
+            _proposed = [v for v in grid if not _is_config_replay_variant(v)]
+            _n_before = len(_proposed)
+            _proposed, _wp_dropped = filter_worldplay_grid(_proposed, model_class=_seed_mc)
+            grid = _replay + _proposed
             for _nm, _reason in _wp_dropped:
                 log.warning(
                     "explore: dropping off-spec worldplay variant %s (%s)",
