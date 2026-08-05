@@ -48,6 +48,52 @@ _FORGE_EXPERIMENT_ID = "hyperloom"
 # runtime budget rather than running a non-productive campaign.
 _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
+_FLYDSL_REWRITE_ENV = "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL"
+
+
+def _flydsl_rewrite_enabled() -> bool:
+    """Return whether per-kernel Forge uses cross-language FlyDSL rewrite."""
+    return str(os.environ.get(_FLYDSL_REWRITE_ENV) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _rewrite_op_name(operator_name: str, kernel_path: str) -> str:
+    """Return a Python-identifier-safe logical name for build_<op>_module."""
+    raw = (operator_name or Path(kernel_path).stem).split("::")[-1]
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_")
+    if not normalized:
+        normalized = "operator"
+    if normalized[0].isdigit():
+        normalized = f"op_{normalized}"
+    return normalized
+
+
+def _rewrite_source_kernel(
+    worktree_kernel: str,
+    source_files: list[str] | None,
+    target_functions: list[str] | None,
+) -> str:
+    """Prefer the implementation source that actually defines a target symbol."""
+    candidates = list(dict.fromkeys([*(source_files or []), worktree_kernel]))
+    symbols = [symbol for symbol in (target_functions or []) if symbol]
+    for candidate in candidates:
+        try:
+            text = Path(candidate).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for symbol in symbols:
+            if re.search(
+                rf"\b(?:def|class)\s+{re.escape(symbol)}\b"
+                rf"|\b(?:__global__|__device__)\b[^;{{}}]*"
+                rf"\b{re.escape(symbol)}\s*\(",
+                text,
+            ):
+                return candidate
+    return worktree_kernel
 
 
 def _forge_e2e_pct(candidate: dict) -> float | None:
@@ -1221,6 +1267,230 @@ def _build_driver_adapter(
     )
 
 
+_FLYDSL_REWRITE_DRIVER_TEMPLATE = '''#!/usr/bin/env python3
+"""Generated source-vs-FlyDSL BYOD driver for KernelForge rewrite."""
+import argparse
+import importlib.util
+import math
+import statistics
+import sys
+
+import torch
+
+HARNESS_PATH = {harness_path!r}
+CANDIDATE_PATH = {candidate_path!r}
+BUILDER_SYMBOL = {builder_symbol!r}
+
+_HARNESS = None
+_CANDIDATE = None
+_LAUNCHERS = {{}}
+
+
+def _load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {{path}}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _harness():
+    global _HARNESS
+    if _HARNESS is None:
+        _HARNESS = _load_module(HARNESS_PATH, "_forge_rewrite_harness")
+    return _HARNESS
+
+
+def _candidate():
+    global _CANDIDATE
+    if _CANDIDATE is None:
+        _CANDIDATE = _load_module(CANDIDATE_PATH, "_forge_rewrite_candidate")
+    return _CANDIDATE
+
+
+def _configs():
+    configs = list(getattr(_harness(), "ALL_CONFIGS", []) or [])
+    if not configs:
+        raise RuntimeError("rewrite harness exposes no ALL_CONFIGS")
+    return configs
+
+
+def _inputs(config):
+    return _harness().setup_inputs(config)
+
+
+def _reference(config):
+    inputs = _inputs(config)
+    result = _harness().run_kernel(inputs)
+    return inputs if result is None else result
+
+
+def _launch(config):
+    key = repr(config)
+    if key not in _LAUNCHERS:
+        builder = getattr(_candidate(), BUILDER_SYMBOL)
+        _LAUNCHERS[key] = builder(config)
+    return _LAUNCHERS[key]
+
+
+def _test(config):
+    inputs = _inputs(config)
+    result = _launch(config)(inputs)
+    return inputs if result is None else result
+
+
+def _tensor_leaves(value):
+    if isinstance(value, torch.Tensor):
+        return [value]
+    if isinstance(value, dict):
+        leaves = []
+        for key in sorted(value):
+            leaves.extend(_tensor_leaves(value[key]))
+        return leaves
+    if isinstance(value, (list, tuple)):
+        leaves = []
+        for item in value:
+            leaves.extend(_tensor_leaves(item))
+        return leaves
+    return []
+
+
+def _snr_db(reference, test):
+    refs = _tensor_leaves(reference)
+    tests = _tensor_leaves(test)
+    if len(refs) != len(tests) or not refs:
+        return 100.0 if reference == test else 0.0
+    signal = 0.0
+    noise = 0.0
+    for ref, out in zip(refs, tests):
+        if ref.shape != out.shape:
+            return 0.0
+        ref32 = ref.detach().float()
+        out32 = out.detach().float()
+        signal += torch.sum(ref32 * ref32).item()
+        delta = out32 - ref32
+        noise += torch.sum(delta * delta).item()
+    if noise <= 0.0:
+        return 100.0
+    if signal <= 0.0:
+        return 0.0
+    return 10.0 * math.log10(signal / noise)
+
+
+def _time_ms(fn, warmup, iters):
+    for _ in range(max(1, warmup)):
+        fn()
+    torch.cuda.synchronize()
+    samples = []
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    for _ in range(max(1, iters)):
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        samples.append(start.elapsed_time(end))
+    return statistics.median(samples)
+
+
+def _correctness():
+    snrs = []
+    for config in _configs():
+        reference = _reference(config)
+        test = _test(config)
+        snrs.append(_snr_db(reference, test))
+    minimum = min(snrs)
+    print(f"SNR: {{minimum:.2f}} dB")
+    print(f"allclose: {{minimum >= 30.0}}")
+    return 0 if minimum >= 30.0 else 1
+
+
+def _bench(candidate, warmup, iters):
+    case_times = []
+    for index, config in enumerate(_configs()):
+        fn = (lambda cfg=config: _test(cfg)) if candidate else (
+            lambda cfg=config: _reference(cfg)
+        )
+        elapsed = _time_ms(fn, warmup, iters)
+        case_times.append(elapsed)
+        print(f"case_ms: case_{{index:04d}} {{elapsed:.6f}}")
+    print(f"median_ms: {{statistics.median(case_times):.6f}}")
+    return 0
+
+
+def _profile():
+    config = _configs()[0]
+    for _ in range(3):
+        _test(config)
+    torch.cuda.synchronize()
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bench-mode", action="store_true")
+    parser.add_argument("--ref-bench-mode", action="store_true")
+    parser.add_argument("--profile-run", action="store_true")
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--iters", type=int, default=30)
+    args, _unknown = parser.parse_known_args()
+    if args.profile_run:
+        return _profile()
+    if args.ref_bench_mode:
+        return _bench(False, args.warmup, args.iters)
+    if args.bench_mode:
+        return _bench(True, args.warmup, args.iters)
+    return _correctness()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def _build_flydsl_rewrite_driver(
+    test_command: str,
+    workspace: str,
+    *,
+    op_name: str,
+) -> str | None:
+    """Wrap a generated Hyperloom harness in the rewrite BYOD contract."""
+    try:
+        argv = shlex.split(str(test_command or ""))
+    except ValueError:
+        return None
+    harness_path = next(
+        (
+            Path(token).expanduser().resolve()
+            for token in argv
+            if token.endswith(".py") and Path(token).expanduser().is_file()
+        ),
+        None,
+    )
+    if harness_path is None:
+        return None
+    try:
+        harness_text = harness_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+    required = ("def setup_inputs(", "def run_kernel(", "ALL_CONFIGS")
+    if not all(token in harness_text for token in required):
+        return None
+    candidate_name = f".forge_rewrite_{op_name}_flydsl.py"
+    return _write_generated_driver(
+        workspace,
+        _FLYDSL_REWRITE_DRIVER_TEMPLATE.format(
+            harness_path=str(harness_path),
+            candidate_path=str((Path(workspace) / candidate_name).resolve()),
+            builder_symbol=f"build_{op_name}_module",
+        ),
+    )
+
+
 # Auto-generated Forge-native driver for harness-less candidates. Imports the
 # kernel module by file path, discovers a callable entry, builds inputs from
 # --shape, and emits 'SNR: <v> dB' + 'wall_ms: <v>'.
@@ -2090,6 +2360,23 @@ def _driver_is_compile_only(driver_path: str) -> bool:
     return "compile_only: True" in txt
 
 
+def _driver_supports_flydsl_rewrite(driver_path: str) -> bool:
+    """Require the BYOD source/candidate contract before cross-language rewrite."""
+    try:
+        text = Path(driver_path).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return False
+    return (
+        "--ref-bench-mode" in text
+        and "--bench-mode" in text
+        and re.search(r"\bbuild_[A-Za-z_][A-Za-z0-9_]*_module\b", text)
+        is not None
+    )
+
+
 def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str, timeout_s: int) -> tuple[bool, str]:
     """Run the driver on the UNMODIFIED kernel to confirm the harness is valid.
 
@@ -2542,6 +2829,114 @@ def _validated_forge_best_result(
     }
 
 
+def _validated_flydsl_rewrite_result(
+    payload: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+    experiments_dir: Path,
+) -> dict | None:
+    """Validate the final framework patch published by FlyDSL rewrite."""
+    if not isinstance(payload, dict):
+        return None
+    if (
+        payload.get("success") is not True
+        or payload.get("port_ok") is not True
+        or payload.get("applyback_required") is not True
+        or payload.get("applyback_ok") is not True
+    ):
+        return None
+    if str(payload.get("base_commit") or "").strip() != base_commit:
+        return None
+    best_commit = str(payload.get("best_commit") or "").strip()
+    if not best_commit or best_commit == base_commit:
+        return None
+    exists = _run(
+        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+        timeout=30,
+    )
+    if exists.returncode != 0:
+        return None
+    ancestor = _run(
+        [
+            "git",
+            "-C",
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            best_commit,
+        ],
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        return None
+
+    manifest_text = str(payload.get("best_manifest") or "").strip()
+    if not manifest_text:
+        return None
+    try:
+        root = experiments_dir.resolve()
+        manifest_path = Path(manifest_text).resolve()
+        manifest_path.relative_to(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        return None
+    if str(manifest.get("base_commit") or "").strip() != base_commit:
+        return None
+    if str(manifest.get("commit_hash") or "").strip() != best_commit:
+        return None
+    if manifest.get("correctness_passed") is not True:
+        return None
+    if manifest.get("integration_validation_required") is not True:
+        return None
+    changed_files = manifest.get("changed_files")
+    if not isinstance(changed_files, list) or not all(
+        isinstance(path, str) and path.strip() for path in changed_files
+    ):
+        return None
+
+    try:
+        publication_root = manifest_path.parent.parent.resolve()
+        patch_path = (publication_root / str(manifest.get("patch_path") or "")).resolve()
+        patch_path.relative_to(publication_root)
+        if not patch_path.is_file() or not patch_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).strip():
+            return None
+    except (OSError, ValueError):
+        return None
+
+    def _positive_float(value: object) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+    baseline_ms = _positive_float(payload.get("baseline_ms"))
+    best_ms = _positive_float(payload.get("best_ms"))
+    improved = bool(
+        baseline_ms is not None
+        and best_ms is not None
+        and best_ms < baseline_ms
+    )
+    return {
+        "best_commit": best_commit,
+        "baseline_ms": baseline_ms,
+        "best_ms": best_ms,
+        "improved": improved,
+        "source": "flydsl_rewrite_result",
+        "manifest_path": str(manifest_path),
+        "patch_path": str(patch_path),
+        "changed_files": list(changed_files),
+        "commit_ref": str(payload.get("applyback_commit_ref") or ""),
+    }
+
+
 def _validated_forge_checkpoint(
     checkpoint: dict | None,
     *,
@@ -2726,17 +3121,17 @@ def _run_loop_via_cli(
     framework: str = "",
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
+    rewrite_by_flydsl: bool = False,
 ) -> ForgeLoopOutcome:
-    """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
+    """Run Forge optimization or FlyDSL rewrite as an isolated subprocess.
 
-    Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
-    out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung fellow can no longer freeze the orchestrator: the timeout
-    terminates the whole process group, then returns any persisted best
-    checkpoint for recovery.
+    The default shells out to ``kernel-agents forge-loop``. When the explicit
+    environment-controlled rewrite route is selected, it invokes
+    ``forge-rewrite-by-flydsl`` instead. Both remain hard-killable process-group
+    children; only forge-loop has an interim checkpoint recovery channel.
 
     The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
-    PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
+    PYTHONPATH) and runs the selected ``python -m kernel_agents.cli`` command.
     """
     import json as _json
 
@@ -2771,62 +3166,115 @@ def _run_loop_via_cli(
         # Self-heal aiter's flydsl dep (fly_values rename) so HIP/CK ops aren't
         # disabled before the loop imports aiter.
         _ensure_flydsl_aiter_compat()
-    cmd = [
-        sys.executable,
-        "-m",
-        "kernel_agents.cli",
-        "forge-loop",
-        "--kernel",
-        worktree_kernel,
-        "--driver",
-        driver,
-        "--workspace",
-        workspace,
-        "--shapes-json",
-        _json.dumps(shapes),
-        "--snr-threshold",
-        str(snr_threshold),
-        "--max-iters",
-        str(max_iters),
-        "--max-hours",
-        str(max_hours),
-        "--git-branch",
-        branch,
-        "--gpu-target",
-        gpu_target,
-        "--fellow",
-        fellow,
-        "--experiments-dir",
-        str(experiments_dir),
-        "--experiment-id",
-        _FORGE_EXPERIMENT_ID,
-        "--experience-id",
-        experience_id or experiments_dir.parent.name,
-        "--deadline-unix",
-        str(deadline_unix),
-        "--result-json",
-        str(result_json),
-    ]
-    if program_md_file and Path(program_md_file).exists():
-        cmd += ["--program-md-file", str(program_md_file)]
-    if invocation_spec_file and Path(invocation_spec_file).is_file():
-        cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
-    # Forward the kernel's E2E time share so forge-loop's baseline profile can
-    # project a per-kernel end-to-end optimization potential.
-    if e2e_pct is not None:
-        cmd += ["--e2e-pct", str(e2e_pct)]
-    if operator_name:
-        cmd += ["--operator-name", operator_name]
-    if target_functions:
-        cmd += ["--target-functions", ",".join(target_functions)]
-    if source_files:
-        cmd += ["--source-files", ",".join(source_files)]
-    # Pin the KB framework identity so producer/consumer resolve the same kernel
-    # page across differing workspace layouts. Omitted when unknown, in which
-    # case forge-loop infers it from the kernel path (soft, never fatal).
-    if framework:
-        cmd += ["--framework", framework]
+    if rewrite_by_flydsl:
+        rewrite_source = _rewrite_source_kernel(
+            worktree_kernel,
+            source_files,
+            target_functions,
+        )
+        rewrite_name = _rewrite_op_name(operator_name, rewrite_source)
+        flydsl_kernel_name = f".forge_rewrite_{rewrite_name}_flydsl.py"
+        cmd = [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            "forge-rewrite-by-flydsl",
+            "--source-kernel",
+            rewrite_source,
+            "--driver",
+            driver,
+            "--op-name",
+            rewrite_name,
+            "--workspace",
+            workspace,
+            "--experiments-dir",
+            str(experiments_dir),
+            "--snr-threshold",
+            str(snr_threshold),
+            "--flydsl-kernel-name",
+            flydsl_kernel_name,
+            "--gpu-target",
+            gpu_target,
+            "--max-iters",
+            str(max_iters),
+            "--max-hours",
+            str(max_hours),
+            "--git-branch",
+            branch,
+            "--deadline-unix",
+            str(deadline_unix),
+            "--result-json",
+            str(result_json),
+        ]
+        if target_functions:
+            cmd += ["--target-functions", ",".join(target_functions)]
+        if framework:
+            cmd += ["--framework", framework]
+    else:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kernel_agents.cli",
+            "forge-loop",
+            "--kernel",
+            worktree_kernel,
+            "--driver",
+            driver,
+            "--workspace",
+            workspace,
+            "--shapes-json",
+            _json.dumps(shapes),
+            "--snr-threshold",
+            str(snr_threshold),
+            "--max-iters",
+            str(max_iters),
+            "--max-hours",
+            str(max_hours),
+            "--git-branch",
+            branch,
+            "--gpu-target",
+            gpu_target,
+            "--fellow",
+            fellow,
+            "--experiments-dir",
+            str(experiments_dir),
+            "--experiment-id",
+            _FORGE_EXPERIMENT_ID,
+            "--experience-id",
+            experience_id or experiments_dir.parent.name,
+            "--deadline-unix",
+            str(deadline_unix),
+            "--result-json",
+            str(result_json),
+        ]
+        if program_md_file and Path(program_md_file).exists():
+            cmd += ["--program-md-file", str(program_md_file)]
+        if invocation_spec_file and Path(invocation_spec_file).is_file():
+            cmd += [
+                "--invocation-spec-file",
+                str(Path(invocation_spec_file).resolve()),
+            ]
+        # Forward the kernel's E2E time share so forge-loop's baseline profile can
+        # project a per-kernel end-to-end optimization potential.
+        if e2e_pct is not None:
+            cmd += ["--e2e-pct", str(e2e_pct)]
+        if operator_name:
+            cmd += ["--operator-name", operator_name]
+        if target_functions:
+            cmd += ["--target-functions", ",".join(target_functions)]
+        if source_files:
+            cmd += ["--source-files", ",".join(source_files)]
+        # Pin the KB framework identity so producer/consumer resolve the same kernel
+        # page across differing workspace layouts. Omitted when unknown, in which
+        # case forge-loop infers it from the kernel path (soft, never fatal).
+        if framework:
+            cmd += ["--framework", framework]
 
+    engine_name = (
+        "forge-rewrite-by-flydsl"
+        if rewrite_by_flydsl
+        else "forge-loop"
+    )
     loop_exc = None
     out = ""
     timed_out = False
@@ -2849,19 +3297,19 @@ def _run_loop_via_cli(
         out = (stdout or "") + "\n" + (stderr or "")
         if timed_out:
             loop_exc = RuntimeError(
-                f"forge-loop exceeded absolute deadline after {timeout_s}s"
+                f"{engine_name} exceeded absolute deadline after {timeout_s}s"
             )
         if proc.returncode != 0:
             if loop_exc is None:
                 loop_exc = RuntimeError(
-                    f"forge-loop exited rc={proc.returncode}"
+                    f"{engine_name} exited rc={proc.returncode}"
                 )
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
 
     try:
         with open(forge_log, "a") as f:
-            f.write("\n=== forge-loop (cli) stdout ===\n")
+            f.write(f"\n=== {engine_name} (cli) stdout ===\n")
             f.write(out)
             if loop_exc:
                 f.write(f"\n=== forge-loop exception ===\n{loop_exc}\n")
@@ -2879,9 +3327,14 @@ def _run_loop_via_cli(
             parsed = _json.loads(result_json.read_text())
     except Exception:
         parsed = None
-    if parsed is None and "__FORGE_RESULT__" in out:
+    sentinel = (
+        "__FORGE_REWRITE_RESULT__"
+        if rewrite_by_flydsl
+        else "__FORGE_RESULT__"
+    )
+    if parsed is None and sentinel in out:
         try:
-            seg = out.split("__FORGE_RESULT__")[1]
+            seg = out.split(sentinel)[1]
             parsed = _json.loads(seg)
         except Exception:
             parsed = None
@@ -2904,9 +3357,13 @@ def _run_loop_via_cli(
             timed_out = True
             if loop_exc is None:
                 loop_exc = RuntimeError(
-                    "forge-loop reached its graceful absolute deadline"
+                    f"{engine_name} reached its graceful absolute deadline"
                 )
-    checkpoint = _read_forge_checkpoint(experiments_dir)
+    checkpoint = (
+        None
+        if rewrite_by_flydsl
+        else _read_forge_checkpoint(experiments_dir)
+    )
     return ForgeLoopOutcome(
         baseline_ms=baseline_ms,
         best_ms=best_ms,
@@ -3087,6 +3544,7 @@ def submit(
     """
     started = time.time()
     candidate = candidate or {}
+    rewrite_by_flydsl = _flydsl_rewrite_enabled()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3193,6 +3651,7 @@ def submit(
         return result
 
     driver = ""
+    rewrite_commit_ref = ""
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -3222,7 +3681,21 @@ def submit(
         # a missing driver path. Its task-preparer owns the final driver-authoring
         # fallback and will either create a conforming driver or fail explicitly.
         driver_from_adapter = False
-        if requires_multi_case_driver:
+        rewrite_name = _rewrite_op_name(logical_operator, worktree_kernel)
+        if rewrite_by_flydsl and test_command:
+            driver = _build_flydsl_rewrite_driver(
+                test_command,
+                workspace,
+                op_name=rewrite_name,
+            ) or ""
+            if driver:
+                log.info(
+                    "forge rewrite driver: generated BYOD adapter from %s",
+                    test_command,
+                )
+        if driver:
+            pass
+        elif requires_multi_case_driver:
             if not _invocation_spec_covers_cases(
                 invocation_spec_file,
                 grouped_cases,
@@ -3304,6 +3777,18 @@ def submit(
                 source_type,
                 kernel_kind or "-",
                 (candidate or {}).get("operation", ""),
+            )
+        if rewrite_by_flydsl and not _driver_supports_flydsl_rewrite(driver):
+            return _normalized(
+                1,
+                "",
+                (
+                    "forge rewrite requires a BYOD driver that implements "
+                    "--ref-bench-mode, --bench-mode, and imports a "
+                    "build_<op>_module FlyDSL candidate; the prepared Hyperloom "
+                    "driver does not satisfy that contract"
+                ),
+                time.time() - started,
             )
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
@@ -3393,9 +3878,14 @@ def submit(
             framework=source_framework,
             target_functions=implementation_symbols,
             source_files=implementation_sources,
+            rewrite_by_flydsl=rewrite_by_flydsl,
         )
-        # keep/revert is decided from forge's own published best, in descending
-        # order of trust:
+        # Same-language forge-loop recovery uses the following trust order.
+        # FlyDSL rewrite instead requires its final apply-back manifest; an inner
+        # forge-loop checkpoint describes only the standalone FlyDSL candidate
+        # and must never be exported as a framework patch.
+        #
+        # Same-language trust order:
         #   1. best_result.json -- rewritten atomically on every KEEP, gated on
         #      correctness, and pointing at a commit already in the history. It
         #      is current whether the loop finished, exhausted its soft budget,
@@ -3404,30 +3894,73 @@ def submit(
         #      --experiments-dir and only as fresh as the last KEEP callback.
         #   3. the final-result sidecar / stdout sentinel -- only produced on a
         #      graceful return, and never sufficient on its own after a kill.
-        raw_published = _read_forge_best_result(workspace)
-        published = _validated_forge_best_result(
-            raw_published,
-            workspace=workspace,
-            base_commit=base_commit,
-        )
-        checkpoint_recovery = _validated_forge_checkpoint(
-            loop_outcome.checkpoint,
-            workspace=workspace,
-            base_commit=base_commit,
-            shapes=shapes,
-        )
-        warm_start_recovery = _validated_warm_start_result(
-            loop_outcome.structured_result,
-            workspace=workspace,
-            base_commit=base_commit,
-        )
-        recovery = published or checkpoint_recovery or warm_start_recovery
-        if loop_outcome.error is not None and recovery is None:
-            failure_detail = (
-                "forge cli loop timed out without recoverable checkpoint"
-                if loop_outcome.timed_out
-                else "forge cli loop failed without validated recovery"
+        raw_published = None
+        if rewrite_by_flydsl:
+            published = None
+            checkpoint_recovery = None
+            warm_start_recovery = None
+            recovery = _validated_flydsl_rewrite_result(
+                loop_outcome.structured_result,
+                workspace=workspace,
+                base_commit=base_commit,
+                experiments_dir=experiments_dir,
             )
+        else:
+            raw_published = _read_forge_best_result(workspace)
+            published = _validated_forge_best_result(
+                raw_published,
+                workspace=workspace,
+                base_commit=base_commit,
+            )
+            checkpoint_recovery = _validated_forge_checkpoint(
+                loop_outcome.checkpoint,
+                workspace=workspace,
+                base_commit=base_commit,
+                shapes=shapes,
+            )
+            warm_start_recovery = _validated_warm_start_result(
+                loop_outcome.structured_result,
+                workspace=workspace,
+                base_commit=base_commit,
+            )
+            recovery = published or checkpoint_recovery or warm_start_recovery
+        if rewrite_by_flydsl and recovery is None:
+            failure_detail = (
+                "forge rewrite timed out before publishing an apply-back patch"
+                if loop_outcome.timed_out
+                else "forge rewrite returned without a validated apply-back patch"
+            )
+            failed = _normalized(
+                1,
+                "",
+                (
+                    f"{failure_detail}: {loop_outcome.error}"
+                    if loop_outcome.error is not None
+                    else failure_detail
+                ),
+                time.time() - started,
+            )
+            failed["timed_out"] = loop_outcome.timed_out
+            failed["salvaged"] = False
+            failed["output_dir"] = str(output_dir)
+            if loop_outcome.structured_result is not None:
+                failed["forge_result"] = loop_outcome.structured_result
+            return failed
+        if loop_outcome.error is not None and recovery is None:
+            if rewrite_by_flydsl and loop_outcome.timed_out:
+                failure_detail = (
+                    "forge rewrite timed out before publishing an apply-back patch"
+                )
+            elif rewrite_by_flydsl:
+                failure_detail = (
+                    "forge rewrite failed without a validated apply-back patch"
+                )
+            elif loop_outcome.timed_out:
+                failure_detail = (
+                    "forge cli loop timed out without recoverable checkpoint"
+                )
+            else:
+                failure_detail = "forge cli loop failed without validated recovery"
             failed = _normalized(
                 1,
                 "",
@@ -3471,6 +4004,7 @@ def submit(
                 and float(best_ms) < float(baseline_ms)
             )
             best_commit = recovery["best_commit"]
+            rewrite_commit_ref = str(recovery.get("commit_ref") or "")
         salvaged = bool(loop_outcome.error and recovery is not None)
         if published is not None and checkpoint_recovery is not None:
             # Both channels are validated; disagreement means one is stale. The
@@ -3508,8 +4042,9 @@ def submit(
         gbrain_active = bool(
             os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
         )
+        mode_label = "flydsl-rewrite" if rewrite_by_flydsl else "forge-loop"
         msg = (
-            f"forge done (cli): pristine_baseline={baseline_ms} "
+            f"forge done ({mode_label}): pristine_baseline={baseline_ms} "
             f"search_start={search_start_ms} best={best_ms} "
             f"improved={improved} improved_during_search={improved_during_search} "
             f"fellow={fellow} gpu={gpu_target} "
@@ -3566,17 +4101,27 @@ def submit(
         res["implementation_sources"] = implementation_sources
         res["kernel_kind"] = kernel_kind
         res["target_functions"] = implementation_symbols
+        res["rewrite_by_flydsl"] = rewrite_by_flydsl
         if recovery is not None:
             res["best_commit"] = recovery["best_commit"]
-            res["checkpoint_path"] = str(
-                experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
-            )
+            if rewrite_by_flydsl:
+                res["best_manifest"] = recovery.get("manifest_path", "")
+                res["applyback_patch"] = recovery.get("patch_path", "")
+            else:
+                res["checkpoint_path"] = str(
+                    experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+                )
         return res
     except Exception as exc:  # noqa: BLE001
         return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
     finally:
         # Never let workspace cleanup failure swallow the forge result dict.
         try:
+            if rewrite_commit_ref:
+                _run(
+                    ["git", "-C", workspace, "update-ref", "-d", rewrite_commit_ref],
+                    timeout=30,
+                )
             _finalize_forge_workspace(
                 inplace=inplace,
                 restore_info=restore_info,

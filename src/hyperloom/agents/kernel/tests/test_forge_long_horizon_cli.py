@@ -631,6 +631,215 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     assert 100.0 < captured["communicate_timeout"] <= 120.0
 
 
+def test_cli_invocation_switches_to_flydsl_rewrite_contract(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    wrapper = workspace / "wrapper.py"
+    wrapper.write_text("from impl import kernel_impl\n")
+    implementation = workspace / "impl.py"
+    implementation.write_text("def kernel_impl(x):\n    return x\n")
+    driver = workspace / "driver.py"
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    captured = {}
+
+    class FakeProcess:
+        pid = 43210
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            payload = {
+                "baseline_ms": 2.0,
+                "best_ms": 1.0,
+                "improved": True,
+                "success": True,
+            }
+            return (
+                f"__FORGE_REWRITE_RESULT__{json.dumps(payload)}"
+                "__FORGE_REWRITE_RESULT__",
+                "",
+            )
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    outcome = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(wrapper),
+        driver=str(driver),
+        workspace=str(workspace),
+        shapes={"primary": {"M": 128}},
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/kernel",
+        gpu_target="gfx950",
+        fellow="triton-fellow",
+        program_md_file="program.md",
+        invocation_spec_file="invocation.json",
+        experiments_dir=experiments,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=120,
+        deadline_unix=time.time() + 120,
+        operator_name="vllm::logical-op",
+        framework="vllm",
+        target_functions=["kernel_impl"],
+        source_files=[str(wrapper), str(implementation)],
+        rewrite_by_flydsl=True,
+    )
+
+    command = captured["command"]
+    assert command[:4] == [
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        "forge-rewrite-by-flydsl",
+    ]
+    expected = {
+        "--source-kernel": str(implementation),
+        "--driver": str(driver),
+        "--op-name": "logical_op",
+        "--workspace": str(workspace),
+        "--experiments-dir": str(experiments),
+        "--target-functions": "kernel_impl",
+        "--framework": "vllm",
+        "--git-branch": "forge/session/kernel",
+    }
+    for flag, value in expected.items():
+        assert command[command.index(flag) + 1] == value
+    assert "--kernel" not in command
+    assert "--fellow" not in command
+    assert "--shapes-json" not in command
+    assert outcome.structured_result["success"] is True
+    assert outcome.checkpoint is None
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_flydsl_rewrite_switch_is_explicit_and_default_off(
+    monkeypatch,
+    value,
+):
+    monkeypatch.delenv(
+        "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL",
+        raising=False,
+    )
+    assert forge_submit._flydsl_rewrite_enabled() is False
+    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", value)
+    assert forge_submit._flydsl_rewrite_enabled() is True
+
+
+def test_flydsl_rewrite_driver_contract_fails_closed(tmp_path):
+    ordinary = tmp_path / "ordinary.py"
+    ordinary.write_text(
+        "# --bench-mode\n"
+        "print('allclose: True')\n"
+    )
+    rewrite = tmp_path / "rewrite.py"
+    rewrite.write_text(
+        "# --ref-bench-mode --bench-mode\n"
+        "from kernel import build_softmax_module\n"
+    )
+
+    assert forge_submit._driver_supports_flydsl_rewrite(str(ordinary)) is False
+    assert forge_submit._driver_supports_flydsl_rewrite(str(rewrite)) is True
+
+
+def test_generated_harness_becomes_flydsl_rewrite_byod_driver(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = tmp_path / "generated_harness.py"
+    harness.write_text(
+        "ALL_CONFIGS = [(1,)]\n"
+        "def setup_inputs(config):\n"
+        "    return {'x': config}\n"
+        "def run_kernel(inputs):\n"
+        "    return inputs['x']\n"
+    )
+
+    driver = forge_submit._build_flydsl_rewrite_driver(
+        f"python {harness} --correctness",
+        str(workspace),
+        op_name="softmax",
+    )
+    assert driver is not None
+    text = Path(driver).read_text()
+    compile(text, driver, "exec")
+    assert str(harness.resolve()) in text
+    assert str((workspace / ".forge_rewrite_softmax_flydsl.py").resolve()) in text
+    assert "build_softmax_module" in text
+    assert forge_submit._driver_supports_flydsl_rewrite(driver) is True
+
+
+def test_submit_routes_enabled_forge_attempt_to_flydsl_rewrite(
+    tmp_path,
+    monkeypatch,
+):
+    repo, source = _make_repo(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("# Rewrite\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "# --ref-bench-mode --bench-mode\n"
+        "from kernel import build_softmax_module\n"
+        "print('allclose: True')\n"
+    )
+    captured = {}
+
+    _stub_submit_environment(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", "1")
+    monkeypatch.setattr(
+        forge_submit,
+        "_autogen_forge_driver",
+        lambda *_args, **_kwargs: str(driver),
+    )
+    monkeypatch.setattr(
+        forge_submit,
+        "_resolve_gpu_target",
+        lambda _candidate: "gfx950",
+    )
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=None,
+            best_ms=None,
+            improved=False,
+            output="rewrite failed",
+            error=RuntimeError("expected test stop"),
+            timed_out=False,
+            checkpoint=None,
+            structured_result={"success": False, "port_ok": False},
+        )
+
+    monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_run)
+    result = forge_submit.submit(
+        source_file=str(source),
+        prompt_file=prompt,
+        output_dir=tmp_path / "attempt",
+        source_type="triton",
+        candidate={
+            "operation": "vllm::softmax",
+            "kernel_sources": [str(source)],
+            "platform": "mi355x",
+        },
+        timeout_s=3600,
+        kernel_repo=str(repo),
+    )
+
+    assert captured["rewrite_by_flydsl"] is True
+    assert result["returncode"] == 1
+    assert "validated apply-back patch" in result["stderr_tail"]
+
+
 def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
     tmp_path,
     monkeypatch,
@@ -1120,6 +1329,68 @@ def test_checkpoint_naming_an_unavailable_commit_is_rejected(tmp_path):
 
     assert _git(workspace, "rev-parse", "HEAD") == base_commit
     assert Path(kernel).read_text() == "BASELINE\n"
+
+
+def test_flydsl_rewrite_result_requires_valid_applyback_manifest(
+    tmp_path,
+):
+    repo, source = _make_repo(tmp_path)
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    source.write_text("FLYDSL_FRAMEWORK_INTEGRATION\n")
+    _git(repo, "add", "kernel.py")
+    _git(repo, "commit", "-m", "apply back flydsl")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    version = experiments / "rewrite_applyback" / "best" / "iter_000"
+    version.mkdir(parents=True)
+    patch = version / "forge.patch"
+    patch.write_text(_git(repo, "diff", base_commit, best_commit) + "\n")
+    manifest_path = experiments / "rewrite_applyback" / "best" / "manifest.json"
+    manifest = {
+        "schema_version": 1,
+        "base_commit": base_commit,
+        "commit_hash": best_commit,
+        "correctness_passed": True,
+        "integration_validation_required": True,
+        "changed_files": ["kernel.py"],
+        "patch_path": "best/iter_000/forge.patch",
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    payload = {
+        "success": True,
+        "port_ok": True,
+        "applyback_required": True,
+        "applyback_ok": True,
+        "base_commit": base_commit,
+        "best_commit": best_commit,
+        "best_manifest": str(manifest_path),
+        "baseline_ms": 2.0,
+        "best_ms": 1.0,
+        "applyback_commit_ref": "refs/forge-rewrite/applyback/op",
+    }
+
+    recovered = forge_submit._validated_flydsl_rewrite_result(
+        payload,
+        workspace=str(repo),
+        base_commit=base_commit,
+        experiments_dir=experiments,
+    )
+    assert recovered is not None
+    assert recovered["best_commit"] == best_commit
+    assert recovered["patch_path"] == str(patch)
+    assert recovered["improved"] is True
+
+    payload["applyback_ok"] = False
+    assert (
+        forge_submit._validated_flydsl_rewrite_result(
+            payload,
+            workspace=str(repo),
+            base_commit=base_commit,
+            experiments_dir=experiments,
+        )
+        is None
+    )
 
 
 def test_submit_timeout_salvages_only_the_validated_best_commit(
