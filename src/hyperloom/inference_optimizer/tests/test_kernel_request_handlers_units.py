@@ -861,6 +861,74 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
 
     @pytest.mark.asyncio
+    async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(
+        self, tmp_path, monkeypatch
+    ):
+        """vLLM block-FP8 must tune the device-side traced shapes.
+
+        Decode steps replay inside a CUDA Graph, so they emit no Kineto op
+        events and the block-FP8 profile capture can only ever report prefill M
+        (it reported M=2095 alone on the session that then lost 18.45% E2E).
+        The TraceLens candidates carry the decode M, so they win and the capture
+        pass is not needed at all.
+        """
+        candidates = tmp_path / "kernel_candidates.json"
+        candidates.write_text(
+            json.dumps(
+                {
+                    "hot_kernels": [
+                        {
+                            "name": "aiter::gemm_a8w8_blockscale_ck",
+                            "input_shapes": [
+                                {"call_num": 1440, "shape": "(64,3072) fp8"},
+                                {"call_num": 1440, "shape": "(10240,3072) fp8"},
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path="/models/qwen",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            last_trace_analyze={"candidates_path": str(candidates)},
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_profile_shapes_are_fresh", lambda _state: True)
+
+        captured = {"ran": False}
+
+        async def _record_capture(**_kwargs):
+            captured["ran"] = True
+            return {"status": "failed"}
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", _record_capture)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 1, "", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        # task_id keeps the workspace deterministic (it otherwise falls back to
+        # a wall-clock suffix, which the assertion below could not re-derive).
+        payload = {"precision": "fp8", "quant_type": "blockscale", "task_id": "gemm-1"}
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        assert captured["ran"] is False, "profile capture ran despite traced shapes"
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        written = json.loads(
+            (workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8")
+        )
+        shapes = json.loads(Path(written["shapes_json"]).read_text(encoding="utf-8"))
+        assert shapes == [{"M": 64, "N": 10240, "K": 3072}]
+
+    @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
         """Forge runs must carry ``engine='forge'`` so the breakdown attributes them correctly."""
         state = SharedState(

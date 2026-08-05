@@ -3103,6 +3103,27 @@ async def _run_forge_gemm_tuning(
         dry_run=bool(payload.get("dry_run")),
     )
     if block_fp8_profile_capture:
+        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto
+        # *op* events, so every profile-derived block-FP8 shape set structurally
+        # carries prefill M only -- measured on a real capture, the decode-only
+        # trace split yields zero block-FP8 events while the prefill splits yield
+        # M=2095. Tuning that alone optimizes an operating point the workload
+        # barely uses. TraceLens candidates are built from the device kernel
+        # timeline, which does see through the graph and carries the decode M
+        # that dominates throughput, so prefer them. ``require_fresh_profile``
+        # keeps the vLLM rule that shapes must be workload-matched, and
+        # ``precision`` keeps BF16 heads out of an FP8 tuner's input.
+        traced_shapes = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+            precision=precision,
+        )
+        if traced_shapes:
+            shapes_json = traced_shapes
+            untuned_csv = ""
+            block_fp8_profile_capture = False
+    if block_fp8_profile_capture:
         shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
             state,
             workspace=workspace,
