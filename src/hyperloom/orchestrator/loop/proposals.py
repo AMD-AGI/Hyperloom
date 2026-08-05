@@ -364,7 +364,8 @@ class ProposalsCollaborator:
                 "variant_timeout_safety_margin",
                 safety_margin_override,
             )
-        # Thread the persisted explore_search ledger so ExploreExecutor's dedup has cross-turn memory.
+        # Thread the persisted explore_search ledger so the executor seeds its
+        # tested history; it is evidence only, not an eligibility gate.
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)

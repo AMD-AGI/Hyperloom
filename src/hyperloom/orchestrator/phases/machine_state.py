@@ -1582,9 +1582,9 @@ def enablement_engaged(state: Any) -> bool:
     if resolve_enablement_mode(state) == ENABLEMENT_MODE_OFF:
         return False
     return bool(
-        (getattr(state, "enablement_kept_patches", None) or [])
-        or getattr(state, "enablement_dispatched", False)
-        or int(getattr(state, "enablement_attempts", 0) or 0) > 0
+        (getattr(state.enablement, "kept_patches", None) or [])
+        or getattr(state.enablement, "inflight_task_id", "")
+        or int(getattr(state.enablement, "attempts", 0) or 0) > 0
     )
 
 

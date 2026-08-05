@@ -2302,7 +2302,6 @@ class EnablementBreakdown(TypedDict, total=False):
         stall_streak: Consecutive no-progress rounds toward ``enablement_stalled``.
         inflight_task_id: Specialist task id of the in-flight round.
         last_specialist_task_id: Specialist task id of the most recent round.
-        dispatch_tick: Coordinator tick the in-flight round was dispatched on.
         revalidation_task_id: TaskRegistry id of the tracked revalidation task.
         revalidation_generation: Revalidation window counter (idempotency).
         launch_log_excerpt: Tail of the captured boot failure text that triggered
@@ -2346,7 +2345,6 @@ class EnablementBreakdown(TypedDict, total=False):
     stall_streak: int
     inflight_task_id: str
     last_specialist_task_id: str
-    dispatch_tick: int
     revalidation_task_id: str
     revalidation_generation: int
     launch_log_excerpt: str
