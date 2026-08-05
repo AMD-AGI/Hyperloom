@@ -102,8 +102,8 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     tmp_path,
     monkeypatch,
 ):
-    venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
-    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
     akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
@@ -138,6 +138,15 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     manifest = json.loads(Path(result["manifest_path"]).read_text())
     assert manifest["status"] == "applied"
     assert manifest["strategy"]["rebuild_mode"] == "runtime_jit"
+    assert manifest["strategy"]["jit_build_dir"] == str(
+        aiter_pkg / "jit" / "build"
+    )
+
+    revert = akp.revert_kernel_patch(result["manifest_path"])
+
+    assert revert["status"] == "ok"
+    assert target.read_text(encoding="utf-8").endswith("int x = 1; }\n")
+    assert (aiter_pkg / "jit" / "build" / "stale.so").is_file()
 
 
 def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
@@ -145,8 +154,8 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     tmp_path,
     monkeypatch,
 ):
-    venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
-    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
     site = aiter_pkg.parent
     akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
@@ -187,3 +196,97 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     assert result["rebuild"]["mode"] == "runtime_jit"
     assert result["jit_build_backup"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == "TILE = 64\n"
+
+
+def test_runtime_jit_uses_target_root_not_importable_aiter(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, target_aiter = _make_isolated_aiter(tmp_path / "target")
+    import_aiter = (
+        tmp_path
+        / "imported"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "aiter"
+    )
+    imported_build = import_aiter / "jit" / "build"
+    imported_build.mkdir(parents=True)
+    (imported_build / "unrelated.so").write_text("unrelated", encoding="utf-8")
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.setattr(
+        akp.importlib.util,
+        "find_spec",
+        lambda name: types.SimpleNamespace(
+            submodule_search_locations=[str(import_aiter)]
+        ),
+    )
+    site = target_aiter.parent
+    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    optimized = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n'
+    )
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "v1_forge.cu"
+    patch.write_text(optimized, encoding="utf-8")
+    (target_aiter / "jit" / "build" / "target.so").write_text(
+        "target",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k003",
+    )
+
+    assert result["status"] == "ok", result
+    assert result["jit_build_backup"]["src"] == str(
+        target_aiter / "jit" / "build"
+    )
+    assert not (target_aiter / "jit" / "build").exists()
+    assert (imported_build / "unrelated.so").is_file()
+
+
+def test_runtime_jit_rejects_unverified_cache_invalidation(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "v1_forge.cu"
+    patch.write_text(
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        akp,
+        "_invalidate_aiter_jit_build",
+        lambda *args, **kwargs: {
+            "status": "skipped",
+            "reason": "aiter package not importable",
+        },
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k003",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "aiter_jit_invalidation_failed"
+    assert target.read_text(encoding="utf-8") == original

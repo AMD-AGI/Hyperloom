@@ -603,7 +603,7 @@ def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_p
     res = apply_tool._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
-        jit_build_dir_override=jit_build,
+        jit_build_dir=jit_build,
     )
 
     assert res["status"] == "ok", res

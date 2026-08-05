@@ -841,14 +841,15 @@ def _invalidate_aiter_jit_build(
     target_file: Path,
     backup_dir: Path,
     *,
-    jit_build_dir_override: Path | None = None,
+    jit_build_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs.
 
     Args:
         target_file: The file being patched (gates the operation).
         backup_dir: Directory to move the ``jit/build`` tree into.
-        jit_build_dir_override: Test-only override for the jit/build location.
+        jit_build_dir: Authoritative JIT build path from the apply strategy.
+            Falls back to runtime discovery for non-runtime-JIT strategies.
 
     Returns:
         A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``
@@ -856,11 +857,15 @@ def _invalidate_aiter_jit_build(
     """
     if not _target_is_in_aiter_csrc(target_file):
         return {"status": "skipped", "reason": "target not under aiter/csrc/"}
-    jit_build = jit_build_dir_override or _aiter_jit_build_dir()
+    jit_build = jit_build_dir or _aiter_jit_build_dir()
     if jit_build is None:
         return {"status": "skipped", "reason": "aiter package not importable"}
     if not jit_build.exists():
-        return {"status": "skipped", "reason": "aiter jit/build/ does not exist"}
+        return {
+            "status": "clean",
+            "reason": "aiter jit/build/ does not exist",
+            "src": str(jit_build),
+        }
     try:
         is_empty = not any(jit_build.iterdir())
     except OSError as exc:
@@ -870,7 +875,11 @@ def _invalidate_aiter_jit_build(
             "src": str(jit_build),
         }
     if is_empty:
-        return {"status": "skipped", "reason": "aiter jit/build/ is empty"}
+        return {
+            "status": "clean",
+            "reason": "aiter jit/build/ is empty",
+            "src": str(jit_build),
+        }
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup_path = backup_dir / "jit_build"
     if backup_path.exists():
@@ -896,7 +905,27 @@ def _invalidate_aiter_jit_build(
     }
 
 
-def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]:
+def _trusted_installed_aiter_jit_build_dir(path: Path) -> bool:
+    """Validate a strategy-persisted installed AITER JIT destination."""
+    resolved = path.resolve()
+    runtime_root = _installed_aiter_runtime_root(resolved)
+    if (
+        runtime_root is None
+        or resolved != (runtime_root / "aiter" / "jit" / "build").resolve()
+    ):
+        return False
+    return any(
+        Path(raw.rstrip("/")).is_absolute()
+        and _within_root(resolved, Path(raw.rstrip("/")))
+        for raw in known_target_roots()
+    )
+
+
+def _restore_aiter_jit_build(
+    jit_build_backup: dict[str, Any],
+    *,
+    expected_jit_build_dir: str | Path | None = None,
+) -> dict[str, Any]:
     """Restore an aiter ``jit/build`` backup, reversing the invalidation.
 
     Any regenerated ``jit/build`` directory is removed first.
@@ -904,24 +933,34 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
     Args:
         jit_build_backup: The backup record returned by
             :func:`_invalidate_aiter_jit_build`.
+        expected_jit_build_dir: Apply-time strategy path. Runtime-JIT restores
+            use this instead of rediscovering aiter from the current process.
 
     Returns:
         A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
     """
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
-    src = Path(jit_build_backup.get("src", ""))
-    backup_path = Path(jit_build_backup.get("backup_path", ""))
-    if not src or not backup_path:
+    src_raw = str(jit_build_backup.get("src") or "").strip()
+    backup_raw = str(jit_build_backup.get("backup_path") or "").strip()
+    if not src_raw or not backup_raw:
         return {"status": "skipped", "reason": "incomplete backup record"}
+    src = Path(src_raw)
+    backup_path = Path(backup_raw)
     # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
-    # Only the importable aiter jit/build dir is a legitimate destination.
-    expected = _aiter_jit_build_dir()
-    if expected is None or not _within_root(src, expected):
+    # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
+    expected_raw = str(expected_jit_build_dir or "").strip()
+    expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
+    if expected_raw and not _trusted_installed_aiter_jit_build_dir(expected):
+        return {
+            "status": "skipped",
+            "reason": f"untrusted strategy jit/build dir: {expected}",
+        }
+    if expected is None or src.resolve() != expected.resolve():
         log.warning(
             "revert: skipping jit/build restore; recorded src %s does not match the "
-            "importable aiter jit/build dir %s (aiter reinstalled/relocated, cross-process "
-            "resume, or a forged manifest). jit/build left invalidated; next import re-JITs.",
+            "strategy/import aiter jit/build dir %s (aiter reinstalled/relocated "
+            "or a forged manifest). jit/build left invalidated; next import re-JITs.",
             src,
             expected,
         )
@@ -1266,7 +1305,8 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     Returns:
         dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
             (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
-            ``artifact_roots`` (list[Path]).
+            ``artifact_roots`` (list[Path]). Runtime-JIT strategies also carry
+            the authoritative ``jit_build_dir``.
 
     Raises:
         ValueError: When the target is outside the known roots and
@@ -1284,6 +1324,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     rebuild_mode = _REBUILD_MODE_NONE
     rebuild_command: list[str] = []
     artifact_roots: list[Path] = []
+    jit_build_dir = ""
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
     if "/sgl-workspace/aiter/" in lower:
@@ -1309,6 +1350,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     elif installed_aiter_root:
         root = installed_aiter_root
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        jit_build_dir = str(installed_aiter_root / "aiter" / "jit" / "build")
         artifact_roots = [
             package
             for package in (
@@ -1327,6 +1369,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         rebuild_mode = _REBUILD_MODE_NONE
         rebuild_command = []
         artifact_roots = []
+        jit_build_dir = ""
     elif compiled and root is None:
         root = target_file.parent
 
@@ -1336,6 +1379,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         "rebuild_mode": rebuild_mode,
         "rebuild_command": rebuild_command,
         "artifact_roots": artifact_roots,
+        "jit_build_dir": jit_build_dir,
     }
 
 
@@ -1435,6 +1479,30 @@ def _run_strategy_rebuild(
             "cwd": str(cwd),
         }
     return _run_rebuild([], cwd, timeout_sec)
+
+
+def _runtime_jit_invalidation_error(
+    strategy: dict[str, Any],
+    result: dict[str, Any],
+) -> str:
+    """Return why a runtime-JIT strategy cannot safely defer compilation."""
+    if strategy.get("rebuild_mode") != _REBUILD_MODE_RUNTIME_JIT:
+        return ""
+    expected_raw = str(strategy.get("jit_build_dir") or "").strip()
+    actual_raw = str(result.get("src") or "").strip()
+    if not expected_raw:
+        return "runtime-JIT strategy has no authoritative jit_build_dir"
+    if not actual_raw or Path(actual_raw).resolve() != Path(expected_raw).resolve():
+        return (
+            "JIT invalidation did not inspect the strategy-pinned build dir "
+            f"{expected_raw}"
+        )
+    if result.get("status") not in {"ok", "clean"}:
+        return (
+            "strategy-pinned JIT build dir was not invalidated or proven clean: "
+            f"{result.get('reason') or result.get('error') or result.get('status')}"
+        )
+    return ""
 
 
 def _rebuild_completed(result: dict[str, Any]) -> bool:
@@ -1550,7 +1618,18 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") == "ok":
-        jit_build_restore = _restore_aiter_jit_build(jit_build_backup)
+        strategy = manifest.get("strategy") or {}
+        expected_jit_build_dir = str(
+            strategy.get("jit_build_dir") or ""
+        ).strip()
+        if not expected_jit_build_dir:
+            snapshot_jit_dirs = list(strategy.get("jit_build_dirs") or [])
+            if len(snapshot_jit_dirs) == 1:
+                expected_jit_build_dir = str(snapshot_jit_dirs[0])
+        jit_build_restore = _restore_aiter_jit_build(
+            jit_build_backup,
+            expected_jit_build_dir=expected_jit_build_dir or None,
+        )
         manifest["jit_build_restore"] = jit_build_restore
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
@@ -1755,6 +1834,7 @@ def apply_kernel_patch(
             "compiled": strategy["compiled"],
             "root": strategy["root"],
             "rebuild_mode": strategy["rebuild_mode"],
+            "jit_build_dir": strategy["jit_build_dir"],
         },
         "created_at": utc_now(),
     }
@@ -1836,27 +1916,39 @@ def apply_kernel_patch(
     }
     if strategy["compiled"] and not skip_rebuild:
         # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
-        jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
-        if jit_build_backup.get("status") == "failed":
-            # Refuse to rebuild against an inconsistent jit cache: restore and bail.
-            try:
-                shutil.copy2(source_backup["backup_path"], target)
-            except OSError:
-                pass
-            return {
-                "status": "failed",
-                "error_class": "aiter_jit_invalidation_failed",
-                "error": (f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error')}"),
-                "manifest_path": str(manifest_path),
-                "jit_build_backup": jit_build_backup,
-            }
-        if jit_build_backup.get("status") == "ok":
+        strategy_jit_dir = str(strategy.get("jit_build_dir") or "").strip()
+        jit_build_backup = _invalidate_aiter_jit_build(
+            target,
+            backup_dir,
+            jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
+        )
+        if jit_build_backup.get("status") in {"ok", "clean"}:
             # Persist the backup record before rebuild so a failure can still restore.
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+        invalidation_error = _runtime_jit_invalidation_error(
+            strategy,
+            jit_build_backup,
+        )
+        if jit_build_backup.get("status") == "failed" or invalidation_error:
+            # Refuse to benchmark against an unknown/stale binary.
+            revert = revert_kernel_patch(manifest_path)
+            detail = (
+                invalidation_error
+                or str(jit_build_backup.get("error") or "")
+                or str(jit_build_backup.get("reason") or "")
+            )
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_invalidation_failed",
+                "error": f"aiter jit/build/ invalidation failed: {detail}",
+                "manifest_path": str(manifest_path),
+                "jit_build_backup": jit_build_backup,
+                "revert": revert,
+            }
 
         # aiter cpp_itfs kernels runtime-compile into $HOME/.aiter/build/ with a param-hashed
         # dir name, so pristine + patched collide; move the cache aside for a clean re-baseline.
@@ -1903,7 +1995,7 @@ def apply_kernel_patch(
     manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
-    if jit_build_backup.get("status") in {"ok", "skipped"}:
+    if jit_build_backup.get("status") in {"ok", "clean", "skipped"}:
         # Surface skipped reason too for manifest auditing.
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
@@ -2009,6 +2101,16 @@ def _apply_kernel_patch_snapshot(
 
     rebuild_strategies = _multi_root_strategies(write_paths, allow_unknown_target=allow_unknown_target)
     compiled = bool(rebuild_strategies)
+    runtime_jit_strategies = [
+        strategy
+        for strategy in rebuild_strategies
+        if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+    ]
+    if len(runtime_jit_strategies) > 1:
+        return {
+            "status": "failed",
+            "error": "snapshot spans multiple installed AITER runtime-JIT roots",
+        }
 
     artifacts: list[dict[str, str]] = []
     if compiled:
@@ -2031,6 +2133,13 @@ def _apply_kernel_patch_snapshot(
             "root": str(repo_root),
             "rebuild_modes": sorted(
                 {strat["rebuild_mode"] for strat in rebuild_strategies}
+            ),
+            "jit_build_dirs": sorted(
+                {
+                    str(strat["jit_build_dir"])
+                    for strat in runtime_jit_strategies
+                    if strat.get("jit_build_dir")
+                }
             ),
         },
         "created_at": utc_now(),
@@ -2152,22 +2261,39 @@ def _apply_kernel_patch_snapshot(
             ),
             target,
         )
+        runtime_jit_strategy = (
+            runtime_jit_strategies[0] if runtime_jit_strategies else {}
+        )
+        strategy_jit_dir = str(
+            runtime_jit_strategy.get("jit_build_dir") or ""
+        ).strip()
         jit_build_backup = _invalidate_aiter_jit_build(
             aiter_jit_target,
             backup_dir,
+            jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
         )
-        if jit_build_backup.get("status") == "failed":
-            revert_kernel_patch(manifest_path)
+        if jit_build_backup.get("status") in {"ok", "clean"}:
+            manifest["jit_build_backup"] = jit_build_backup
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        invalidation_error = _runtime_jit_invalidation_error(
+            runtime_jit_strategy,
+            jit_build_backup,
+        )
+        if jit_build_backup.get("status") == "failed" or invalidation_error:
+            revert = revert_kernel_patch(manifest_path)
+            detail = (
+                invalidation_error
+                or str(jit_build_backup.get("error") or "")
+                or str(jit_build_backup.get("reason") or "")
+            )
             return {
                 "status": "failed",
                 "error_class": "aiter_jit_invalidation_failed",
-                "error": f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error')}",
+                "error": f"aiter jit/build/ invalidation failed: {detail}",
                 "manifest_path": str(manifest_path),
                 "jit_build_backup": jit_build_backup,
+                "revert": revert,
             }
-        if jit_build_backup.get("status") == "ok":
-            manifest["jit_build_backup"] = jit_build_backup
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
         cpp_itfs_target = next(
             (
@@ -2218,7 +2344,7 @@ def _apply_kernel_patch_snapshot(
     manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
-    if jit_build_backup.get("status") in {"ok", "skipped"}:
+    if jit_build_backup.get("status") in {"ok", "clean", "skipped"}:
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
         manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
