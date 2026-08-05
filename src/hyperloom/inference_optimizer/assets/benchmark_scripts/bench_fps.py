@@ -162,8 +162,19 @@ class ChunkTimer:
 def _extract_frames_uint8(videos, k):
     """Sample ``k`` evenly-spaced frames from a pipeline video tensor.
 
-    Returns ``(frames_uint8[K,H,W,3], indices)`` normalized to [0,255]. Handles
-    both [B,C,F,H,W] and [C,F,H,W] layouts and [-1,1] or [0,1] value ranges.
+    Returns ``(frames_uint8[K,H,W,3], indices)`` on [0,255]. Handles both
+    [B,C,F,H,W] and [C,F,H,W] layouts.
+
+    The pipeline's own writer sets the range convention: ``save_video`` in
+    HY-WorldPlay's ``hyvideo/generate.py`` does ``(video * 255).clamp(0, 255)``,
+    so the output is [0,1] and needs scaling only. This used to infer the range
+    instead, rescaling by ``(x + 1) / 2`` whenever the clip's minimum fell below
+    -0.01. That guess is decided by the single most extreme pixel in the clip, so
+    one excursion — which a diverging rollout produces readily — silently
+    brightened every frame including the good ones, and the reference and the
+    candidate could be transformed differently. Out-of-range values are reported
+    rather than absorbed, because a genuine change of contract must be visible
+    and not quietly reinterpreted.
     """
     import numpy as np
 
@@ -180,8 +191,11 @@ def _extract_frames_uint8(videos, k):
         raise ValueError(f"unexpected video shape {s}")
     v = v.permute(1, 2, 3, 0)  # [C,F,H,W] -> [F,H,W,C]
     arr = v.numpy()
-    if float(arr.min()) < -0.01:  # [-1,1] -> [0,1]
-        arr = (arr + 1.0) / 2.0
+    lo, hi = float(arr.min()), float(arr.max())
+    if lo < -0.01 or hi > 1.01:
+        rank0(f"[bench][warn] video outside the [0,1] range save_video assumes "
+              f"(min={lo:.4f} max={hi:.4f}); clipping. A generation this far out "
+              f"of range is usually diverging, not merely unnormalized.")
     arr = np.clip(arr, 0.0, 1.0)
     f = arr.shape[0]
     k = max(1, min(int(k), f))
@@ -781,6 +795,38 @@ def _sanitize(obj):
     return obj
 
 
+#: Packages whose version decides whether this pipeline draws a valid video at
+#: all, so a run is not interpretable without them. Recording only torch/hip/
+#: python once cost three sessions: every leg produced saturated colour noise
+#: because the container had drifted (moviepy 2.x, transformers 5.x, numpy 2.x
+#: against the repo's pinned 1.0.3 / 4.56.0 / 1.26.4), and nothing in the result
+#: JSON could have revealed it. ``flash_attn`` and ``aiter`` are here because
+#: which of them resolves selects the attention kernel.
+_RECORDED_PACKAGES = (
+    "diffusers", "transformers", "numpy", "moviepy", "imageio",
+    "scikit-image", "lpips", "einops", "safetensors", "huggingface_hub",
+    "flash_attn", "aiter",
+)
+
+
+def _package_versions():
+    """Best-effort version map for the packages that decide correctness.
+
+    Returns:
+        ``{name: version_or_"absent"}``. Never raises: losing this metadata must
+        not lose a benchmark.
+    """
+    from importlib import metadata
+
+    out = {}
+    for name in _RECORDED_PACKAGES:
+        try:
+            out[name] = metadata.version(name)
+        except Exception:  # noqa: BLE001 — absence is itself the datum
+            out[name] = "absent"
+    return out
+
+
 def _finalize_and_write(cli, args, runs, world_size, done, quality_gate=None):
     """Assemble the result dict and (over)write the JSON. Safe to call after
     every repeat so partial progress is always persisted (deadline safety)."""
@@ -802,6 +848,7 @@ def _finalize_and_write(cli, args, runs, world_size, done, quality_gate=None):
             torch=torch.__version__, hip=torch.version.hip,
             python=platform.python_version(),
             worldplay_sha=git_sha(cli.worldplay_dir),
+            packages=_package_versions(),
         ),
         summary=dict(
             overall_fps=_agg(runs, "overall_fps"),
