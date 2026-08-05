@@ -122,20 +122,36 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     assert "(DISABLED:" not in text
 
 
-def test_role_md_files_carry_phase_awareness():
-    """Static rules fragments carry phase awareness (robustness excluded: not prompt-driven)."""
+def test_orchestration_md_carries_phase_awareness():
+    """The orchestration rules fragment names the phase chain it plans against."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
-    root = asset_system_prompts_dir()
-    for name in ("orchestration", "critic"):
-        body = (root / f"{name}.md").read_text(encoding="utf-8")
-        if name == "critic":
-            assert "Phase-specific rules" in body
-        else:
-            assert "Phase awareness" in body, f"{name}.md missing phase awareness"
-        assert "PRELUDE" in body or "PHASE_PRELUDE" in body
-        assert "EXPLORE" in body
-        assert "KERNEL_AGENT" in body
+    body = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
+    assert "Phase awareness" in body
+    assert "PRELUDE" in body or "PHASE_PRELUDE" in body
+    assert "EXPLORE" in body
+    assert "KERNEL_AGENT" in body
+
+
+def test_critic_phase_orientation_is_delivered_not_inlined():
+    """Critic phase awareness lives in the per-phase injector, not in critic.md.
+
+    ``critic.md`` keeps the framing (how to treat a phase question) and points
+    at the delivered fields; the per-phase contracts are injected one at a time
+    so the Critic never reads five phases' rules to use one.
+    """
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+    from hyperloom.orchestrator.phases import machine_state as _ps
+    from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
+
+    body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
+    assert "Phase-specific rules" in body
+    assert "judge_bundle.phase" in body
+    assert "phase_orientation" in body
+    # The five-phase bullet list must not come back as always-on text.
+    assert "Per-phase orientation:" not in body
+
+    assert set(_PHASE_ORIENTATION) == set(_ps.PHASE_NAMES)
 
 
 # SharedState renderers

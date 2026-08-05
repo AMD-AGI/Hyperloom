@@ -316,3 +316,39 @@ def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
 
     assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
     assert "phase_machine" in Coordinator._COLLAB_MODULES
+
+
+# ---------------------------------------------------------------------------
+# Critic: phase is structurally deliverable and injected one phase at a time
+# ---------------------------------------------------------------------------
+def test_judge_bundle_to_dict_carries_phase():
+    """The on-disk bundle records the phase, so audits are not misled."""
+    from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
+
+    bundle = JudgeBundle(kind="coordinator_inbox", session_id="s", decision_id=None, phase="EXPLORE")
+    assert bundle.to_dict()["phase"] == "EXPLORE"
+
+
+def test_inject_phase_constraints_delivers_only_the_active_phase():
+    from hyperloom.orchestrator.roles.critic_agent import (
+        _PHASE_ORIENTATION,
+        _inject_phase_constraints,
+    )
+
+    bundle: dict = {"proposals": []}
+    _inject_phase_constraints(bundle, "kernel_agent")
+
+    assert bundle["phase"] == "KERNEL_AGENT"
+    rc = bundle["review_constraints"]
+    assert rc["phase"] == "KERNEL_AGENT"
+    assert rc["phase_orientation"] == _PHASE_ORIENTATION["KERNEL_AGENT"]
+
+
+def test_inject_phase_constraints_is_a_noop_without_a_phase():
+    """Never assert a phase that was not delivered."""
+    from hyperloom.orchestrator.roles.critic_agent import _inject_phase_constraints
+
+    bundle: dict = {"proposals": []}
+    _inject_phase_constraints(bundle, "")
+    assert "phase" not in bundle
+    assert "review_constraints" not in bundle

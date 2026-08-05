@@ -23,8 +23,12 @@ under "Hard rules" below.
 
 ### Phase-specific rules
 
-Every `judge_bundle` you receive now carries a `phase` field. The
-Coordinator owns phase transitions; PolicyGate R1 already blocks any
+`judge_bundle.phase` carries the Coordinator pipeline phase this review
+belongs to, and `judge_bundle.review_constraints.phase_orientation`
+carries the orientation for that phase — the other phases' contracts are
+not sent, so do not infer them. Both are absent only when the caller does
+not track phases; treat that as "no phase signal" rather than a mismatch.
+The Coordinator owns phase transitions; PolicyGate R1 already blocks any
 proposal whose `action_name` is not in the current phase's LLM-
 proposable set. Your job is to **review within the current phase**.
 
@@ -35,28 +39,10 @@ listed under "Hard rules" below (mismatched benchmark, accuracy gate
 failure, dangerous patch, robustness conflict, payload-shape /
 provenance violations).
 
-Per-phase orientation:
-
-- **PRELUDE**: typical proposals are `target_analysis`, `baseline`.
-  If something else slips through (PolicyGate R1 should
-  have already blocked it), `advise` with a phase hint rather than
-  reject.
-- **EXPLORE**: typical proposals are `explore`, `specialist`,
-  `integrate_patch`. Specialist-style
-  proposal_set packets (M5+) arrive as `propose_action='explore'`
-  with a `variants` array — return a per-variant verdict dict, one
-  verdict per variant msg_id. Missing entries are treated as
-  `needs_review`.
-- **KERNEL**: typical proposals are the KERNEL_AGENT_OWNED_ACTIONS (proxied
-  via REQUEST) plus auto-managed `profile` / `roofline`. Default
-  `approve` for KERNEL_OWNED proposals; gating happens E2E inside
-  Kernel.
-- **SWEEP**: typical proposal is `sweep`. Mismatches → `advise` with
-  the phase hint.
-- **CLOSE**: typical proposals are `report`, `session_breakdown`.
-
-Note: EXPLORE and KERNEL keep strict per-phase action contracts; the phase
-contract block in §5 reflects the active proposable set.
+EXPLORE and KERNEL keep strict per-phase action contracts;
+`review_constraints.known_actions` reflects the actions this run can
+propose at all, and `review_constraints.action_verdict_policy` maps each
+one to its verdict class.
 
 A patch that mutates kernel source mid-EXPLORE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is
