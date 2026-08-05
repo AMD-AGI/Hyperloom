@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir, asset_system_prompts_dir
 from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -25,7 +25,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 # Marker text identifying each phase-scoped prompt module.
 KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
-BASELINE_FINGERPRINT = "eight params fields"
+BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
 SPECIALIST_DIALS = "### One specialist, four dials"
 SPECIALIST_WATCH = "### Watching a running specialist"
 SPECIALIST_DOMAIN = "### Choosing specialist domain"
@@ -99,17 +99,24 @@ def test_idea_generation_only_in_explore_phase(registry):
 
 
 def test_baseline_recovery_detail_only_in_prelude(registry):
-    """Only PRELUDE can re-propose baseline, so only it needs the fingerprint."""
+    """Only PRELUDE can re-propose baseline, so F1/F2 rules render only there."""
+    refs_dir = asset_prompt_references_dir()
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
+        # Detailed fingerprint text lives in the reference doc, not in any prompt.
+        assert BASELINE_FINGERPRINT not in text, (
+            f"baseline fingerprint detail leaked into {phase} prompt"
+        )
         if phase == _ps.PHASE_PRELUDE:
-            assert BASELINE_FINGERPRINT in text
             assert "RULE F1" in text
             assert "RULE F2" in text
         else:
-            assert BASELINE_FINGERPRINT not in text, f"baseline fingerprint leaked into {phase}"
             assert "RULE F1" not in text
             assert "RULE F2" not in text
+    # The reference doc itself must contain the fingerprint detail.
+    failure_ref = refs_dir / "failure_recovery.md"
+    if failure_ref.exists():
+        assert BASELINE_FINGERPRINT in failure_ref.read_text(encoding="utf-8")
 
 
 def test_specialist_dispatch_prose_only_in_explore(registry):
@@ -177,12 +184,13 @@ def test_unscoped_build_renders_every_module(registry):
     for marker in (
         KERNEL_REQUEST_REF,
         IDEA_GENERATION,
-        BASELINE_FINGERPRINT,
         "GRID INPUT (REQUIRED)",
         *ALL_SPECIALIST_OPS,
         *ALWAYS_ON,
     ):
         assert marker in text, f"{marker} missing from the unscoped build"
+    # Detailed fingerprint text now lives in the reference doc, not in the prompt.
+    assert BASELINE_FINGERPRINT not in text
 
 
 def test_scoped_builds_are_strictly_smaller(registry):

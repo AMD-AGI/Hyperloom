@@ -62,8 +62,9 @@ def test_orchestration_prompt_explains_kill_task_resource_lifetime(registry):
         rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
     )
 
-    assert "does **not** terminate an already-running specialist process" in text
-    assert "Do not use this to promptly free capacity" in text
+    # Detailed kill_task semantics moved to specialist_rescue.md reference doc.
+    assert "kill_task" in text
+    assert "read_reference('specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
