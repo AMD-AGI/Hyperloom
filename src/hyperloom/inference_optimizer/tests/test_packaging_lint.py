@@ -3,10 +3,12 @@
 
 """Packaging-lint guard for ``pyproject.toml``.
 
-Every path-bearing declaration in ``pyproject.toml`` is checked against the
-working tree so a deleted file cannot leave a dead declaration behind:
-setuptools silently ignores a ``package-data`` glob that matches nothing, so
-such rot is invisible at build time (a real case shipped for months).
+Checks run in both directions, because each catches a different defect:
+
+* declaration -> tree: setuptools silently ignores a ``package-data`` glob that
+  matches nothing, so deleting a file leaves invisible rot at build time.
+* tree -> declaration: a newly added asset that no glob covers is silently left
+  out of the wheel, which breaks code that reads it from the install.
 
 Wheel *contents* are asserted separately by ``.github/workflows/packaging.yml``,
 which builds a real wheel; this module only needs the source tree.
@@ -15,10 +17,26 @@ which builds a real wheel; this module only needs the source tree.
 from __future__ import annotations
 
 import ast
+import subprocess
 from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
+
+# Directory names whose contents never ship. Kept in sync with the
+# ``packages.find`` exclude patterns by test_test_packages_are_excluded_*.
+_TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
+
+# Files under src/ that intentionally stay out of the wheel. Anything else that
+# no declaration covers is a packaging bug, so keep this list justified.
+_UNPACKAGED_ASSETS = (
+    # Developer-only tooling, meaningless in an installed package.
+    "**/.gitignore",
+    "**/.ci-deferred/*",
+    # Container image build context: the Dockerfile clones the repo and the
+    # scripts hardcode /opt/Hyperloom, so they are only used from a checkout.
+    "hyperloom/inference_optimizer/assets/quick-start/*",
+)
 
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
     import tomllib
@@ -132,11 +150,66 @@ def test_test_packages_are_excluded_from_distribution():
     leaked = [
         name
         for name in _discovered_packages()
-        if "tests" in name.split(".") and not any(fnmatchcase(name, pattern) for pattern in excludes)
+        if _TEST_DIR_NAMES.intersection(name.split(".")) and not any(fnmatchcase(name, pattern) for pattern in excludes)
     ]
     assert not leaked, (
         "test packages would ship in the wheel (their fixture data is not package-data, "
         f"so a shipped copy cannot run): {leaked}"
+    )
+
+
+def _declared_asset_paths() -> set[str]:
+    """Every src-relative non-Python file some declaration ships."""
+    assert _REPO_ROOT is not None
+    cfg = _pyproject()["tool"]["setuptools"]
+    declared: set[str] = set()
+    for package, patterns in cfg["package-data"].items():
+        package_dir = _src() / package.replace(".", "/")
+        for pattern in patterns:
+            declared.update(str(match.relative_to(_src())) for match in package_dir.glob(pattern))
+    # data-files sources are repo-relative; only src/ ones matter here.
+    for sources in cfg["data-files"].values():
+        for source in sources:
+            path = _REPO_ROOT / source
+            if path.is_relative_to(_src()):
+                declared.add(str(path.relative_to(_src())))
+    return declared
+
+
+def _tracked_src_assets() -> list[str]:
+    """Git-tracked non-Python files under src/, excluding test trees."""
+    assert _REPO_ROOT is not None
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "src"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"git is required to enumerate tracked assets: {exc}")
+    listing = result.stdout.split()
+    assets = []
+    for entry in listing:
+        relative = Path(entry).relative_to("src")
+        if relative.suffix == ".py" or _TEST_DIR_NAMES.intersection(relative.parts):
+            continue
+        assets.append(str(relative))
+    return assets
+
+
+def test_no_undeclared_assets_under_src():
+    """A new asset must be declared or justified, never silently unshipped."""
+    declared = _declared_asset_paths()
+    orphans = [
+        asset
+        for asset in _tracked_src_assets()
+        if asset not in declared and not any(fnmatchcase(asset, pattern) for pattern in _UNPACKAGED_ASSETS)
+    ]
+    assert not orphans, (
+        "assets under src/ that no package-data or data-files entry ships; declare them "
+        f"or add a justified entry to _UNPACKAGED_ASSETS: {orphans}"
     )
 
 
