@@ -52,7 +52,6 @@ in-phase kernel patch would.
 
 ### When to deviate from the default verdict
 
-
 * `judge_bundle.required_context` non-empty → emit `needs_review` with
   `source = "critic_unavailable"` and list missing keys.
 * `judge_bundle.kb_read_skipped_reason` set → prefer `advise` /
@@ -72,65 +71,16 @@ in-phase kernel patch would.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
-
-### Cross-domain proposal review (scope=domains)
-
-This block fires only when `judge_bundle.review_constraints.cross_domain
-== true` — the runtime sets the flag when any proposal was authored by a
-specialist running the cross-domain dial (`scope == "domains"`). For
-single-domain (`scope == "domain"`) or freeform (`scope == "freeform"`)
-specialist proposals skip this block entirely.
-
-Severity contract:
-
-* `patch_landing` four-checklist applies **unchanged**. Cross-domain
-  patches are not held to a weaker bar — the "higher authority" of a
-  cross-domain specialist lives on the input side (multi-tag KB, full
-  roofline / profile, multi-turn research), never on the output review
-  side.
-* The three rules below are **strategy hints**: a violation does NOT
-  block approve. Surface it via `advise` (or in the `notes` of the
-  primary verdict). Only the safety hard guards at the bottom of
-  this section gate `reject`.
-
-Strategy hints — call them out by `rule_id` in `notes` when relevant
-so the audit trail is searchable:
-
-1. **rationale_per_domain** — the proposal SHOULD give an independent
-   rationale for every entry of `scope_domains`. If per-domain
-   reasoning is missing / shallow / cargo-culted, emit `advise`
-   with `reason="cross_domain_rationale_incomplete"` and explain in
-   `notes`. The patch is not unsafe — just unconvincing.
-
-2. **coupling_and_side_effects** — the proposal SHOULD name the
-   cross-domain coupling points (why these changes must happen
-   together) AND at least one potential side effect. Missing either
-   half → `advise` with
-   `reason="cross_domain_coupling_unspecified"`.
-
-3. **motivation_gap_valid** — the proposal SHOULD show that no
-   single specialist could have surfaced this combination within
-   its own domain prompt. "Stack specialist A's proposal on top of
-   specialist B's" is a `explore.params.grid` combo, not a
-   cross-domain proposal; emit `advise` with
-   `reason="cross_domain_motivation_invalid"` when the rationale
-   degenerates this way. The benchmark + KEEP threshold + stack
-   rebench will adjudicate the patch's actual contribution.
-
-Safety hard guards (these stay `reject` — they are still enforced
-upstream by the runtime safety layer; replay here as the last line
-of defence — if any of these reach you, the upstream layer has
-regressed and the dispatch must die):
-
 * `proposal_set[*]` MUST NOT carry `expected_gain` / `bench_evidence`
-  / `confidence` / `score` / `rank` / `force_provenance` (§1.2 red
-  lines). Reject with `reason="specialist_quantitative_claim_violation"`.
-  This guard is scope-agnostic — it applies to every specialist
-  proposal, not just `scope=domains`.
+  / `confidence` / `score` / `rank` / `force_provenance`. Reject with
+  `reason="specialist_quantitative_claim_violation"`. This guard applies to
+  every specialist proposal regardless of scope.
 
-`advise` keeps the patch flowing through to integrate_patch (the
-benchmark + accuracy gate downstream still adjudicate it). Use it
-freely for strategy concerns; reserve `reject` for the safety hard
-guards above and the standard patch_landing safety failures
-(benchmark mismatch, accuracy fail, missing rollback, robustness
-conflict).
+### Cross-domain proposals (scope=domains)
+
+When `judge_bundle.review_constraints.cross_domain == true` the bundle
+also carries `review_constraints.cross_domain_rules` — a list of
+`{rule_id, description, failure_verdict, failure_reason_code}` dicts.
+Apply each: strategy-hint violations emit `advise` with the matching
+`failure_reason_code`; the safety hard guard above remains `reject`.
+Single-domain and freeform proposals skip this section.
