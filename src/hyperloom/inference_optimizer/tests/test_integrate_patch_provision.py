@@ -27,6 +27,7 @@ from hyperloom.orchestrator.framework.stack_actions import (
     FrameworkRuntime,
     ProvisionResult,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
 def _ctx(task_id: str = "t-1"):
@@ -269,7 +270,7 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
         framework="vllm",
         model_name="deepseek-v4",
         gpu_type="mi355x",
-        enablement=types.SimpleNamespace(
+        enablement=EnablementRound(
             kept_patches=[],
             setup_commands=[],
             kept_stack_action=kept,

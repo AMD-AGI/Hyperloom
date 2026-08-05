@@ -21,6 +21,7 @@ from hyperloom.orchestrator.phases.framework import (
     _derive_gpu_arch,
     _repo_matches_targeted_build_component,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +572,7 @@ def _make_params_fake(**kw):
         framework=kw.get("framework", "vllm"),
         model_name=kw.get("model_name", "deepseek-ai/DeepSeek-V4"),
         gpu_type=kw.get("gpu_type", "mi355x"),
-        enablement=types.SimpleNamespace(
+        enablement=EnablementRound(
             kept_patches=[],
             kept_stack_action={},
             setup_commands=[],
