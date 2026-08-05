@@ -169,19 +169,23 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
     Raises:
         TypeError: If even the most reduced signature is rejected.
     """
-    last: TypeError | None = None
-    attempted: set[frozenset[str]] = set()
+    seen: set[frozenset[str]] = set()
+    attempts: list[dict[str, Any]] = []
     for drop in _OBS_KWARG_LADDER:
         attempt = {k: v for k, v in kwargs.items() if k not in drop}
         signature = frozenset(attempt)
-        if signature in attempted:
+        if signature in seen:
             continue
-        attempted.add(signature)
+        seen.add(signature)
+        attempts.append(attempt)
+    for attempt in attempts[:-1]:
         try:
             return parent.start_observation(**attempt)
-        except TypeError as exc:
-            last = exc
-    raise last  # type: ignore[misc]  # the ladder always runs at least once
+        except TypeError:
+            continue
+    # The final rung is not guarded, so a still-rejected signature surfaces its
+    # own TypeError instead of one synthesized from a saved exception.
+    return parent.start_observation(**attempts[-1])
 
 
 def _end_time_wants_int(obs: Any) -> bool:

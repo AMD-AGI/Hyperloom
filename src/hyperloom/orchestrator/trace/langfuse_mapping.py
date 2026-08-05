@@ -25,8 +25,6 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .llm_trace import LLM_STATUS_OK
-
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
 
@@ -34,6 +32,11 @@ UNKNOWN_AGENT = "(unknown)"
 # error rate is queryable; everything else stays DEFAULT.
 LEVEL_DEFAULT = "DEFAULT"
 LEVEL_ERROR = "ERROR"
+
+# ``llm_trace.LLM_STATUS_OK``, re-declared rather than imported: this module is
+# a pure projection layer that ``llm_trace`` reaches back into via the emitter,
+# so importing it here would close an import cycle.
+_STATUS_OK = "ok"
 
 # Env-var name fragments whose value is redacted before the environment
 # snapshot is attached to session_start. Matched case-insensitively as a substring.
@@ -279,8 +282,8 @@ def generation_level(row: dict[str, Any]) -> str:
     Returns:
         ``ERROR`` for a failed call, else ``DEFAULT``.
     """
-    status = str(row.get("status") or LLM_STATUS_OK).strip().lower()
-    return LEVEL_DEFAULT if status == LLM_STATUS_OK else LEVEL_ERROR
+    status = str(row.get("status") or _STATUS_OK).strip().lower()
+    return LEVEL_DEFAULT if status == _STATUS_OK else LEVEL_ERROR
 
 
 def generation_status_message(row: dict[str, Any]) -> str | None:
@@ -326,7 +329,7 @@ def generation_metadata(
         "has_text": has_text,
         "latency_ms": row.get("latency_ms"),
         "reviewed_msg_ids": row.get("reviewed_msg_ids"),
-        "status": row.get("status") or LLM_STATUS_OK,
+        "status": row.get("status") or _STATUS_OK,
         "error_type": row.get("error_type"),
     }
 
