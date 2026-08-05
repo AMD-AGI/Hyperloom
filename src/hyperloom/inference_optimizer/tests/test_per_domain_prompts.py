@@ -1045,3 +1045,93 @@ def test_research_lane_capacity_is_core_state_field():
     assert "gpu_specialist_capacity" in CORE_STATE_FIELDS
     assert "specialist_rounds" in CORE_STATE_FIELDS
     assert "last_specialist" in CORE_STATE_FIELDS
+
+
+# --------------------------------------------------------------------------- #
+# Stage-1 guard: read-only domains never grant patch authoring
+# --------------------------------------------------------------------------- #
+def test_readonly_domains_never_grant_patch_authoring():
+    """research_scout, static_recon, and pr_intel system prompts must NOT
+    contain the 'author source patches' grant from _section_identity."""
+    for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
+        system, _ = build_specialist_prompts(
+            SpecialistPromptInputs(
+                task_id=f"task-{key}",
+                domain=get_domain(key),
+                max_turns=4,
+                mode="research",
+                gap_canonical_id=f"gap.{key}.test",
+            )
+        )
+        assert "author source patches" not in system, (
+            f"{key} system prompt grants patch authoring but should not"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Stage-2 guard: mandate section carries run-status when available
+# --------------------------------------------------------------------------- #
+def test_mandate_section_renders_run_status():
+    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold
+    when those fields are non-zero."""
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-mandate",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.test",
+        framework="vllm",
+        baseline_tput=6232.0,
+        current_tput=6848.5,
+        cumulative_gain_validated=9.89,
+        keep_threshold_pct=1.0,
+        applied_stack=[{"variant_name": "--kv-cache-dtype fp8_e4m3", "gain_pct": 5.99}],
+    )
+    _, user = build_specialist_prompts(inp)
+    assert "## 0. MANDATE" in user
+    assert "6232" in user
+    assert "9.89" in user or "+9.89" in user
+    assert "1.00%" in user or "1.0%" in user
+    assert "--kv-cache-dtype fp8_e4m3" in user
+
+
+# --------------------------------------------------------------------------- #
+# Stage-3 guard: enablement ladder book appears exactly once
+# --------------------------------------------------------------------------- #
+def test_enablement_ladder_rendered_exactly_once():
+    """ENABLEMENT METHODOLOGY must appear only in §1b, not also in §10."""
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-dedup",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.unknown",
+        gap_symptom="vllm cannot launch ModelFoo: unknown",
+        gap_evidence={"model": "ModelFoo", "failure_kind": "unknown"},
+        framework="vllm",
+        # notes is empty (no stacked patches, no build failure)
+        notes="",
+    )
+    _, user = build_specialist_prompts(inp)
+    count = user.count("ENABLEMENT METHODOLOGY")
+    assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
+
+
+# --------------------------------------------------------------------------- #
+# Stage-4 guard: KB-write iron rule is gone
+# --------------------------------------------------------------------------- #
+def test_kb_write_iron_rule_absent():
+    """Rule 3 (KB writes) is dead text — confirm it no longer appears."""
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    inp = SpecialistPromptInputs(
+        task_id="task-iron",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.iron_rule",
+    )
+    system, _ = build_specialist_prompts(inp)
+    assert "RecipeKB.put_recipe" not in system
+    assert "NEVER** write to the Recipe KB" not in system
