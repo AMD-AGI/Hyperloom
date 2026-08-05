@@ -355,6 +355,32 @@ def build_probe_env(
     return env
 
 
+def promote_evidence_path(shared_state: Any, result: dict[str, Any] | None) -> str:
+    """Lift an executor result's evidence path onto SharedState, if it carries one.
+
+    Both the standalone ``profile`` action and the composite ``roofline`` action
+    (which runs profile internally) can produce the document, so both have to
+    promote it. Leaving that to one of them is how a live session ended up with 29
+    measured candidates on disk and a specialist reporting that no host-side
+    evidence was available: the roofline path never looked for it, and the prompt
+    renderer reads SharedState, not the filesystem.
+
+    Args:
+        shared_state: The SharedState to update.
+        result: An executor result that may carry ``framework_rewrite_evidence``.
+
+    Returns:
+        The promoted path, or ``""`` when the result carries none — in which case
+        any path already on record is left alone, because a leg that produced no
+        document is not evidence that the previous one was wrong.
+    """
+    path = str((result or {}).get("framework_rewrite_evidence") or "").strip()
+    if not path:
+        return ""
+    shared_state.last_framework_rewrite_evidence = path
+    return path
+
+
 def _round(value: float, digits: int = 4) -> float:
     """Round ``value`` defensively.
 

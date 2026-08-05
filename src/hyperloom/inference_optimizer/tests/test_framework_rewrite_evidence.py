@@ -1201,6 +1201,44 @@ def test_probe_env_carries_dir_roots_and_deep_flag(tmp_path):
     assert "PYTHONPATH" not in env
 
 
+def test_evidence_reaches_shared_state_from_a_composite_result():
+    """The evidence is useless if the path never lands on SharedState.
+
+    On a live session the probe produced 29 classified candidates and the
+    specialist still reported "No host-side profiling evidence was available this
+    round" — it had been left to guess landing points from source. The path was
+    promoted only by the ``profile`` writeback, while the evidence is produced
+    inside the composite ``roofline`` action, whose own promotion path never
+    looked for it. Every measurement in the pipeline was collected and then
+    dropped one step before the consumer.
+    """
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(last_framework_rewrite_evidence="")
+    promoted = evidence.promote_evidence_path(
+        state,
+        {"framework_rewrite_evidence": "/runs/roofline/abc/framework_rewrite_evidence.json"},
+    )
+    assert promoted == "/runs/roofline/abc/framework_rewrite_evidence.json"
+    assert state.last_framework_rewrite_evidence == promoted
+
+
+def test_promoting_evidence_never_clears_a_path_already_on_record():
+    """A later result without evidence must not erase the evidence we have.
+
+    The deep leg and the cheap leg do not both produce a document, and a run whose
+    probe was disabled produces none at all; treating that as "forget what you
+    measured" would silently return the specialist to guessing.
+    """
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(last_framework_rewrite_evidence="/kept/evidence.json")
+    assert evidence.promote_evidence_path(state, {}) == ""
+    assert state.last_framework_rewrite_evidence == "/kept/evidence.json"
+    assert evidence.promote_evidence_path(state, {"framework_rewrite_evidence": "  "}) == ""
+    assert state.last_framework_rewrite_evidence == "/kept/evidence.json"
+
+
 def test_probe_env_drops_a_bare_site_packages_root(tmp_path):
     """A site-packages root attributes call sites to torch, which is never a rewrite target.
 

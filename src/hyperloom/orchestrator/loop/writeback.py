@@ -2619,9 +2619,10 @@ class WritebackCollaborator:
         # "which host-side work is redundant", which no kernel timeline can, and
         # a run whose trace was unusable can still have produced good evidence.
         # So promote it on its own, outside the trace_path branch.
-        evidence_path = str(result.get("framework_rewrite_evidence") or "").strip()
+        from ..actions.executors._framework_rewrite_evidence import promote_evidence_path
+
+        evidence_path = promote_evidence_path(self.shared_state, result)
         if evidence_path:
-            self.shared_state.last_framework_rewrite_evidence = evidence_path
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
