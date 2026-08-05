@@ -275,6 +275,58 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     assert result["accuracy_stage"]["status"] == "succeeded"
 
 
+def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
+    """Ineligible lifecycle fallback must retain accuracy in its only round."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        cfg_idx = cmd.index("--benchmark-config")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        captured.append(cfg)
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        (slot / "results_gsm8k.json").write_text(
+            json.dumps(
+                {
+                    "results": {
+                        "gsm8k": {
+                            "exact_match,strict-match": 0.9,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert len(captured) == 1
+    assert captured[0]["benchmark"]["envs"]["RUN_EVAL"] == "true"
+    assert result["accuracy"] == pytest.approx(0.9)
+    assert "accuracy_stage" not in result
+
+
 def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     """Baseline defaults to cold+hot rounds to match EXPLORE warm-decision."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", raising=False)

@@ -259,6 +259,42 @@ def test_canonical_forge_artifacts_logs_missing_files_root(tmp_path, caplog):
     assert str(bundle / "files") in caplog.text
 
 
+def test_canonical_forge_artifacts_rejects_files_symlink_escape(
+    tmp_path,
+    caplog,
+):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    bundle.mkdir(parents=True)
+    (bundle / "forge.patch").write_text(
+        "diff --git a/a.py b/a.py\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-files"
+    outside.mkdir()
+    (outside / "a.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (bundle / "files").symlink_to(outside, target_is_directory=True)
+    (campaign / "best" / "manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "best/iter_003",
+                "patch_path": "best/iter_003/forge.patch",
+                "changed_files": ["a.py"],
+            },
+        )
+        == {}
+    )
+    assert "files directory resolves outside" in caplog.text
+    assert str(outside) in caplog.text
+
+
 def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
     env = _make_repo(tmp_path)
     repo = env["repo"]

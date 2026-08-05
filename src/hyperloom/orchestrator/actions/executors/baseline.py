@@ -324,6 +324,19 @@ def _materialized_run_eval_disabled(config_path: Path) -> bool:
     return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
+def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
+    """Set the effective eval mode after lifecycle eligibility is known."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    benchmark = cfg.setdefault("benchmark", {})
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
+        "true" if enabled else "false"
+    )
+    config_path.write_text(
+        yaml.safe_dump(cfg, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
 def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
     """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it.
 
@@ -1968,11 +1981,6 @@ class BaselineExecutor:
         defer_accuracy_until_after_measure = is_truthy(
             params.get("defer_accuracy_until_after_measure")
         )
-        if defer_accuracy_until_after_measure:
-            # Kernel integration first needs a stable hot-throughput verdict.
-            # Accuracy runs as a separate round on the same persistent server
-            # only after the candidate clears that gate.
-            base_extra_envs["RUN_EVAL"] = "false"
         if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
@@ -2047,7 +2055,6 @@ class BaselineExecutor:
         # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
         # never salvaging a prior attempt's stale ``results*.json`` from the
         # reused per-round slot.
-        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))
@@ -2067,6 +2074,17 @@ class BaselineExecutor:
             ctx_extra=extra,
         )
         double_run = double_run_requested and lifecycle["eligible"]
+        if defer_accuracy_until_after_measure and double_run:
+            # Only the lifecycle path can reuse the hot server for a staged
+            # accuracy round. A single-round fallback must retain the original
+            # eval contract so a throughput winner still carries accuracy.
+            _set_materialized_run_eval(
+                materialized_config_path,
+                enabled=False,
+            )
+        run_eval_disabled = _materialized_run_eval_disabled(
+            materialized_config_path
+        )
 
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +

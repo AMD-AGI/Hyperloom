@@ -2446,6 +2446,26 @@ def _canonical_forge_artifacts(
             artifact_dir,
         )
         return {}
+    try:
+        resolved_files_root = files_root.resolve(strict=True)
+    except OSError as error:
+        log.warning(
+            "canonical Forge bundle unavailable: files directory could not be "
+            "resolved at %s (%s); compatibility artifact fallback may be used",
+            files_root,
+            error,
+        )
+        return {}
+    if not _path_is_within(resolved_files_root, campaign_root):
+        log.warning(
+            "canonical Forge bundle unavailable: files directory resolves "
+            "outside the campaign root (%s -> %s, root=%s); compatibility "
+            "artifact fallback may be used",
+            files_root,
+            resolved_files_root,
+            campaign_root,
+        )
+        return {}
     if not changed_files:
         log.warning(
             "canonical Forge bundle unavailable: manifest changed_files is "
@@ -2455,7 +2475,7 @@ def _canonical_forge_artifacts(
     return {
         "best_manifest": str(manifest_path),
         "canonical_patch_path": str(patch_path),
-        "canonical_files_root": str(files_root),
+        "canonical_files_root": str(resolved_files_root),
         "changed_files": changed_files,
         "forge_workspace": str(Path(workspace).resolve()),
     }
