@@ -203,7 +203,6 @@ def test_build_backends_uses_claude_critic_when_codex_follows_claude(
         critic_choice="agent",
         session_dir=tmp_path,
         critic_agent_root=None,
-        no_kernel=True,
         codex_follows_claude=True,
     )
 

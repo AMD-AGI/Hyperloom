@@ -94,11 +94,7 @@ class MachinePhase(PhaseHandler):
             )
 
     def _kernel_enabled(self) -> bool:
-        """Whether kernel optimization is enabled for this run.
-
-        Returns:
-            ``True`` when the persisted ``kernel_enabled`` flag is set.
-        """
+        """Whether kernel optimization is enabled for this run."""
         return bool(self.shared_state.kernel_enabled)
 
     def _explore_enabled(self) -> bool:

@@ -28,7 +28,6 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 
 
-
 def _official_anthropic_only() -> bool:
     """True when only the Anthropic-side endpoint is available."""
     has_anthropic = bool(
@@ -124,7 +123,6 @@ def _build_backends(
     robustness_choice: str = "mock",
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
-    no_kernel: bool = False,
     codex_follows_claude: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
@@ -148,8 +146,6 @@ def _build_backends(
             ``robustness_choice='agent'``.
         robustness_options: Optional ``request.options`` overrides for the
             robustness agent.
-        no_kernel: Accepted for forward compatibility; does not affect the
-            returned backends dict (kernel work is handled programmatically).
 
     Returns:
         A mapping of role name to its constructed backend.

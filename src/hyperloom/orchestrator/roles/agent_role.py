@@ -25,11 +25,9 @@ Three persistent LLM agent roles and their permitted intents::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-Kernel work is not an LLM role. Every kernel REQUEST emitted by orchestration
-is handled inline by a registered Python handler in
-``orchestrator/kernel/request_handlers.py``; the Coordinator posts the RESPONSE
-directly to the bus without burning an LLM turn. Framework-agent work runs as
-the Coordinator-owned FRAMEWORK_AGENT phase, not an agent role.
+Kernel work is handled by programmatic Python handlers, not an LLM role.
+Framework-agent work runs as the Coordinator-owned FRAMEWORK_AGENT phase, not
+an agent role.
 """
 
 from __future__ import annotations

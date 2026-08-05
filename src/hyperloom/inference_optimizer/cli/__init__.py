@@ -199,6 +199,7 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    phase: str = "",
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -838,7 +839,7 @@ def _smoke_test_codex_model(
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``codex_model`` / ``critic_backend`` / ``no_kernel``).
+            ``codex_model`` / ``critic_backend``).
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
@@ -1969,7 +1970,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_choice=robustness_choice,
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
-        no_kernel=no_kernel,
         codex_follows_claude=codex_follows_claude,
     )
     # Expose active session_dir to in-process executors via the canonical pin
