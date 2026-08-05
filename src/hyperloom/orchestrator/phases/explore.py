@@ -20,6 +20,7 @@ from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..loop.sub_agent_runner import SubAgentResult
+from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..specialists.runner import SpecialistFailureType
 from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import Task
@@ -280,9 +281,10 @@ class ExplorePhase(PhaseHandler):
         """Rebuild the orchestration system prompt for the new macro-cycle.
 
         Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
-        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
-        records the directive in the ``cycle_directive_history`` ring. Skips a
-        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``,
+        snapshots the installed scope, and records the directive in the
+        ``cycle_directive_history`` ring. Skips a user-supplied
+        ``--orch-prompt``. Best-effort; returns True when reseeded.
         """
         if getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
@@ -301,6 +303,7 @@ class ExplorePhase(PhaseHandler):
         if not isinstance(overrides, dict):
             return False
         overrides["orchestration"] = new_prompt
+        _write_prompt_snapshot(self.session_dir, "orchestration", new_prompt, phase=state.phase)
         history = list(getattr(state, "cycle_directive_history", []) or [])
         history.append(
             {

@@ -9,6 +9,7 @@ import logging as _logging
 from typing import Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
@@ -298,7 +299,9 @@ class MachinePhase(PhaseHandler):
         """Re-scope the orchestration system prompt to the phase being entered.
 
         Carries the current macro-cycle and cycle directive over unchanged; only
-        the phase scope moves. Skips a user-supplied ``--orch-prompt``.
+        the phase scope moves. Snapshots the installed scope so the artefacts
+        record what each phase actually ran under. Skips a user-supplied
+        ``--orch-prompt``.
 
         Args:
             to_phase: The phase being entered.
@@ -314,11 +317,13 @@ class MachinePhase(PhaseHandler):
         if rebuild is None or not isinstance(overrides, dict):
             return False
         state = self.shared_state
-        overrides["orchestration"] = rebuild(
+        scoped = rebuild(
             macro_cycle=state.macro_cycle,
             cycle_directive=str(state.orchestration_memory.get("next_cycle_directive", "") or ""),
             phase=phase,
         )
+        overrides["orchestration"] = scoped
+        _write_prompt_snapshot(self.session_dir, "orchestration", scoped, phase=phase)
         log.info("orchestration prompt re-scoped for phase=%s", phase)
         return True
 

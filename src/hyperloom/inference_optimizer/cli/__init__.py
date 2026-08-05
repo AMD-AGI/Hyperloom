@@ -2111,7 +2111,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts)
+    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)

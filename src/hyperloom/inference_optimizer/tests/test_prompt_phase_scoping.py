@@ -313,7 +313,7 @@ def test_phase_argument_is_case_insensitive(registry):
 # ---------------------------------------------------------------------------
 # Coordinator re-scopes the override at the phase seam
 # ---------------------------------------------------------------------------
-def _machine_with_stub_coordinator(*, user_supplied: bool = False):
+def _machine_with_stub_coordinator(session_dir, *, user_supplied: bool = False):
     """Build a MachinePhase over a minimal coordinator stub.
 
     Returns ``(phase_handler, coord, rebuild_calls)`` where ``rebuild_calls``
@@ -334,6 +334,7 @@ def _machine_with_stub_coordinator(*, user_supplied: bool = False):
 
     coord = SimpleNamespace(
         shared_state=state,
+        session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
@@ -341,8 +342,8 @@ def _machine_with_stub_coordinator(*, user_supplied: bool = False):
     return MachinePhase(coord), coord, rebuild_calls
 
 
-def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive():
-    handler, coord, calls = _machine_with_stub_coordinator()
+def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive(tmp_path):
+    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("kernel_agent") is True
     assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=KERNEL_AGENT]"
@@ -355,20 +356,52 @@ def test_phase_seam_rescopes_the_override_and_keeps_the_cycle_directive():
     ]
 
 
-def test_phase_seam_never_clobbers_a_user_supplied_prompt():
-    handler, coord, calls = _machine_with_stub_coordinator(user_supplied=True)
+def test_phase_seam_never_clobbers_a_user_supplied_prompt(tmp_path):
+    handler, coord, calls = _machine_with_stub_coordinator(tmp_path, user_supplied=True)
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is False
     assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
 
 
-def test_phase_seam_ignores_a_blank_phase():
-    handler, coord, calls = _machine_with_stub_coordinator()
+def test_phase_seam_ignores_a_blank_phase(tmp_path):
+    handler, coord, calls = _machine_with_stub_coordinator(tmp_path)
 
     assert handler._reseed_orch_prompt_for_phase("") is False
     assert coord.system_prompt_overrides["orchestration"] == "ORIGINAL"
     assert calls == []
+
+
+def test_phase_seam_snapshots_the_scope_it_installed(tmp_path):
+    """Each scope the model actually ran under must leave its own artefact."""
+    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+
+    assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
+
+    snapshot = tmp_path / "agents" / "orchestration" / "system_prompt.EXPLORE.snapshot.md"
+    assert snapshot.read_text(encoding="utf-8") == "PROMPT[phase=EXPLORE]"
+
+
+def test_phase_seam_snapshot_never_overwrites_the_boot_file(tmp_path):
+    """The unsuffixed file stays the boot scope so existing readers keep working."""
+    boot = tmp_path / "agents" / "orchestration" / "system_prompt.snapshot.md"
+    boot.parent.mkdir(parents=True, exist_ok=True)
+    boot.write_text("BOOT", encoding="utf-8")
+    handler, _coord, _calls = _machine_with_stub_coordinator(tmp_path)
+
+    handler._reseed_orch_prompt_for_phase("CLOSE")
+
+    assert boot.read_text(encoding="utf-8") == "BOOT"
+
+
+def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
+    """A failed snapshot must not abort the phase transition."""
+    blocker = tmp_path / "agents"
+    blocker.write_text("not a directory", encoding="utf-8")
+    handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
+
+    assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
+    assert coord.system_prompt_overrides["orchestration"] == "PROMPT[phase=SWEEP]"
 
 
 def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
@@ -377,6 +410,48 @@ def test_reseed_for_phase_is_reachable_through_the_coordinator_delegation_map():
 
     assert Coordinator._DELEGATED.get("_reseed_orch_prompt_for_phase") == "phase_machine"
     assert "phase_machine" in Coordinator._COLLAB_MODULES
+
+
+# ---------------------------------------------------------------------------
+# Snapshot paths: one artefact per scope the model ran under
+# ---------------------------------------------------------------------------
+def test_prompt_snapshot_path_is_phase_suffixed(tmp_path):
+    from hyperloom.inference_optimizer.session.session_paths import agent_prompt_snapshot
+
+    assert agent_prompt_snapshot(tmp_path, "orchestration").name == "system_prompt.snapshot.md"
+    scoped = agent_prompt_snapshot(tmp_path, "orchestration", phase="explore")
+    assert scoped.name == "system_prompt.EXPLORE.snapshot.md"
+    # A blank phase must not produce a stray dot in the stem.
+    assert agent_prompt_snapshot(tmp_path, "orchestration", phase="  ").name == "system_prompt.snapshot.md"
+
+
+def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
+    """The boot prompt is already phase-scoped, so it needs its own suffixed copy."""
+    from hyperloom.inference_optimizer.cli.bootstrap import _snapshot_system_prompts
+
+    _snapshot_system_prompts(
+        tmp_path,
+        prompts={"orchestration": "BOOT PROMPT", "critic": "CRITIC"},
+        orchestration_phase="PRELUDE",
+    )
+
+    agents = tmp_path / "agents"
+    assert (agents / "orchestration" / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT PROMPT"
+    assert (agents / "orchestration" / "system_prompt.PRELUDE.snapshot.md").read_text(
+        encoding="utf-8",
+    ) == "BOOT PROMPT"
+    # Critic is not phase-scoped at the system-prompt level.
+    assert not (agents / "critic" / "system_prompt.PRELUDE.snapshot.md").exists()
+
+
+def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
+    from hyperloom.inference_optimizer.cli.bootstrap import _snapshot_system_prompts
+
+    _snapshot_system_prompts(tmp_path, prompts={"orchestration": "BOOT"})
+
+    orch = tmp_path / "agents" / "orchestration"
+    assert (orch / "system_prompt.snapshot.md").read_text(encoding="utf-8") == "BOOT"
+    assert list(orch.glob("system_prompt.*.snapshot.md")) == []
 
 
 # ---------------------------------------------------------------------------

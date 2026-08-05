@@ -495,7 +495,7 @@ class ClaudeBackend:
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
                 # The composed prompt carries the user turn; the system
-                # prompt is snapshotted once under agents/<role>/.
+                # prompt is snapshotted per scope under agents/<role>/.
                 "prompt": full_prompt,
                 "response": raw_text,
             },
