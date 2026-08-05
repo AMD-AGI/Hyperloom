@@ -507,6 +507,9 @@ exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv"]
 # fatal/error-severity messages are reported there (see ``lint.yml``).
 [tool.pylint.main]
 jobs = 1
+# flydsl re-exports its IR types with ``import *`` from a compiled extension,
+# so static analysis cannot see the members that exist at runtime.
+ignored-modules = ["flydsl"]
 
 # Ruff configuration. Pins the rule set that the BRAIN audit ran with
 # (default ``E`` + ``F``, plus ``W`` for explicitness) so future
