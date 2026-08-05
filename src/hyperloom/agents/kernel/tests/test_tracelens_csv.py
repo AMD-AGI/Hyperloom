@@ -52,6 +52,68 @@ def test_default_top_k_invalid_falls_back(monkeypatch):
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
+def test_rocm_paged_attention_dispatch_resolves_runtime_implementation():
+    """The observed ROCM_ATTN symbol must resolve past the shared wrapper."""
+    resolution = tla.OpResolver(tla.load_mapping()).resolve_op_source(
+        "vllm::unified_attention_with_output",
+        framework="vllm",
+        device_kernel_name="kernel_paged_attention_2d",
+    )
+
+    assert resolution is not None
+    assert resolution.is_routable is True
+    assert resolution.primary_source.endswith(
+        "vllm/v1/attention/ops/chunked_prefill_paged_decode.py"
+    )
+    assert resolution.primary_runtime_backend == "ROCM_ATTN"
+    assert resolution.matched_route == "kernel_paged_attention_2d"
+
+
+def test_unresolved_dispatch_with_runtime_symbol_does_not_fallback_launcher(
+    monkeypatch,
+):
+    """A known runtime symbol miss must fail closed before Forge dispatch."""
+    monkeypatch.setattr(
+        tla,
+        "load_mapping",
+        lambda: {
+            "vllm::dispatch_op": {
+                "kind": "dispatch",
+                "patchable": True,
+                "vllm": {
+                    "different_kernel": {
+                        "kernel_source_path": "vllm/ops/different.py",
+                        "kernel_kind": "triton",
+                        "patchable": True,
+                    }
+                },
+            }
+        },
+    )
+    candidate = {
+        "name": "vllm::dispatch_op",
+        "device_kernel_name": "observed_kernel",
+        "duration_us": 100.0,
+        "source_file": (
+            "/usr/local/lib/python3.12/dist-packages/"
+            "vllm/model_executor/wrapper.py"
+        ),
+        "tracelens_launcher_path": "vllm/model_executor/wrapper.py(1): call",
+    }
+
+    finalized = tla._finalize_candidates(
+        [candidate],
+        framework="vllm",
+    )[0]
+
+    assert finalized["source_file"] == ""
+    assert finalized["launcher_source_file"].endswith("wrapper.py")
+    assert finalized["op_to_source_status"] == "unresolved"
+    assert finalized["reusable_native_kernel"] is False
+    assert finalized["recommended_backends"] == []
+    assert "runtime device symbol" in finalized["op_to_source_reason"]
+
+
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {

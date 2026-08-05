@@ -164,6 +164,7 @@ class OpResolution:
     # templates to the ck-fellow instead of the generic hip-fellow.
     kernel_kinds: list[str] = field(default_factory=list)
     prebuilt_binaries: list[str] = field(default_factory=list)
+    runtime_backends: list[str] = field(default_factory=list)
 
     @property
     def primary_source(self) -> str:
@@ -185,6 +186,13 @@ class OpResolution:
         if 0 <= self.target_index < len(self.prebuilt_binaries):
             return self.prebuilt_binaries[self.target_index]
         return self.prebuilt_binaries[0] if self.prebuilt_binaries else ""
+
+    @property
+    def primary_runtime_backend(self) -> str:
+        """The production attention/backend identity for the selected source."""
+        if 0 <= self.target_index < len(self.runtime_backends):
+            return self.runtime_backends[self.target_index]
+        return self.runtime_backends[0] if self.runtime_backends else ""
 
     @property
     def is_routable(self) -> bool:
@@ -242,6 +250,9 @@ class OpResolution:
         pb = self.primary_prebuilt_binary
         if pb:
             item["prebuilt_binary"] = pb
+        runtime_backend = self.primary_runtime_backend
+        if runtime_backend:
+            item["runtime_backend"] = runtime_backend
         self.stamp_onto(item)
 
 
@@ -516,6 +527,7 @@ class OpResolver:
                             matched_route=kname,
                             kernel_kinds=[str(info.get("kernel_kind") or "")],
                             prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
+                            runtime_backends=[str(info.get("backend") or "")],
                         )
                     return OpResolution(
                         op_name=op_name,
@@ -3738,6 +3750,36 @@ def _finalize_candidates(
         if res is not None and res.status in {"non_rewritable", "no_kernel"}:
             # Curated verdict: not rewritable. Keep the .py launcher as context.
             res.stamp_onto(item)
+        if (
+            res is not None
+            and res.kind == "dispatch"
+            and res.status == "unresolved"
+            and str(item.get("device_kernel_name") or "").strip()
+        ):
+            # A dispatch op with an observed device symbol must never fall back
+            # to its Python launcher. The launcher is shared by multiple
+            # backends and does not identify the implementation that actually
+            # ran. Keep it only as audit context and fail closed so Forge cannot
+            # synthesize a harness for a different backend.
+            launcher = str(
+                item.get("source_file")
+                or item.get("tracelens_launcher_path")
+                or ""
+            )
+            if launcher:
+                item["launcher_source_file"] = launcher
+            res.stamp_onto(item)
+            item["op_to_source_reason"] = (
+                "runtime device symbol did not resolve to an editable "
+                "implementation source"
+            )
+            item["source_file"] = ""
+            item["source_path"] = ""
+            item["kernel_repo"] = ""
+            item["source_type"] = "unresolved_dispatch"
+            item["runtime_generated_kernel"] = False
+            _stamp_candidate_metadata(item, op_cat_map)
+            continue
         # Legacy fallback resolution runs ONLY for a dictionary miss or an
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.

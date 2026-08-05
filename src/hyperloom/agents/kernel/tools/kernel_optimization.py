@@ -1529,6 +1529,7 @@ def build_kernel_metadata(candidate: dict[str, Any], args: argparse.Namespace) -
         "input_dtypes": input_dtypes or [],
         "output_dtypes": candidate.get("output_dtypes") or [],
         "backend": candidate.get("backend") or candidate.get("framework"),
+        "runtime_backend": str(candidate.get("runtime_backend") or ""),
         "runtime_args": runtime_args,
         "runtime_flags": runtime_flags,
         "env_vars": candidate.get("env_vars") or {},

@@ -229,6 +229,35 @@ def test_canonical_forge_artifacts_reject_path_escape(tmp_path):
     )
 
 
+def test_changed_files_must_touch_resolved_implementation_source(tmp_path):
+    workspace = tmp_path / "worktree"
+    expected = workspace / "vllm" / "ops" / "runtime_kernel.py"
+    wrong = workspace / "vllm" / "ops" / "alternate_kernel.py"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("def runtime_kernel():\n    pass\n")
+    wrong.write_text("def alternate_kernel():\n    pass\n")
+
+    touched, expected_paths = (
+        forge_submit._changed_files_touch_implementation(
+            workspace=str(workspace),
+            changed_files=["vllm/ops/alternate_kernel.py"],
+            implementation_sources=[str(expected)],
+        )
+    )
+    assert touched is False
+    assert expected_paths == ["vllm/ops/runtime_kernel.py"]
+
+    touched, _ = forge_submit._changed_files_touch_implementation(
+        workspace=str(workspace),
+        changed_files=[
+            "vllm/ops/alternate_kernel.py",
+            "vllm/ops/runtime_kernel.py",
+        ],
+        implementation_sources=[str(expected)],
+    )
+    assert touched is True
+
+
 def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):
     env = _make_repo(tmp_path)
     repo = env["repo"]

@@ -14,6 +14,7 @@ Dispatch table is exposed via :data:`KERNEL_REQUEST_HANDLERS` for test monkey-pa
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import functools
 import importlib.util
@@ -788,6 +789,40 @@ def _enrich_candidates_artifact(
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _python_source_defines_runtime_symbol(
+    source_file: str,
+    runtime_symbol: str,
+) -> bool | None:
+    """Check ownership for a plain Python/Triton runtime kernel symbol.
+
+    Native and mangled symbols are not validated here because their source-level
+    names can differ after template instantiation. A plain identifier paired
+    with a Python source is unambiguous: the implementation file must define it,
+    not merely import or dispatch to it.
+    """
+    symbol = str(runtime_symbol or "").strip()
+    path = Path(str(source_file or ""))
+    if (
+        not symbol
+        or not symbol.isidentifier()
+        or path.suffix.lower() != ".py"
+        or not path.is_file()
+    ):
+        return None
+    try:
+        tree = ast.parse(
+            path.read_text(encoding="utf-8", errors="replace"),
+            filename=str(path),
+        )
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == symbol
+        for node in ast.walk(tree)
+    )
+
+
 def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     """Reject compile-generated or otherwise non-reusable kernel targets.
 
@@ -811,7 +846,33 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     kernel_id = str(payload.get("kernel_id") or "")
     name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
     source_file = str(payload.get("source_file") or candidate.get("source_file") or "")
+    resolution_kind = str(candidate.get("op_to_source_kind") or "")
+    resolution_status = str(candidate.get("op_to_source_status") or "")
+    device_kernel_name = str(
+        candidate.get("device_kernel_name")
+        or payload.get("device_kernel_name")
+        or ""
+    ).strip()
     reusable = candidate.get("reusable_native_kernel")
+    if (
+        resolution_kind == "dispatch"
+        and resolution_status
+        and resolution_status != "resolved"
+    ):
+        return {
+            "status": "failed",
+            "error_class": "unresolved_dispatch_source",
+            "error": (
+                "dispatch kernel runtime symbol did not resolve to a concrete "
+                "implementation source"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "device_kernel_name": device_kernel_name,
+            "source_file": source_file,
+            "reason": candidate.get("op_to_source_reason")
+            or "dispatch source resolution failed",
+        }
     if reusable is False:
         return {
             "status": "failed",
@@ -829,6 +890,23 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "error": "kernel-opt requires a resolved stable source_file",
             "kernel_id": kernel_id,
             "kernel_name": name,
+        }
+    symbol_ownership = _python_source_defines_runtime_symbol(
+        source_file,
+        device_kernel_name,
+    )
+    if symbol_ownership is False:
+        return {
+            "status": "failed",
+            "error_class": "runtime_symbol_source_mismatch",
+            "error": (
+                "resolved Python source does not define the observed runtime "
+                "device kernel symbol"
+            ),
+            "kernel_id": kernel_id,
+            "kernel_name": name,
+            "device_kernel_name": device_kernel_name,
+            "source_file": source_file,
         }
     if _is_runtime_generated_kernel(name, source_file):
         return {
