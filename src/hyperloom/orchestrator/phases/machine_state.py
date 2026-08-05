@@ -869,17 +869,21 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
-def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float:
+def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
     """Return total Explore wall-clock seconds across all macro cycles.
 
     Completed Explore segments are accumulated at every transition out of
     EXPLORE. If the current phase is still EXPLORE, append the live segment at
-    read time so runtime telemetry remains current between transitions.
+    read time so runtime telemetry remains current between transitions. Returns
+    ``None`` when a legacy resumed state has no trustworthy historical total.
     """
+    raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+    if raw_accumulated is None:
+        return None
     try:
-        accumulated = float(getattr(state, "explore_elapsed_accum_s", 0.0) or 0.0)
+        accumulated = float(raw_accumulated or 0.0)
     except (TypeError, ValueError):
-        accumulated = 0.0
+        return None
     if (getattr(state, "phase", "") or "").strip().upper() == PHASE_EXPLORE:
         accumulated += phase_elapsed_seconds(state, now_unix=now_unix)
     return max(0.0, accumulated)
@@ -2549,14 +2553,17 @@ def record_phase_transition(
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
     if from_phase == PHASE_EXPLORE:
-        try:
-            accumulated = float(getattr(state, "explore_elapsed_accum_s", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            accumulated = 0.0
-        state.explore_elapsed_accum_s = accumulated + phase_elapsed_seconds(
-            state,
-            now_unix=now_unix,
-        )
+        raw_accumulated = getattr(state, "explore_elapsed_accum_s", 0.0)
+        if raw_accumulated is not None:
+            try:
+                accumulated = float(raw_accumulated or 0.0)
+            except (TypeError, ValueError):
+                state.explore_elapsed_accum_s = None
+            else:
+                state.explore_elapsed_accum_s = accumulated + phase_elapsed_seconds(
+                    state,
+                    now_unix=now_unix,
+                )
     row = make_history_row(
         from_phase=from_phase,
         to_phase=to_phase,

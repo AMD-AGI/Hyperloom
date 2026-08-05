@@ -361,6 +361,36 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
+def test_legacy_resume_keeps_explore_runtime_unknown():
+    raw = SharedState().to_dict()
+    raw.pop("explore_elapsed_accum_s")
+    raw.update(
+        {
+            "start_ts": "2026-05-19T00:00:00+00:00",
+            "phase": "EXPLORE",
+            "phase_started_unix": 100.0,
+        }
+    )
+
+    s = SharedState.from_dict(raw)
+    assert s.explore_elapsed_accum_s is None
+    assert phase_state.explore_elapsed_seconds(s, now_unix=220.0) is None
+
+    summary = s._langfuse_status_summary()
+    assert "session_elapsed_s" in summary
+    assert "explore_elapsed_s" not in summary
+    assert "explore_ratio" not in summary
+
+    s.record_phase_transition(
+        to_phase="KERNEL_AGENT",
+        reason="explore_done",
+        evidence={},
+        ts="2026-05-19T00:02:00+00:00",
+        ts_unix=220.0,
+    )
+    assert s.explore_elapsed_accum_s is None
+
+
 def test_core_state_fields_includes_phase_fields():
     for f in (
         "phase",

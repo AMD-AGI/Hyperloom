@@ -52,6 +52,29 @@ from .trace_env import (
 
 log = logging.getLogger(__name__)
 
+_STATUS_CLOCK_BUCKET_SEC = 60
+_STATUS_CLOCK_KEYS = frozenset({"explore_elapsed_s", "session_elapsed_s"})
+_STATUS_CLOCK_DERIVED_KEYS = frozenset({"explore_ratio"})
+
+
+def _status_signature(status: dict[str, Any]) -> tuple:
+    """Return a throttle signature with volatile runtime clocks minute-bucketed."""
+    items: list[tuple[str, Any]] = []
+    for raw_key, raw_value in status.items():
+        key = str(raw_key)
+        if key in _STATUS_CLOCK_DERIVED_KEYS:
+            # Derived from the two elapsed clocks; it will be refreshed whenever
+            # either clock crosses a bucket or another semantic field changes.
+            continue
+        value = raw_value
+        if key in _STATUS_CLOCK_KEYS:
+            try:
+                value = int(float(raw_value) // _STATUS_CLOCK_BUCKET_SEC)
+            except (TypeError, ValueError):
+                pass
+        items.append((key, value))
+    return tuple(sorted(items))
+
 
 def _manifest_path(session_dir: Path) -> Path:
     """Return the path to a session's ``manifest.json``.
@@ -821,8 +844,10 @@ class LangfuseEmitter:
         status timeline is queryable.
 
         Throttled to avoid flooding the trace: a snapshot is sent only when its
-        signature changed or after ``min_refresh_sec`` elapsed. Never flushes the
-        client; best-effort and a no-op unless live push is enabled.
+        signature changed or after ``min_refresh_sec`` elapsed. Runtime clocks
+        are minute-bucketed in that signature, so per-save second changes do not
+        defeat the throttle. Never flushes the client; best-effort and a no-op
+        unless live push is enabled.
 
         Args:
             status (dict[str, Any]): Flat scalar status summary (str/bool/int/
@@ -836,7 +861,7 @@ class LangfuseEmitter:
         try:
             import time
 
-            sig = tuple(sorted((str(k), status[k]) for k in status))
+            sig = _status_signature(status)
             now = time.monotonic()
             if (
                 self._last_status_sig is not None

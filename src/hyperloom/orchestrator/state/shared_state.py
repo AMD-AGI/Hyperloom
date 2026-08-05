@@ -800,10 +800,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Durable sum of completed EXPLORE segments. The current active EXPLORE
+    # Durable sum of completed EXPLORE segments. None means a legacy resumed
+    # state whose pre-upgrade total is unknowable. The current active EXPLORE
     # segment is added at status-render time; accumulating completed segments
     # avoids undercounting long macro-cycle runs after phase_history is capped.
-    explore_elapsed_accum_s: float = 0.0
+    explore_elapsed_accum_s: float | None = 0.0
     # Append-only operator-facing lifecycle log. Each row (built by
     # :func:`machine_state.make_lifecycle_event`) records a phase/step boundary
     # plus artifact paths. Coordinator-only writer; capped at ``_LIFECYCLE_CAP``.
@@ -1181,6 +1182,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
+        # A pre-telemetry state may already have completed EXPLORE segments,
+        # but their exact sum cannot be reconstructed once phase_history has
+        # been capped. Preserve "unknown" instead of reporting a misleading
+        # partial zero after resume. Fresh states still start from 0.0.
+        if "explore_elapsed_accum_s" not in raw:
+            filtered["explore_elapsed_accum_s"] = None
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
         if not isinstance(filtered.get("kernel_opt_attempts"), dict):
@@ -1473,15 +1480,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         try:
             from ..phases.machine_state import explore_elapsed_seconds
 
-            explore_elapsed_s = explore_elapsed_seconds(self)
             session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
-            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
             summary["session_elapsed_s"] = int(round(session_elapsed_s))
-            summary["explore_ratio"] = (
-                round(explore_elapsed_s / session_elapsed_s, 4)
-                if session_elapsed_s > 0.0
-                else 0.0
-            )
+            explore_elapsed_s = explore_elapsed_seconds(self)
+            if explore_elapsed_s is not None:
+                summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
+                summary["explore_ratio"] = (
+                    round(explore_elapsed_s / session_elapsed_s, 4)
+                    if session_elapsed_s > 0.0
+                    else 0.0
+                )
         except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None
