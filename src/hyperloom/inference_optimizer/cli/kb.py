@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Recipe-snapshot KB + KnowledgePlane bootstrap for the CLI.
-
-Resolves the local KB root, builds the RecipeKB local-write/remote-read
-dispatcher, runs the T0 warm-start anchor, and wires the KnowledgePlane
-facade (PR Monitor + KB). Must not import ``cli`` (one-way dependency).
-"""
+"""Recipe-snapshot KB + Phase 1 KnowledgePlane bootstrap for the CLI."""
 
 from __future__ import annotations
 
@@ -15,13 +10,14 @@ import json
 import logging
 import os
 import sys
+import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
-from ..session.paths import workspace_root as _workspace_root_resolve
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
@@ -31,9 +27,7 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the local recipe-snapshot KB root: ``--local-kb-root`` ->
-    ``$HYPERLOOM_LOCAL_KB_ROOT`` -> ``workspace_root()/kb``. Not created here
-    (LocalRecipeStore creates it lazily on first write).
+    """Resolve the shared local knowledge root without creating it.
 
     Args:
         args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
@@ -41,10 +35,17 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
     Returns:
         Path: The resolved local KB root directory.
     """
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
     explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    if explicit:
+    if explicit and "KNOWLEDGE_LOCAL_ROOT" not in os.environ:
+        warnings.warn(
+            "--local-kb-root/HYPERLOOM_LOCAL_KB_ROOT is deprecated; use KNOWLEDGE_LOCAL_ROOT",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return Path(str(explicit).strip())
-    return _workspace_root_resolve() / "kb"
+    return Path(KnowledgeConfig.from_env().local_root)
 
 
 def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
@@ -95,49 +96,55 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
-    """Build the local-write / gbrain-read RecipeKB dispatcher. Local store is
-    always wired; the read-side remote is the gbrain page store (``GBRAIN_*``),
-    enabled unless ``--degraded-kb`` is set or gbrain is unconfigured.
-
-    Writes stay local-only; gbrain serves the read side (and an optional
-    in-process mirror of each local write via ``RECIPE_KB_MIRROR_MODE=inline``).
+    """Build RecipeKB over exactly one selected local or remote store.
 
     Args:
         args: Parsed CLI arguments (``degraded_kb`` etc.).
 
     Returns:
-        Any: A configured ``RecipeKB`` dispatcher (optionally gbrain-mirroring).
+        Any: A configured ``RecipeKB``, or ``None`` for ``--degraded-kb``.
     """
-    from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
-
-    local_root = _resolve_local_kb_root(args)
-    local_store = LocalRecipeStore(root=local_root)
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
+    from hyperloom.orchestrator.knowledge.recipe_kb import (
+        GbrainRecipeStore,
+        LocalRecipeStore,
+        RecipeKB,
+    )
 
     if bool(getattr(args, "degraded_kb", False)):
-        return RecipeKB(local=local_store, remote=None)  # opt-out: no network
+        return None
 
-    # Read-side remote is gbrain only. Writes stay local-only; gbrain is
-    # consulted for READS and (optionally) mirrored to on local write.
-    from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import build_gbrain_remote_from_env
-
-    gbrain_remote = build_gbrain_remote_from_env()
-    if gbrain_remote is None or not gbrain_remote.enabled:
-        return RecipeKB(local=local_store, remote=None)  # gbrain unconfigured: local-only
-
-    kb = RecipeKB(local=local_store, remote=gbrain_remote)
-    # RECIPE_KB_MIRROR_MODE (default ``external``): ``external`` keeps gbrain off
-    # the write path; ``inline`` best-effort mirrors each local write into gbrain
-    # in-process (local write stays authoritative).
-    mirror_mode = os.environ.get("RECIPE_KB_MIRROR_MODE", "external").strip().lower()
-    if mirror_mode == "inline":
-        from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
-            GbrainMirroringRecipeKB,
-            build_mirror_mcp_from_env,
+    config = KnowledgeConfig.from_env()
+    if os.environ.get("RECIPE_KB_MIRROR_MODE"):
+        log.warning("RECIPE_KB_MIRROR_MODE is deprecated and ignored; use KNOWLEDGE_STORE_MODE=local|remote")
+        warnings.warn(
+            "RECIPE_KB_MIRROR_MODE is deprecated and ignored by KnowledgePlane; "
+            "select KNOWLEDGE_STORE_MODE=local|remote",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        mirror_mcp = build_mirror_mcp_from_env()
-        return GbrainMirroringRecipeKB(kb, mirror_mcp) if mirror_mcp is not None else kb
-    return kb  # external (default): no in-process mirror
+    if config.mode is KnowledgeStoreMode.LOCAL:
+        # No GBrain client is constructed in local mode, even when ambient
+        # credentials are present.
+        if "KNOWLEDGE_LOCAL_ROOT" not in os.environ and (
+            getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
+        ):
+            config = replace(config, local_root=str(_resolve_local_kb_root(args)))
+        store: Any = LocalRecipeStore(root=Path(config.local_root))
+    else:
+        store = GbrainRecipeStore.from_credentials(
+            base_url=config.gbrain_base_url,
+            token=config.gbrain_token,
+            lock_root=Path(config.local_root) / ".remote-locks" / "recipes",
+        )
+    kb = RecipeKB(
+        local=store,
+        remote=None,
+        mode=config.mode.value,
+        backend_name=config.backend,
+    )
+    kb.knowledge_config = config
+    return kb
 
 
 def _bootstrap_recipe_kb(
@@ -295,7 +302,10 @@ def _bootstrap_knowledge_plane(
                 exc,
             )
 
+    config = getattr(recipe_kb_client, "knowledge_config", None)
     return KnowledgePlane.from_clients(
         pr_monitor=pr_client,
         pr_monitor_mcp_url=pr_mcp_url,
+        recipe_kb=recipe_kb_client,
+        config=config,
     )

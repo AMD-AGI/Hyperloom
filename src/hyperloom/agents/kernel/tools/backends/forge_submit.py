@@ -2037,26 +2037,14 @@ def _apply_fellow_env(env: dict) -> None:
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
-    # Forward gbrain credentials so the Forge loop's program.md generator can
-    # inject cross-KB kernel knowledge. setdefault keeps operator overrides
-    # authoritative.
-    _gbrain_url = env.get("GBRAIN_BASE_URL", "").strip()
-    _gbrain_token = env.get("GBRAIN_TOKEN", "").strip()
-    if _gbrain_url and _gbrain_token:
-        env.setdefault("KERNELFORGE_GBRAIN_ENABLED", "true")
-        env.setdefault("GBRAIN_BASE_URL", _gbrain_url)
-        env.setdefault("GBRAIN_TOKEN", _gbrain_token)
-    else:
-        # Surface when the gbrain kernel KB is disabled (either GBRAIN_BASE_URL
-        # or GBRAIN_TOKEN absent) so operators can tell forge ran without
-        # cross-KB kernel knowledge.
-        import sys as _sys
+    # Shared KnowledgePlane contract. KernelForge remains responsible for its
+    # own local knowledge implementation and remote kernel-experience behavior.
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
 
-        _sys.stderr.write(
-            "[forge_submit] gbrain KB disabled (forge runs without cross-KB "
-            f"knowledge): GBRAIN_BASE_URL={'set' if _gbrain_url else 'MISSING'} "
-            f"GBRAIN_TOKEN={'set' if _gbrain_token else 'MISSING'}\n"
-        )
+    KernelExperienceBridge(KnowledgeConfig.from_env(env)).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported.
@@ -2960,6 +2948,12 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
+
+    knowledge_bridge = KernelExperienceBridge(KnowledgeConfig.from_env())
     candidate = candidate or {}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3378,15 +3372,13 @@ def submit(
             search_start_ms=search_start_ms,
             improved_during_search=improved_during_search,
         )
-        gbrain_active = bool(
-            os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
-        )
+        knowledge_status = knowledge_bridge.status
         msg = (
             f"forge done (cli): pristine_baseline={baseline_ms} "
             f"search_start={search_start_ms} best={best_ms} "
             f"improved={improved} improved_during_search={improved_during_search} "
             f"fellow={fellow} gpu={gpu_target} "
-            f"gbrain={'on' if gbrain_active else 'off'} "
+            f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )
         # Surface the run's LLM token spend + key-step timeline from the CLI
@@ -3425,6 +3417,18 @@ def submit(
             kb_experience = loop_outcome.structured_result.get("kb_experience")
             if isinstance(kb_experience, dict):
                 res["kb_experience"] = kb_experience
+        kernel_experience = knowledge_bridge.collect_result(loop_outcome.structured_result)
+        res["kernel_experience"] = kernel_experience
+        res["knowledge_audit"] = [
+            {
+                "op": "kernel_experience_passthrough",
+                "mode": knowledge_status.mode,
+                "backend": knowledge_status.backend,
+                "resolution": "collected" if kernel_experience["result_present"] else "not_reported",
+                "success": True,
+                "provenance": kernel_experience["provenance"],
+            }
+        ]
         res["logical_operator"] = logical_operator
         res["source_framework"] = source_framework
         res["implementation_sources"] = implementation_sources

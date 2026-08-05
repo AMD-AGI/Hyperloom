@@ -3169,11 +3169,11 @@ class FrameworkPhase(PhaseHandler):
         ``patch REVERTED_ON arch``) so the live link graph reflects the
         decision immediately, instead of only after the next mirror cron.
 
-        Native-only and best-effort: ``get_kg_client`` returns a native
-        client only when ``GBRAIN_KG_NATIVE`` is set (otherwise edges would
-        be written as a ``## Facts`` fence that gbrain ingest discards), and
-        all failures degrade silently via the ``*_safe`` wrappers so a KG
-        hiccup never affects the run.
+        Native-only and best-effort: local mode supplies a native filesystem
+        graph client automatically; remote mode requires ``GBRAIN_KG_NATIVE``
+        (otherwise edges would be written as a ``## Facts`` fence that gbrain
+        ingest discards). All failures degrade silently via the ``*_safe``
+        wrappers so a KG hiccup never affects the run.
 
         Args:
             patch_file: The patch identifier (edge subject).

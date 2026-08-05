@@ -412,6 +412,17 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         lacks the model/hardware identity needed for a canonical id.
     """
     attrs = frontmatter.get("attrs") if isinstance(frontmatter.get("attrs"), Mapping) else {}
+    # Direct-remote Phase 1 pages carry the complete arbor row. Prefer it when
+    # valid; the legacy attr projection below remains the compatibility path
+    # for canonical pages written by prior mirror/ingest flows.
+    recipe_json = attrs.get("recipe_json")
+    if isinstance(recipe_json, str) and recipe_json.strip():
+        try:
+            decoded = json.loads(recipe_json)
+        except (json.JSONDecodeError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict) and decoded.get(C.F_CANONICAL_ID):
+            return decoded
     model = str(attrs.get("model") or "").strip()
     hardware = str(attrs.get("hardware") or "").strip()
     if not model or not hardware:
@@ -493,7 +504,15 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
         return True
     recipe_labels = recipe.get("labels")
     if not isinstance(recipe_labels, Mapping):
-        recipe_labels = {}
+        recipe_labels = C.canonical_labels(
+            model=str(recipe.get("model") or ""),
+            hardware=str(recipe.get("hardware") or ""),
+            framework_name=str(recipe.get("framework_name") or recipe.get("framework") or ""),
+            framework_version=str(recipe.get("framework_version") or ""),
+            precision=str(recipe.get("precision") or ""),
+            model_type=str(recipe.get("model_type") or ""),
+            architectures=recipe.get("architectures") or [],
+        )
     want = C.canonical_labels(
         model=str(label_match.get(C.F_LABEL_MODEL, "") or recipe_labels.get(C.F_LABEL_MODEL, "")),
         hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or recipe_labels.get(C.F_LABEL_HARDWARE, "")),
@@ -808,8 +827,6 @@ class GbrainRemoteRecipeClient:
             return None
         if not canonical_id:
             raise ValueError("get_recipe requires a non-empty canonical_id")
-        if version is not None and int(version) != 1:
-            return None
         try:
             from .canonical_id import cid_to_path_components
 
@@ -831,7 +848,9 @@ class GbrainRemoteRecipeClient:
         # separators, so exact reads skip the full corpus scan.
         direct = self._get_page_recipe(_slug_for_canonical(canonical_id))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
-            return direct
+            if version is None or int(direct.get(C.F_VERSION) or 1) == int(version):
+                return direct
+            return None
         if framework_version != C.DEFAULT_FRAMEWORK_VERSION_SLUG:
             # Older sessions lacking framework_version were mirrored under
             # unknown_version; fall back there before a corpus scan.
@@ -936,7 +955,13 @@ def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[st
     for metric, bounds in (metric_filters or {}).items():
         val = metrics.get(metric)
         if val is None and metric in ("best_throughput", "throughput"):
-            val = body.get("best_throughput") or metrics.get("throughput")
+            val = (
+                body.get("best_throughput")
+                or metrics.get("throughput")
+                or recipe.get("best_throughput")
+            )
+        if val is None:
+            val = recipe.get(metric)
         if val is None:
             return False
         fval = _as_float(val)

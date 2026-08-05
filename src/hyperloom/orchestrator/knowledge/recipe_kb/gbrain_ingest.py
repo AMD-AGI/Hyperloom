@@ -271,6 +271,10 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
         "validated_gain_pct": float(recipe.get("validated_gain_pct") or 0.0),
     }
+    # Phase 1 direct-remote writes retain the complete arbor row in one
+    # round-trippable field. Legacy attrs remain above so existing canonical
+    # pages/readers continue to work unchanged.
+    attrs["recipe_json"] = json.dumps(dict(recipe), ensure_ascii=False, default=str)
     # Negative-knowledge + provenance lists ride the recipe page so a gbrain
     # warm-start gets the same anti-priors the local row carries. The minimal
     # YAML emitter only handles scalar lists, so structured list-of-dict fields

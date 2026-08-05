@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 
 from hyperloom.inference_optimizer.cli import kb as cli_kb
 
@@ -39,13 +41,13 @@ def test_resolve_local_kb_root_env(tmp_path, monkeypatch) -> None:
 def test_resolve_local_kb_root_default(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_LOCAL_KB_ROOT", raising=False)
     out = cli_kb._resolve_local_kb_root(_args())
-    assert out.name == "kb"
+    assert out.name == "knowledge"
 
 
 def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     kb = cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True))
-    assert kb.remote is None
+    assert kb is None
 
 
 def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
@@ -58,33 +60,36 @@ def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
 
 
 def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "external")
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
+    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.test")
+    monkeypatch.setenv("GBRAIN_TOKEN", "token")
 
-    class _Remote:
-        enabled = True
+    class _Store:
+        backend_name = "gbrain"
 
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import GbrainRecipeStore
 
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
+    monkeypatch.setattr(
+        GbrainRecipeStore,
+        "from_credentials",
+        classmethod(lambda cls, **kwargs: _Store()),
+    )
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert isinstance(kb.remote, _Remote)
+    assert isinstance(kb.local, _Store)
+    assert kb.remote is None
+    assert kb.mode == "remote"
 
 
-def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
+def test_dispatcher_gbrain_inline_mirror_is_deprecated(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "inline")
-
-    class _Remote:
-        enabled = True
-
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
     from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
 
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
-    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", object)
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert isinstance(kb, gi.GbrainMirroringRecipeKB)
+    with pytest.warns(DeprecationWarning, match="RECIPE_KB_MIRROR_MODE"):
+        kb = cli_kb._build_recipe_kb_dispatcher(_args())
+    assert not isinstance(kb, gi.GbrainMirroringRecipeKB)
+    assert kb.mode == "local"
 
 
 def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
@@ -113,22 +118,14 @@ def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     assert "ts" in row
 
 
-def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
+def test_attach_recipe_audit_hook_with_deprecated_mirror_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "inline")
 
-    class _Remote:
-        enabled = True
-
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
-
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
-    monkeypatch.setattr(gi, "build_mirror_mcp_from_env", object)
-    kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert isinstance(kb, gi.GbrainMirroringRecipeKB)
+    with pytest.warns(DeprecationWarning):
+        kb = cli_kb._build_recipe_kb_dispatcher(_args())
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)
-    assert callable(kb._inner.audit_hook)
+    assert callable(kb.audit_hook)
 
 
 def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
