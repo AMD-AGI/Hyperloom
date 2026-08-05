@@ -1907,10 +1907,18 @@
     ],
     "patchable": true,
     "vllm": {
+      "kernel_paged_attention_2d": {
+        "kernel_source_path": "vllm/v1/attention/ops/chunked_prefill_paged_decode.py",
+        "kernel_source_line": "46",
+        "kernel_kind": "triton",
+        "backend": "ROCM_ATTN",
+        "patchable": true
+      },
       "kernel_paged_attentiond.kd": {
         "kernel_source_path": "vllm/v1/attention/ops/chunked_prefill_paged_decode.py",
         "kernel_source_line": "250",
         "kernel_kind": "triton",
+        "backend": "ROCM_ATTN",
         "patchable": true
       },
       "_fwd_kernel.kd": {
@@ -1931,10 +1939,18 @@
         "kernel_kind": "aiter_hip",
         "patchable": true
       },
+      "kernel_unified_attention": {
+        "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/_triton_kernels/attention/unified_attention.py",
+        "kernel_source_line": "11",
+        "kernel_kind": "triton",
+        "backend": "ROCM_AITER_UNIFIED_ATTN",
+        "patchable": true
+      },
       "kernel_unified_attentiond.kd": {
         "kernel_source_path": "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/_triton_kernels/attention/unified_attention.py",
         "kernel_source_line": "11",
         "kernel_kind": "triton",
+        "backend": "ROCM_AITER_UNIFIED_ATTN",
         "patchable": true
       },
       "void paged_attention_ll4mi_QKV_mfma16_kernel<__hip_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1, __hip_bfloat16,": {

@@ -1583,6 +1583,7 @@ def apply_kernel_patch(
     dry_run: bool = False,
     snapshot_dir: str | Path | None = None,
     repo_root: str | Path | None = None,
+    producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Apply an optimized kernel file with backup, rebuild, and fan-out.
 
@@ -1619,6 +1620,8 @@ def apply_kernel_patch(
         dry_run (bool): Prepare backups/manifest only, without applying.
         snapshot_dir (str | Path | None): When set, enables snapshot mode and
             holds byte-exact final contents mirrored at each write path.
+        producer_manifest (str | Path | None): Canonical producer manifest
+            recorded for deployment provenance.
 
     Returns:
         dict[str, Any]: A result dict with ``status`` and, on success, the
@@ -1640,6 +1643,7 @@ def apply_kernel_patch(
             allow_unknown_target=allow_unknown_target,
             dry_run=dry_run,
             repo_root=repo_root,
+            producer_manifest=producer_manifest,
         )
     patch = Path(patch_path).resolve()
     target = Path(target_file).resolve()
@@ -1683,6 +1687,10 @@ def apply_kernel_patch(
         },
         "created_at": utc_now(),
     }
+    if producer_manifest:
+        manifest["producer_manifest"] = str(
+            Path(producer_manifest).resolve()
+        )
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
@@ -1865,6 +1873,7 @@ def _apply_kernel_patch_snapshot(
     allow_unknown_target: bool,
     dry_run: bool,
     repo_root: str | Path | None = None,
+    producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Snapshot-mode apply: land an entire multi-file patch atomically.
 
@@ -1950,6 +1959,10 @@ def _apply_kernel_patch_snapshot(
         "strategy": {"compiled": compiled, "root": str(repo_root)},
         "created_at": utc_now(),
     }
+    if producer_manifest:
+        manifest["producer_manifest"] = str(
+            Path(producer_manifest).resolve()
+        )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
         return {"status": "ok", "dry_run": True, "manifest_path": str(manifest_path)}
