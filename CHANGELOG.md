@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
+  removed from the role registry. All kernel work was already handled by
+  programmatic Python handlers in `orchestrator/kernel/request_handlers.py`; the
+  LLM role was a no-op heartbeat responder. The following CLI flags and env vars
+  are removed:
+  - `--kernel-prompt` — overriding the kernel system prompt is no longer meaningful.
+  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
+  - `INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS` — no kernel LLM backend.
+  - `INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL` — no kernel LLM backend.
+  
+  `--no-kernel` continues to work: it sets `shared_state.kernel_enabled=False`,
+  which causes the Coordinator's request router to auto-reject kernel REQUESTs
+  with `agent_disabled`.
+
+  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been replaced
+  by `docs/conceptual/kernel-execution-path.md`, which documents the real
+  programmatic dispatch flow.
+
 ### Added
 
 - **Recipe-KB writes in the Langfuse trace**: every write to the cross-session

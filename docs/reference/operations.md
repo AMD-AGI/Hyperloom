@@ -38,7 +38,7 @@ GEAK workers. The Coordinator pod itself is small.
 | Coordinator + Orchestration        | 4 cores   | 16 GiB    | none                                      | minimal                                                                                    |
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
-| Kernel-agent + Ray head            | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
+| GEAK + Ray head (kernel optimization) | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
 | Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
 | Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
@@ -95,7 +95,7 @@ namespace: hyperloom
 │   ├── Pod: coordinator                  # Python CLI
 │   ├── (subprocess) critic-agent
 │   ├── (subprocess) robustness-agent
-│   └── (subprocess) kernel-agent + Ray head
+│   └── Ray head (launched by kernel request handlers; GEAK runs as Ray workers)
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
 ├── Secret: hyperloom-creds                # SAFE_API_KEY
@@ -104,8 +104,9 @@ namespace: hyperloom
 
 Notes:
 
-* Ray workers are launched as child processes of the kernel-agent,
-  not as separate pods. Hyperloom does not require Ray's Kubernetes
+* Ray is launched directly by the Coordinator's programmatic kernel request
+  handlers (`orchestrator/kernel/request_handlers.py`) when GEAK runs, not by a
+  separate kernel-agent process. Hyperloom does not require Ray's Kubernetes
   operator. (Hosted Primus-Claw deployments do use RayJob for multi-node
   scale-out; that is internal to the Primus-Claw control plane.)
 * Pin the pod to a single node with `nodeSelector` matching your AMD

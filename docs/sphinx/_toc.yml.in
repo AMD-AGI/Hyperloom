@@ -37,6 +37,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/kernel-execution-path.md
+    title: Kernel optimization execution path
 
 - caption: How to
   entries:

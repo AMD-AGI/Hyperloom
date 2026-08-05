@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 - Robustness: default `--robustness-agent` — drives the
@@ -156,10 +156,11 @@ foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
 run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
-> Inside a running session, the equivalent guard is Kernel-agent IR-4
-> (`kill_server` + `check_gpu_memory` before every server (re)start —
-> see `src/hyperloom/orchestrator/prompts/kernel_agent.md`). IR-1 above is the
-> *outer* gate that fires before the optimizer process exists.
+> Inside a running session, the equivalent guard is enforced in
+> `orchestrator/kernel/request_handlers.py`: `restart_server_for_round` and
+> `apply_and_bench.py` run `kill_server` + `check_gpu_memory` before every
+> server restart. IR-1 above is the *outer* gate that fires before the
+> optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
 

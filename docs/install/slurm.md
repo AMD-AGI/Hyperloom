@@ -62,9 +62,10 @@ location the scheduler can read (for example `/mnt/vast/hyperloom-slurm`) and ru
 
 ## Step 2: Configure LLM credentials
 
-Hyperloom is an LLM-driven agent: the orchestrator and kernel agent call the
-gateway throughout the run, so a working key and a reachable endpoint are hard
-requirements (the installer's preflight enforces them).
+Hyperloom is an LLM-driven agent: the Orchestration role calls the gateway
+throughout the run, and GEAK (the kernel optimization backend, launched as a
+subprocess) has its own gateway calls. A working key and a reachable endpoint
+are hard requirements; the installer's preflight enforces them.
 
 Copy the template and fill it in:
 
@@ -203,13 +204,13 @@ utilization ramp up only after the model-load step.
 
 ## LLM model-name constraints
 
-The job calls the gateway for orchestration and for the kernel agent (GEAK).
-Model names must exist in your key's catalog:
+The job calls the gateway for orchestration and (via GEAK subprocess) for kernel
+optimization. Model names must exist in your key's catalog:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-4-8` preferred, with `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
-| Kernel agent (GEAKv4 Claude Code workflow) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different Claude Code model. |
+| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
 | Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
 - Do *not* use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
