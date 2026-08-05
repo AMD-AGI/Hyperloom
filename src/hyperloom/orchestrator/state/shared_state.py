@@ -58,6 +58,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
 from . import kernel_decision_settings as _kernel_decision_settings
+from ._shared_state.enablement_round import EnablementRound
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +254,7 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 _TRACE_HOT_KERNEL_TOP_N = 15
 
 # Global ``last_action_failures`` rolling-log cap.
-_DEFAULT_LAST_FAILURES = 10
+_DEFAULT_LAST_FAILURES = 30
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
@@ -300,7 +301,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 3
+LATEST_STATE_SCHEMA_VERSION: int = 4
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -480,105 +481,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # One-shot: a cuda-graph capture failure asks the next baseline to retry with
     # cuda-graph capture disabled. Set on failure, consumed by BaselineExecutor.
     baseline_eager_fallback: bool = False
-    # Eval-origin enablement carriers: set when the first baseline runs but its
-    # accuracy eval fails, so the enablement pump/gate can reconstruct the trigger
-    # and re-run the same eval contract. Empty for boot-origin enablement.
-    enablement_origin: str = ""
-    enablement_accuracy_floor: float = 0.0
-    enablement_probe_config_path: str = ""
-    enablement_eval_contract_fingerprint: str = ""
-    enablement_baseline_eval_evidence: str = ""
-    enablement_baseline_eval_kind: str = ""
-    enablement_observed_accuracy: float = 0.0
-    enablement_observed_task: str = ""
-    enablement_observed_metric: str = ""
-    enablement_pending: bool = False
-    # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
-    # must revalidate accuracy before the run is considered enabled.
-    enablement_validation_pending: bool = False
-    # Enablement path (framework-agent) state.
-    # ``enablement_launch_log``: captured launch/traceback text when baseline
-    #   cannot launch.
-    # ``enablement_dispatched``: in-flight guard for a queued/running authoring
-    #   attempt; cleared when the attempt REVERTs.
-    # ``enablement_attempts``: number of dispatches (candidate rotation / idempotency).
-    # ``enablement_succeeded``: terminal KEEP guard.
     # Admission for both enablement lanes, from ``--enablement``: ``launch``,
     # ``eval``, ``all`` (default) or ``off`` — with ``off`` a broken baseline
     # fast-fails instead of opening an authoring loop.
     enablement_mode: str = "all"
-    enablement_launch_log: str = ""
-    enablement_dispatched: bool = False
-    enablement_attempts: int = 0
-    enablement_succeeded: bool = False
-    # Watchdog bookkeeping for the in-flight enablement round: the dispatched
-    #   specialist task id and the tick it was dispatched on. If a round ends
-    #   without ever calling ``_maybe_rearm_enablement`` (e.g. the deliverable
-    #   was approved-but-empty and routed to plain baseline retries, or any other
-    #   path that never produces an integrate result), ``enablement_dispatched``
-    #   would stay stuck True forever and the run could never reach
-    #   ``enablement_stalled``. The watchdog in ``_maybe_enqueue_enablement_specialist``
-    #   uses these to detect a silently-finished round and count it as a stall.
-    enablement_inflight_task_id: str = ""
-    enablement_dispatch_tick: int = -1
-    # Task id of the most recently completed enablement specialist round. Captured
-    #   at rearm so the async dispatch chokepoint can read that round's
-    #   ``specialist_done.json`` for a ``needs_targeted_build`` request and enqueue
-    #   an off-loop build (see ``_maybe_enqueue_specialist_requested_build``).
-    #   Cleared once consumed. Optional; defaults via from_dict, no schema bump.
-    enablement_last_specialist_task_id: str = ""
-    # Ordered, deduped patch paths from prior enablement rounds that made forward
-    #   progress; re-applied as a base before the next round's patch so serial
-    #   gaps stack. See ``_maybe_rearm_enablement``.
-    enablement_kept_patches: list = field(default_factory=list)
-    # Ordered, deduped allowlisted env-setup shell commands prior rounds ran to
-    #   make the combo buildable/runnable; re-run idempotently by integrate_patch
-    #   before applying patches + booting. Stacked like ``enablement_kept_patches``.
-    enablement_setup_commands: list = field(default_factory=list)
-    # Consecutive enablement rounds that neither became runnable nor advanced to
-    #   a new failure signature; at ``_ENABLEMENT_MAX_STALL`` the loop stops with
-    #   stop_reason ``enablement_stalled``.
-    enablement_stall_streak: int = 0
-    # Launch-log hashes already recorded as needs_human_review; one record per log.
-    enablement_human_review_logged: list = field(default_factory=list)
-    # Path to the materialized config produced by the KEEP'd candidate bench.
-    # This is the effective config (with server fixes applied) used for
-    # revalidation; distinct from enablement_probe_config_path (the original
-    # trigger config before any enablement patches).  Optional; defaults via
-    # from_dict, no schema bump.
-    enablement_accepted_config_path: str = ""
-    # Task identity for the current revalidation baseline task. Cleared when
-    # the task finishes (success or failure).  Optional; defaults via from_dict.
-    enablement_revalidation_task_id: str = ""
-    # Monotonically increasing counter: incremented each time an eval-origin
-    # KEEP opens a new revalidation window so each window gets a fresh idempotency
-    # key and cannot reuse a prior terminal TaskRegistry row.
-    enablement_revalidation_generation: int = 0
-    # Attempt-scoped runtime acquisition state. All optional; NOT in
-    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
-    # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
-    # ``enablement_active_runtime``: the currently-promoted attempt FrameworkRuntime dict.
-    # ``enablement_attempt_runtimes``: retained attempt-runtime records (capped).
-    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm.
-    # ``enablement_localization_manifest``: localization records.
-    enablement_stack_actions: list = field(default_factory=list)
-    enablement_active_runtime: dict = field(default_factory=dict)
-    enablement_attempt_runtimes: list = field(default_factory=list)
-    enablement_kept_stack_action: dict = field(default_factory=dict)
-    enablement_localization_manifest: list = field(default_factory=list)
-    # Off-loop targeted-build state. All optional; NOT in fact_layer_keys and
-    # do NOT bump schema_version (default via from_dict).
-    # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
-    #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
-    # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
-    # ``enablement_last_build_failure``: failure_class + failure_summary.
-    # ``enablement_build_novelty``: compact repeat-vs-novel ledger.
-    # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
+    # All per-round enablement fields are nested here.
+    enablement: EnablementRound = field(default_factory=EnablementRound)
+    # Off-loop targeted-build sentinel (task_id/pid/pgid/attempt_root/
+    # aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
     pending_targeted_build: dict = field(default_factory=dict)
-    enablement_build_manifest: list = field(default_factory=list)
-    enablement_last_build_failure: dict = field(default_factory=dict)
-    enablement_build_novelty: list = field(default_factory=list)
-    enablement_candidate_refs: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
@@ -1303,6 +1214,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             existing=filtered.get("explore_search"),
         )
 
+        if incoming_version < 4:
+            # Lift flat enablement_* keys from old state.json into EnablementRound.
+            _ENABLEMENT_ROUND_FIELDS = set(EnablementRound.__dataclass_fields__)
+            flat = {
+                k[len("enablement_"):]: v
+                for k, v in raw.items()
+                if k.startswith("enablement_") and k[len("enablement_"):] in _ENABLEMENT_ROUND_FIELDS
+            }
+            # Prefer any nested blob already present (from a partial migration).
+            if not isinstance(filtered.get("enablement"), dict):
+                filtered["enablement"] = flat
+            else:
+                for k, v in flat.items():
+                    filtered["enablement"].setdefault(k, v)
+
+        if isinstance(filtered.get("enablement"), dict):
+            filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
+        elif not isinstance(filtered.get("enablement"), EnablementRound):
+            filtered["enablement"] = EnablementRound()
+
         filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
 
         return cls(**filtered)
@@ -1711,8 +1642,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return (
             phase in ("PRELUDE", "FRAMEWORK_AGENT")
             and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and not bool(getattr(self, "enablement_succeeded", False))
-        ) or bool(getattr(self, "enablement_validation_pending", False))
+            and not self.enablement.succeeded
+        ) or self.enablement.validation_pending
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
@@ -2126,12 +2057,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
-    def _truncate_excerpt(value: Any, *, limit: int = 800) -> str | None:
+    def _truncate_excerpt(value: Any, *, limit: int = 1200) -> str | None:
         """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``).
 
         Args:
             value (Any): The value to coerce to a string excerpt.
-            limit (int): Maximum retained length in characters (default 800).
+            limit (int): Maximum retained length in characters.
 
         Returns:
             str | None: The trimmed string, or ``None`` when ``value`` is
@@ -2187,7 +2118,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         Returns:
             dict[str, Any]: The shared diagnostic fields (``error_class`` /
                 ``error_excerpt`` / ``stderr_tail`` / ``stderr_log_path`` /
-                ``workspace`` / ``raw_result_path`` / ``reported_success``).
+                ``workspace`` / ``raw_result_path`` / ``reported_success`` /
+                ``variant_name``).
         """
         return {
             "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
@@ -2197,6 +2129,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
             "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
             "reported_success": result.get("reported_success"),
+            "variant_name": (str(result.get("variant_name")) if result.get("variant_name") else None),
         }
 
     def record_action_attempt(
@@ -2210,7 +2143,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         extras: dict[str, Any] | None = None,
         max_history: int = _DEFAULT_ATTEMPTS_HISTORY,
     ) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, raw_result_path, reported_success, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`.
+        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`.
 
         Args:
             action (str): The audited action name (must be in

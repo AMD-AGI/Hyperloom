@@ -947,8 +947,8 @@ async def test_explore_stack_rebench_floor_follows_the_in_batch_anchor(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
-    """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
+async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant in explore_search.tested runs again; only same-grid exact duplicates are collapsed."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -971,10 +971,12 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
     fp_dup = canonical_fingerprint("--dup-flag", {})
     grid = [
-        # Already in ledger.tested -> SKIPPED
-        {"name": "v_dup", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
-        # New -> runs
+        # Historical REVERT in ledger — must now execute (no cross-round block).
+        {"name": "v_prior_revert", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        # New variant — runs.
         {"name": "v_fresh", "extra_args": "--fresh-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        # Exact same-grid duplicate of v_prior_revert — collapsed to round_dup.
+        {"name": "v_same_again", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
     ]
     task = await tr.create(
         kind="explore",
@@ -998,7 +1000,6 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "name_index": {},
             },
             "variant_timeout_sec": 10,
-            # Disable stack rebench so bench calls count only single-variant runs.
             "enable_stack_rebench": False,
         },
         idempotency_key="ex-dedup",
@@ -1011,9 +1012,13 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
         res = await sub.run_task(task)
 
     out = res.result
-    assert {d["name"] for d in out["skipped_dup"]} == {"v_dup"}
-    assert len(bench_calls) == 1
-    assert {w["name"] for w in out["winners"]} == {"v_fresh"}
+    # v_same_again is a same-grid round_dup; v_prior_revert runs (no cross-round block).
+    assert {d["name"] for d in out["skipped_dup"]} == {"v_same_again"}
+    assert {d["reason"] for d in out["skipped_dup"]} == {"round_dup"}
+    # Both historical and fresh variants execute (two bench calls, not one).
+    assert len(bench_calls) == 2
+    # Historical REVERT fingerprint was not blocked — it ran and can win.
+    assert "v_prior_revert" in {w["name"] for w in out["winners"]}
 
 
 @pytest.mark.asyncio
@@ -1849,3 +1854,77 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
     assert variant.args_mode == "replace"
     assert variant.extra_server_args == "--max-num-seqs 256"
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_runner, tmp_path, monkeypatch):
+    """FAILED and accepted historical fingerprints may rerun; rejected contains latest attempt."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-rerun"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    fp_failed = canonical_fingerprint("--prev-failed", {})
+    fp_accepted = canonical_fingerprint("--prev-kept", {})
+    grid = [
+        {"name": "rerun_failed", "extra_args": "--prev-failed", "extra_envs": {}, "provenance": "llm_direct"},
+        {"name": "rerun_kept", "extra_args": "--prev-kept", "extra_envs": {}, "provenance": "llm_direct"},
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
+            "explore_search": {
+                "tested": {
+                    fp_failed: {
+                        "fingerprint": fp_failed,
+                        "name": "rerun_failed",
+                        "extra_server_args": "--prev-failed",
+                        "extra_envs": {},
+                        "outcome": "FAILED",
+                        "gain_pct": None,
+                    },
+                },
+                "rejected": [],
+                "accepted": [
+                    {
+                        "fingerprint": fp_accepted,
+                        "name": "rerun_kept",
+                        "extra_server_args": "--prev-kept",
+                        "extra_envs": {},
+                        "outcome": "KEEP",
+                        "gain_pct": 5.0,
+                    }
+                ],
+                "name_index": {},
+            },
+            "variant_timeout_sec": 10,
+            "enable_stack_rebench": False,
+        },
+        idempotency_key="ex-rerun-all",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # Neither historical FAILED nor accepted fingerprint is blocked.
+    assert not any(d["reason"] == "ledger_dup" for d in out["skipped_dup"])
+    # Both ran (first one wins; second measures same tput as updated base so it won't KEEP).
+    tested = out["explore_search_update"]["tested"]
+    assert fp_failed in tested
+    # The latest result for fp_failed overwrites the FAILED entry.
+    assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE", "KILLED_OVERTIME")

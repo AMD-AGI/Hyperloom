@@ -19,6 +19,11 @@ def _shared_state_module():
     return shared_state
 
 
+# Failure rows rendered into the prompt, and per-row excerpt budget.
+_FAILURES_RENDERED = 10
+_FAILURE_EXCERPT_CHARS = 600
+
+
 class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Forwarding shim — implementation in :mod:`.policy`."""
@@ -600,27 +605,38 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render up to the 3 most-recent global failures; full list on disk.
+        """Render the most-recent global failures, each with its excerpt tail and log path.
 
         Returns:
-            str: A pipe-joined render of the last 3 failures (with an
-                ``[+N earlier]`` suffix when more exist), or ``"(none)"``.
+            str: A newline-separated render of the last
+                :data:`_FAILURES_RENDERED` failures (with an
+                ``[+N earlier failures]`` suffix when more exist), or
+                ``"(none)"``.
         """
         if not self.last_action_failures:
             return "(none)"
         rows: list[str] = []
-        for entry in self.last_action_failures[-3:]:
+        for entry in self.last_action_failures[-_FAILURES_RENDERED:]:
             if not isinstance(entry, dict):
                 continue
             action = entry.get("action") or "?"
             error_class = entry.get("error_class") or "?"
             ts = entry.get("ts") or "?"
-            excerpt = entry.get("error_excerpt") or ""
-            ws = entry.get("workspace") or "-"
-            excerpt_short = excerpt.splitlines()[0][:200] if excerpt else ""
-            rows.append(f'[{action}/{error_class}@{ts}] err="{excerpt_short}" ws={ws}')
-        suffix = f" [+{len(self.last_action_failures) - 3} earlier]" if len(self.last_action_failures) > 3 else ""
-        return " | ".join(rows) + suffix if rows else "(none)"
+            header = f"[{action}/{error_class}@{ts}]"
+            variant = entry.get("variant_name") or ""
+            if variant:
+                header += f" variant={variant}"
+            header += f" ws={entry.get('workspace') or '-'}"
+            log_path = entry.get("stderr_log_path") or ""
+            if log_path:
+                header += f" log={log_path}"
+            # stderr_tail holds the actionable end of the blob; excerpt is its head.
+            blob = entry.get("stderr_tail") or entry.get("error_excerpt") or ""
+            excerpt = blob[-_FAILURE_EXCERPT_CHARS:].strip()
+            rows.append(f"{header}\n  {excerpt}" if excerpt else header)
+        earlier = len(self.last_action_failures) - _FAILURES_RENDERED
+        suffix = f"\n[+{earlier} earlier failures]" if earlier > 0 else ""
+        return "\n".join(rows) + suffix if rows else "(none)"
 
     def _format_rejected_kernel_patches(self) -> str:
         """Render the most recent rejected kernel patches for the prompt.
@@ -677,7 +693,16 @@ class _RenderMixin:
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}"
+        parts: list[str] = []
+        error_class = str(entry.get("error_class") or "").strip()
+        if error_class:
+            parts.append(f"err={error_class}")
+        reason = str(entry.get("reason") or "").strip()
+        # Threshold rejections are already conveyed by the gain column.
+        if reason and reason not in ("not_keep", "gain_below_threshold"):
+            parts.append(f"reason={reason[:120]}")
+        suffix = "  " + " ".join(parts) if parts else ""
+        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
 
     @staticmethod
     def _enrich_with_tested_gain(
@@ -738,8 +763,8 @@ class _RenderMixin:
                     "      • " + _RenderMixin._format_variant_line(_RenderMixin._enrich_with_tested_gain(entry, tested))
                 )
         if rejected:
-            out.append("    rejected (last 5):")
-            for entry in rejected[-5:]:
+            out.append("    rejected (last 15):")
+            for entry in rejected[-15:]:
                 if not isinstance(entry, dict):
                     continue
                 out.append("      • " + _RenderMixin._format_variant_line(entry))
