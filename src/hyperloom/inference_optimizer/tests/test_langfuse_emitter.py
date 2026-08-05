@@ -388,6 +388,100 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
     assert g.ended is True
 
 
+def test_failed_call_emits_immediately_with_error_level(tmp_path, monkeypatch):
+    """A failure has no response half, so it must not wait for a pair.
+
+    Buffering it would hide the failure until session end and let ``pair_key``
+    (status-blind) marry it to a neighbouring successful call.
+    """
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    em.record_llm_call(
+        _llm_row(
+            status="error",
+            error_type="BackendError",
+            error_message="gateway returned 400",
+            input_tokens=None,
+            output_tokens=None,
+            cache_read_input_tokens=None,
+        )
+    )
+
+    assert len(client.generations) == 1
+    g = client.generations[0]
+    assert g.kwargs["level"] == lfmap.LEVEL_ERROR
+    assert g.kwargs["status_message"] == "BackendError: gateway returned 400"
+    assert g.kwargs["metadata"]["status"] == "error"
+    assert g.kwargs["metadata"]["error_type"] == "BackendError"
+    # No response half was ever buffered waiting for a partner.
+    assert em._pending == {}
+    assert em._counts["generations_failed"] == 1
+
+
+def test_successful_and_legacy_rows_stay_default_level(tmp_path, monkeypatch):
+    """Rows written before ``status`` existed must not all turn red on backfill."""
+    _enable_env(monkeypatch)
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    legacy = _llm_row()
+    assert "status" not in legacy
+    em.record_llm_call(legacy)
+    em.record_conversation(_conv_row())
+
+    assert len(client.generations) == 1
+    g = client.generations[0]
+    assert g.kwargs["level"] == lfmap.LEVEL_DEFAULT
+    assert g.kwargs["status_message"] is None
+    assert em._counts["generations_failed"] == 0
+
+
+def test_start_obs_degrades_when_sdk_rejects_level(monkeypatch):
+    """An SDK predating ``level`` still gets the observation, minus the extras."""
+
+    class _OldParent:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def start_observation(self, **kwargs):
+            self.calls.append(kwargs)
+            for unsupported in ("start_time", "level", "status_message"):
+                if unsupported in kwargs:
+                    raise TypeError(f"unexpected keyword argument {unsupported!r}")
+            return "observation"
+
+    parent = _OldParent()
+    got = lfe._start_obs(
+        parent,
+        name="gen",
+        as_type="generation",
+        start_time="T",
+        level="ERROR",
+        status_message="boom",
+    )
+
+    assert got == "observation"
+    # Ladder walked down to the signature the SDK accepts, without repeating one.
+    assert [sorted(c) for c in parent.calls] == [
+        ["as_type", "level", "name", "start_time", "status_message"],
+        ["as_type", "level", "name", "status_message"],
+        ["as_type", "name"],
+    ]
+
+
+def test_start_obs_reraises_when_even_minimal_signature_fails():
+    class _Hostile:
+        def start_observation(self, **_kwargs):
+            raise TypeError("nope")
+
+    with pytest.raises(TypeError):
+        lfe._start_obs(_Hostile(), name="gen", as_type="span")
+
+
 def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

@@ -139,26 +139,49 @@ def _to_ns(dt: Any) -> int | None:
     return None
 
 
+# Optional kwargs dropped, in order, when the installed SDK rejects them. Each
+# rung is a superset of the previous one, so the richest call that the SDK
+# actually accepts wins instead of the whole observation being lost.
+_OBS_KWARG_LADDER: tuple[tuple[str, ...], ...] = (
+    (),
+    ("start_time",),
+    ("start_time", "level", "status_message"),
+)
+
+
 def _start_obs(parent: Any, **kwargs: Any) -> Any:
     """Create a child/root observation, tolerant of v2/v3 vs v4 signatures.
 
-    Tries the caller's kwargs first and, if the SDK rejects ``start_time`` with a
-    TypeError (v4 removed it), retries without it — keeping backdated timestamps
-    where supported and degrading to "start = now" only where required.
+    Tries the caller's kwargs first and, on a ``TypeError``, retries with
+    progressively fewer optional kwargs (:data:`_OBS_KWARG_LADDER`): ``v4``
+    removed ``start_time``, and older SDKs predate ``level`` /
+    ``status_message``. Degrading one rung at a time keeps backdated timestamps
+    and error levels wherever they are supported. Rungs that would repeat an
+    already-attempted signature are skipped.
 
     Args:
         parent: the parent observation (or client) to create the child on.
-        **kwargs: the keyword arguments forwarded to ``start_observation``;
-            ``start_time`` is dropped on a retry if the SDK rejects it.
+        **kwargs: the keyword arguments forwarded to ``start_observation``.
 
     Returns:
         The newly started observation.
+
+    Raises:
+        TypeError: If even the most reduced signature is rejected.
     """
-    try:
-        return parent.start_observation(**kwargs)
-    except TypeError:
-        kwargs.pop("start_time", None)
-        return parent.start_observation(**kwargs)
+    last: TypeError | None = None
+    attempted: set[frozenset[str]] = set()
+    for drop in _OBS_KWARG_LADDER:
+        attempt = {k: v for k, v in kwargs.items() if k not in drop}
+        signature = frozenset(attempt)
+        if signature in attempted:
+            continue
+        attempted.add(signature)
+        try:
+            return parent.start_observation(**attempt)
+        except TypeError as exc:
+            last = exc
+    raise last  # type: ignore[misc]  # the ladder always runs at least once
 
 
 def _end_time_wants_int(obs: Any) -> bool:
@@ -366,6 +389,7 @@ class LangfuseEmitter:
             "generations_paired": 0,  # of which had both token + text halves
             "generations_text_only": 0,
             "generations_token_only": 0,
+            "generations_failed": 0,  # of which recorded a failed LLM call (level=ERROR)
             "session_start_recorded": 0,  # 1 once the startup marker was sent
             "status_updates_sent": 0,  # live state.json status snapshots mirrored
             "scores_sent": 0,  # decision Scores created (span + trace)
@@ -566,10 +590,18 @@ class LangfuseEmitter:
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
         """Buffer one half of a generation and emit once both halves arrive.
 
+        A failed call is emitted immediately instead of being buffered: it has
+        no response, so its conversation half never arrives and waiting would
+        hold the failure until session end — or worse, let ``pair_key`` (which
+        does not consider status) marry it to a neighbouring successful call.
+
         Args:
             row: The token (``llm``) or conversation (``conv``) row.
             half: Which half this row represents (``"llm"`` or ``"conv"``).
         """
+        if half == "llm" and lfmap.generation_level(row) == lfmap.LEVEL_ERROR:
+            self._emit_generation(token_row=row, conv_row=None)
+            return
         key = lfmap.pair_key(row)
         emit_parts: dict[str, dict[str, Any]] | None = None
         with self._lock:
@@ -650,6 +682,7 @@ class LangfuseEmitter:
         end = lfmap.parse_ts(base.get("ts"))
         start = lfmap.generation_start(end, (token_row or {}).get("latency_ms"))
         has_text = conv_row is not None
+        level = lfmap.generation_level(base)
         try:
             parent = self._ensure_agent_span(phase, agent, start)
             gen = _start_obs(
@@ -662,9 +695,13 @@ class LangfuseEmitter:
                 output=(conv_row or {}).get("response"),
                 metadata=lfmap.generation_metadata(base, phase=phase, has_text=has_text),
                 usage_details=lfmap.usage_details(token_row or {}),
+                level=level,
+                status_message=lfmap.generation_status_message(base),
             )
             _end_obs(gen, end)
             self._counts["generations_sent"] += 1
+            if level == lfmap.LEVEL_ERROR:
+                self._counts["generations_failed"] += 1
             if token_row is not None and conv_row is not None:
                 self._counts["generations_paired"] += 1
             elif conv_row is not None:

@@ -1756,6 +1756,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 outcome="backend_error",
                 error=exc,
             )
+            self._trace_reactor_llm_failure(
+                agent_name,
+                exc,
+                latency_ms=int((time.perf_counter() - _t0) * 1000),
+            )
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1960,6 +1965,43 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
+                agent_name,
+                exc_info=True,
+            )
+
+    def _trace_reactor_llm_failure(
+        self,
+        agent_name: str,
+        error: BaseException,
+        *,
+        latency_ms: int | None = None,
+    ) -> None:
+        """Append one ``status="error"`` ``llm_calls.jsonl`` row for a failed turn.
+
+        The success path (:meth:`_trace_reactor_llm_call`) can only run once a
+        ``BackendTurnResult`` exists, so without this the ledger — and therefore
+        Langfuse — has no trace of a turn whose model call never returned. The
+        row carries no token counters; it exists to make the failure countable.
+
+        Args:
+            agent_name: The reactor role; doubles as trace component and role.
+            error: The backend error that ended the turn.
+            latency_ms: Time spent before failing, when measured.
+        """
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                error=error,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                latency_ms=latency_ms,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,
                 exc_info=True,
             )

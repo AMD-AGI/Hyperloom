@@ -76,6 +76,68 @@ def test_coerce_optional_str_list_variants():
     assert llm_trace._coerce_optional_str_list(["x", "", " y "]) == ["x", "y"]
 
 
+def test_for_failure_records_error_without_token_counters(tmp_path: Path, monkeypatch):
+    """A failed call lands in the ledger as an ``error`` row, tokens unmeasured."""
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(llm_trace, "get_emitter", lambda _session_dir: None, raising=False)
+
+    record = llm_trace.LLMCallRecord.for_failure(
+        session_id="s1",
+        component="orchestration",
+        role="orchestration",
+        error=RuntimeError("litellm.BadRequestError: AnthropicException"),
+        model="claude-opus-5",
+        tick=4,
+        phase="EXPLORE",
+        latency_ms=1200,
+    )
+    llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+    row = json.loads((tmp_path / "reports" / "trace" / "llm_calls.jsonl").read_text())
+
+    assert row["status"] == llm_trace.LLM_STATUS_ERROR
+    assert row["error_type"] == "RuntimeError"
+    assert row["error_message"] == "litellm.BadRequestError: AnthropicException"
+    # Join keys survive so the failure lands on the same phase/agent as its peers.
+    assert (row["component"], row["tick"], row["phase"]) == ("orchestration", 4, "EXPLORE")
+    assert row["latency_ms"] == 1200
+    # Nothing was measured, so no counter may claim zero.
+    assert all(
+        row[k] is None
+        for k in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        )
+    )
+
+
+def test_for_failure_accepts_plain_message_and_truncates(tmp_path: Path):
+    """A gateway body can be huge; the ledger keeps a bounded slice of it."""
+    record = llm_trace.LLMCallRecord.for_failure(
+        session_id="s1",
+        component="forge",
+        error="x" * 5000,
+    )
+    row = record.to_row()
+    assert row["error_type"] is None
+    assert len(row["error_message"]) == llm_trace._ERROR_MESSAGE_MAX
+
+
+def test_success_rows_default_to_ok_status(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+    row = llm_trace.LLMCallRecord(session_id="s1", component="forge").to_row()
+    assert row["status"] == llm_trace.LLM_STATUS_OK
+    assert row["error_type"] is None and row["error_message"] is None
+
+
+def test_append_llm_call_rejects_unknown_status(tmp_path: Path):
+    record = llm_trace.LLMCallRecord(session_id="s1", component="forge")
+    record.status = "partially_ok"
+    with pytest.raises(llm_trace.LLMTraceRowError):
+        llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+
+
 def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
 

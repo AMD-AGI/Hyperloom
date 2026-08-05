@@ -25,8 +25,15 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .llm_trace import LLM_STATUS_OK
+
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
+
+# Langfuse observation levels we emit. A failed LLM call must be ERROR so the
+# error rate is queryable; everything else stays DEFAULT.
+LEVEL_DEFAULT = "DEFAULT"
+LEVEL_ERROR = "ERROR"
 
 # Env-var name fragments whose value is redacted before the environment
 # snapshot is attached to session_start. Matched case-insensitively as a substring.
@@ -260,6 +267,38 @@ def generation_name(row: dict[str, Any]) -> str:
     return str(row.get("component") or row.get("role") or "llm_call")
 
 
+def generation_level(row: dict[str, Any]) -> str:
+    """Map a row's terminal status onto a Langfuse observation level.
+
+    Rows written before ``status`` existed carry no such key and are treated as
+    successes, so a backfill of an old session does not turn every call red.
+
+    Args:
+        row: A token trace row dict.
+
+    Returns:
+        ``ERROR`` for a failed call, else ``DEFAULT``.
+    """
+    status = str(row.get("status") or LLM_STATUS_OK).strip().lower()
+    return LEVEL_DEFAULT if status == LLM_STATUS_OK else LEVEL_ERROR
+
+
+def generation_status_message(row: dict[str, Any]) -> str | None:
+    """The human-readable failure reason for a row, or ``None`` on success.
+
+    Args:
+        row: A token trace row dict.
+
+    Returns:
+        ``"<error_type>: <error_message>"`` (either part may be missing), or
+        ``None`` when the row is a success or carries no error detail.
+    """
+    if generation_level(row) == LEVEL_DEFAULT:
+        return None
+    parts = [str(row.get(k) or "").strip() for k in ("error_type", "error_message")]
+    return ": ".join(p for p in parts if p) or None
+
+
 def generation_metadata(
     row: dict[str, Any],
     *,
@@ -287,6 +326,8 @@ def generation_metadata(
         "has_text": has_text,
         "latency_ms": row.get("latency_ms"),
         "reviewed_msg_ids": row.get("reviewed_msg_ids"),
+        "status": row.get("status") or LLM_STATUS_OK,
+        "error_type": row.get("error_type"),
     }
 
 
