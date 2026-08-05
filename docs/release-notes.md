@@ -1,18 +1,39 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a2, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a3, including Recipe-KB trace visibility, Cortex KB removal, and recipe-oriented naming."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0a2 (`pyproject.toml`). For the
+The current packaged version is 1.0.0a3 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.0.0a3 release
+
+The [1.0.0a3 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)
+builds on 1.0.0a2 with stronger Recipe-KB observability, removal of the remote
+Cortex KB path, and a recipe-oriented naming cleanup across orchestration state.
+
+### 1.0.0a3 highlights
+
+- **Recipe-KB write traceability**: writes to the cross-session recipe KB are now
+  mirrored as Langfuse spans, so T0 identity anchors and Coordinator KEEP/REVERT,
+  framework-PR, and CLOSE amends can be audited without diffing local history.
+
+- **Remote Cortex KB removal**: the obsolete remote Cortex KB integration is
+  removed end to end, including CLI wiring, critic assessment calls, prompt
+  injection, bundle fields, env vars, and the specialist Cortex KB MCP server.
+
+- **Recipe-KB naming realignment**: local recipe knowledge-base paths now use
+  `recipe_*` names across Python APIs, CLI flags, emitted state, breakdown data,
+  stop reasons, warm-recipe source tags, sweep grid sources, and session runtime
+  directories.
 
 ## Hyperloom 1.0.0a2 release
 
