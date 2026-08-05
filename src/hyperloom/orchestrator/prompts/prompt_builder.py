@@ -625,12 +625,12 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "") -> lis
 def _failure_recovery_lines(*, phase: str) -> list[str]:
     """Build the FAILURE RECOVERY block.
 
-    Any action can fail, so the recovery surfaces and rules F3/F4 are always-on;
-    the ``baseline`` fingerprint detail and rules F1/F2 are PRELUDE-scoped.
+    Always-on trigger and F3/F4 rules are inlined; the detailed diagnostic
+    surfaces, fingerprint semantics, and worked examples live in the
+    ``failure_recovery`` reference document (pull with ``read_reference``).
 
     Args:
-        phase (str): Normalised current pipeline phase; ``""`` renders the
-            baseline detail too.
+        phase (str): Normalised current pipeline phase.
 
     Returns:
         list[str]: Markdown lines for the failure-recovery block.
@@ -642,99 +642,31 @@ def _failure_recovery_lines(*, phase: str) -> list[str]:
         "",
         "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
         "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-        "action with the same params. Coordinator stamps an audit trail on every",
-        "attempt; consult these SharedState surfaces in order:",
+        "action with the same params. Consult `last_<action>` / `<action>_attempts`",
+        "/ `last_action_failures` for the error detail. Full diagnostic surfaces,",
+        "fingerprint semantics, and examples: ``read_reference('failure_recovery')``.",
         "",
-        "1. **`last_<action>`** (snapshot of the latest attempt) and",
-        "   **`<action>_attempts`** (capped per-action history, newest last).",
-        "   Each entry carries `status` / `decision` / `error_class` /",
-        "   `error_excerpt` / `workspace` / `raw_result_path` /",
-        "   `extras.fingerprint`. The fingerprint is the canonical hash of the",
-        "   params fields that determine the action's behaviour, and Coordinator",
-        "   keys task idempotency on that same fingerprint — so a proposal",
-        "   matching a queued or running task is dropped before it ever reaches",
-        "   the executor, and any key you add to `params` outside the",
-        "   fingerprint (a tag, a note, a counter) is invisible to it and does",
-        "   NOT make the proposal distinct.",
-        "2. **`last_action_failures`** (global rolling log capped at the last",
-        "   10 unpromotable results across ALL kinds, including kernel_agent-owned).",
-        "   Use this when the per-action history doesn't carry the kind you",
-        "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
-        "   only covers the six explore/validate kinds).",
+        "Rules (apply in order):",
+        "",
     ]
     if baseline_scoped:
-        lines.extend([
-            "3. **`baseline_failure_streak`** (consecutive failed baselines).",
-            "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
-            "   and the run terminates; you must recover BEFORE the third failure.",
-            "",
-            "The `baseline` fingerprint is exactly eight params fields:",
-            "`benchmark_script` / `result_dir` / `extra_server_args` /",
-            "`extra_envs` / `model_path` / `gpu_type` / `config_path` /",
-            "`disable_run_eval`. Those eight are the WHOLE fingerprint. A baseline",
-            "may also come back `status='succeeded'` with `decision='no_promote'`",
-            "and `extras.anchor_kept_tput`: it ran fine but measured below the",
-            "established anchor, so the anchor was kept. That is a completed",
-            "measurement, NOT a failure — do not retry it.",
-        ])
-    lines.extend([
-        "",
-        "The decision rules below apply in order:",
-        "",
-    ])
-    if baseline_scoped:
-        lines.extend([
-            "* **RULE F1 — same fingerprint, twice failed → change at least one",
-            "  of the eight fingerprint fields.** Because you run as a persistent",
-            "  conversation you remember the attempts you already made this",
-            "  session — do not re-propose a baseline whose params fingerprint",
-            "  matches a recent failure; it will fail the same way. Changing a",
-            "  field OUTSIDE the eight does not count and does not get you a new",
-            "  attempt: the proposal is dropped as a duplicate and you have burned",
-            "  a tick. Bump at least one of: `params.benchmark_script`",
-            "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
-            "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
-            "  cross-framework script boots the wrong engine and is rejected),",
-            "  `params.result_dir`, `params.extra_server_args`, or",
-            "  `params.extra_envs`.",
-            "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
-            "  warning ⇒ leak salvage missed.** The script wrote results outside the",
-            "  workspace and outside the configured leak destinations. Override",
-            "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
-            "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
-            "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
-            "  attempt salvages the leak.",
-        ])
-    lines.extend([
-        "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-        "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-        "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-        "  switch action families just to dodge the failure; Robustness'",
-        "  escalation policy needs the heartbeat to fire its RCA.",
-        "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
-        "  `why_denied` context tool (and the `Recent policy denials` block on a",
-        "  seed turn) shows repeated (action, rule) collisions. The system no",
-        "  longer reacts to the streak — there is NO auto-prune at streak≥5 and",
-        "  NO `policy_loop` stop at streak≥10; the run continues until the",
-        "  wall-clock deadline or another stop_reason fires. So the streak is",
-        "  purely a signal for YOU: the same params keep colliding with the same",
-        "  invariant, so change something substantive — a new `params.grid`",
-        "  variant, a different `benchmark_script`, or a sibling action family.",
-        "  Re-emitting the identical denied intent just wastes a tick.",
-    ])
-    if baseline_scoped:
-        lines.extend([
-            "",
-            "Example (baseline failed twice with `error_class='no_report'`):",
-            "",
-            "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
-            "    # when you have verified a same-framework script-specific bug.",
-            "    propose_action{action_name='baseline',",
-            "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
-            "        predicted_gain_pct: 0,",
-            "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
-            "                to the observed leak location'}",
-        ])
+        lines.extend(
+            [
+                "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
+                " change at least one of the eight fingerprint fields.",
+                "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
+                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+            ]
+        )
+    lines.extend(
+        [
+            "* **RULE F3** — `error_class='subprocess_nonzero'` same fingerprint"
+            " → stop retrying; heartbeat 'blocked: …' and let Robustness intervene.",
+            "* **RULE F4** — `policy_denial_streak` is information only."
+            " Change something substantive; re-emitting the identical intent wastes a tick.",
+        ]
+    )
     return lines
 
 
@@ -948,14 +880,68 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
         lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
         lines.append(cycle_directive.strip())
     else:
-        lines.extend([
-            "Default arc (no per-cycle directive yet):",
-            "- Early cycles (≈0-2): cast WIDE — many cheap config/env levers and"
-            "  several specialists in parallel to map the space fast.",
-            "- Later cycles: FEWER, DEEPER, longer-running specialist tasks —"
-            "  spend the amplified budget on autotune / kernel / profiling-driven"
-            "  work that needs a long measure→edit→measure loop.",
-        ])
+        lines.extend(
+            [
+                "Default arc (no per-cycle directive yet):",
+                "- Early cycles (≈0-2): cast WIDE — many cheap config/env levers and"
+                "  several specialists in parallel to map the space fast.",
+                "- Later cycles: FEWER, DEEPER, longer-running specialist tasks —"
+                "  spend the amplified budget on autotune / kernel / profiling-driven"
+                "  work that needs a long measure→edit→measure loop.",
+            ]
+        )
+    return lines
+
+
+_WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+
+
+def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+    """Render the on-demand reference index for ``## 8.``
+
+    Each ``*.md`` file in *references_dir* whose ``<!-- phase: ... -->`` tag
+    includes *phase* (or that carries no phase tag) gets one line in the
+    index. An absent or empty directory produces no section.
+
+    Args:
+        references_dir: Directory containing the reference markdown files.
+        phase: Normalised current pipeline phase; ``""`` includes all entries.
+
+    Returns:
+        Markdown lines for the section, or an empty list when no entries apply.
+    """
+    if not references_dir.is_dir():
+        return []
+    entries: list[tuple[str, str]] = []
+    for path in sorted(references_dir.glob("*.md")):
+        when_text = ""
+        file_phases: frozenset[str] = frozenset()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(">"):
+                continue
+            when_m = _WHEN_TAG_RE.match(stripped)
+            if when_m:
+                when_text = when_m.group("when")
+                continue
+            phase_m = _PHASE_TAG_RE.match(stripped)
+            if phase_m:
+                file_phases = frozenset(p.strip().upper() for p in phase_m.group("phases").split(",") if p.strip())
+                continue
+            break
+        if file_phases and not _renders_in(phase, file_phases):
+            continue
+        entries.append((path.stem, when_text or "see document"))
+    if not entries:
+        return []
+    lines: list[str] = [
+        "## 8. ON-DEMAND REFERENCE INDEX",
+        "",
+        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        "",
+    ]
+    for stem, when in entries:
+        lines.append(f"- **{stem}** — {when}")
     return lines
 
 
@@ -975,6 +961,7 @@ def build_orchestration_prompt(
     phase: str = "",
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
+    references_dir: Path | None = None,
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1006,6 +993,8 @@ def build_orchestration_prompt(
             unreadable.
         framework_source_roots: optional framework source roots passed through
             to the session-context section.
+        references_dir: directory of on-demand reference documents; defaults
+            to ``asset_prompt_references_dir()`` when ``None``.
 
     Returns:
         The composed Orchestration system prompt text.
@@ -1018,6 +1007,11 @@ def build_orchestration_prompt(
         rules_fragment_path,
     )
     phase_norm = (phase or "").strip().upper()
+
+    if references_dir is None:
+        from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
+
+        references_dir = asset_prompt_references_dir()
 
     sections: list[list[str]] = [
         _section_mission(),
@@ -1047,6 +1041,9 @@ def build_orchestration_prompt(
         and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
     ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
+    ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+    if ref_index:
+        sections.append(ref_index)
     sections.append(_section_rules(rules_md, phase=phase_norm))
 
     return join_sections(sections)
