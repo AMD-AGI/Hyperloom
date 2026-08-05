@@ -47,7 +47,7 @@ from .subprocess_ import (
     _setup_worktree,
 )
 from . import patch_safety as _patch_safety
-from .profile import SpecialistProfile, resolve_specialist_profile
+from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -510,7 +510,7 @@ class SpecialistRunner:
         max_turns = int(params.get("max_turns") or self.default_max_turns)
         # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
-        profile = resolve_specialist_profile(params)
+        profile = resolve_specialist_profile(params, domain=domain)
         task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
@@ -553,6 +553,7 @@ class SpecialistRunner:
         worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
             ctx,
             workspace=workspace,
+            profile=profile,
         )
         if worktree_err:
             notes.append(f"worktree_setup_failed:{worktree_err}")
@@ -1353,6 +1354,7 @@ class SpecialistRunner:
         ctx: RunnerContext,
         *,
         workspace: Path | None,
+        profile: SpecialistProfile | None = None,
     ) -> tuple[Path | None, Path | None, str]:
         """Provision a per-task git worktree when in subprocess mode.
 
@@ -1362,6 +1364,7 @@ class SpecialistRunner:
         Args:
             ctx: The runner context for this specialist task.
             workspace: The task workspace the worktree is created under.
+            profile: Resolved dispatch profile; read-only mode skips worktree.
 
         Returns:
             A ``(worktree_dir, worktree_base, error)`` tuple; ``worktree_dir``
@@ -1369,12 +1372,14 @@ class SpecialistRunner:
         """
         if self.subprocess_config is None or workspace is None:
             return None, None, ""
-        params = ctx.task.params or {}
-        readonly = bool(params.get("readonly")) or (
-            str(params.get("domain") or "").strip() == "research_scout_specialist"
-        )
-        if readonly:
-            return None, None, ""
+        if profile is not None:
+            if profile.mode != MODE_PATCH:
+                return None, None, ""
+        else:
+            # Fallback for callers that don't pass a profile.
+            params = ctx.task.params or {}
+            if bool(params.get("readonly")):
+                return None, None, ""
         base = _pick_worktree_base(self.subprocess_config.framework_source_roots)
         if base is None:
             return None, None, "no_git_framework_source_root"

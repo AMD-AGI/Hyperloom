@@ -802,6 +802,16 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: Markdown lines for the identity section.
     """
+    if inp.mode == "patch":
+        capability_line = (
+            "probe the host via Bash, **author source patches into your isolated"
+            " worktree**, and use as many of your ``max_turns`` LLM turns as you need"
+        )
+    else:
+        capability_line = (
+            "probe the host via Bash, and use as many of your ``max_turns`` LLM"
+            " turns as you need"
+        )
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -814,8 +824,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "You operate **autonomously** inside your domain — no per-step approval",
         "is needed. You have full authority to read any code under the framework",
         "source roots (Section 7), search any public GitHub repo or NVIDIA PR,",
-        "probe the host via Bash, **author source patches into your isolated",
-        "worktree**, and use as many of your ``max_turns`` LLM turns as you need",
+        capability_line,
         "to be thorough. Be creative. Investigate deeply. One-turn shortcuts",
         "are discouraged when a real bottleneck is on the table. Quality is",
         "scored over quantity: cap your final ``proposal_set`` at the",

@@ -21,7 +21,10 @@ call to single-domain patch-authoring behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .domains import SpecialistDomain
 
 
 # scope
@@ -199,7 +202,10 @@ def holds_serving_slot(params: dict[str, Any] | None) -> bool:
     return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 
-def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfile:
+def resolve_specialist_profile(
+    params: dict[str, Any] | None,
+    domain: "SpecialistDomain | None" = None,
+) -> SpecialistProfile:
     """Read ``scope`` / ``mode`` / ``bench`` / ``lane`` from dispatch params.
 
     Unknown / missing values fall back to the legacy-compatible defaults so the
@@ -211,9 +217,15 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
     (legacy patch/GPU default preserved), while a truly bare dispatch resolves
     to ``freeform`` → ``research`` → ``cpu`` (safe & cheap first).
 
+    ``readonly`` in params or ``domain.readonly=True`` forces ``mode=research``
+    regardless of any other dial, so the three read-only catalogue domains and
+    any explicit ``readonly=True`` dispatch share a single resolution path.
+
     Args:
         params: The dispatch params carrying ``scope`` / ``mode`` / ``bench`` /
-            ``lane``, or ``None``.
+            ``lane`` / ``readonly``, or ``None``.
+        domain: Optional resolved :class:`SpecialistDomain`; when supplied its
+            ``readonly`` flag is consulted to override mode.
 
     Returns:
         The resolved :class:`SpecialistProfile` with legacy-compatible
@@ -229,6 +241,11 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
     if mode not in MODE_VALUES:
         # Freeform recon defaults to read-only research; else patch-authoring.
         mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
+
+    # A readonly dispatch always resolves to research mode regardless of dials.
+    domain_readonly = bool(getattr(domain, "readonly", False)) if domain is not None else False
+    if _coerce_bool(p.get("readonly"), False) or domain_readonly:
+        mode = MODE_RESEARCH
 
     bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
     # bench only has meaning when the worker can write a patch.
