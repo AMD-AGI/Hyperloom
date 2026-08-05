@@ -7,7 +7,8 @@ set -euo pipefail
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORLDMIRROR_REPO_URL="${WORLDMIRROR_REPO_URL:-https://github.com/Tencent-Hunyuan/HY-World-2.0.git}"
-WORLDMIRROR_DIR="${WORLDMIRROR_DIR:-${WORLDMIRROR_REPO_PATH:-}}"
+# Prefixed names first, then the framework-agnostic form.
+WORLDMIRROR_DIR="${WORLDMIRROR_DIR:-${WORLDMIRROR_REPO_PATH:-${FRAMEWORK_REPO_PATH:-}}}"
 if [ -z "${WORLDMIRROR_DIR}" ]; then
     _CACHE_ROOT="${HYPERLOOM_CACHE_DIR:-${HOME}/.cache/hyperloom}"
     WORLDMIRROR_DIR="${_CACHE_ROOT}/HY-World-2.0"

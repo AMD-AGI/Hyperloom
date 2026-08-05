@@ -7,7 +7,10 @@ set -euo pipefail
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORLDPLAY_REPO_URL="${WORLDPLAY_REPO_URL:-https://github.com/Tencent-Hunyuan/HY-WorldPlay.git}"
-WORLDPLAY_DIR="${WORLDPLAY_DIR:-${WORLDPLAY_REPO_PATH:-}}"
+# Prefixed names first, then the framework-agnostic form: a session is
+# single-framework, so an operator should not need to know the name to point at
+# the checkout.
+WORLDPLAY_DIR="${WORLDPLAY_DIR:-${WORLDPLAY_REPO_PATH:-${FRAMEWORK_REPO_PATH:-}}}"
 if [ -z "${WORLDPLAY_DIR}" ]; then
     _CACHE_ROOT="${HYPERLOOM_CACHE_DIR:-${HOME}/.cache/hyperloom}"
     WORLDPLAY_DIR="${_CACHE_ROOT}/HY-WorldPlay"

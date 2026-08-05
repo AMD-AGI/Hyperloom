@@ -46,10 +46,14 @@ def test_every_domain_has_focus_template():
 
 
 def test_specialist_domain_keys_covers_all_active_domains():
-    """The active set covers the full catalogue (ten entries: seven legacy
-    domains + static_recon_specialist + enablement_specialist +
-    cross_framework_rewrite_specialist)."""
-    assert len(SPECIALIST_DOMAIN_KEYS) == 10
+    """The active key set is exactly the catalogue, with no duplicate keys.
+
+    Asserted as a property rather than a count: a hard-coded total has to be
+    edited every time a domain is added, which makes the edit routine and stops
+    it from signalling anything.
+    """
+    assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
+    assert len(SPECIALIST_DOMAIN_KEYS) == len(SPECIALIST_DOMAINS)
 
 
 # 2. Per-domain content checks — each template mentions its signature
@@ -487,11 +491,21 @@ def _valid_done_payload(
 
 
 # 1. specialist_domains catalogue
-def test_specialist_domains_catalogue_has_ten_entries():
-    """Ten entries: seven legacy domains + static_recon_specialist +
-    enablement_specialist + cross_framework_rewrite_specialist."""
-    assert len(SPECIALIST_DOMAINS) == 10
+def test_specialist_domains_catalogue_is_well_formed():
+    """Every catalogue entry is complete and uniquely keyed.
+
+    Guards what actually breaks a dispatch — a blank key, a missing KB anchor
+    PolicyGate validates against, or a duplicate key that shadows an earlier
+    entry — rather than the entry count.
+    """
+    assert SPECIALIST_DOMAINS
     assert SPECIALIST_DOMAIN_KEYS == frozenset(d.key for d in SPECIALIST_DOMAINS)
+    assert len(SPECIALIST_DOMAIN_KEYS) == len(SPECIALIST_DOMAINS)
+    for domain in SPECIALIST_DOMAINS:
+        assert domain.key.strip(), "domain key must not be blank"
+        assert domain.kb_anchor.strip(), f"{domain.key} has no KB anchor"
+        assert domain.layer.strip(), f"{domain.key} has no layer label"
+        assert domain.description.strip(), f"{domain.key} has no description"
 
 
 def test_serving_specialist_is_M5_active():

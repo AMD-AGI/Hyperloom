@@ -531,6 +531,9 @@ class ProfileExecutor(BaselineExecutor):
             default_timeout_sec=default_timeout_sec,
             cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
+        # Set by ``_after_materialize_config`` once the probe is armed, read
+        # after the run to aggregate the per-rank reports.
+        self._host_probe_dir: str = ""
 
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml.
@@ -588,12 +591,88 @@ class ProfileExecutor(BaselineExecutor):
             )
         return str(scoped)
 
+    def _inject_host_probe(self, config_path: Path, output_dir: Path) -> str:
+        """Arm the host-side evidence probe in the materialized profile config.
+
+        The probe is delivered by prepending its asset directory to the
+        benchmark process's ``PYTHONPATH``, so CPython's ``sitecustomize``
+        auto-import installs it without the framework's entrypoint knowing it
+        exists. Editing the materialized YAML (rather than passing ``extra_envs``)
+        is what makes the ``PYTHONPATH`` a *prefix*: ``extra_envs`` overrides, and
+        replacing a framework's ``PYTHONPATH`` would break its imports.
+
+        Args:
+            config_path: The materialized profile YAML to edit in place.
+            output_dir: The run workspace; the probe writes its per-rank reports
+                into a subdirectory of it.
+
+        Returns:
+            The probe report directory, or ``""`` when the probe was not armed.
+        """
+        from . import _framework_rewrite_evidence as _evidence
+
+        if not _evidence.probe_enabled():
+            return ""
+        asset_dir = _evidence.probe_asset_dir()
+        if not asset_dir.is_dir():
+            log.warning(
+                "profile_executor: host-probe assets missing at %s; host-side rewrite evidence disabled",
+                asset_dir,
+            )
+            return ""
+        probe_dir = output_dir / _evidence.PROBE_SUBDIR
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("profile_executor: cannot create host-probe dir %s: %s", probe_dir, exc)
+            return ""
+
+        from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+
+        try:
+            roots = list(resolve_source_file_allowlist())
+        except Exception:  # noqa: BLE001 - attribution is advisory
+            roots = []
+        probe_env = _evidence.build_probe_env(
+            probe_dir=probe_dir,
+            source_roots=roots,
+            deep=_evidence.deep_probe_enabled(),
+        )
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("profile_executor: cannot read %s to arm the host probe: %s", config_path, exc)
+            return ""
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else None
+        if not isinstance(bench, dict):
+            return ""
+        envs = bench.setdefault("envs", {})
+        if not isinstance(envs, dict):
+            return ""
+        current = str(envs.get("PYTHONPATH", "") or "").strip()
+        entry = str(asset_dir)
+        if entry not in current.split(os.pathsep):
+            envs["PYTHONPATH"] = f"{entry}{os.pathsep}{current}" if current else entry
+        for key, value in probe_env.items():
+            envs[key] = value
+        try:
+            config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        except OSError as exc:
+            log.warning("profile_executor: cannot write %s after arming the host probe: %s", config_path, exc)
+            return ""
+        log.info(
+            "profile_executor: host-side rewrite evidence probe armed (deep=%s), reports -> %s",
+            bool(probe_env.get("HYPERLOOM_HOST_PROBE_DEEP")),
+            probe_dir,
+        )
+        return str(probe_dir)
+
     def _after_materialize_config(
         self,
         config_path: Path,
         output_dir: Path,
     ) -> dict[str, Any] | None:
-        """Patch the exact InferenceX checkout Magpie will execute.
+        """Arm the host probe, then patch the InferenceX checkout Magpie will execute.
 
         `$INFERENCEX_PATH` alone is insufficient (Magpie resolves an empty
         `benchmark.inferencex_path` to its own sibling checkout); patch the
@@ -602,12 +681,17 @@ class ProfileExecutor(BaselineExecutor):
 
         Args:
             config_path: The materialized profile YAML config to read.
-            output_dir: The run output directory (unused here).
+            output_dir: The run output directory, also the probe report root.
 
         Returns:
             ``None`` when the InferenceX checkout is patched correctly,
             otherwise a failure result dict describing the patch gap.
         """
+        try:
+            self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
+        except Exception:  # noqa: BLE001 - evidence collection is never fatal
+            log.debug("profile_executor: host-probe injection failed", exc_info=True)
+            self._host_probe_dir = ""
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception as exc:  # noqa: BLE001
@@ -687,6 +771,46 @@ class ProfileExecutor(BaselineExecutor):
                 "benchmark_serving": str(serving_path),
             }
         return None
+
+    def _collect_rewrite_evidence(self, result: dict[str, Any]) -> None:
+        """Merge the per-rank host-probe reports onto ``result``.
+
+        Adds ``framework_rewrite_evidence`` (the document path) and
+        ``framework_rewrite_candidate_count``. Silent no-op when the probe was
+        not armed, and never raises: evidence is an input to the next
+        optimization decision, not a precondition for reporting this profile.
+
+        Args:
+            result: The profile result dict, mutated in place.
+        """
+        probe_dir = str(self._host_probe_dir or "").strip()
+        if not probe_dir:
+            return
+        from . import _framework_rewrite_evidence as _evidence
+
+        try:
+            out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
+            document = _evidence.aggregate_probe_dir(probe_dir, out_path)
+        except Exception:  # noqa: BLE001 - aggregation is best-effort
+            log.debug("profile_executor: rewrite-evidence aggregation failed", exc_info=True)
+            return
+        candidates = document.get("candidates") or []
+        if not candidates:
+            log.info(
+                "profile_executor: host probe produced no rewrite candidates "
+                "(ranks_merged=%s); see %s for why",
+                document.get("ranks_merged"),
+                out_path,
+            )
+            return
+        result["framework_rewrite_evidence"] = str(out_path)
+        result["framework_rewrite_candidate_count"] = len(candidates)
+        log.info(
+            "profile_executor: %d host-side rewrite candidate(s) from %s rank(s) -> %s",
+            len(candidates),
+            document.get("ranks_merged"),
+            out_path,
+        )
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the profiling action for the given context.
@@ -880,6 +1004,12 @@ class ProfileExecutor(BaselineExecutor):
                 # start fired but stop didn't (window task cancelled mid-run
                 # because Magpie finished first) -> ensure a matching stop.
                 await trigger_infera_engine_profile("stop")
+
+        # Merge the per-rank host-probe reports into the rewrite-evidence
+        # document. Independent of the trace path below: the two answer different
+        # questions (which kernel is hot vs. which host-side work is redundant),
+        # and a run that produced no trace can still have produced good evidence.
+        self._collect_rewrite_evidence(result)
 
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.

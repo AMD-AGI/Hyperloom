@@ -18,6 +18,11 @@ import sys
 import sysconfig
 from pathlib import Path
 
+#: Framework-agnostic way to name the source tree a session may patch. Accepted in
+#: addition to ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``, which keep
+#: precedence; see :func:`_discover_explicit_framework_root`.
+GENERIC_FRAMEWORK_ROOT_ENV: str = "FRAMEWORK_REPO_PATH"
+
 _DEFAULT_SOURCE_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
@@ -314,6 +319,30 @@ def _discover_scriptable_repo_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _discover_explicit_framework_root() -> tuple[str, ...]:
+    """Discover the framework checkout named by the framework-agnostic env var.
+
+    ``<FRAMEWORK>_REPO_PATH`` requires the operator to know the framework name
+    before the right variable can be set, and to change variable names when
+    switching frameworks — for a value that cannot collide, since a session is
+    single-framework by construction (the CLI locks ``$FRAMEWORK``). This accepts
+    the same thing without the prefix, and unlike the scriptable discovery it is
+    not restricted to registered scriptable frameworks: an editable checkout of a
+    normally pip-installed framework is invisible to both importlib and the
+    site-packages scan, and this is how it gets pointed at.
+
+    A prefixed value keeps precedence, because it is the more specific statement.
+
+    Returns:
+        tuple[str, ...]: The normalised checkout root, or empty when unset or absent.
+    """
+    candidate = os.environ.get(GENERIC_FRAMEWORK_ROOT_ENV, "").strip()
+    if not candidate or not Path(candidate).is_dir():
+        return ()
+    root = _normalize_root(candidate)
+    return (root,) if root else ()
+
+
 def _discover_installed_package_roots() -> tuple[str, ...]:
     """Return active site/dist-packages roots available to specialists."""
     candidates: list[Path] = []
@@ -372,6 +401,7 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         _discover_installed_package_roots(),
         _discover_installed_framework_roots(),
         _discover_scriptable_repo_roots(),
+        _discover_explicit_framework_root(),
         env_roots,
         resolve_rocm_hip_source_roots(),
     )

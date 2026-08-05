@@ -53,6 +53,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import merge_server_args, split_config_changes
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
@@ -91,6 +92,13 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
 )
 _SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
+# Two-sided band, in percent of the pre-patch base, that a switch-off parity leg
+# must land inside. The rewrite workloads this gates measure with a run-to-run
+# spread well under 1%, so a band this wide clears noise by a comfortable margin
+# while still catching a patch that is not actually inert when disabled.
+DEFAULT_SWITCH_OFF_PARITY_BAND_PCT = 2.0
+
+
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
     "enablement_base_patches",
@@ -100,6 +108,43 @@ _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "config_changes",
     "enablement_setup_commands",
 )
+
+
+def _parse_framework_switches(
+    *,
+    params: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read the framework-rewrite switch manifest for this integration.
+
+    Looks in the task params first (an explicit dispatch), then in the
+    specialist's done payload (the normal authoring path, possibly nested under
+    ``payload``).
+
+    Args:
+        params: The integrate_patch task params.
+        done_payload: The originating specialist's done payload, if any.
+
+    Returns:
+        ``(switches, problems)`` from :func:`_switch_manifest.parse_manifest`;
+        ``([], [])`` when no manifest was delivered.
+    """
+    raw = params.get(_switch_manifest.MANIFEST_KEY)
+    if not raw and isinstance(done_payload, dict):
+        raw = done_payload.get(_switch_manifest.MANIFEST_KEY)
+        if not raw:
+            inner = done_payload.get("payload")
+            if isinstance(inner, dict):
+                raw = inner.get(_switch_manifest.MANIFEST_KEY)
+    if not raw:
+        return [], []
+    # Env the benchmark already defines is reserved: a "switch" colliding with it
+    # would be toggled by unrelated configuration rather than by the lever.
+    reserved: set[str] = set()
+    for source in (params.get("base_extra_envs"), params.get("extra_envs")):
+        if isinstance(source, dict):
+            reserved.update(str(k).strip().upper() for k in source)
+    return _switch_manifest.parse_manifest(raw, reserved_env=reserved)
 
 
 def _is_allowlisted_setup_command(cmd: str) -> bool:
@@ -1890,6 +1935,39 @@ class IntegratePatchExecutor:
         if isinstance(raw_extra_envs, dict):
             proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
 
+        # Framework-rewrite switches. Every rewrite in such a patch sits behind
+        # a switch that defaults OFF, so the applied patch is inert and benching
+        # it as-is would measure the baseline. Turn the switches on for the
+        # measurement and carry the parsed manifest to the gate, which needs the
+        # dependency edges to decide between a throughput KEEP and an inert one.
+        switch_manifest, switch_problems = _parse_framework_switches(
+            params=params,
+            done_payload=done_payload,
+        )
+        if switch_manifest and not patch_paths:
+            # A manifest without a patch describes switches that gate code which
+            # was never delivered. Setting them would be a no-op, and registering
+            # them as levers would leave the ledger pointing at absent code.
+            switch_problems.append(
+                f"discarded {len(switch_manifest)} switch(es): the deliverable carries no patch, "
+                f"so there is no rewrite for them to gate"
+            )
+            switch_manifest = []
+        if switch_manifest:
+            proposal_extra_envs.update(_switch_manifest.switch_env(switch_manifest))
+            log.info(
+                "integrate_patch: benching with %d framework rewrite switch(es) on\n%s",
+                len(switch_manifest),
+                _switch_manifest.summarize(switch_manifest, switch_problems),
+            )
+        elif switch_problems:
+            log.warning(
+                "integrate_patch: framework switch manifest unusable\n%s",
+                _switch_manifest.summarize(switch_manifest, switch_problems),
+            )
+        ctx._ip_switch_manifest = switch_manifest  # type: ignore[attr-defined]
+        ctx._ip_switch_problems = switch_problems  # type: ignore[attr-defined]
+
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
             specialist_workspace=specialist_workspace,
@@ -2702,7 +2780,114 @@ class IntegratePatchExecutor:
             params.get("extra_envs"),
         )
 
+        switch_manifest: list[dict[str, Any]] = list(getattr(ctx, "_ip_switch_manifest", None) or [])
+        switch_problems: list[str] = list(getattr(ctx, "_ip_switch_problems", None) or [])
+
+        # Switch-off parity. Run before either KEEP verdict, since both of them
+        # leave the patch on disk and therefore both depend on it being inert when
+        # disabled. Skipped when the patch is heading for a revert anyway (nothing
+        # to protect) so the extra leg is only spent where it decides something.
+        parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
+        if switch_manifest and not acc_block:
+            parity = await self._switch_off_parity(
+                params=params,
+                output_root=output_root,
+                specialist_task_id=specialist_task_id,
+                switch_manifest=switch_manifest,
+                base_tput=base_tput,
+            )
+            if not parity.get("ok"):
+                # An unmeasurable parity leg reverts under its own verdict: the patch
+                # was never shown to break, so neither the log line nor the KB lesson
+                # may say that it did.
+                from ...knowledge import kb_writeback as _kb
+
+                inconclusive = bool(parity.get("inconclusive"))
+                error_class = (
+                    "switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed"
+                )
+                kb_outcome = (
+                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE
+                    if inconclusive
+                    else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+                )
+                artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                reverted = self._revert_patches(framework_root, applied)
+                log.warning(
+                    "integrate_patch: switch-off parity %s task=%s: %s",
+                    "INCONCLUSIVE" if inconclusive else "FAILED",
+                    specialist_task_id,
+                    parity.get("reason"),
+                )
+                await self._maybe_write_framework_kb_record(
+                    done_payload=done_payload,
+                    outcome=kb_outcome,
+                    tps_delta_pct=float(delta_pct or 0.0),
+                    extra=extra,
+                    accuracy_delta_pct=acc_delta_pct,
+                    config_fingerprint=cfg_fingerprint,
+                )
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "reverted",
+                        "error_class": error_class,
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_reverted": artifacts_reverted,
+                        "config_changes_applied": {},
+                        "output_throughput": new_tput,
+                        "delta_pct": delta_pct,
+                        "accuracy_pass": accuracy_pass,
+                        "base_tput": base_tput,
+                        "keep_threshold_pct": keep_threshold_pct,
+                        "reason": str(parity.get("reason") or "switch-off parity failed"),
+                        "switch_off_parity": parity,
+                        "framework_switch_problems": switch_problems,
+                        "bench_result": bench_result,
+                        "workspace": str(output_root),
+                    },
+                )
+
         if not gate_pass:
+            # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
+            # is behind a switch that defaults OFF, so keeping the code with the
+            # switches unset changes nothing at runtime — which makes reverting
+            # it the more expensive choice. The bundle failed as a bundle, but a
+            # bundle usually mixes rewrites that pay with one that does not, and
+            # some of them are enablers that cannot pay until measured together
+            # with what they unlock. So keep the code inert, register the switches
+            # as levers, and let the explore phase find the subset that wins.
+            #
+            # Correctness still gates: an accuracy or quality regression means the
+            # rewrite is wrong, not merely unprofitable, and gets reverted.
+            if switch_manifest and applied and not acc_block:
+                return await self._keep_inert_switches(
+                    params=params,
+                    extra=extra,
+                    specialist_task_id=specialist_task_id,
+                    done_payload=done_payload,
+                    output_root=output_root,
+                    framework_root=framework_root,
+                    stash_state=stash_state,
+                    stash_note=stash_note,
+                    applied=applied,
+                    applied_artifacts=applied_artifacts,
+                    switch_manifest=switch_manifest,
+                    switch_problems=switch_problems,
+                    parity=parity,
+                    bench_result=bench_result,
+                    new_tput=new_tput,
+                    delta_pct=delta_pct,
+                    base_tput=base_tput,
+                    keep_threshold_pct=keep_threshold_pct,
+                    accuracy_pass=accuracy_pass,
+                    acc_delta_pct=acc_delta_pct,
+                    cfg_fingerprint=cfg_fingerprint,
+                )
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
@@ -2902,6 +3087,265 @@ class IntegratePatchExecutor:
                 "source_snapshot": source_snapshot_dir,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,
+                # The bundle cleared the gate, so its switches join the running
+                # configuration and are registered as levers that are already on.
+                # Attribution from here is leave-one-out.
+                "framework_levers": switch_manifest,
+                "framework_lever_outcome": ("default_on" if switch_manifest else ""),
+                "framework_switch_problems": switch_problems,
+                "switch_off_parity": parity,
+            },
+        )
+
+    async def _switch_off_parity(
+        self,
+        *,
+        params: dict[str, Any],
+        output_root: Path,
+        specialist_task_id: str,
+        switch_manifest: list[dict[str, Any]],
+        base_tput: float,
+    ) -> dict[str, Any]:
+        """Verify the patch is genuinely inert with every rewrite switch unset.
+
+        The whole lever mechanism rests on one invariant: with no switch set, the
+        patched tree behaves exactly like the original. That invariant is what
+        makes it safe to keep unprofitable rewrite code on disk, what makes a
+        per-lever measurement mean anything, and what keeps the baseline
+        comparable across a session that has accumulated several rewrite patches.
+        It is also the invariant an LLM is most likely to break by accident — by
+        reading the switch once at import, inverting a default, or restructuring
+        code outside the guard — and nothing else in the pipeline would notice: a
+        switches-on bench that improves throughput looks like a success whether or
+        not the switches-off path still works.
+
+        So it is measured, not assumed. One extra leg with the switches removed
+        must land inside a noise band around the pre-patch base.
+
+        Args:
+            params: The task params.
+            output_root: The per-task workspace.
+            specialist_task_id: The originating specialist.
+            switch_manifest: Parsed switch manifest.
+            base_tput: Pre-patch throughput to compare against.
+
+        Returns:
+            ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
+            "reason"}``. ``ran`` is False when the check was skipped (disabled, or
+            no usable base to compare against), which is reported rather than
+            silently treated as a pass.
+        """
+        band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
+        if not bool(params.get("enable_switch_off_parity", True)):
+            return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
+        if base_tput <= 0:
+            return {
+                "ran": False,
+                "ok": True,
+                "reason": "no positive base throughput to compare a parity leg against",
+            }
+        switch_names = [entry["switch"] for entry in switch_manifest]
+        try:
+            parity_bench, parity_evidence = await self._bench_patch(
+                params=params,
+                output_root=output_root,
+                extra_server_args_applied="",
+                extra_envs_applied={},
+                specialist_task_id=specialist_task_id,
+                unset_envs=switch_names,
+                variant_suffix="-parity",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
+            return {
+                "ran": True,
+                "ok": False,
+                "reason": f"switch-off parity leg raised: {exc!r}",
+            }
+        parity_tput = parity_bench.get("output_throughput")
+        accuracy_pass = parity_evidence.get("accuracy_pass")
+        if not isinstance(parity_tput, (int, float)) or parity_tput <= 0:
+            # No measurement is not evidence of a behavioural change. The patch is
+            # still reverted — leaving an unverified rewrite on disk would skew every
+            # later measurement — but the verdict must not claim the invariant was
+            # tested and broken. On a live session this exact branch discarded a
+            # +4.7% patch whose parity leg had in fact measured 0.5% from base, and
+            # recording that as a violation would have taught later sessions a lesson
+            # drawn from a filesystem race rather than from the code.
+            return {
+                "ran": True,
+                "ok": False,
+                "inconclusive": True,
+                "tput": parity_tput,
+                "accuracy_pass": accuracy_pass,
+                "reason": (
+                    "switch-off parity could not be measured: the parity leg returned "
+                    "no throughput, so the switches-unset invariant was never tested. "
+                    "Reverting because an unverified rewrite must not stay on disk, not "
+                    "because the patch was shown to be non-inert"
+                ),
+            }
+        delta_pct = (float(parity_tput) - base_tput) / base_tput * 100.0
+        if abs(delta_pct) > band_pct:
+            return {
+                "ran": True,
+                "ok": False,
+                "tput": float(parity_tput),
+                "delta_pct": delta_pct,
+                "band_pct": band_pct,
+                "accuracy_pass": accuracy_pass,
+                "reason": (
+                    f"switch-off parity leg moved throughput {delta_pct:+.2f}% "
+                    f"(band +/-{band_pct:.2f}%): the patch changes behaviour with "
+                    f"every switch unset, so it is not a default-off rewrite"
+                ),
+            }
+        if accuracy_pass is False:
+            return {
+                "ran": True,
+                "ok": False,
+                "tput": float(parity_tput),
+                "delta_pct": delta_pct,
+                "band_pct": band_pct,
+                "accuracy_pass": accuracy_pass,
+                "reason": (
+                    "switch-off parity leg failed its correctness gate: the patch "
+                    "changes output with every switch unset"
+                ),
+            }
+        return {
+            "ran": True,
+            "ok": True,
+            "tput": float(parity_tput),
+            "delta_pct": delta_pct,
+            "band_pct": band_pct,
+            "accuracy_pass": accuracy_pass,
+            "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
+        }
+
+    async def _keep_inert_switches(
+        self,
+        *,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        specialist_task_id: str,
+        done_payload: dict[str, Any] | None,
+        output_root: Path,
+        framework_root: Path | None,
+        stash_state: str,
+        stash_note: str,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+        switch_manifest: list[dict[str, Any]],
+        switch_problems: list[str],
+        parity: dict[str, Any],
+        bench_result: dict[str, Any],
+        new_tput: Any,
+        delta_pct: float | None,
+        base_tput: float,
+        keep_threshold_pct: float,
+        accuracy_pass: bool | None,
+        acc_delta_pct: float | None,
+        cfg_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Keep a correct-but-unprofitable rewrite patch dormant and register its levers.
+
+        The bundle passed correctness but not the throughput threshold. Because
+        every rewrite is behind a switch that defaults OFF, the applied code is
+        inert: leaving it in place costs nothing at runtime, while reverting it
+        would discard the rewrites that do pay along with the one that does not,
+        and would discard any enabler whose whole purpose is to make another
+        rewrite profitable rather than to be profitable itself.
+
+        So the code stays and the switches are registered as search levers, with
+        ``extra_envs_applied`` deliberately empty so nothing enters the running
+        configuration. The explore phase then turns them on one dependency-closed
+        bundle at a time.
+
+        Args:
+            params: The task params.
+            extra: The runner's extra context.
+            specialist_task_id: The originating specialist.
+            done_payload: The specialist's done payload, for the KB record.
+            output_root: The per-task workspace.
+            framework_root: The patched framework checkout.
+            stash_state: Stash bookkeeping for the restore wrapper.
+            stash_note: Stash bookkeeping for the restore wrapper.
+            applied: Patches that were applied and are being kept.
+            applied_artifacts: Artifacts that were installed.
+            switch_manifest: Parsed switch manifest.
+            switch_problems: Problems found while parsing it.
+            parity: The switch-off parity verdict, recorded on the result so the
+                inert KEEP carries its own evidence of being inert.
+            bench_result: The measured bench result (switches on).
+            new_tput: Measured throughput with the switches on.
+            delta_pct: Measured delta against ``base_tput``.
+            base_tput: The comparison base.
+            keep_threshold_pct: The throughput threshold that was not met.
+            accuracy_pass: Accuracy verdict.
+            acc_delta_pct: Accuracy delta, for the KB record.
+            cfg_fingerprint: Config fingerprint, for the KB record.
+
+        Returns:
+            The ``kept_inert`` result envelope.
+        """
+        enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
+        reason_bits = [
+            f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
+            if delta_pct is not None
+            else "bundle throughput not measurable",
+            f"code kept inert ({len(applied)} patch(es), all switches default-off) and "
+            f"{len(switch_manifest)} lever(s) registered for per-lever exploration",
+        ]
+        if enablers:
+            reason_bits.append(
+                f"{len(enablers)} declared enabler(s) ({', '.join(enablers)}) cannot pay standalone "
+                f"and are only measurable inside their bundle"
+            )
+        await self._maybe_write_framework_kb_record(
+            done_payload=done_payload,
+            outcome="kept_inert_levers_registered",
+            tps_delta_pct=float(delta_pct or 0.0),
+            extra=extra,
+            accuracy_delta_pct=acc_delta_pct,
+            config_fingerprint=cfg_fingerprint,
+        )
+        log.info(
+            "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
+            specialist_task_id,
+            f"{delta_pct:+.2f}%" if delta_pct is not None else "n/a",
+            keep_threshold_pct,
+            len(switch_manifest),
+            len(enablers),
+        )
+        return _with_stash_restore(
+            framework_root,
+            stash_state,
+            stash_note,
+            {
+                "status": "kept_inert",
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [str(p) for p in applied],
+                "patches_reverted": [],
+                "artifacts_applied": applied_artifacts,
+                # Empty on purpose: the code is present but dormant, so nothing
+                # may enter current_best. The levers below are how it gets turned
+                # on, one measured bundle at a time.
+                "config_changes_applied": {},
+                "extra_server_args_applied": "",
+                "extra_envs_applied": {},
+                "output_throughput": new_tput,
+                "delta_pct": delta_pct,
+                "accuracy_pass": accuracy_pass,
+                "base_tput": base_tput,
+                "keep_threshold_pct": keep_threshold_pct,
+                "reason": "; ".join(reason_bits),
+                "bench_result": bench_result,
+                "workspace": str(output_root),
+                "framework_root": str(framework_root or ""),
+                "framework_levers": switch_manifest,
+                "framework_lever_outcome": "registered_off",
+                "framework_switch_problems": switch_problems,
+                "switch_off_parity": parity,
             },
         )
 
@@ -3169,6 +3613,8 @@ class IntegratePatchExecutor:
         extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
         specialist_task_id: str,
+        unset_envs: "list[str] | None" = None,
+        variant_suffix: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
@@ -3182,6 +3628,12 @@ class IntegratePatchExecutor:
             extra_envs_applied: Environment overrides layered onto the variant.
             specialist_task_id: The originating specialist task id (names the
                 variant).
+            unset_envs: Extra env names to remove for this leg, on top of the
+                task's ``base_unset_envs``. Used by the switch-off parity leg,
+                which has to guarantee the rewrite switches are absent even when
+                an earlier KEEP put them into the base configuration.
+            variant_suffix: Appended to the variant name so a second leg does not
+                collide with the first one's grid slot.
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
@@ -3215,14 +3667,24 @@ class IntegratePatchExecutor:
         # For enablement runs, ensure RUN_EVAL=true survives any variant overlay.
         if bool(params.get("enablement")):
             _variant_envs["RUN_EVAL"] = "true"
+        _unset = to_str_list(params.get("base_unset_envs"))
+        for name in unset_envs or []:
+            key = str(name).strip()
+            if not key:
+                continue
+            # Removing it from the variant env too: ``unset_envs`` drops inherited
+            # values, but a key present in both would otherwise be re-added here.
+            _variant_envs.pop(key, None)
+            if key not in _unset:
+                _unset.append(key)
         variant = GridVariant(
-            name=f"integrate-patch-{specialist_task_id[:8]}",
+            name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
             extra_server_args=extra_server_args_applied,
             extra_envs=_variant_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
-            unset_envs=to_str_list(params.get("base_unset_envs")),
+            unset_envs=_unset,
             args_mode=str(params.get("base_args_mode") or "append"),
-            note=f"integrate_patch:{specialist_task_id}",
+            note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:

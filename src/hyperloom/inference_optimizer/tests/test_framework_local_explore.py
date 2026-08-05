@@ -145,6 +145,8 @@ class _Stub:
     _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
     _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
     _compose_framework_local_explore_gap = FrameworkPhase._compose_framework_local_explore_gap
+    _authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain
+    _render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt
     _next_local_explore_candidate_id = FrameworkPhase._next_local_explore_candidate_id
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore

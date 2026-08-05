@@ -144,9 +144,35 @@ def test_register_executors_wires_full_set_and_kernel_noops():
         assert kind in reg
     assert "target_analysis" in reg
     assert "integrate_patch" in reg
-    assert "framework" in reg
+    assert "framework_agent" in reg
     assert "roofline" in reg
     assert any(fn is _noop_prep for fn in reg.values())
+
+
+def test_register_executors_covers_every_phase_allowed_action():
+    """Every action a phase may enqueue resolves to a registered executor.
+
+    ``SubAgentRunner.run_task`` fails a task with ``no_executor`` when
+    ``task.kind`` has no registry entry, so a name that drifts between the
+    enqueue site and the registration site turns into a silent phase-wide
+    failure. Deriving the expectation from ``PHASE_ALLOWED_ACTIONS`` keeps the
+    two in lockstep instead of re-listing kinds by hand.
+    """
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
+
+    coord = _fake_coordinator()
+
+    async def _spec(ctx):  # noqa: ANN001, ANN202 - test stub
+        return {}
+
+    _register_executors(coord, no_kernel=False, session_dir=None, specialist_executor=_spec)
+    reg = coord.sub.executor_registry
+
+    expected: set[str] = set()
+    for actions in PHASE_ALLOWED_ACTIONS.values():
+        expected |= set(actions)
+    missing = sorted(kind for kind in expected if kind not in reg)
+    assert not missing, f"phase-allowed actions with no executor: {missing}"
 
 
 def test_register_executors_no_kernel_skips_noops_and_debug_log(caplog):

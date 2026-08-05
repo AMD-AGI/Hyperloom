@@ -146,6 +146,9 @@ class _Stub:
     _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
+    # Authoring routes by framework kind; this suite's state is sglang, so the
+    # router resolves to the serving domain.
+    _authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl

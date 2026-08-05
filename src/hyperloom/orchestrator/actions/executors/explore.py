@@ -45,6 +45,7 @@ from ._accuracy_gate import (
     is_high_accuracy_risk,
     parse_eval_results,
 )
+from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import canonical_fingerprint, workload_signature
 from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
@@ -250,7 +251,116 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
+        # Framework-rewrite lever this variant attributes to, and how. Carried so
+        # the round can report each rewrite's own contribution instead of only
+        # whether the variant won.
+        gv.framework_lever = str(raw.get("framework_lever") or "")  # type: ignore[attr-defined]
+        gv.framework_lever_source = str(raw.get("framework_lever_source") or "")  # type: ignore[attr-defined]
         out.append(gv)
+    return out
+
+
+def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
+    """Build explore variants that attribute each registered rewrite lever.
+
+    Registered levers are the switches behind framework-level source rewrites
+    that were accepted by ``integrate_patch``. They arrive in one of two states,
+    and each needs the opposite experiment:
+
+    * **dormant** (the authored bundle passed correctness but not the throughput
+      threshold, so the code is applied with every switch off) — switch one lever
+      plus its dependency closure ON and see what it adds;
+    * **on** (the bundle cleared the gate and its switches are part of the running
+      configuration) — switch one lever plus everything that depends on it OFF and
+      see what the stack loses.
+
+    The closure is what makes either experiment meaningful. An enabler measured
+    alone shows nothing, and a dependent measured without its enabler shows the
+    cost of a broken configuration rather than the lever's contribution.
+
+    Levers that already carry an attribution are skipped, so a later round spends
+    its legs on something new.
+
+    Args:
+        shared_state: The live SharedState (duck-typed; ``None`` yields ``[]``).
+
+    Returns:
+        Variant payload dicts ready for :func:`_grid_variants_from_payload`.
+    """
+    if shared_state is None:
+        return []
+    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
+    if not rows:
+        return []
+    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
+    if not pending:
+        return []
+    dormant = [row for row in pending if not row.get("default_on")]
+    active = [row for row in pending if row.get("default_on")]
+    payload: list[dict[str, Any]] = []
+    if dormant:
+        for variant in _switch_manifest.additive_variants(dormant):
+            payload.append({**variant, "framework_lever_source": "additive"})
+    if active:
+        for variant in _switch_manifest.leave_one_out_variants(active):
+            payload.append({**variant, "framework_lever_source": "leave_one_out"})
+    return payload
+
+
+def _framework_lever_attributions(
+    per_variant_outcomes: list[dict[str, Any]],
+    lever_payload: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive each rewrite lever's own contribution from this round's outcomes.
+
+    The sign convention differs by experiment, and getting it wrong would invert
+    every verdict:
+
+    * an **additive** variant switched the lever on, so the measured gain *is* its
+      contribution;
+    * a **leave-one-out** variant switched it off, so its contribution is the
+      negation of the measured gain — a stack that drops 8% without a lever means
+      that lever was worth about 8%.
+
+    Only variants naming a single primary lever are attributed. A whole-stack
+    combination variant carries no primary lever and is a combination test, not an
+    attribution of any one rewrite.
+
+    Args:
+        per_variant_outcomes: This round's per-variant outcome rows.
+        lever_payload: The lever variants seeded into this round.
+
+    Returns:
+        ``{switch, gain_pct, source, variant_name, outcome}`` rows.
+    """
+    if not lever_payload:
+        return []
+    by_name = {
+        str(v.get("name") or ""): v
+        for v in lever_payload
+        if isinstance(v, dict) and str(v.get("framework_lever") or "")
+    }
+    if not by_name:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in per_variant_outcomes:
+        seed = by_name.get(str(row.get("variant_name") or ""))
+        if seed is None:
+            continue
+        measured = (row.get("metrics") or {}).get("gain_pct")
+        if not isinstance(measured, (int, float)):
+            continue
+        source = str(seed.get("framework_lever_source") or "")
+        gain = -float(measured) if source == "leave_one_out" else float(measured)
+        out.append(
+            {
+                "switch": str(seed["framework_lever"]),
+                "gain_pct": round(gain, 4),
+                "source": source,
+                "variant_name": str(row.get("variant_name") or ""),
+                "outcome": str(row.get("outcome") or ""),
+            }
+        )
     return out
 
 
@@ -841,7 +951,26 @@ class ExploreExecutor:
 
         # ----- Variant grid ------------------------------------------------
         grid_payload = params.get("grid") or []
-        if not isinstance(grid_payload, list) or not grid_payload:
+        if not isinstance(grid_payload, list):
+            grid_payload = []
+        # Framework-rewrite levers first. Each one is a measured, already-applied
+        # source rewrite awaiting its individual number, so it is both cheaper to
+        # judge and better evidenced than a proposed config knob. Prepending also
+        # means an LLM-supplied grid does not crowd the attribution out of the
+        # round's budget.
+        lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
+        if lever_payload:
+            existing_names = {
+                str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)
+            }
+            fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
+            if fresh:
+                log.info(
+                    "explore: seeding %d framework-rewrite lever variant(s) for attribution",
+                    len(fresh),
+                )
+                grid_payload = fresh + list(grid_payload)
+        if not grid_payload:
             # No LLM variants: fall through to the framework's programmatic
             # seed grid instead of failing the task.
             seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
@@ -1897,6 +2026,17 @@ class ExploreExecutor:
                 }
             )
 
+        lever_attributions = _framework_lever_attributions(
+            per_variant_outcomes,
+            lever_payload,
+        )
+        if lever_attributions:
+            log.info(
+                "explore: attributed %d framework rewrite lever(s): %s",
+                len(lever_attributions),
+                ", ".join(f"{a['switch']}={a['gain_pct']:+.2f}%" for a in lever_attributions),
+            )
+
         # ``last_round`` summary for the prompt / breakdown.
         killed_overtime_fps = [
             str(te.get("fingerprint") or "")
@@ -1969,6 +2109,7 @@ class ExploreExecutor:
             "skipped_dup": skipped_dup,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
+            "framework_lever_attributions": lever_attributions,
             "explore_search_update": search_update,
             "discovered_flags_update": None,
             "round_id": round_id,
