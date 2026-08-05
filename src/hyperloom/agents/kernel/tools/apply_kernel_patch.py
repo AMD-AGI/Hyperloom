@@ -54,6 +54,15 @@ _FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
 
 _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
+_ALLOWED_KERNEL_DEPLOY_PACKAGES = frozenset(
+    {"aiter", "aiter_meta", "sglang", "vllm"}
+)
+_EDITABLE_KERNEL_DEPLOY_ROOTS = (
+    Path("/sgl-workspace/aiter"),
+    Path("/sgl-workspace/sglang"),
+    Path("/sgl-workspace/vllm"),
+)
+
 
 _UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
 _UNSAFE_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
@@ -542,15 +551,24 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
     return descriptors
 
 
-def _contained_dest(repo_root: Path, rel_path: str) -> Path:
-    """Resolve ``rel_path`` under ``repo_root``, rejecting any escape.
+def _contained_dest(
+    repo_root: Path,
+    rel_path: str,
+    *,
+    deploy_roots: Iterable[Path] | None = None,
+) -> Path:
+    """Resolve ``rel_path`` under its coordinate and authorized deploy roots.
 
     Rejects absolute paths and any ``..`` traversal, and confirms the resolved
-    destination stays inside ``repo_root``.
+    destination stays inside ``repo_root``. When ``deploy_roots`` is provided,
+    it must also stay inside an explicitly authorized framework root.
 
     Args:
         repo_root (Path): The framework repo root that destinations must stay in.
         rel_path (str): Repo-relative target path from the patch manifest.
+        deploy_roots (Iterable[Path] | None): Authorized framework roots.
+            ``None`` preserves coordinate-only validation for legacy callers;
+            an empty iterable rejects every destination.
 
     Returns:
         Path: The validated absolute destination path.
@@ -569,6 +587,12 @@ def _contained_dest(repo_root: Path, rel_path: str) -> Path:
         dest.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"patch path escapes repo root {root}: {rel_path}") from exc
+    if deploy_roots is not None:
+        allowed = [Path(path).resolve() for path in deploy_roots]
+        if not any(_within_root(dest, allowed_root) for allowed_root in allowed):
+            raise ValueError(
+                f"patch path is outside authorized deploy roots: {rel_path}"
+            )
     return dest
 
 
@@ -603,6 +627,7 @@ def apply_snapshot(
     descriptors: list[dict[str, Any]],
     snapshot_dir: str | Path,
     repo_root: str | Path,
+    deploy_roots: Iterable[str | Path],
     backup_dir: str | Path,
 ) -> dict[str, Any]:
     """Apply a content-addressed snapshot atomically (all-or-nothing).
@@ -621,6 +646,8 @@ def apply_snapshot(
         snapshot_dir (str | Path): Directory holding byte-exact final contents
             for every ``write`` path (mirrored at the same relative path).
         repo_root (str | Path): Framework repo root the targets live under.
+        deploy_roots (Iterable[str | Path]): Authorized framework roots under
+            which every write/delete destination must remain.
         backup_dir (str | Path): Where per-path backups + the revert manifest
             are written.
 
@@ -630,6 +657,7 @@ def apply_snapshot(
             an ``error`` and the offending path.
     """
     root = Path(repo_root)
+    allowed_roots = [Path(path) for path in deploy_roots]
     snap = Path(snapshot_dir)
     backups: list[dict[str, Any]] = []
 
@@ -637,7 +665,11 @@ def apply_snapshot(
     staged: list[tuple[dict[str, Any], Path, Path | None]] = []
     try:
         for desc in descriptors:
-            dest = _contained_dest(root, desc["path"])
+            dest = _contained_dest(
+                root,
+                desc["path"],
+                deploy_roots=allowed_roots,
+            )
             src: Path | None = None
             if desc["op"] == "write":
                 src = snap / desc["path"]
@@ -647,6 +679,25 @@ def apply_snapshot(
                         "error": f"snapshot missing content for {desc['path']}",
                         "path": desc["path"],
                     }
+                if src.is_symlink():
+                    link_target = os.readlink(src)
+                    resolved_link = (
+                        Path(link_target)
+                        if os.path.isabs(link_target)
+                        else dest.parent / link_target
+                    ).resolve()
+                    if not any(
+                        _within_root(resolved_link, allowed_root)
+                        for allowed_root in allowed_roots
+                    ):
+                        return {
+                            "status": "failed",
+                            "error": (
+                                "snapshot symlink target is outside authorized "
+                                f"deploy roots: {desc['path']} -> {link_target}"
+                            ),
+                            "path": desc["path"],
+                        }
             staged.append((desc, dest, src))
     except ValueError as exc:
         return {"status": "failed", "error": str(exc), "path": "<pre-flight>"}
@@ -685,7 +736,11 @@ def apply_snapshot(
                 dest.unlink(missing_ok=True)
             else:
                 # Re-validate containment right before the write (close TOCTOU window).
-                _contained_dest(root, desc["path"])
+                _contained_dest(
+                    root,
+                    desc["path"],
+                    deploy_roots=allowed_roots,
+                )
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 if dest.is_symlink():
                     dest.unlink()
@@ -787,6 +842,37 @@ def _isolated_aiter_pkg_root() -> Path | None:
     return None
 
 
+def _installed_kernel_package(
+    target_file: Path,
+) -> tuple[Path, str] | None:
+    """Return ``(site-packages root, package name)`` for an allowed framework."""
+    # Preserve the lexical install path: venv/site-packages is commonly a
+    # symlink, and resolving it here would make strategy classification disagree
+    # with the path matching performed by _detect_strategy.
+    target = target_file.absolute()
+    for parent in target.parents:
+        if (
+            parent.name in _ALLOWED_KERNEL_DEPLOY_PACKAGES
+            and parent.parent.name in {"site-packages", "dist-packages"}
+        ):
+            return parent.parent, parent.name
+    return None
+
+
+def _installed_kernel_deploy_roots(coordinate_root: Path) -> list[Path]:
+    """Return existing, explicitly allowed framework packages under a wheel root."""
+    return [
+        coordinate_root / package
+        for package in sorted(_ALLOWED_KERNEL_DEPLOY_PACKAGES)
+        if (coordinate_root / package).is_dir()
+    ]
+
+
+def _editable_kernel_deploy_roots() -> list[Path]:
+    """Return existing editable framework roots supported by kernel integration."""
+    return [root for root in _EDITABLE_KERNEL_DEPLOY_ROOTS if root.is_dir()]
+
+
 def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     """Return the package root shared by installed ``aiter`` and ``aiter_meta``.
 
@@ -794,17 +880,10 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     into the sibling ``aiter_meta`` package. Both are runtime-JIT inputs and must
     share one deployment/rebuild strategy.
     """
-    # Preserve the lexical install path: venv/site-packages is commonly a
-    # symlink, and resolving it here would make strategy classification disagree
-    # with the path matching performed by _detect_strategy.
-    target = target_file.absolute()
-    for parent in target.parents:
-        if (
-            parent.name in {"aiter", "aiter_meta"}
-            and parent.parent.name in {"site-packages", "dist-packages"}
-        ):
-            return parent.parent
-    return None
+    installed = _installed_kernel_package(target_file)
+    if installed is None or installed[1] not in {"aiter", "aiter_meta"}:
+        return None
+    return installed[0]
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
@@ -1328,39 +1407,50 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     rebuild_mode = _REBUILD_MODE_NONE
     rebuild_command: list[str] = []
     artifact_roots: list[Path] = []
+    deploy_roots: list[Path] = []
     jit_build_dir = ""
+    installed_kernel = _installed_kernel_package(target_file)
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
     if "/sgl-workspace/aiter/" in lower:
         root = Path("/sgl-workspace/aiter")
+        deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
         root = Path("/sgl-workspace/sglang/sgl-kernel")
+        deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/" in lower:
         root = Path("/sgl-workspace/sglang")
+        deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
         artifact_roots = [root]
     elif "/sgl-workspace/vllm/" in lower:
         root = Path("/sgl-workspace/vllm")
+        deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
     elif installed_aiter_root:
         root = installed_aiter_root
+        deploy_roots = _installed_kernel_deploy_roots(installed_aiter_root)
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
         jit_build_dir = str(installed_aiter_root / "aiter" / "jit" / "build")
         # Runtime-JIT artifacts live under jit/build and are moved aside as one
         # tree below. Recursively copying wheel .so/.co files here is redundant
         # and can consume gigabytes per integration attempt.
         artifact_roots = []
+    elif installed_kernel:
+        root = installed_kernel[0]
+        deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
     elif allow_unknown_target:
         root = target_file.parent
+        deploy_roots = [root]
 
     if (
         suffix in PYTHON_SOURCE_SUFFIXES
@@ -1376,6 +1466,8 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         jit_build_dir = ""
     if root is None:
         root = target_file.parent
+    if not deploy_roots:
+        deploy_roots = [root]
 
     return {
         "compiled": compiled,
@@ -1383,6 +1475,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         "rebuild_mode": rebuild_mode,
         "rebuild_command": rebuild_command,
         "artifact_roots": artifact_roots,
+        "deploy_roots": deploy_roots,
         "jit_build_dir": jit_build_dir,
     }
 
@@ -1839,6 +1932,9 @@ def apply_kernel_patch(
         "strategy": {
             "compiled": strategy["compiled"],
             "root": strategy["root"],
+            "deploy_roots": [
+                str(path) for path in strategy.get("deploy_roots") or []
+            ],
             "rebuild_modes": [strategy["rebuild_mode"]],
             "jit_build_dirs": (
                 [strategy["jit_build_dir"]]
@@ -2096,6 +2192,18 @@ def _apply_kernel_patch_snapshot(
             ),
         }
     repo_root = Path(resolved_root)
+    deploy_roots = [
+        Path(path)
+        for path in primary_strategy.get("deploy_roots") or []
+    ]
+    if not deploy_roots:
+        return {
+            "status": "failed",
+            "error": (
+                "snapshot mode requires at least one authorized framework "
+                f"deploy root for target: {target}"
+            ),
+        }
     backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
@@ -2104,7 +2212,11 @@ def _apply_kernel_patch_snapshot(
     write_paths: list[Path] = []
     for desc in descriptors:
         try:
-            dest = _contained_dest(repo_root, desc["path"])
+            dest = _contained_dest(
+                repo_root,
+                desc["path"],
+                deploy_roots=deploy_roots,
+            )
         except ValueError as exc:
             return {"status": "failed", "error": str(exc), "path": desc["path"]}
         if desc["op"] == "write":
@@ -2142,6 +2254,7 @@ def _apply_kernel_patch_snapshot(
         "strategy": {
             "compiled": compiled,
             "root": str(repo_root),
+            "deploy_roots": [str(path) for path in deploy_roots],
             "rebuild_modes": sorted(
                 {strat["rebuild_mode"] for strat in rebuild_strategies}
             ),
@@ -2167,6 +2280,7 @@ def _apply_kernel_patch_snapshot(
         descriptors=descriptors,
         snapshot_dir=snapshot_dir,
         repo_root=repo_root,
+        deploy_roots=deploy_roots,
         backup_dir=backup_dir,
     )
     if applied["status"] != "ok":
@@ -2189,7 +2303,11 @@ def _apply_kernel_patch_snapshot(
     # gone. Any mismatch -> full restore.
     snap = Path(snapshot_dir)
     for desc in descriptors:
-        dest = _contained_dest(repo_root, desc["path"])
+        dest = _contained_dest(
+            repo_root,
+            desc["path"],
+            deploy_roots=deploy_roots,
+        )
         if desc["op"] == "delete":
             if dest.exists():
                 revert_kernel_patch(manifest_path)

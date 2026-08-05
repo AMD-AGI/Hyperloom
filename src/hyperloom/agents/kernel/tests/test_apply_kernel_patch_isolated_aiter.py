@@ -309,7 +309,189 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     assert target.read_text(encoding="utf-8") == "TILE = 64\n"
     snapshot_manifest = json.loads(Path(result["manifest_path"]).read_text())
     assert snapshot_manifest["strategy"]["root"] == str(site)
+    assert snapshot_manifest["strategy"]["deploy_roots"] == [
+        str(site / "aiter"),
+        str(site / "aiter_meta"),
+    ]
     assert snapshot_manifest["strategy"]["rebuild_modes"] == ["runtime_jit"]
+
+
+def test_installed_snapshot_can_span_aiter_and_vllm(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    site = aiter_pkg.parent
+    vllm = site / "vllm"
+    vllm.mkdir()
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    aiter_relative = Path("aiter_meta/csrc/kernels/gen_instances.py")
+    vllm_relative = Path("vllm/_aiter_ops.py")
+    aiter_target = site / aiter_relative
+    vllm_target = site / vllm_relative
+    aiter_target.write_text("TILE = 128\n", encoding="utf-8")
+    vllm_target.write_text("ENABLED = False\n", encoding="utf-8")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/aiter_meta/csrc/kernels/gen_instances.py "
+        "b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "--- a/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "+++ b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "@@ -1 +1 @@\n"
+        "-TILE = 128\n"
+        "+TILE = 64\n"
+        "diff --git a/vllm/_aiter_ops.py b/vllm/_aiter_ops.py\n"
+        "--- a/vllm/_aiter_ops.py\n"
+        "+++ b/vllm/_aiter_ops.py\n"
+        "@@ -1 +1 @@\n"
+        "-ENABLED = False\n"
+        "+ENABLED = True\n",
+        encoding="utf-8",
+    )
+    snapshot = tmp_path / "snapshot"
+    for relative, content in (
+        (aiter_relative, "TILE = 64\n"),
+        (vllm_relative, "ENABLED = True\n"),
+    ):
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=aiter_target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=snapshot,
+        kernel_id="k-cross-framework",
+    )
+
+    assert result["status"] == "ok", result
+    assert aiter_target.read_text(encoding="utf-8") == "TILE = 64\n"
+    assert vllm_target.read_text(encoding="utf-8") == "ENABLED = True\n"
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    assert manifest["strategy"]["deploy_roots"] == [
+        str(site / "aiter"),
+        str(site / "aiter_meta"),
+        str(site / "vllm"),
+    ]
+
+
+@pytest.mark.parametrize("explicit_repo_root", (False, True))
+def test_installed_snapshot_rejects_other_site_packages(
+    akp,
+    tmp_path,
+    monkeypatch,
+    explicit_repo_root,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    torch = site / "torch"
+    torch.mkdir()
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    aiter_relative = Path("aiter_meta/csrc/kernels/gen_instances.py")
+    torch_relative = Path("torch/runtime.py")
+    aiter_target = site / aiter_relative
+    torch_target = site / torch_relative
+    aiter_target.write_text("TILE = 128\n", encoding="utf-8")
+    torch_target.write_text("VALUE = 1\n", encoding="utf-8")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/aiter_meta/csrc/kernels/gen_instances.py "
+        "b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "--- a/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "+++ b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "@@ -1 +1 @@\n"
+        "-TILE = 128\n"
+        "+TILE = 64\n"
+        "diff --git a/torch/runtime.py b/torch/runtime.py\n"
+        "--- a/torch/runtime.py\n"
+        "+++ b/torch/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n",
+        encoding="utf-8",
+    )
+    snapshot = tmp_path / "snapshot"
+    for relative, content in (
+        (aiter_relative, "TILE = 64\n"),
+        (torch_relative, "VALUE = 2\n"),
+    ):
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=aiter_target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=snapshot,
+        repo_root=site if explicit_repo_root else None,
+        kernel_id="k-forbidden-package",
+    )
+
+    assert result["status"] == "failed"
+    assert "outside authorized deploy roots" in result["error"]
+    assert aiter_target.read_text(encoding="utf-8") == "TILE = 128\n"
+    assert torch_target.read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_installed_snapshot_rejects_symlink_to_other_package(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    (site / "torch").mkdir()
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    target = site / "aiter_meta" / "csrc" / "kernels" / "gen_instances.py"
+    target.write_text("TILE = 128\n", encoding="utf-8")
+    relative = Path("aiter_meta/csrc/kernels/runtime.py")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/aiter_meta/csrc/kernels/runtime.py "
+        "b/aiter_meta/csrc/kernels/runtime.py\n"
+        "new file mode 120000\n"
+        "--- /dev/null\n"
+        "+++ b/aiter_meta/csrc/kernels/runtime.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+../../../torch/runtime.py\n",
+        encoding="utf-8",
+    )
+    snapshot_link = tmp_path / "snapshot" / relative
+    snapshot_link.parent.mkdir(parents=True)
+    snapshot_link.symlink_to("../../../torch/runtime.py")
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=tmp_path / "snapshot",
+        kernel_id="k-forbidden-symlink",
+    )
+
+    assert result["status"] == "failed"
+    assert "symlink target is outside authorized deploy roots" in result["error"]
+    assert not (site / relative).exists()
 
 
 def test_runtime_jit_uses_target_root_not_importable_aiter(
