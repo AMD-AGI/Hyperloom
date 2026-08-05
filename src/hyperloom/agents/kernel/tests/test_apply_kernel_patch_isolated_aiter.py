@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -33,6 +34,7 @@ def _make_isolated_aiter(tmp_path: Path) -> tuple[Path, Path]:
     (aiter_pkg / "jit" / "build").mkdir(parents=True)
     (aiter_pkg / "csrc" / "kernels").mkdir(parents=True)
     (aiter_pkg / "ops" / "triton").mkdir(parents=True)
+    (site / "aiter_meta" / "csrc" / "kernels").mkdir(parents=True)
     return venv_root, aiter_pkg
 
 
@@ -55,15 +57,17 @@ def test_jit_build_dir_none_without_isolated_venv(akp, monkeypatch):
 def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tmp_path, monkeypatch):
     venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
-    akp._CACHED_KNOWN_TARGET_ROOTS = (str(aiter_pkg) + "/",)
+    site = aiter_pkg.parent
+    akp._CACHED_KN_TARGET_ROOTS = (str(site) + "/",)
 
-    target = aiter_pkg / "csrc" / "kernels" / "foo.cu"
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
     strat = akp._detect_strategy(target, allow_unknown_target=False)
 
     assert strat["compiled"] is True
-    assert strat["root"] == str(aiter_pkg)
+    assert strat["root"] == str(site)
+    assert strat["rebuild_mode"] == "runtime_jit"
     assert strat["rebuild_command"] == []
-    assert strat["artifact_roots"] == [aiter_pkg]
+    assert strat["artifact_roots"] == [aiter_pkg, site / "aiter_meta"]
 
 
 def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_path, monkeypatch):
@@ -75,6 +79,7 @@ def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_pa
     strat = akp._detect_strategy(target, allow_unknown_target=False)
 
     assert strat["compiled"] is False
+    assert strat["rebuild_mode"] == "none"
     assert strat["rebuild_command"] == []
     assert strat["artifact_roots"] == []
 
@@ -88,4 +93,97 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
 
     assert strat["compiled"] is True
     assert strat["root"] == "/sgl-workspace/aiter"
+    assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
+
+
+def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    site = aiter_pkg.parent
+    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    target.write_text(
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 1; }\n',
+        encoding="utf-8",
+    )
+    patch = tmp_path / "v1_forge.cu"
+    optimized = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n'
+    )
+    patch.write_text(optimized, encoding="utf-8")
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k003",
+    )
+
+    assert result["status"] == "ok", result
+    assert result["rebuild"]["status"] == "deferred"
+    assert result["rebuild"]["mode"] == "runtime_jit"
+    assert result["jit_build_backup"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == optimized
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    assert manifest["status"] == "applied"
+    assert manifest["strategy"]["rebuild_mode"] == "runtime_jit"
+
+
+def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    monkeypatch.setattr(akp.importlib.util, "find_spec", lambda name: None)
+    site = aiter_pkg.parent
+    akp._CACHED_KNOWN_TARGET_ROOTS = (str(site) + "/",)
+    relative = Path("aiter_meta/csrc/kernels/gen_instances.py")
+    target = site / relative
+    target.write_text("TILE = 128\n", encoding="utf-8")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/aiter_meta/csrc/kernels/gen_instances.py "
+        "b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "--- a/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "+++ b/aiter_meta/csrc/kernels/gen_instances.py\n"
+        "@@ -1 +1 @@\n"
+        "-TILE = 128\n"
+        "+TILE = 64\n",
+        encoding="utf-8",
+    )
+    snapshot = tmp_path / "snapshot"
+    snapshot_target = snapshot / relative
+    snapshot_target.parent.mkdir(parents=True)
+    snapshot_target.write_text("TILE = 64\n", encoding="utf-8")
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=snapshot,
+        repo_root=site,
+        kernel_id="k006",
+    )
+
+    assert result["status"] == "ok", result
+    assert result["rebuild"]["status"] == "deferred"
+    assert result["rebuild"]["mode"] == "runtime_jit"
+    assert result["jit_build_backup"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "TILE = 64\n"

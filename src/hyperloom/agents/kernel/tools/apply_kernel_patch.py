@@ -767,6 +767,9 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
 # split wheel (``/aiter_meta/csrc/``); both feed the same importable ``aiter``
 # JIT build, so the rebuild gates must recognise both layouts.
 _AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
+_REBUILD_MODE_COMMAND = "command"
+_REBUILD_MODE_NONE = "none"
+_REBUILD_MODE_RUNTIME_JIT = "runtime_jit"
 
 
 def _isolated_aiter_pkg_root() -> Path | None:
@@ -777,9 +780,27 @@ def _isolated_aiter_pkg_root() -> Path | None:
     lib = Path(vllm_venv) / "lib"
     if not lib.is_dir():
         return None
-    for match in sorted(lib.glob("python*/site-packages/aiter")):
-        if match.is_dir():
-            return match
+    for package_dir in ("site-packages", "dist-packages"):
+        for match in sorted(lib.glob(f"python*/{package_dir}/aiter")):
+            if match.is_dir():
+                return match
+    return None
+
+
+def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
+    """Return the package root shared by installed ``aiter`` and ``aiter_meta``.
+
+    AITER wheels split runtime Python/JIT code into ``aiter`` and device sources
+    into the sibling ``aiter_meta`` package. Both are runtime-JIT inputs and must
+    share one deployment/rebuild strategy.
+    """
+    target = target_file.resolve()
+    for parent in target.parents:
+        if (
+            parent.name in {"aiter", "aiter_meta"}
+            and parent.parent.name in {"site-packages", "dist-packages"}
+        ):
+            return parent.parent
     return None
 
 
@@ -1233,7 +1254,8 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
 
     Matches the target against the known framework roots (aiter / sglang /
     vllm) to pick the rebuild command and artifact roots, and decides whether
-    the target is a compiled source. Python targets never rebuild.
+    the target feeds a compiled runtime. Python codegen under AITER ``csrc``
+    requires the same rebuild/JIT invalidation as a native source.
 
     Args:
         target_file (Path): The file being patched.
@@ -1243,8 +1265,8 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
 
     Returns:
         dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
-            (str), ``rebuild_command`` (list[str]) and ``artifact_roots``
-            (list[Path]).
+            (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
+            ``artifact_roots`` (list[Path]).
 
     Raises:
         ValueError: When the target is outside the known roots and
@@ -1259,40 +1281,59 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     suffix = target_file.suffix.lower()
     compiled = suffix in COMPILED_SOURCE_SUFFIXES
     root = None
+    rebuild_mode = _REBUILD_MODE_NONE
     rebuild_command: list[str] = []
     artifact_roots: list[Path] = []
+    installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
     if "/sgl-workspace/aiter/" in lower:
         root = Path("/sgl-workspace/aiter")
+        rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
         root = Path("/sgl-workspace/sglang/sgl-kernel")
+        rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/" in lower:
         root = Path("/sgl-workspace/sglang")
+        rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
         artifact_roots = [root]
     elif "/sgl-workspace/vllm/" in lower:
         root = Path("/sgl-workspace/vllm")
+        rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
-    elif isolated_aiter_root := _isolated_aiter_pkg_root():
-        if _within_root(target_file, isolated_aiter_root):
-            root = isolated_aiter_root
-            artifact_roots = [root]
+    elif installed_aiter_root:
+        root = installed_aiter_root
+        rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        artifact_roots = [
+            package
+            for package in (
+                installed_aiter_root / "aiter",
+                installed_aiter_root / "aiter_meta",
+            )
+            if package.is_dir()
+        ]
     elif allow_unknown_target:
         root = target_file.parent
 
-    if suffix in PYTHON_SOURCE_SUFFIXES:
+    if suffix in PYTHON_SOURCE_SUFFIXES and _target_is_in_aiter_csrc(target_file):
+        compiled = True
+    elif suffix in PYTHON_SOURCE_SUFFIXES:
         compiled = False
+        rebuild_mode = _REBUILD_MODE_NONE
         rebuild_command = []
         artifact_roots = []
+    elif compiled and root is None:
+        root = target_file.parent
 
     return {
         "compiled": compiled,
         "root": str(root) if root else "",
+        "rebuild_mode": rebuild_mode,
         "rebuild_command": rebuild_command,
         "artifact_roots": artifact_roots,
     }
@@ -1370,6 +1411,35 @@ def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, A
         "command": command,
         "cwd": str(cwd),
     }
+
+
+def _run_strategy_rebuild(
+    strategy: dict[str, Any],
+    *,
+    command_override: list[str],
+    timeout_sec: int,
+) -> dict[str, Any]:
+    """Run an eager rebuild or record a runtime-JIT handoff."""
+    command = command_override or list(strategy["rebuild_command"])
+    cwd = Path(strategy["root"])
+    if command:
+        return _run_rebuild(command, cwd, timeout_sec)
+    if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT:
+        return {
+            "status": "deferred",
+            "mode": _REBUILD_MODE_RUNTIME_JIT,
+            "reason": (
+                "installed AITER sources compile on runtime import after JIT "
+                "cache invalidation"
+            ),
+            "cwd": str(cwd),
+        }
+    return _run_rebuild([], cwd, timeout_sec)
+
+
+def _rebuild_completed(result: dict[str, Any]) -> bool:
+    """Return whether apply may proceed after this rebuild result."""
+    return result.get("status") in {"ok", "deferred"}
 
 
 def _revert_backup_trusted(backup_path: str, backup_root: Path) -> bool:
@@ -1684,6 +1754,7 @@ def apply_kernel_patch(
         "strategy": {
             "compiled": strategy["compiled"],
             "root": strategy["root"],
+            "rebuild_mode": strategy["rebuild_mode"],
         },
         "created_at": utc_now(),
     }
@@ -1751,11 +1822,7 @@ def apply_kernel_patch(
             encoding="utf-8",
         )
 
-    command: list[str] = []
-    if rebuild_command:
-        command = list(coerced_rebuild_command)
-    elif not skip_rebuild:
-        command = list(strategy["rebuild_command"])
+    command_override = list(coerced_rebuild_command) if rebuild_command else []
 
     rebuild = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {
@@ -1817,9 +1884,12 @@ def apply_kernel_patch(
                 encoding="utf-8",
             )
 
-        cwd = Path(strategy["root"] or target.parent)
-        rebuild = _run_rebuild(command, cwd, rebuild_timeout_sec)
-        if rebuild["status"] != "ok":
+        rebuild = _run_strategy_rebuild(
+            strategy,
+            command_override=command_override,
+            timeout_sec=rebuild_timeout_sec,
+        )
+        if not _rebuild_completed(rebuild):
             revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
@@ -1956,7 +2026,13 @@ def _apply_kernel_patch_snapshot(
         "mode": "snapshot",
         "descriptors": descriptors,
         "artifacts": artifacts,
-        "strategy": {"compiled": compiled, "root": str(repo_root)},
+        "strategy": {
+            "compiled": compiled,
+            "root": str(repo_root),
+            "rebuild_modes": sorted(
+                {strat["rebuild_mode"] for strat in rebuild_strategies}
+            ),
+        },
         "created_at": utc_now(),
     }
     if producer_manifest:
@@ -2062,9 +2138,7 @@ def _apply_kernel_patch_snapshot(
         manifest["multinode"] = multinode_info
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    command: list[str] = []
-    if rebuild_command:
-        command = list(coerced_rebuild_command)
+    command_override = list(coerced_rebuild_command) if rebuild_command else []
 
     rebuild: dict[str, Any] = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}
@@ -2123,11 +2197,13 @@ def _apply_kernel_patch_snapshot(
         # Rebuild each distinct compiled root. Any failure -> full restore.
         rebuild_records: list[dict[str, Any]] = []
         for strat in rebuild_strategies:
-            cmd = command or list(strat["rebuild_command"])
-            cwd = Path(strat["root"] or target.parent)
-            rec = _run_rebuild(cmd, cwd, rebuild_timeout_sec)
+            rec = _run_strategy_rebuild(
+                strat,
+                command_override=command_override,
+                timeout_sec=rebuild_timeout_sec,
+            )
             rebuild_records.append(rec)
-            if rec["status"] != "ok":
+            if not _rebuild_completed(rec):
                 revert = revert_kernel_patch(manifest_path)
                 return {
                     "status": "failed",
