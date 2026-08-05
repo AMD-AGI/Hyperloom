@@ -232,6 +232,8 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
         return {"status": revert_status}
 
     class _FakeBaselineExecutor:
+        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
         def __init__(self, *, session_dir):
             self.session_dir = session_dir
 

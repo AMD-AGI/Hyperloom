@@ -930,6 +930,7 @@ def build_invocation_spec(
         "target_platform": runtime_flags.get("target_platform"),
         "is_multigpu": bool(candidate.get("is_multigpu")),
         "num_gpus_recommended": candidate.get("num_gpus_recommended"),
+        "runtime_backend": candidate.get("runtime_backend"),
     }
     for key, value in execution_fields.items():
         if value not in (None, ""):
@@ -947,6 +948,7 @@ def build_invocation_spec(
             "sources": list(dict.fromkeys([source, *kernel_sources])),
             "kernel_kind": _effective_kernel_kind(candidate),
             "symbols": implementation_symbols,
+            "runtime_backend": str(candidate.get("runtime_backend") or ""),
         },
         "kernel": {
             "kernel_id": str(candidate.get("kernel_id") or ""),
