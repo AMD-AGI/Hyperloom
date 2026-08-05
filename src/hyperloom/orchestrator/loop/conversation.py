@@ -140,10 +140,40 @@ class ConversationCollaborator:
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
                 action_runner=self._run_action_now_sync,
+                reference_reader=self._context_reference_reader,
             )
             setter(provider)
         except Exception:  # noqa: BLE001 — context pull is best-effort
             log.exception("Coordinator: failed to attach orchestration context tools")
+
+    def _context_reference_reader(self, name: str = "") -> str:
+        """Return the text of a named prompt reference document.
+
+        Accepts only bare stems to prevent path traversal. Unknown names
+        return a list of available names rather than an error.
+
+        Args:
+            name: Bare stem of the reference file (no path separators or
+                extension).
+
+        Returns:
+            The document text, or an error/available-list string when the
+            name is invalid or the file is absent.
+        """
+        from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
+
+        refs_dir = asset_prompt_references_dir()
+        stem = (name or "").strip()
+        if not stem or "/" in stem or "\\" in stem or stem.startswith("."):
+            available = sorted(p.stem for p in refs_dir.glob("*.md"))
+            return f"(read_reference: invalid name {name!r}; available: {available})"
+        candidate = (refs_dir / stem).with_suffix(".md").resolve()
+        if candidate.parent != refs_dir.resolve():
+            return f"(read_reference: path traversal rejected for {name!r})"
+        if not candidate.exists():
+            available = sorted(p.stem for p in refs_dir.glob("*.md"))
+            return f"(read_reference: {name!r} not found; available: {available})"
+        return candidate.read_text(encoding="utf-8")
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path).
@@ -594,7 +624,8 @@ class ConversationCollaborator:
                 "with the read-only context tools: get_shared_state, "
                 "get_gaps, get_warm_start, get_proposal_scores, "
                 "get_intervention_mix, why_denied, show_analysis_md, "
-                "get_inbox, get_recent_outcomes, get_running_tasks. Reason "
+                "get_inbox, get_recent_outcomes, get_running_tasks, "
+                "read_reference. Reason "
                 "from your own running plan; do not re-derive it from scratch."
             )
 
