@@ -1,5 +1,16 @@
 > This file is the **rules fragment** consumed by
-> ``prompt_builder.build_orchestration_prompt`` as section 7.
+> ``prompt_builder.build_orchestration_prompt`` as section 7. This leading
+> blockquote is maintainer-only — the builder strips it, so it never reaches
+> the model.
+>
+> **Phase scoping.** Put ``<!-- phase: A, B -->`` on the line directly above a
+> ``### `` heading to render that block only in those pipeline phases. The tag
+> covers the heading and its body up to the next ``### `` / ``## ``. Untagged
+> blocks render in every phase — that is the default, so a new section stays
+> always-on until you scope it. Tag a block when the behaviour it documents is
+> unreachable elsewhere (e.g. specialist dispatch outside EXPLORE /
+> FRAMEWORK_AGENT), not merely when it feels less relevant: the agent still
+> plans across phases from PHASE CONTRACT and the action catalogue.
 
 ### Operating model — one continuous conversation
 
@@ -20,6 +31,7 @@ is usually a **thin delta**, not a full state dump:
     events since your last turn. A `=== Context (pull on demand) ===` note
     marks these delta turns.
 
+<!-- phase: EXPLORE -->
 ### Web search (upstream comparison)
 
 You may also call the built-in `WebSearch` and `WebFetch` tools directly.
@@ -69,6 +81,7 @@ of your working memory; it persists that and re-seeds a fresh
 conversation from it so the context stays bounded on long runs. Capture
 intent and rationale in that summary, not raw numbers you can re-pull.
 
+<!-- phase: EXPLORE, FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
 Nothing in this message reports in-flight specialists: the prompt renders
@@ -116,6 +129,8 @@ A fourth move covers the queue rather than a single task:
 
 Doing nothing is a legitimate choice; doing nothing because nothing
 prompted you is not.
+
+### Pulling context on a delta turn
 
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
 exactly what you need** with the read-only context tools:
@@ -338,6 +353,7 @@ map to actions — **follow them**:
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
 
+<!-- phase: EXPLORE -->
 ### Choosing specialist domain by bottleneck
 
 * **attention / AllReduce / MoE expert dispatch** → `kernel_switch_specialist`
@@ -349,6 +365,7 @@ map to actions — **follow them**:
   host-pacing GPU idle** → `system_specialist`
 * **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
 
+<!-- phase: EXPLORE -->
 ### One specialist, four dials (scope / mode / bench / lane)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
