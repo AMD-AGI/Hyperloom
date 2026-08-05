@@ -5836,20 +5836,16 @@ def _grade_integrate_accuracy(
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
-    The re-baseline already ran the serving eval, so the score is read back
-    rather than re-measured -- grading costs no extra GPU time. A measured drop
+    The staged re-baseline already ran the serving eval after hot throughput
+    passed, so the score is read back rather than re-measured. A measured drop
     beyond ``ACCURACY_THRESHOLD`` blocks the KEEP. A missing verdict blocks only
     when a positive baseline accuracy proves eval works in this environment;
     otherwise the gate degrades to throughput-only so eval-less setups are not
     universally blocked.
 
-    Reading the score takes two steps because of where the double-run leaves it.
-    The baseline double-run evaluates in the WARMUP round only, and the measured
-    round's own parse -- rooted at its own slot -- cannot see that sibling file,
-    so the returned result carries no ``accuracy``. The genuine-baseline sibling
-    salvage that would recover it is skipped for this synthetic task by
-    ``quality_ref_exempt``. So fall back to parsing the task workspace, where
-    ``parse_eval_results`` resolves the warmup round's score.
+    The preferred path is the accuracy attached by BaselineExecutor's staged
+    accuracy round. Workspace parsing remains as a compatibility fallback for
+    older runs where eval lived in the warmup slot.
 
     Args:
         bench_result: The re-baseline result dict from ``BaselineExecutor``.
@@ -6102,6 +6098,10 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": base_tput
+            * (1.0 + keep_threshold_pct / 100.0),
+            "accuracy_timeout_sec": rebaseline_timeout_sec,
             # Synthetic kind="baseline": candidate A/B validation against the
             # already-anchored reference. It runs eval for the kernel accuracy
             # gate but never establishes a replacement quality reference.

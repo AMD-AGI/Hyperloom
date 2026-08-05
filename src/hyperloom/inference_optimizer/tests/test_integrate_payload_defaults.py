@@ -300,3 +300,5 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert result["decision"] == "KEEP"
         assert result["new_tput"] == 1100.0
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+        assert captured["params"]["defer_accuracy_until_after_measure"] is True
+        assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
