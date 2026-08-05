@@ -272,15 +272,17 @@ class TestIntegrateHandlerHonoursStateDefault:
         _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
         captured: dict[str, object] = {}
 
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
         class FakeBaselineExecutor:
+            default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
             def __init__(self, *, session_dir):
                 self.session_dir = session_dir
 
             async def __call__(self, ctx):
                 captured["params"] = dict(ctx.task.params)
                 return {"output_throughput": 1100.0, "completed_requests": 10}
-
-        from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
         monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
 

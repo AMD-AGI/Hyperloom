@@ -5933,14 +5933,20 @@ def _integrate_rebaseline_timeout_sec(
             if value > 0:
                 return value
         except (TypeError, ValueError):
-            pass
+            log.debug(
+                "integrate_handler: invalid timeout_sec; trying fallback timeout sources",
+                exc_info=True,
+            )
     if "budget_minutes" in payload:
         try:
             value = int(float(payload["budget_minutes"]) * 60)
             if value > 0:
                 return value
         except (TypeError, ValueError):
-            pass
+            log.debug(
+                "integrate_handler: invalid budget_minutes; trying fallback timeout sources",
+                exc_info=True,
+            )
     config_path = str(payload.get("config_path") or "")
     if config_path and Path(config_path).is_file():
         try:
@@ -5958,7 +5964,10 @@ def _integrate_rebaseline_timeout_sec(
                 if value > 0:
                     return value
         except (OSError, TypeError, ValueError, yaml.YAMLError):
-            pass
+            log.debug(
+                "integrate_handler: invalid benchmark timeout config; using executor default",
+                exc_info=True,
+            )
     return max(1, int(default_timeout_sec))
 
 
@@ -5996,10 +6005,7 @@ async def integrate_handler(
         ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
         ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
     """
-    from ..actions.executors.baseline import (
-        BASELINE_DEFAULT_TIMEOUT_SEC,
-        BaselineExecutor,
-    )
+    from ..actions.executors.baseline import BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
@@ -6082,11 +6088,7 @@ async def integrate_handler(
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     rebaseline_timeout_sec = _integrate_rebaseline_timeout_sec(
         payload,
-        default_timeout_sec=getattr(
-            baseline_executor,
-            "default_timeout_sec",
-            BASELINE_DEFAULT_TIMEOUT_SEC,
-        ),
+        default_timeout_sec=baseline_executor.default_timeout_sec,
     )
     fake_task = Task(
         task_id=fake_task_id,
