@@ -113,6 +113,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 hyperloom = [
     "orchestrator/prompts/*.md",
+    "orchestrator/prompts/references/*.md",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",

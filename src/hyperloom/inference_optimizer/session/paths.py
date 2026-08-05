@@ -285,6 +285,15 @@ def asset_system_prompts_dir() -> Path:
     return Path(_prompts_pkg.__file__).resolve().parent
 
 
+def asset_prompt_references_dir() -> Path:
+    """Return the directory of shipped on-demand prompt reference documents.
+
+    Returns:
+        Path: ``<asset_system_prompts_dir>/references``.
+    """
+    return asset_system_prompts_dir() / "references"
+
+
 # Workspace-/session-scoped artefact helpers. Single source of truth so
 # callers go through e.g. magpie_dir() / runtime_dir() instead of concatenating
 # paths by hand.
@@ -388,6 +397,7 @@ __all__ = [
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "asset_actions_dir",
+    "asset_prompt_references_dir",
     "asset_root",
     "asset_system_prompts_dir",
     "db_path_for",
