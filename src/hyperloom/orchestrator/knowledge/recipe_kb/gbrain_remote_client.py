@@ -422,7 +422,65 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         except (json.JSONDecodeError, ValueError):
             decoded = None
         if isinstance(decoded, dict) and decoded.get(C.F_CANONICAL_ID):
-            return decoded
+            if isinstance(decoded.get("labels"), Mapping) and isinstance(
+                decoded.get("body"), Mapping
+            ):
+                return decoded
+            best_config = decoded.get("best_config")
+            stack_fingerprint = decoded.get("stack_fingerprint")
+            provenance = decoded.get(C.F_PROVENANCE)
+            throughput = _as_float(decoded.get("best_throughput"))
+            return {
+                **decoded,
+                "labels": C.canonical_labels(
+                    model=str(decoded.get("model") or ""),
+                    hardware=str(decoded.get("hardware") or ""),
+                    framework_name=str(
+                        decoded.get("framework_name") or decoded.get("framework") or ""
+                    ),
+                    model_type=str(decoded.get("model_type") or ""),
+                    architectures=decoded.get("architectures") or [],
+                    framework_version=str(decoded.get("framework_version") or ""),
+                    precision=str(decoded.get("precision") or ""),
+                ),
+                "body": {
+                    "best_config": dict(best_config) if isinstance(best_config, Mapping) else {},
+                    "best_throughput": throughput,
+                    "stack_fingerprint": (
+                        dict(stack_fingerprint)
+                        if isinstance(stack_fingerprint, Mapping)
+                        else {}
+                    ),
+                    "sessions": _json_list(decoded.get("sessions")),
+                    "last_profiled": str(decoded.get("last_profiled") or ""),
+                    "prs_tested": _json_list(decoded.get("prs_tested")),
+                },
+                "metrics": {
+                    "throughput": throughput,
+                    "validated_gain_pct": _as_float(decoded.get("validated_gain_pct")),
+                },
+                "findings": _json_list(decoded.get("what_worked")),
+                "failures": _json_list(decoded.get("what_failed")),
+                "gaps": _json_list(decoded.get("remaining_gaps")),
+                "pitfalls": _json_list(decoded.get("pitfalls")),
+                "lessons": _json_list(decoded.get("lessons")),
+                C.F_AUTHORITY: str(
+                    decoded.get(C.F_AUTHORITY)
+                    or frontmatter.get("authority")
+                    or C.AUTHORITY_EXPERIENTIAL
+                ),
+                C.F_CONFIDENCE: (
+                    _as_float(decoded.get(C.F_CONFIDENCE))
+                    or _as_float(frontmatter.get("confidence"))
+                    or C.DEFAULT_CONFIDENCE
+                ),
+                C.F_EVIDENCE_REFS: _json_list(decoded.get(C.F_EVIDENCE_REFS)),
+                C.F_PROVENANCE: (
+                    dict(provenance)
+                    if isinstance(provenance, Mapping)
+                    else _provenance_from_attrs(frontmatter, attrs)
+                ),
+            }
     model = str(attrs.get("model") or "").strip()
     hardware = str(attrs.get("hardware") or "").strip()
     if not model or not hardware:
@@ -504,6 +562,17 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
         return True
     recipe_labels = recipe.get("labels")
     if not isinstance(recipe_labels, Mapping):
+        flat_identity = (
+            recipe.get("model"),
+            recipe.get("hardware"),
+            recipe.get("framework_name") or recipe.get("framework"),
+            recipe.get("framework_version"),
+            recipe.get("precision"),
+            recipe.get("model_type"),
+            recipe.get("architectures"),
+        )
+        if not any(flat_identity):
+            return True
         recipe_labels = C.canonical_labels(
             model=str(recipe.get("model") or ""),
             hardware=str(recipe.get("hardware") or ""),

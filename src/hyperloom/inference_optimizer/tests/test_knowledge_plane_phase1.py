@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import sys
 import threading
 import time
 from pathlib import Path
@@ -77,10 +78,8 @@ def test_local_mode_ignores_ambient_gbrain(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://ambient.invalid")
     monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
 
-    import hyperloom.orchestrator.knowledge.recipe_kb.gbrain_store as gs
-
     monkeypatch.setattr(
-        gs.GbrainRecipeStore,
+        GbrainRecipeStore,
         "from_credentials",
         classmethod(lambda cls, **kwargs: pytest.fail("local mode constructed GBrain")),
     )
@@ -360,7 +359,7 @@ def test_two_remote_store_instances_serialize_latest_read_and_put(tmp_path: Path
     first = _remote_store(mcp, lock_root)
     second = _remote_store(mcp, lock_root)
     cid = "inference:m:h:f:mt:a:v:p"
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def _write(store: GbrainRecipeStore, statement: str) -> None:
         try:
@@ -368,7 +367,7 @@ def test_two_remote_store_instances_serialize_latest_read_and_put(tmp_path: Path
                 canonical_id=cid,
                 lessons=[{"statement": statement, "measured_impact": ""}],
             )
-        except BaseException as exc:  # noqa: BLE001 - surfaced in test thread
+        except Exception as exc:  # noqa: BLE001 - surfaced in test thread
             errors.append(exc)
 
     first_thread = threading.Thread(target=_write, args=(first, "first"))
@@ -415,8 +414,7 @@ def test_remote_store_rejects_missing_or_unavailable_locking(monkeypatch, tmp_pa
     with pytest.raises(ValueError, match="requires lock_root"):
         GbrainRecipeStore(client=client, mcp=mcp)
 
-    import hyperloom.orchestrator.knowledge.recipe_kb.gbrain_store as store_module
-
+    store_module = sys.modules[GbrainRecipeStore.__module__]
     monkeypatch.setattr(store_module, "_fcntl", None)
     with pytest.raises(GbrainRecipeLockError, match="requires POSIX fcntl"):
         GbrainRecipeStore(client=client, mcp=mcp, lock_root=tmp_path / "locks")
