@@ -37,6 +37,8 @@ Pure functions over already-parsed JSON; the executor owns all I/O.
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import valid_env_key
@@ -47,6 +49,74 @@ log = logging.getLogger(__name__)
 
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
+
+# Environment reads a patch may legitimately add without declaring a switch: rank
+# topology and the framework's own already-documented configuration. Anything else
+# a patch newly reads is a gate, and a gate has to be declared.
+_NON_SWITCH_ENV: frozenset[str] = frozenset(
+    {
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+    }
+)
+
+# ``os.environ.get("NAME"`` / ``os.getenv("NAME"`` / ``os.environ["NAME"]`` on an
+# added line. Only added lines matter: an untouched read was already there.
+_ENV_READ_RE = re.compile(
+    r"""os\.(?:environ\.get|getenv)\(\s*["']([A-Z][A-Z0-9_]*)["']|os\.environ\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]"""
+)
+
+
+def undeclared_switch_gates(
+    patch_paths: "list[Path] | tuple[Path, ...]",
+    switches: list[dict[str, Any]],
+) -> list[str]:
+    """Return environment switches a patch gates on but the manifest never declares.
+
+    The whole lever scheme rests on the manifest describing every gate the patch
+    introduces. When a gate is missing from it the scheme does not fail loudly, it
+    stands down: nothing is turned on for the measurement, no switch-off parity leg
+    runs, and no lever is registered — so the patch is benched as an ordinary diff
+    and whatever it does when "off" is never checked. A live session delivered four
+    env-gated patches with no manifest at all, measured +1.4%, moved the output past
+    the quality band, and none of the guarantees that exist for exactly this case
+    were in play.
+
+    Only *added* lines are scanned, so a rewrite that merely moves an existing
+    ``os.environ`` read is not flagged, and rank/topology variables are exempt
+    because reading them is not gating behaviour.
+
+    Args:
+        patch_paths: Unified-diff files the deliverable applies.
+        switches: The parsed manifest.
+
+    Returns:
+        Sorted env names the patch gates on and the manifest omits; empty when the
+        deliverable is self-consistent.
+    """
+    declared = {str(s.get("switch") or "").strip() for s in switches}
+    found: set[str] = set()
+    for path in patch_paths or ():
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            log.warning("undeclared_switch_gates: cannot read %s: %s", path, exc)
+            continue
+        for line in text.splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            for match in _ENV_READ_RE.finditer(line):
+                name = match.group(1) or match.group(2)
+                if name and name not in _NON_SWITCH_ENV and name not in declared:
+                    found.add(name)
+    return sorted(found)
 
 # Default value assigned to a switch whose manifest entry omits one. The
 # rewrites are boolean fast paths, so "on" is the only value that matters.

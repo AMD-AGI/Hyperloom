@@ -267,19 +267,40 @@ a correctness bug that a throughput benchmark will happily accept.
 1. **Key on the complete argument identity.** For a tensor:
    `(data_ptr, shape, dtype, device, _version)`. Plus every scalar that changes
    the result. A key missing one input returns another input's answer.
-2. **Pin the source tensors in the entry.** Under a caching allocator a freed
+2. **Key on every value the entry holds, not just the first.** Caching a
+   `(k, v)` pair under a key derived from `k` alone returns the wrong `v` the
+   moment two calls share a `k` identity — and under classifier-free guidance the
+   two branches keep separate caches whose tensors can land on the same recycled
+   address. A real attempt shipped this shape and pushed the output past the
+   quality band while measuring +1.4% faster.
+3. **Pin the source tensors in the entry.** Under a caching allocator a freed
    tensor's address goes straight back to the next allocation, so `data_ptr`
    alone reports a brand-new tensor as a hit. Holding a reference to the keyed
    tensors makes the address unreusable while the entry lives.
-3. **Check `_version`** so an in-place mutation invalidates the entry.
-4. **Never hash tensor contents.** That forces a device-to-host sync per call
+
+   Pinning means storing the **source** objects you keyed on. Storing only the
+   computed result is not pinning — the sources are then unreferenced and their
+   addresses are free to be recycled under a still-live key:
+
+```python
+# NOT pinned: `src` was rebound by the computation, so nothing holds the key's
+# source and its address can be reused while this entry stays reachable.
+src = transform(src)
+_CACHE[key] = src
+
+# Pinned: the entry keeps the objects the key was derived from.
+_CACHE[key] = _Entry(value=transform(src), sources=(src,))
+```
+
+4. **Check `_version`** so an in-place mutation invalidates the entry.
+5. **Never hash tensor contents.** That forces a device-to-host sync per call
    and costs more than the cache saves — and on a `(c)` rewrite it reintroduces
    exactly the stall being removed.
-5. **Bound the cache and size it for the calling pattern.** A small LRU is
+6. **Bound the cache and size it for the calling pattern.** A small LRU is
    enough. Under classifier-free guidance the positive and negative branches
    alternate, so a single-entry cache thrashes to a 0% hit rate; size for the
    number of interleaved callers.
-6. **Include the chunk identity** when caching across a chunk boundary.
+7. **Include the chunk identity** when caching across a chunk boundary.
    Geometry alone repeats between chunks whose contents differ.
 
 ## Switch discipline

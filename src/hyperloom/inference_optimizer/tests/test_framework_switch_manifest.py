@@ -581,6 +581,21 @@ index 0000000..1111111 100644
 +    return 2
 """
 
+# A patch that gates its rewrite on an environment switch but does not declare it.
+# This is the shape a real specialist delivered: four env-gated patches and no
+# ``framework_switches`` key in the done payload at all.
+_ENV_GATED_PATCH_WITHOUT_MANIFEST = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,3 @@
+ def f():
+-    return 1
++    import os
++    return 2 if os.environ.get("HL_UNDECLARED_CACHE", "") == "1" else 1
+"""
+
 
 # Default manifest for the integrate_patch runs below: a hoist enabler plus the
 # cache it unlocks. Named so a test can pass ``switches=[]`` to mean "no manifest
@@ -609,6 +624,7 @@ async def _run_rewrite_integrate(
     parity_delta_pct: float = 0.0,
     parity_accuracy_pass: bool | None = True,
     parity_tput_missing: bool = False,
+    patch_body: str | None = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench.
 
@@ -639,7 +655,9 @@ async def _run_rewrite_integrate(
     init_git_repo(repo)
     workspace = session_dir / "runs" / "specialist" / "t-spec-rw"
     (workspace / "worktree" / "patches").mkdir(parents=True)
-    (workspace / "worktree" / "patches" / "001_rewrite.patch").write_text(_REWRITE_PATCH, encoding="utf-8")
+    (workspace / "worktree" / "patches" / "001_rewrite.patch").write_text(
+        patch_body or _REWRITE_PATCH, encoding="utf-8"
+    )
     (workspace / "specialist_done.json").write_text(
         _json.dumps(
             {
@@ -907,6 +925,55 @@ async def test_a_patch_that_is_not_inert_when_disabled_is_reverted(tmp_path, mon
     assert result["error_class"] == "switch_off_parity_failed"
     assert "not a default-off rewrite" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_an_env_gated_patch_without_a_manifest_is_rejected(tmp_path, monkeypatch):
+    """A gate the manifest does not declare disables every guarantee, silently.
+
+    Observed on a live session: the specialist delivered four patches, each gating
+    its rewrite on ``os.environ.get("WORLDPLAY_...")``, and no ``framework_switches``
+    key at all. With an empty manifest the whole scheme quietly stands down --
+    nothing is turned on for the measurement, no parity leg runs, no lever is
+    registered -- and the patch is benched as an ordinary diff. That run then
+    measured +1.4% *and* moved the output (ssim 0.4527 under a 0.4740 floor, lpips
+    31% over), which a genuinely default-off patch cannot do. The parity leg exists
+    precisely to catch that, and it never ran.
+
+    The failure mode is the mirror of the manifest-without-a-patch case already
+    handled here, so it gets the same treatment: refuse the deliverable instead of
+    falling back to the unguarded path.
+    """
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "framework_switch_gates_undeclared"
+    assert "HL_UNDECLARED_CACHE" in result["reason"]
+    # Refused before spending a benchmark leg on it.
+    assert not legs, "an undeclared gate must be caught before benching"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_a_plain_patch_without_env_gates_still_needs_no_manifest(tmp_path, monkeypatch):
+    """The check must not turn every ordinary framework patch into a rejection.
+
+    Most framework work is a straight edit with no switch at all; only a patch that
+    reads an undeclared environment switch is contradicting its own manifest.
+    """
+    result, _, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        switches=[],
+    )
+    assert result.get("error_class") != "framework_switch_gates_undeclared"
+    assert legs, "a plain patch must still be benched"
 
 
 @pytest.mark.asyncio
