@@ -95,3 +95,8 @@ runtime-env/
 # framework-specific; not part of the product). Keep them out of the repo.
 run_kernel_forge.sh
 resume_kernel_forge.sh
+gates.findings.md
+
+# Working plan / investigation notes for the FlyDSL integration (not product)
+flydsl-plan/
+Hyperloom-Flydsl.integrate.md
