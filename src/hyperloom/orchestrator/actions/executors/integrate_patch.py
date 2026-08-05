@@ -2814,10 +2814,19 @@ class IntegratePatchExecutor:
 
         # Switch-off parity. Run before either KEEP verdict, since both of them
         # leave the patch on disk and therefore both depend on it being inert when
-        # disabled. Skipped when the patch is heading for a revert anyway (nothing
-        # to protect) so the extra leg is only spent where it decides something.
+        # disabled.
+        #
+        # It runs on a quality regression too, which looks wasteful and is not: the
+        # switches are benched together, so a moved output localises to the bundle
+        # rather than to a switch. On a live session a four-switch bundle reached
+        # +65.5% and was reverted whole on the gate, discarding three switches that
+        # were never implicated along with the one that was. Default-off code costs
+        # nothing to keep and explore can bisect it per lever — but only if the tree
+        # is genuinely unchanged with every switch unset, which is exactly what this
+        # leg measures. An unswitched patch has no "off" state to fall back to, so
+        # it still reverts without spending the leg.
         parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
-        if switch_manifest and not acc_block:
+        if switch_manifest:
             parity = await self._switch_off_parity(
                 params=params,
                 output_root=output_root,
@@ -2891,9 +2900,15 @@ class IntegratePatchExecutor:
             # with what they unlock. So keep the code inert, register the switches
             # as levers, and let the explore phase find the subset that wins.
             #
-            # Correctness still gates: an accuracy or quality regression means the
-            # rewrite is wrong, not merely unprofitable, and gets reverted.
-            if switch_manifest and applied and not acc_block:
+            # A quality regression does not condemn the bundle either, for the same
+            # reason: the switches are benched together, so a moved output says
+            # "at least one of these is wrong", not "all of them are". The bundle
+            # stays inert and explore bisects it per lever — the verdict carries
+            # ``quality_unverified`` so nothing downstream mistakes it for a clean
+            # keep. What still condemns it is failing parity, handled above: code
+            # that is not inert when disabled would skew every later measurement,
+            # and that check now runs on this path too.
+            if switch_manifest and applied:
                 return await self._keep_inert_switches(
                     params=params,
                     extra=extra,
@@ -3352,6 +3367,12 @@ class IntegratePatchExecutor:
             stash_note,
             {
                 "status": "kept_inert",
+                # True when the bundle moved the output with every switch on. The
+                # code is still kept, because the switches are benched together and
+                # that verdict does not say which one is at fault — explore bisects
+                # per lever from here. The flag exists so nothing downstream reads
+                # this as a clean keep.
+                "quality_unverified": accuracy_pass is False,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],

@@ -761,11 +761,20 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_an_incorrect_rewrite_is_reverted_not_kept_inert(tmp_path, monkeypatch):
-    """Failing accuracy means the rewrite is wrong, not merely unprofitable.
+async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path, monkeypatch):
+    """A correctness failure on a bundle names the bundle, not a switch.
 
-    The inert-keep path must never absorb a correctness failure: dormant-but-wrong
-    code would be turned on later by the explore phase.
+    This used to revert, on the reasoning that dormant-but-wrong code would be
+    turned on later by explore. That risk is covered elsewhere: every lever variant
+    explore benches goes through the same quality gate (``is_valid_measurement``
+    rejects a scriptable measurement whose gate failed), so a broken switch is
+    caught the moment it is the one being measured — which is also the only way to
+    learn *which* switch it is.
+
+    What reverting actually cost was the rest of the bundle. A live four-switch
+    patch hit +65.5% and was discarded whole on the gate, taking three switches
+    that were never implicated with it. So the code stays inert and flagged, and
+    explore bisects it.
     """
     result, repo, _, _ = await _run_rewrite_integrate(
         tmp_path,
@@ -773,9 +782,12 @@ async def test_an_incorrect_rewrite_is_reverted_not_kept_inert(tmp_path, monkeyp
         delta_pct=0.2,
         accuracy_pass=False,
     )
-    assert result["status"] == "reverted"
-    assert result["patches_applied"] == []
-    assert (repo / "src.py").read_text().endswith("return 1\n")
+    assert result["status"] == "kept_inert"
+    assert result.get("quality_unverified") is True
+    # Applied but dormant: nothing may enter current_best off this verdict.
+    assert result["config_changes_applied"] == {}
+    assert result["extra_envs_applied"] == {}
+    assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
@@ -1069,15 +1081,76 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_correctness_failure_skips_the_parity_leg(tmp_path, monkeypatch):
-    """A patch heading for a revert should not spend a second bench leg."""
-    _, _, _, legs = await _run_rewrite_integrate(
+async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(
+    tmp_path, monkeypatch
+):
+    """A quality regression condemns one switch, not the whole bundle.
+
+    Measured on a live session: a four-switch patch cached the SP seqlen
+    rendezvous and reached 0.577 fps against a 0.3487 base -- +65.5%, three timed
+    runs 0.3% apart -- and was reverted whole because the quality gate failed. The
+    switches are benched together, so "the output moved" localises to the bundle,
+    not to a switch; at least one is broken and the rest may be exactly the win
+    the evidence pointed at.
+
+    Default-off code costs nothing to keep, and per-lever attribution in explore
+    is what separates the good switches from the bad one. But keeping it is only
+    safe if the tree really is unchanged with every switch unset, which is what
+    the parity leg measures — so on a switched bundle it is now worth its leg even
+    when the gate failed.
+    """
+    result, repo, _, legs = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
         delta_pct=8.0,
         accuracy_pass=False,
     )
+    assert [leg for leg in legs if leg.get("unset_envs")], "parity must run to decide if the code can stay"
+    assert result["status"] == "kept_inert"
+    assert result.get("quality_unverified") is True
+    # The code stays on disk with the switches off, for explore to bisect.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_a_correctness_failure_without_switches_still_reverts(tmp_path, monkeypatch):
+    """An unswitched patch has nothing to bisect, so a quality regression reverts it.
+
+    Without a manifest the code is live the moment it is applied: there is no
+    "off" state to fall back to, so a moved output means the patch must go.
+    """
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        accuracy_pass=False,
+        switches=[],
+    )
+    assert result["status"] == "reverted"
     assert not [leg for leg in legs if leg.get("unset_envs")]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_that_is_not_inert_still_reverts_despite_the_bisect_path(
+    tmp_path, monkeypatch
+):
+    """Keeping code is only safe when 'off' is genuinely off.
+
+    A bundle that fails both the quality gate and parity is not a bisect
+    candidate: with the switches unset it already changes the tree's behaviour, so
+    leaving it would skew every later measurement in the session.
+    """
+    result, repo, _, _ = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=8.0,
+        accuracy_pass=False,
+        parity_delta_pct=9.0,
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "switch_off_parity_failed"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
