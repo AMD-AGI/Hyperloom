@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Packaging
+
+# Validates every path-bearing declaration in ``pyproject.toml`` and the
+# contents of a real wheel build.
+#
+# Deliberately has NO ``paths-ignore``, unlike ``lint.yml`` and
+# ``tests-coverage.yml``: eight ``package-data`` globs point at ``*.md`` files,
+# so a documentation-only PR is exactly the change that can strand a
+# declaration -- and it is the change those workflows skip. setuptools ignores a
+# glob that matches nothing without warning, so nothing else catches it.
+on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pyproject-lint:
+    name: pyproject declarations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        # The lint is stdlib-only (tomllib + ast + pathlib), so no project
+        # extras are installed here; this job stays seconds long.
+        run: |
+          pip install --upgrade pip
+          pip install "pytest>=8.0"
+
+      - name: Lint pyproject declarations
+        run: |
+          pytest src/hyperloom/inference_optimizer/tests/test_packaging_lint.py \
+            -p no:cacheprovider -v
+
+  wheel-contents:
+    name: wheel contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        # setuptools>=77 matches the build-system floor (PEP 639 license form).
+        run: |
+          pip install --upgrade pip
+          pip install "setuptools>=77" wheel build
+
+      - name: Build wheel
+        id: build
+        run: |
+          python -m build --wheel --no-isolation --outdir dist 2>&1 | tee build.log
+          echo "wheel=$(ls dist/*.whl)" >> "$GITHUB_OUTPUT"
+
+      - name: Check wheel contents
+        run: python scripts/check_wheel_contents.py "${{ steps.build.outputs.wheel }}"
+
+      - name: Advisory notice on setuptools deprecations
+        # Advisory only: setuptools adds deprecations over time and this job does
+        # not pin an upper bound, so hard-failing here would break on upgrades.
+        if: always()
+        run: |
+          if grep -qi "SetuptoolsDeprecationWarning" build.log; then
+            echo "::warning::Build emitted SetuptoolsDeprecationWarning; see the Build wheel step log."
+            grep -i -A2 "SetuptoolsDeprecationWarning" build.log || true
+          fi
