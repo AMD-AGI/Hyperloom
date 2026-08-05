@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.provenance import detect_gfx_arch, detect_stack_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -414,6 +415,73 @@ def _explain_stop_reason(stop_reason):
     return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
+def _read_sysfs(path: str) -> str:
+    """Read a sysfs scalar, returning ``""`` when absent or unreadable."""
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _platform_fingerprint() -> dict[str, Any] | None:
+    """Capture host CPU tuning state for run-to-run comparability.
+
+    Two sessions taken on nodes whose BIOS differs are not comparable, and a
+    throughput delta credited to a code change can just as easily be SMT, the
+    NUMA layout, or a frequency governor. Recording the platform alongside the
+    numbers lets a suspicious delta be checked after the fact instead of re-run.
+
+    Read here at report time rather than plumbed from CLI preflight: the sysfs
+    read is free, it needs no cross-process state, and sampling at both ends
+    means a knob toggled mid-session shows up as a mismatch rather than being
+    silently attributed to the optimizer.
+
+    Returns:
+        dict[str, Any] | None: Platform facts, or ``None`` off Linux sysfs
+        (containers without a host /sys), where the check is not meaningful.
+    """
+    try:
+        smt_active = _read_sysfs("/sys/devices/system/cpu/smt/active")
+        if not smt_active:
+            return None
+        cpu_root = Path("/sys/devices/system/cpu")
+        sockets = len(
+            {p.read_text().strip() for p in cpu_root.glob("cpu*/topology/physical_package_id")}
+        )
+        nodes = len(list(Path("/sys/devices/system/node").glob("node[0-9]*")))
+        cpu = next(
+            (
+                ln.split(":", 1)[1].strip()
+                for ln in _read_sysfs("/proc/cpuinfo").splitlines()
+                if ln.startswith("model name")
+            ),
+            "unknown",
+        )
+        return {
+            "cpu": cpu,
+            "smt": "on" if smt_active == "1" else "off",
+            "sockets": sockets or None,
+            "numa_nodes": nodes or None,
+            "nps": f"NPS{nodes // sockets}" if sockets and nodes else "unknown",
+            "governor": _read_sysfs("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "unknown",
+            "boost": {"1": "on", "0": "off"}.get(
+                _read_sysfs("/sys/devices/system/cpu/cpufreq/boost"), "unknown"
+            ),
+            "kernel": _read_sysfs("/proc/sys/kernel/osrelease") or "unknown",
+            "gpu": {
+                # PCI devices bound to amdgpu — the count the run actually had,
+                # independent of any *_VISIBLE_DEVICES masking.
+                "count": len(list(Path("/sys/bus/pci/drivers/amdgpu").glob("0000:*"))) or None,
+                "gfx_arch": detect_gfx_arch(os.environ) or "unknown",
+                "amdgpu_driver": _read_sysfs("/sys/module/amdgpu/version") or "unknown",
+            },
+            "stack": detect_stack_fingerprint(os.environ),
+        }
+    except Exception:  # never let a cosmetic probe break report generation
+        log.debug("platform fingerprint failed", exc_info=True)
+        return None
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -468,6 +536,7 @@ def _build_summary_dict(
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
+        "platform": _platform_fingerprint(),
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
@@ -576,6 +645,23 @@ def _format_md(summary: dict[str, Any]) -> str:
     if boot_fail:
         lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
+    plat = summary.get("platform")
+    if plat:
+        lines.append(
+            f"- platform       : {plat['cpu']} — SMT {plat['smt']}, {plat['nps']} "
+            f"({plat['numa_nodes']} NUMA nodes / {plat['sockets']} sockets), "
+            f"governor {plat['governor']}, boost {plat['boost']}"
+        )
+        gpu, stack = plat.get("gpu") or {}, plat.get("stack") or {}
+        lines.append(
+            f"- accelerators   : {gpu.get('count') or '?'}× {gpu.get('gfx_arch', 'unknown')}, "
+            f"amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
+        )
+        lines.append(
+            "- stack          : "
+            + ", ".join(f"{k} {v}" for k, v in sorted(stack.items()))
+            + f", kernel {plat.get('kernel', 'unknown')}"
+        )
     lines.append("")
     lines.append("## Event counts")
     lines.append("")
