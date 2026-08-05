@@ -17,6 +17,7 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
+    PendingProposal,
     _extract_enablement_launch_log,
 )
 
@@ -405,7 +406,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
+async def test_watchdog_rearms_silently_finished_round(monkeypatch):
     """A round whose inflight_task_id maps to a terminal task counts as a stall
     and clears the guard so a fresh round can dispatch."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -415,11 +416,6 @@ async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
     fake = _enqueue_self(
         enablement_stall_streak=1,
         enablement_inflight_task_id="spec-stuck",
-    )
-    # Simulate a terminal task in the registry.
-    fake.tasks = _FakeTasks(
-        running=[],
-        queued=[],
     )
 
     async def _in_flight_false(self=fake):
@@ -432,7 +428,7 @@ async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_does_not_fire_when_task_running(monkeypatch, tmp_path):
+async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
     """When the inflight_task_id maps to a running task, the round is not
     counted as a stall — the specialist is still working."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -454,8 +450,6 @@ async def test_watchdog_does_not_fire_when_task_running(monkeypatch, tmp_path):
 
 
 def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
-
     return PendingProposal(
         proposal_msg_id=f"m-{specialist_task_id}",
         from_agent="coordinator",
@@ -470,8 +464,8 @@ def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
 async def test_in_flight_defers_on_undecided_integrate_proposal():
     """The specialist goes terminal a tick before the Critic sees the integrate
     proposal; the round must still count as in flight."""
+    # No task rows, so the specialist lookup raises TaskNotFound (terminal).
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
-    fake.tasks = _FakeTasks()  # specialist is terminal -> TaskNotFound
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
     assert await fake._enablement_in_flight() is True
 
@@ -481,7 +475,6 @@ async def test_in_flight_ignores_decided_integrate_proposal():
     """Once the Critic has ruled, the proposal stops deferring so a dropped
     proposal cannot hold the round open forever."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
-    fake.tasks = _FakeTasks()
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done", decided=True)
     assert await fake._enablement_in_flight() is False
 
@@ -529,7 +522,6 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
         enablement_stall_streak=1,
         enablement_inflight_task_id="spec-done",
     )
-    fake.tasks = _FakeTasks()  # specialist terminal
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
     assert fake.shared_state.enablement.stall_streak == 1

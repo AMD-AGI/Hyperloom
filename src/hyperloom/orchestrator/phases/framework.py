@@ -1495,8 +1495,8 @@ class FrameworkPhase(PhaseHandler):
         * ``enablement_succeeded`` — terminal: a prior attempt was KEPT.
         * ``enablement_validation_pending`` — an eval-origin KEEP is awaiting
           genuine-baseline revalidation; authoring is paused until it resolves.
-        * ``inflight_task_id`` — a specialist task is running; in-flight status
-          is derived from the task registry so no stored bool can get stuck.
+        * ``inflight_task_id`` — a round is still resolving (specialist task or
+          the integrate that consumes its deliverable); derived, never stored.
         * run deadline passed — stop dispatching new work near the close.
 
         A non-blank log is always dispatched (the specialist repairs from the raw
@@ -1522,7 +1522,7 @@ class FrameworkPhase(PhaseHandler):
         if state.enablement.inflight_task_id:
             if await self._enablement_in_flight():
                 return ""
-            # Task has ended without calling _maybe_rearm_enablement — count as stall.
+            # Round ended without calling _maybe_rearm_enablement — count as stall.
             self._maybe_rearm_enablement(
                 {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
             )
@@ -1605,9 +1605,8 @@ class FrameworkPhase(PhaseHandler):
         """True while the current enablement round has not settled.
 
         A round spans the authoring specialist AND the ``integrate_patch`` that
-        consumes its deliverable. The specialist goes terminal a full tick before
-        the Critic even sees the integrate proposal, so the specialist task state
-        alone would declare the round finished while it is still resolving.
+        consumes its deliverable; the specialist goes terminal a tick before the
+        Critic sees the integrate proposal, so its task state alone is not enough.
         """
         from ..state.task_registry import TaskNotFound
 
@@ -1620,16 +1619,15 @@ class FrameworkPhase(PhaseHandler):
             spec = None
         if spec is not None and spec.state in ("queued", "running"):
             return True
-        # An undecided integrate proposal keeps the round open. Once the Critic
-        # rules, approve materialises the task below and reject rearms directly,
-        # so a dropped proposal cannot defer forever.
+        # Undecided proposal keeps the round open; once ruled, approve lands the
+        # task matched below and reject rearms directly, so it cannot defer forever.
         for p in self.state.pending_proposals.values():
             if p.action_name != "integrate_patch" or p.decided:
                 continue
-            if ((p.payload or {}).get("params") or {}).get("specialist_task_id") == tid:
+            if (p.payload.get("params") or {}).get("specialist_task_id") == tid:
                 return True
         for t in (await self.tasks.queued()) + (await self.tasks.running()):
-            if t.kind == "integrate_patch" and (t.params or {}).get("specialist_task_id") == tid:
+            if t.kind == "integrate_patch" and t.params.get("specialist_task_id") == tid:
                 return True
         return False
 
