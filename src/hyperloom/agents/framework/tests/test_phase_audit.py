@@ -203,7 +203,7 @@ def test_audit_patches_path_source(tmp_path: Path):
 
 # opt-in LLM layer: no creds -> static verdict kept, risk noted (hermetic)
 def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     content = "def scaled_op(q, k):\n    scale = compute_scale_factor(q)\n    return q * scale + k\n"
     root = _make_root(tmp_path, "model_executor/layer.py", content)

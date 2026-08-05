@@ -3,7 +3,8 @@
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
+Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
+OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
 CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
 """
 
@@ -215,22 +216,15 @@ def _is_deepseek_anthropic_url(value: str | None) -> bool:
 
 
 def _has_explicit_anthropic_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    return bool((api_key and api_key != safe_key) or (auth_token and auth_token != safe_key))
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
 def _has_explicit_deepseek_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    return bool(deepseek_key and deepseek_key != safe_key)
+    return bool(os.environ.get("DEEPSEEK_API_KEY"))
 
 
 def _has_explicit_openai_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    return bool(openai_key and openai_key != safe_key)
+    return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def _is_stale_proxy_url(value: str | None) -> bool:
@@ -302,9 +296,9 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     Args:
         primary_api_key (str): The Claude CLI primary API key to write; blank
             leaves any existing key untouched. Callers should pass the
-            Anthropic-side key (explicit ANTHROPIC_API_KEY wins, SAFE_API_KEY
-            is the fallback) so a split-entrypoint deploy authenticates Claude
-            with its own key rather than the shared gateway key.
+            Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
+            deploy authenticates Claude with its own key rather than the shared
+            gateway key.
         anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
     """
     import json as _json
@@ -342,16 +336,15 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.
 
-    Accepts either the legacy single-gateway pair (``SAFE_API_KEY`` +
-    ``OPENAI_BASE_URL``) or the split Anthropic/OpenAI entrypoints: at least
-    one base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``) and at least
-    one key (``SAFE_API_KEY`` / ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN``).
+    Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
+    official provider key that implies its default endpoint) plus at least one
+    key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` /
+    ``DEEPSEEK_API_KEY``). Split Anthropic/OpenAI entrypoints and single
+    gateways (same key under both provider env names) are both accepted.
     """
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_key = bool(
-        os.environ.get("SAFE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
+        os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN")
         or os.environ.get("DEEPSEEK_API_KEY")
@@ -363,10 +356,9 @@ def _validate_credentials() -> None:
                 os.environ.get("ANTHROPIC_API_KEY")
                 or os.environ.get("ANTHROPIC_AUTH_TOKEN")
                 or os.environ.get("DEEPSEEK_API_KEY")
-                or os.environ.get("SAFE_API_KEY")
             )
         )
-        or (openai_url and (os.environ.get("OPENAI_API_KEY") or os.environ.get("SAFE_API_KEY")))
+        or (openai_url and os.environ.get("OPENAI_API_KEY"))
     )
     if has_usable_endpoint and has_key:
         return
@@ -375,7 +367,7 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
+        missing.append("an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -386,8 +378,8 @@ def _validate_credentials() -> None:
         "  - shell environment\n"
         f"  - $REPO_ROOT/.env  ({env_status}: {env_file})\n\n"
         "Configure ONE of:\n"
-        "  1. Single gateway (AMD / LiteLLM-style):\n"
-        "       export SAFE_API_KEY=ak-your-safe-apikey\n"
+        "  1. Single gateway (same key under both provider names):\n"
+        "       export OPENAI_API_KEY=ak-your-key  ANTHROPIC_API_KEY=ak-your-key\n"
         "       export OPENAI_BASE_URL=https://gateway.example.com/v1\n"
         "  2. Split entrypoints (native Anthropic + OpenAI):\n"
         "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"

@@ -45,7 +45,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
 )
 
@@ -138,7 +137,6 @@ def resolve_openai_client_config(
         or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
         or (source.get("ANTHROPIC_API_KEY") or "").strip()
         or (source.get("LLM_GATEWAY_KEY") or "").strip()
-        or (source.get("SAFE_API_KEY") or "").strip()
     )
     if not api_key:
         key_names = " / ".join(
@@ -149,7 +147,6 @@ def resolve_openai_client_config(
                     "ANTHROPIC_AUTH_TOKEN",
                     "ANTHROPIC_API_KEY",
                     "LLM_GATEWAY_KEY",
-                    "SAFE_API_KEY",
                 ]
             )
         )
@@ -202,7 +199,6 @@ def claude_sdk_env_options(
         or source.get("ANTHROPIC_API_KEY")
         or source.get("DEEPSEEK_API_KEY")
         or source.get("OPENAI_API_KEY")
-        or source.get("SAFE_API_KEY")
         or source.get("LLM_GATEWAY_KEY")
         or ""
     )

@@ -39,10 +39,6 @@ def load_dotenv(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         value = value.strip().strip('"').strip("'")
         env[key.strip()] = value
-    if "SAFE_API_KEY" in env:
-        env.setdefault("ANTHROPIC_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("OPENAI_API_KEY", env["SAFE_API_KEY"])
-        env.setdefault("ANTHROPIC_AUTH_TOKEN", env["SAFE_API_KEY"])
     if "ANTHROPIC_AUTH_TOKEN" in env:
         env.setdefault("ANTHROPIC_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])
         env.setdefault("OPENAI_API_KEY", env["ANTHROPIC_AUTH_TOKEN"])

@@ -114,7 +114,6 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_CUSTOM_HEADERS",
-        "SAFE_API_KEY",
         "LLM_GATEWAY_KEY",
     ):
         monkeypatch.delenv(key, raising=False)

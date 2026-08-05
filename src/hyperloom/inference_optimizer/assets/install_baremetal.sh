@@ -33,7 +33,7 @@ ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
-SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
+OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
@@ -1120,13 +1120,13 @@ resolve_credentials() {
   # confirmed. Clear unsupported credential families before downstream scripts
   # source env with "env wins".
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset LLM_GATEWAY_KEY
     unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
   elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
     anthropic_key=""
     anthropic_token=""
     anthropic_url=""
-    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset LLM_GATEWAY_KEY
     unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
   fi
@@ -1181,7 +1181,6 @@ resolve_credentials() {
     fi
     remove_dotenv_var OPENAI_API_KEY
     remove_dotenv_var OPENAI_BASE_URL
-    remove_dotenv_var SAFE_API_KEY
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
     remove_dotenv_var OPENAI_CUSTOM_HEADERS

@@ -431,7 +431,7 @@ def test_record_action_attempt_redacts_secrets_from_persisted_errors():
         decision="no_promote",
         result={
             "error_class": "subprocess_nonzero",
-            "error": f"SAFE_API_KEY={secret} Authorization: Bearer {secret}",
+            "error": f"OPENAI_API_KEY={secret} Authorization: Bearer {secret}",
         },
     )
 

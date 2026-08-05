@@ -92,7 +92,7 @@ The package serves two distinct objectives, gated differently:
 
 `fa phase-audit` runs a deterministic **static** local-source judge by
 default (no network, no LLM). Its optional refine layer is **opt-in**
-(`request.use_llm=true`): a single chat-completion that reads `SAFE_API_KEY`
+(`request.use_llm=true`): a single chat-completion that reads `OPENAI_API_KEY`
 + `OPENAI_BASE_URL` (or request overrides). It is best-effort and
 evidence-gated — any missing credential / failure / invalid output keeps the
 static verdict, and it can never upgrade to an `already_*` status the static

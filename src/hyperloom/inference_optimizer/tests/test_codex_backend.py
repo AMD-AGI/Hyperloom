@@ -235,7 +235,6 @@ def test_construct_without_creds_raises_backend_error(monkeypatch):
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "LLM_GATEWAY_KEY",
-        "SAFE_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(BackendError, match="not set"):

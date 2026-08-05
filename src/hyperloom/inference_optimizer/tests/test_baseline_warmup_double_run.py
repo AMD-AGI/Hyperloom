@@ -528,7 +528,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         (slot / "server.log").write_text(
             "(APIServer pid=42) RuntimeError: Engine core initialization "
             "failed. See root cause above. Failed core proc(s): {} "
-            "SAFE_API_KEY=ak-invalid-measurement-secret\n",
+            "OPENAI_API_KEY=ak-invalid-measurement-secret\n",
             encoding="utf-8",
         )
         # Classification must be driven by the server.log marker, not returncode.

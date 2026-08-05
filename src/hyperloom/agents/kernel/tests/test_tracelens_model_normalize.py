@@ -36,7 +36,7 @@ def tl_module():
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_env(monkeypatch):
-    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "SAFE_API_KEY"):
+    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -46,12 +46,6 @@ def _use_safe_gateway(monkeypatch):
 
 def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
     _use_safe_gateway(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
-    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
-
-
-def test_safe_detected_via_safe_api_key(tl_module, monkeypatch):
-    monkeypatch.setenv("SAFE_API_KEY", "ak-test")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 

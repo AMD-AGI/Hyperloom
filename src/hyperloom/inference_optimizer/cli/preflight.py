@@ -44,7 +44,6 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
     "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
@@ -83,7 +82,7 @@ def _provider_only_mode_before_fallback() -> str:
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
     has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
-    has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
+    has_gateway = bool(os.environ.get("LLM_GATEWAY_KEY"))
     if has_anthropic and not has_openai and not has_gateway:
         return "anthropic"
     if has_openai and not has_anthropic and not has_gateway:
@@ -1250,23 +1249,24 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
-    # --- Auth alias export ---
-    # SAFE_API_KEY only fills gaps: a provider-specific key set for split
-    # entrypoints (OPENAI_API_KEY / ANTHROPIC_API_KEY) is kept.
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    if safe_key:
+    # --- Auth alias export (derived keys only) ---
+    # The provider key (ANTHROPIC_API_KEY, else OPENAI_API_KEY) is the single
+    # source the derived GEAK / LLM aliases fall back to; an explicitly set alias
+    # is kept. These aliases do not participate in provider detection, so filling
+    # them here is safe. The per-provider primary keys (OPENAI_API_KEY /
+    # ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN) are cross-filled later, gated on
+    # the resolved endpoints, so an explicit single-provider deploy is never
+    # flipped to a dual entrypoint.
+    provider_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    if provider_key:
         for alias in (
-            "OPENAI_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "DEEPSEEK_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
             if not os.environ.get(alias):
-                os.environ[alias] = safe_key
-                print(f"Preflight: filled {alias} from SAFE_API_KEY")
+                os.environ[alias] = provider_key
+                print(f"Preflight: filled {alias} from the provider key")
     # --- Resolve install interpreters ---
     # Resolve the ACTIVE benchmark backend first so a bypass-only environment
     # (no Magpie / no /opt/venv) never routes installs through Magpie's
@@ -1315,12 +1315,13 @@ def _preflight(
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
         # Claude CLI primary key: prefer the explicit Anthropic-side key so a
-        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY is the fallback.
+        # split-entrypoint deploy auths Claude with its own key; the OpenAI-side
+        # key (same value under a single gateway) is the fallback.
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or safe_key
+            or os.environ.get("OPENAI_API_KEY", "")
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):

@@ -311,7 +311,6 @@ def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None
             raise RuntimeError("no scorer client")
 
     coord._proposal_scorer = _Scorer()  # type: ignore[attr-defined]
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert coord._framework_agent_ranker_client() is None
 
@@ -320,7 +319,7 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
     pytest.importorskip("openai")
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
-    monkeypatch.setenv("SAFE_API_KEY", "safe-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "safe-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
     client = coord._framework_agent_ranker_client()
     assert client is not None

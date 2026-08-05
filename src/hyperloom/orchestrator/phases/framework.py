@@ -2808,7 +2808,7 @@ class FrameworkPhase(PhaseHandler):
         then the orchestration backend's own client (so the LLM ranker is on by
         default whenever orchestration has LLM credentials); otherwise builds
         one from the orchestration backend's configured key/URL env (falling
-        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        back to ``OPENAI_API_KEY``/``ANTHROPIC_API_KEY`` + ``OPENAI_BASE_URL``).
         Cached on first successful build.
         """
         import os
@@ -2845,8 +2845,8 @@ class FrameworkPhase(PhaseHandler):
         base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
         api_key = (
             os.environ.get(api_key_env)
-            or os.environ.get("SAFE_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
         )
         if not api_key:
             return None

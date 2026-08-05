@@ -3,9 +3,9 @@
 
 """Unit tests for ``parallel_e2e_runner.load_env_file`` key/URL derivation.
 
-Locks the single-gateway behaviour (all active aliases derive from SAFE_API_KEY)
+Locks the single-gateway behaviour (all active aliases derive from OPENAI_API_KEY)
 and verifies the split-gateway fallback (GEAK / generic LLM aliases take the
-OpenAI-side key/URL when SAFE_API_KEY is absent).
+OpenAI-side key/URL).
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ def _write_env(tmp_path: Path, **vars: str) -> Path:
     return p
 
 
-def test_single_gateway_all_aliases_from_safe_key(tmp_path):
-    """Single gateway: every key alias is SAFE_API_KEY."""
-    env = per.load_env_file(_write_env(tmp_path, SAFE_API_KEY="ak-safe", OPENAI_BASE_URL="https://gw/v1"))
+def test_single_gateway_all_aliases_from_openai_key(tmp_path):
+    """Single gateway: every key alias is OPENAI_API_KEY."""
+    env = per.load_env_file(_write_env(tmp_path, OPENAI_API_KEY="ak-gateway", OPENAI_BASE_URL="https://gw/v1"))
     for alias in ("OPENAI_API_KEY", "GEAK_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-        assert env[alias] == "ak-safe", alias
+        assert env[alias] == "ak-gateway", alias
     for alias in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_API_BASE"):
         assert env[alias] == "https://gw/v1", alias
     assert "_".join(("legacy backend", "API", "KEY")) not in env
@@ -36,7 +36,7 @@ def test_single_gateway_all_aliases_from_safe_key(tmp_path):
 
 
 def test_split_gateway_geak_and_llm_aliases_take_openai_key(tmp_path):
-    """Split deploy (no SAFE_API_KEY): GEAK/generic aliases derive from OpenAI."""
+    """Split deploy: GEAK/generic aliases derive from OpenAI."""
     env = per.load_env_file(
         _write_env(
             tmp_path,

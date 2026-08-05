@@ -126,7 +126,6 @@ _SECRET_ENV_NAMES: tuple[str, ...] = (
     "HYPERLOOM_PR_CI_GH_TOKEN",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
-    "SAFE_API_KEY",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<key>\b(?:"
