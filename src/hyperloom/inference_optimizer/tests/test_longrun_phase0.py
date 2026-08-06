@@ -381,7 +381,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
 
 
 # ClaudeBackend retries a transient SDK failure end-to-end
-class ToolUseBlock:  # class name must be exactly "ToolUseBlock" (backend checks type name)
+class ToolUseBlock:  # the backend dispatches on the type name, so do not rename
     def __init__(self, name: str, inp: dict[str, Any]):
         self.name = name
         self.input = inp

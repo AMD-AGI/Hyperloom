@@ -42,7 +42,7 @@ echo "  Feature ID: $FEATURE_TYPE_ID"
 echo "  Task    ID: $TASK_TYPE_ID"
 
 echo ""
-echo "=== Step 2: Fetch all open issues ==="
+echo "=== Step 2: Fetch all issues ==="
 
 ISSUES=$(gh issue list --repo "$REPO" --state all --json number,title,labels,id --limit 200)
 ISSUE_COUNT=$(echo "$ISSUES" | jq length)

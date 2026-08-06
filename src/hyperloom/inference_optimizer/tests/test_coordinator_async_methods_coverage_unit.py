@@ -3,8 +3,9 @@
 
 """Coverage for Coordinator async/stateful methods invoked directly against a
 real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt
-composition per agent, advisory blocks, research-scout harvest, and the
-orchestration checkpoint guard."""
+composition per agent, advisory blocks, research-scout harvest, the
+orchestration checkpoint guard, strategy-change escalation, specialist
+autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
 
 from __future__ import annotations
 
@@ -62,8 +63,6 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
         },
     )
     assert coord.shared_state.baseline_tput == 1000.0
-    assert coord.shared_state.baseline_cold_tput == 900.0
-    assert coord.shared_state.baseline_hot_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
     assert coord.shared_state.baseline_arg_error_streak == 0
     assert coord.shared_state.current_best["action"] == "baseline"
@@ -424,7 +423,7 @@ async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinat
     """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
     coord.shared_state.phase = "PRELUDE"
     coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement_succeeded = False
+    coord.shared_state.enablement.succeeded = False
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -437,7 +436,7 @@ async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinato
     """skip_to_close is honored once a baseline exists (guard no longer active)."""
     coord.shared_state.phase = "EXPLORE"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement_succeeded = True
+    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -478,7 +477,20 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
     wt = spec_root / "worktree"
     wt.mkdir(parents=True, exist_ok=True)
     (wt / "kernel.py").write_text("# patched\n", encoding="utf-8")
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="k3")
+    coord.shared_state.phase = "KERNEL_AGENT"
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.framework.fp8",
+            "gap_layer": "framework",
+            "framework": "other-framework",
+            "framework_agent_authoring": True,
+        },
+        idempotency_key="k3",
+    )
     n_before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
@@ -488,6 +500,13 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
         },
     )
     assert len(coord.state.pending_proposals) == n_before + 1
+    pending = list(coord.state.pending_proposals.values())[-1]
+    params = pending.payload["params"]
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
+    assert params["domain"] == "serving_specialist"
+    assert params["provenance"] == "specialist:serving_specialist"
+    assert params["gap_canonical_id"] == "gap.framework.fp8"
+    assert "framework" not in params
 
 
 @pytest.mark.asyncio

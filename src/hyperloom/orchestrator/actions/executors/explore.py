@@ -8,8 +8,8 @@ The unified ``explore`` action (one yaml meta, one
 
 Per-variant flow:
 
-1. canonical_fingerprint dedup against ``explore_search.tested``
-   (rename-resistant).
+1. canonical_fingerprint dedup within the submitted grid only; historical
+   ``explore_search`` results are evidence, never an eligibility gate.
 2. Render the variant's Magpie YAML, run E2E bench.
 3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
    threshold + accuracy gate when ``is_high_accuracy_risk``).
@@ -40,6 +40,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.shared_state import first_positive_tput, resolve_grading_anchor_tput, stack_base_params
 from ._accuracy_gate import (
     accuracy_passed,
     is_high_accuracy_risk,
@@ -59,11 +60,11 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
-    worldplay_blacklist_reason,
-    worldplay_server_args_reason,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
+# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor; override via
+# params['stack_stable_threshold_pct'].
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -82,12 +83,6 @@ log = logging.getLogger(__name__)
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the inlined stack
 # rebench is the second gate. Override per-task via ``params['keep_threshold_pct']``.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
-
-# Stack rebench stability threshold: after a KEEP, rebench tput must beat
-# ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Sourced from ``_stack_rebench`` so the explore
-# ledger and integrate_patch share one confirmation floor (below the KEEP
-# gate). Override via ``params['stack_stable_threshold_pct']``.
 
 
 _now_iso = functools.partial(now_iso, "auto")
@@ -169,23 +164,6 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     remove_args = to_str_list(getattr(variant, "remove_args", []))
     unset_envs = to_str_list(getattr(variant, "unset_envs", []))
     args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
-    out: dict[str, Any] = {}
-    if remove_args:
-        out["remove_args"] = remove_args
-    if unset_envs:
-        out["unset_envs"] = unset_envs
-    if args_mode == "replace":
-        out["args_mode"] = "replace"
-    return out
-
-
-def _entry_control_fields(entry: Any) -> dict[str, Any]:
-    """Return remove/unset/replace controls from a persisted ledger entry."""
-    if not isinstance(entry, dict):
-        return {}
-    remove_args = to_str_list(entry.get("remove_args"))
-    unset_envs = to_str_list(entry.get("unset_envs"))
-    args_mode = str(entry.get("args_mode") or "append").strip().lower()
     out: dict[str, Any] = {}
     if remove_args:
         out["remove_args"] = remove_args
@@ -516,137 +494,70 @@ def _xdit_default_grid(
     return variants
 
 
-def _worldplay_default_grid(
-    *,
-    model_class: str,
-    conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
-) -> list[GridVariant]:
-    """HY-WorldPlay (AR video) EXPLORE default grid, BF16-locked.
+_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
 
-    Only BF16-safe knobs the customer bench-kit recognizes are emitted; a
-    precision change is a different model and is enforced OFF by the vendored
-    body + ``worldplay_blacklist_reason`` in ``_grid_runner.py``. The baseline
-    already runs ``WORLDPLAY_OFFLOADING=0`` (the known WorldPlay winner), so the
-    grid probes the remaining scriptable levers: resident AR rollout,
-    torch.compile (quality-risky — the self-calibrating gate is the guard),
-    group-offloading, and a couple of directionally-safe ROCm env knobs. Variant
-    names are ``worldplay_``-prefixed for cross-session disambiguation.
 
-    Args:
-        model_class: Model-class label (reserved for future gating).
-        conc: Live concurrency (unused for video; signature parity).
-        isl: Input sequence length (unused; signature parity).
-        osl: Output sequence length (unused; signature parity).
+def _is_config_replay_variant(variant: Any) -> bool:
+    """Whether a variant replays an already-validated config verbatim.
 
-    Returns:
-        The curated list of WorldPlay ``GridVariant`` seeds.
+    Such a variant carries the workload spec (resolution / frames / steps) as
+    part of the config being reproduced, so the off-spec filter — which reads
+    those keys as an attempt to move the spec — must not judge it.
     """
-    variants: list[GridVariant] = []
-
-    def _add(name: str, *, envs: dict[str, str]) -> None:
-        """Append a ``default_grid``-provenance env-only variant.
-
-        Args:
-            name (str): Unique variant name (``worldplay_`` prefixed).
-            envs (dict[str, str]): The per-variant env overrides.
-
-        Returns:
-            None: Appends to the enclosing ``variants`` list.
-        """
-        gv = GridVariant(
-            name=name,
-            extra_server_args="",
-            extra_envs=dict(envs),
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # Keep the transformer resident across AR chunks (avoids re-materialization).
-    _add("worldplay_resident_ar", envs={"WORLDPLAY_TRANSFORMER_RESIDENT": "1"})
-    # torch.compile: quality-risky on this AR pipeline (a prior campaign saw
-    # SSIM 0.746) — expose it so the self-calibrating gate can accept/reject it.
-    _add("worldplay_torch_compile", envs={"WORLDPLAY_USE_TORCH_COMPILE": "1"})
-    # Group-offloading (block-wise) as an alternative memory/compute trade.
-    _add("worldplay_group_offload_block", envs={"WORLDPLAY_GROUP_OFFLOADING": "block_level"})
-    # AMD buffer load/store instructions — directionally correct, BF16-safe.
-    _add("worldplay_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
-    # Scratch-reclaim contrast: measured ±25% on some MI355X nodes (KB).
-    _add("worldplay_scratch_reclaim_off", envs={"HSA_NO_SCRATCH_RECLAIM": "0"})
-    # ---- B-layer runtime/system env knobs (injected AROUND the unchanged
-    # customer scripts — this is where single-GPU gains beyond the customer's
-    # own A-layer knobs live; all BF16-safe, numerics-preserving). ----
-    # NOTE: PyTorch TunableOp is deliberately absent. It looks like a free GEMM
-    # win, but session 20260730T135601Z faulted the GPU with it on this exact
-    # pipeline; both TunableOp keys are in `_WORLDPLAY_ENV_BLACKLIST`.
-    # Fewer HW queues trims dispatch overhead on a single-stream AR rollout.
-    _add("worldplay_hw_queues_2", envs={"GPU_MAX_HW_QUEUES": "2"})
-    # MIOpen fast find-mode: skips exhaustive conv search (find-db misses are
-    # benign on this node) — lower per-chunk launch latency, same numerics.
-    _add("worldplay_miopen_fast", envs={"MIOPEN_FIND_MODE": "2"})
-    return variants
+    return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
-def filter_worldplay_grid(
+def filter_operator_pinned_envs(
     grid: list[GridVariant],
-    *,
-    model_class: str = "",
+    baseline_envs: dict[str, Any] | None,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop off-spec WorldPlay variants; fall through to the seed grid if empty.
+    """Drop variants that overwrite an env the operator pinned in the baseline.
 
-    This is the ONLY production enforcement of the locked WorldPlay workload
-    spec on the live explore dispatch path (``apply_compatibility_filter`` is
-    test-only). LLM/specialist proposers routinely emit variants the customer
-    ``bench_fps.py`` rejects or that violate the spec (step-distillation
-    ``WORLDPLAY_NUM_STEPS``/``WORLDPLAY_FEW_STEP``, fp8/fp4/sageattn, resolution
-    or frame-count changes, or the model's native HunyuanVideo CLI). Each is
-    dropped via :func:`worldplay_blacklist_reason` (env-carried locks) and
-    :func:`worldplay_server_args_reason` (CLI-carried locks + unknown flags)
-    BEFORE dedup/dispatch, so no compute is spent and a 4-step distilled leg can
-    never accidentally KEEP against the 50-step spec.
+    A pinned env is part of what the headline number means. Overwriting one does
+    not produce a faster configuration of the same workload, it produces a
+    different measurement wearing the baseline's name — and the quality gate
+    cannot catch it, because changing a repeat count or a warmup depth leaves
+    the output identical. Adding a key the baseline never set is exactly what
+    exploration is for, so only overwrites are refused.
 
-    If EVERY proposed variant is dropped, this returns the curated BF16-safe
-    seed grid (:func:`_worldplay_default_grid`) instead of an empty list, so the
-    round still measures legitimate knobs rather than stalling on rejected
-    proposals.
+    This is for ``custom`` alone. A shipped framework's pinned value does not
+    mean "locked" — several pin a knob at its off value precisely so explore can
+    flip it — and those frameworks declare what is genuinely immutable in their
+    own blacklist. An operator has no blacklist to write in, so their pins carry
+    the stricter reading; it is the one place they can say "this must not move".
 
     Args:
-        grid: Candidate variants assembled from ``params.grid`` / seed.
-        model_class: Model-class label forwarded to the seed grid on fallthrough.
+        grid: Candidate variants for this round.
+        baseline_envs: ``benchmark.envs`` from the materialized baseline config.
 
     Returns:
-        A ``(kept, dropped)`` tuple where ``kept`` is the surviving variants
-        (or the seed grid on full-drop fallthrough) and ``dropped`` is a list of
-        ``(variant_name, reason)`` pairs for logging/telemetry.
+        A ``(kept, dropped)`` tuple, where ``dropped`` holds
+        ``(variant_name, reason)`` pairs for logging.
     """
-    def _reason_for(gv: GridVariant) -> str | None:
-        """Return the spec-violation reason for one variant, else ``None``.
-
-        Args:
-            gv (GridVariant): Candidate variant to screen.
-
-        Returns:
-            str | None: Drop reason, or ``None`` when the variant is on-spec.
-        """
-        return worldplay_blacklist_reason(
-            getattr(gv, "extra_envs", None)
-        ) or worldplay_server_args_reason(getattr(gv, "extra_server_args", None))
+    pinned = {str(k).strip().upper() for k in (baseline_envs or {}) if str(k).strip()}
+    if not pinned:
+        return list(grid), []
 
     kept: list[GridVariant] = []
     dropped: list[tuple[str, str]] = []
     for gv in grid:
-        reason = _reason_for(gv)
-        if reason:
-            dropped.append((str(getattr(gv, "name", "?")), reason))
-        else:
-            kept.append(gv)
-    if not kept and dropped:
-        # Screen the seed grid too: it is curated, but a seed entry that drifts
-        # into blacklisted territory would otherwise reach dispatch through this
-        # fallthrough without ever being filtered.
-        kept = [gv for gv in _worldplay_default_grid(model_class=model_class) if not _reason_for(gv)]
+        clash = sorted(
+            key
+            for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {}))
+            if key in pinned
+        )
+        # A replay reproduces a config another component already measured, so it
+        # carries the pinned values verbatim by construction.
+        if clash and not _is_config_replay_variant(gv):
+            dropped.append(
+                (
+                    str(getattr(gv, "name", "?")),
+                    f"overwrites baseline-pinned env {', '.join(clash)}, which would make "
+                    "its number incomparable to the baseline",
+                )
+            )
+            continue
+        kept.append(gv)
     return kept, dropped
 
 
@@ -660,7 +571,7 @@ def _default_grid_for_framework(
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch.
 
-    Atom, xDiT and WorldPlay return curated seed grids; sglang / vllm / unknown
+    Atom and xDiT return curated seed grids; sglang / vllm / unknown
     return ``[]`` ("no programmatic seed") and rely on LLM-emitted
     ``default_grid`` variants.
 
@@ -684,13 +595,6 @@ def _default_grid_for_framework(
         )
     if fw == "xdit":
         return _xdit_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
-    if fw == "worldplay":
-        return _worldplay_default_grid(
             model_class=model_class,
             conc=conc,
             isl=isl,
@@ -845,24 +749,27 @@ class ExploreExecutor:
             }
 
         # ----- Inputs ------------------------------------------------------
+        # Params snapshot the anchor and the stack it was measured on together;
+        # a KEEP landing while this task queued invalidates both, so refresh them
+        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
+        ss = extra.get("shared_state") or extra.get("state")
+        snapshot_tput = float(params.get("base_tput") or 0.0)
+        live_anchor = 0.0 if params.get("source") == "resume_stack_revalidate" else resolve_grading_anchor_tput(ss)
+        if live_anchor > snapshot_tput:
+            if snapshot_tput > 0:
+                log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, live_anchor)
+            params["base_tput"] = live_anchor
+            cb = getattr(ss, "current_best", None)
+            # Only current_best carries args; a baseline_tput anchor leaves the
+            # params stack (seeded from the baseline record) authoritative.
+            if first_positive_tput(cb) > 0:
+                params.update(stack_base_params(cb))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         base_extra_envs = dict(params.get("base_extra_envs") or {})
         base_remove_args = to_str_list(params.get("base_remove_args"))
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # Backstop: recover the comparison anchor from live SharedState when
-        # params carries no positive ``base_tput``. Prefer running best, fall
-        # back to the original baseline.
-        if base_tput <= 0:
-            ss = extra.get("shared_state") or extra.get("state")
-            if ss is not None:
-                cb = getattr(ss, "current_best", None) or {}
-                cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                    base_tput = float(cb_tput)
-                else:
-                    base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
         baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
@@ -1033,37 +940,10 @@ class ExploreExecutor:
         # `apply_compatibility_filter` is only exercised in tests; the live
         # explore dispatch path assembles `grid` here from LLM/specialist
         # proposals (params.grid) or the programmatic seed and never re-runs it.
-        # For worldplay this is the ONLY line of defence that enforces the
-        # locked workload spec: LLM/specialist proposers routinely emit
-        # off-spec variants (step-distillation `WORLDPLAY_NUM_STEPS=4` /
-        # `WORLDPLAY_FEW_STEP=1` / distilled `WORLDPLAY_ACTION_CKPT`, fp8/fp4/
-        # sageattn, resolution or frame-count changes, or the model's native
-        # HunyuanVideo CLI which the customer wrapper rejects). Drop them
-        # BEFORE dedup/dispatch so no compute is spent and — critically — so a
-        # 4-step distilled leg can never accidentally KEEP against the 50-step
-        # spec. Env-carried locks (worldplay_blacklist_reason) and CLI-carried
-        # locks / unknown flags (worldplay_server_args_reason) are both checked.
-        if framework == "worldplay":
-            _seed_mc = (
-                str(params.get("model_class") or "").strip()
-                or os.environ.get("MODEL_CLASS", "").strip()
-            )
-            _n_before = len(grid)
-            grid, _wp_dropped = filter_worldplay_grid(grid, model_class=_seed_mc)
-            for _nm, _reason in _wp_dropped:
-                log.warning(
-                    "explore: dropping off-spec worldplay variant %s (%s)",
-                    _nm,
-                    _reason,
-                )
-            if _wp_dropped and grid and len(grid) != (_n_before - len(_wp_dropped)):
-                log.warning(
-                    "explore: all %d worldplay proposals were off-spec; "
-                    "fell through to %d curated default_grid seed variants "
-                    "so the round still measures legit knobs",
-                    len(_wp_dropped),
-                    len(grid),
-                )
+        if framework == "custom":
+            grid, _mc_dropped = filter_operator_pinned_envs(grid, _yaml_envs)
+            for _nm, _reason in _mc_dropped:
+                log.warning("explore: dropping variant %s (%s)", _nm, _reason)
 
         if not grid:
             return {
@@ -1073,7 +953,7 @@ class ExploreExecutor:
                 "workspace": output_root.as_posix(),
             }
 
-        # ----- explore_search dedup ----------------------------------------
+        # ----- explore_search ledger (history seed) -------------------------
         search = dict(params.get("explore_search") or _initial_explore_search_state())
         # Defensive default fill (resume / first-run guards).
         for key, default in (
@@ -1089,84 +969,7 @@ class ExploreExecutor:
         ):
             search.setdefault(key, default)
 
-        def _entry_fp(entry: Any) -> str:
-            """Resolve a ledger entry's variant fingerprint.
-
-            Args:
-                entry (Any): A ledger entry; expected to be a dict with
-                    a ``fingerprint`` or server-args/envs to derive one.
-
-            Returns:
-                str: The stored or canonically-derived fingerprint, or
-                ``""`` when ``entry`` is not a dict.
-            """
-            if not isinstance(entry, dict):
-                return ""
-            fp = entry.get("fingerprint")
-            if fp:
-                return str(fp)
-            return canonical_fingerprint(
-                str(entry.get("extra_server_args") or ""),
-                dict(entry.get("extra_envs") or {}),
-                **_entry_control_fields(entry),
-            )
-
-        # Conditional dedup. KEEP'd variants are permanently blocked. A variant
-        # that ran but did not promote (REVERT / KEEP_UNSTABLE / no_promote) only
-        # stays blocked while its prior measured gain is below the current KEEP
-        # bar; once the bar drops to or below that gain it unblocks for re-test.
-        # Infra failures stay blocked regardless of gain. Unblocking only lifts
-        # the hard skip — the variant still re-runs the full gate.
-        gain_unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
-
-        def _is_blocked(entry: Any) -> bool:
-            """Whether a tested-ledger entry should still be skipped this round.
-
-            KEEP'd and infra-failed entries stay blocked; gain-unlockable
-            outcomes (REVERT / KEEP_UNSTABLE / no_promote) unblock once the
-            current KEEP bar drops to or below their prior measured gain.
-
-            Args:
-                entry (Any): A ``tested`` ledger entry (expected dict).
-
-            Returns:
-                bool: ``True`` when the variant should remain skipped, ``False``
-                when it may be re-tested this round.
-            """
-            if not isinstance(entry, dict):
-                return True
-            if str(entry.get("outcome") or "") in gain_unlockable:
-                try:
-                    prior_gain = float(entry.get("gain_pct"))
-                except (TypeError, ValueError):
-                    return True
-                return prior_gain < keep_threshold_pct
-            return True
-
         tested_dict = search.get("tested") or {}
-        seen_fps: set[str] = set()
-        unlocked_reference: list[dict[str, Any]] = []
-        for fp_key, v in tested_dict.items():
-            if _is_blocked(v):
-                seen_fps.add(str(fp_key))
-                seen_fps.add(_entry_fp(v))
-            elif isinstance(v, dict):
-                unlocked_reference.append(v)
-        # accepted == KEEP'd: always blocked.
-        for v in search.get("accepted") or []:
-            seen_fps.add(_entry_fp(v))
-        for v in search.get("rejected") or []:
-            if _is_blocked(v):
-                seen_fps.add(_entry_fp(v))
-            elif isinstance(v, dict):
-                unlocked_reference.append(v)
-        seen_fps.discard("")
-        if unlocked_reference:
-            log.info(
-                "explore: %d prior sub-threshold variant(s) unblocked at keep_threshold=%.3f%% for re-test",
-                len(unlocked_reference),
-                keep_threshold_pct,
-            )
         name_index = dict(search.get("name_index") or {})
 
         # Attach the per-variant fingerprint as an attribute so the result
@@ -1195,15 +998,6 @@ class ExploreExecutor:
                 **identity_controls,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in seen_fps:
-                skipped_dup.append(
-                    {
-                        "name": gv.name,
-                        "fingerprint": fp,
-                        "reason": "ledger_dup",
-                    }
-                )
-                continue
             if fp in unique_in_round:
                 # In-round duplicate — keep the first occurrence.
                 skipped_dup.append(
@@ -1218,7 +1012,7 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
         log.info(
-            "explore dedup: payload=%d → runnable=%d (ledger_dup+round_dup=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
@@ -1270,8 +1064,6 @@ class ExploreExecutor:
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
 
-        last_run_tput: float | None = None  # rebench/single-variant tput
-
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a fresh cold boot for round 2).
         lifecycle = resolve_lifecycle_params(config_path)
@@ -1281,13 +1073,11 @@ class ExploreExecutor:
 
         # Warm-decision mode. Run a discarded cold warmup round first so the
         # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``. Requires
-        # server_lifecycle reuse; otherwise fall back to a single cold-decision
-        # run. Opt out with INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION=0.
-        warm_decision_enabled = os.environ.get(
-            "INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1"
-        ).strip().lower() not in {"0", "false", "no", "off"}
-        use_warm_decision = warm_decision_enabled and lifecycle_eligible
+        # warm — apples-to-apples with ``baseline_tput``. Mirrors both conjuncts
+        # the baseline gates its cold+hot double-run on, so the two sides measure
+        # hot together or cold together: a session that opted out of the double
+        # run has a COLD ``baseline_tput`` and must be graded cold.
+        use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1310,7 +1100,7 @@ class ExploreExecutor:
         # (the ``finally`` after the loop) instead of per variant: the old
         # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
         # every variant, which destabilised the single-node raylet and took the
-        # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
+        # whole session down with it.
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs
         # out; untested variants stay out of the ledger so a resume can retry them.
@@ -1434,6 +1224,8 @@ class ExploreExecutor:
                                 "workload_signature": ws_sig,
                                 "framework": framework,
                                 "reason": "warmup_failed",
+                                "error_class": w.error_class if w is not None else "",
+                                "server_log_path": w.server_log_path if w is not None else None,
                             }
                             if gv.name:
                                 name_index[gv.name] = fp
@@ -1606,7 +1398,7 @@ class ExploreExecutor:
                     outcome = "FAILED"
                     reason: str = ""
                     if r.status != "succeeded" or gain is None:
-                        reason = (r.error or "")[-256:] or "no_measurement"
+                        reason = (r.error or "")[-1200:] or "no_measurement"
                     elif gain < keep_threshold_pct:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
@@ -1656,7 +1448,7 @@ class ExploreExecutor:
                         else:
                             outcome = "KEEP"
 
-                    cold_tput = r.output_throughput
+                    decision_tput = r.output_throughput
                     tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
@@ -1666,8 +1458,8 @@ class ExploreExecutor:
                         "note": gv.note,
                         "outcome": outcome,
                         "status": r.status,
-                        "tput": cold_tput,
-                        "cold_tput": cold_tput,
+                        "tput": decision_tput,
+                        "decision_tput": decision_tput,
                         "gain_pct": gain,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
@@ -1677,6 +1469,8 @@ class ExploreExecutor:
                         "workload_signature": ws_sig,
                         "framework": framework,
                         "workspace": r.workspace,
+                        "error_class": r.error_class or "",
+                        "server_log_path": r.server_log_path,
                     }
                     if gv.name:
                         name_index[gv.name] = fp
@@ -1730,8 +1524,8 @@ class ExploreExecutor:
                             "note": gv.note,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
-                            "cold_tput": cold_tput,
+                            "tput": decision_tput,
+                            "decision_tput": decision_tput,
                             "single_workspace": r.workspace,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
@@ -1743,7 +1537,7 @@ class ExploreExecutor:
                         stack_rebench_workspace: str | None = None
                         stack_rebench_warnings: list[str] = []
 
-                        if enable_stack_rebench and base_tput > 0:
+                        if enable_stack_rebench and running_base_tput > 0:
                             # Round 2: same config as round 1. When eligible,
                             # reuse round 1's hot server (cleanup=true tears it
                             # down) so the measurement is warm and baseline-
@@ -1778,7 +1572,9 @@ class ExploreExecutor:
                                 config_path=config_path,
                                 base_extra_args=stack_extra_args,
                                 variant=rebench_variant,
-                                base_tput=base_tput,
+                                # Floor sits on the anchor round 1 graded against,
+                                # which advances with each in-batch KEEP.
+                                base_tput=running_base_tput,
                                 stable_threshold_pct=stack_stable_threshold_pct,
                                 output_slot=slot / "stack_rebench",
                                 variant_timeout_sec=timeout_sec,
@@ -1802,11 +1598,11 @@ class ExploreExecutor:
                                 log.warning(
                                     "explore: variant %s KEEP -> KEEP_UNSTABLE "
                                     "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                    "with base_tput=%.2f * (1+%.2f%%))",
+                                    "with running_base_tput=%.2f * (1+%.2f%%))",
                                     gv.name,
                                     stack_rebench_tput,
                                     stable_floor,
-                                    base_tput,
+                                    running_base_tput,
                                     stack_stable_threshold_pct,
                                 )
                                 tested_update[fp]["outcome"] = "KEEP_UNSTABLE"
@@ -1831,7 +1627,7 @@ class ExploreExecutor:
                                         "note": gv.note,
                                         "reason": "stack_unstable",
                                         "gain_pct": gain,
-                                        "tput": cold_tput,
+                                        "tput": decision_tput,
                                         "stack_rebench_tput": stack_rebench_tput,
                                         "round_id": round_id,
                                         "ts": _now_iso(),
@@ -1852,7 +1648,6 @@ class ExploreExecutor:
                                 stack_unset_envs = list(run_unset_envs)
                                 stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
-                                last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
                                 keep_entry["tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
@@ -1871,8 +1666,7 @@ class ExploreExecutor:
                             stack_remove_args = list(run_remove_args)
                             stack_unset_envs = list(run_unset_envs)
                             stack_base_args_mode = "replace" if persist_effective_args else "append"
-                            running_base_tput = cold_tput or running_base_tput
-                            last_run_tput = cold_tput
+                            running_base_tput = decision_tput or running_base_tput
 
                         winners.append(keep_entry)
                         winners_history_update.append(
@@ -1902,10 +1696,12 @@ class ExploreExecutor:
                             "note": gv.note,
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "round_id": round_id,
                             "ts": _now_iso(),
                             "provenance": provenance,
+                            "error_class": r.error_class or "",
+                            "server_log_path": r.server_log_path,
                         }
                     )
                     losers.append(
@@ -1917,13 +1713,11 @@ class ExploreExecutor:
                             **control_fields,
                             "provenance": provenance,
                             "gain_pct": gain,
-                            "tput": cold_tput,
+                            "tput": decision_tput,
                             "reason": reason or "not_keep",
                             "workspace": r.workspace,
                         }
                     )
-                    if cold_tput:
-                        last_run_tput = cold_tput
                 finally:
                     # Reap THIS variant's persistent server on every exit path
                     # (idempotent + no-op when reuse was ineligible). This is a
@@ -1944,13 +1738,11 @@ class ExploreExecutor:
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (dedup + accepted preservation) -----------
-        accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}
-        accepted_fps_now.discard("")
+        # ----- Ledger compaction (per-fingerprint last-wins) ----------------
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
-            if not fp or fp in accepted_fps_now:
+            if not fp:
                 continue
             rejected_dedup[fp] = entry
 
@@ -2004,6 +1796,9 @@ class ExploreExecutor:
                     "scope": str(te.get("scope") or ""),
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
+                    "error_class": str(te.get("error_class") or ""),
+                    "server_log_path": te.get("server_log_path"),
+                    "workspace": te.get("workspace"),
                     # Carry the variant knobs so the journal's
                     # ``classify_change_kind`` can classify the change kind.
                     "variant": {
@@ -2076,10 +1871,8 @@ class ExploreExecutor:
         )
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
 
-        if winners:
-            output_throughput = float(running_base_tput) if last_run_tput is not None else None
-        else:
-            output_throughput = None
+        # Each KEEP advances ``running_base_tput``, so this is the final stack.
+        output_throughput = float(running_base_tput) if winners else None
 
         # Successful = at least one bench produced a measurement or was reaped
         # by the overtime gate (KILLED_OVERTIME is a real signal).

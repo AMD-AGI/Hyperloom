@@ -33,14 +33,17 @@ SERVE_FLAG = "serve_flag"
 # Resource constraints (OOM, TP/GPU count) are NOT code acquisition targets.
 RESOURCE_CONSTRAINT = "resource_constraint"
 # Accuracy-eval triggers (values match _accuracy_gate EVAL_KIND_*): a booting
-# baseline whose accuracy is below the floor, and a crashed eval run.
+# baseline whose accuracy is below the floor, an eval cut short because
+# generation never terminated, and a crashed eval run.
 ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
+EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
 
 # Ordered most-specific to least-specific.
 FAILURE_KINDS: tuple[str, ...] = (
     MISSING_MODEL_ARCH,
+    EVAL_GENERATION_PATHOLOGY,
     ACCURACY_BELOW_FLOOR,
     RESOURCE_CONSTRAINT,
     HIP_KERNEL_MISSING,
@@ -191,6 +194,15 @@ _RULES: tuple[_Rule, ...] = (
         ),
         confidence=0.95,
         symbol_from=_grp,
+    ),
+    _Rule(
+        # The eval was cut short because generation never terminated, so the ~0
+        # score says nothing about answer quality. Precedes ACCURACY_BELOW_FLOOR,
+        # whose evidence string it also carries.
+        kind=EVAL_GENERATION_PATHOLOGY,
+        bridge_layer="",
+        patterns=(re.compile(r"eval_generation_pathology"),),
+        confidence=0.95,
     ),
     _Rule(
         # A booting baseline whose accuracy is below the floor. Not a bridge-repo
@@ -714,6 +726,7 @@ def is_targeted_build_candidate(
 __all__ = [
     "ACCURACY_BELOW_FLOOR",
     "CAPABILITY_DISABLED",
+    "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
     "FAILURE_KINDS",
     "HIP_KERNEL_MISSING",

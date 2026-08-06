@@ -3,8 +3,10 @@
 
 """Decision-framework regression tests.
 
-Covers that ``_handle_request`` for ``run_optimization`` mirrors the
-handler result into ``shared_state.last_kernel_opt``.
+Covers ``_handle_request`` mirroring ``run_optimization`` / ``run_gemm_tuning``
+results into ``shared_state``, the native-source guards and batch selection in
+the run_optimization handler, and ``record_kernel_opt`` retiring kernels stuck
+in PARTIAL.
 """
 
 from __future__ import annotations

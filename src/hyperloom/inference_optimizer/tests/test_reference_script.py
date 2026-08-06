@@ -93,6 +93,20 @@ def test_parse_env_whitelist(tmp_path):
     assert "SOME_SECRET" not in r.envs
 
 
+def test_parse_env_self_defaults(tmp_path):
+    text = """\
+export VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-0}
+export NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE-1}"
+export VLLM_ROCM_USE_AITER=${OTHER:-1}
+export VLLM_USE_RUST_FRONTEND=${VLLM_USE_RUST_FRONTEND:-$DEFAULT}
+"""
+    r = parse_reference_script(_write(tmp_path, text), framework="vllm")
+    assert r.envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
+    assert r.envs["NCCL_DMABUF_ENABLE"] == "1"
+    assert "VLLM_ROCM_USE_AITER" not in r.envs
+    assert "VLLM_USE_RUST_FRONTEND" not in r.envs
+
+
 def test_parse_continuation_parity(tmp_path):
     """A \\-continuation recipe parses identically to its single-line form."""
     multi = _write(tmp_path, _M3_RECIPE, "multi.sh")

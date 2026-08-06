@@ -32,7 +32,13 @@ from .coordinator_helpers import (
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
-from ..policy.gate import PolicyDenied, SPECIALIST_FROM_AGENT_PREFIX
+from ..policy.gate import (
+    PolicyDenied,
+    PRUNE_BRANCH_SCOPE_FAMILY,
+    PRUNE_BRANCH_SCOPE_QUEUED,
+    SPECIALIST_FROM_AGENT_PREFIX,
+)
+from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import get_handler
 
@@ -130,10 +136,10 @@ class IntentRouter:
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review.
 
-        Drops proposals for pruned families, applies the pending-roofline and
-        execution-order denials, then publishes a ``proposal`` message and
-        registers a :class:`PendingProposal` so the Critic gate can later
-        return a verdict.
+        Records an advisory observation for pruned families (the proposal still
+        queues), applies the execution-order denial, then publishes a
+        ``proposal`` message and registers a :class:`PendingProposal` so the
+        Critic gate can later return a verdict.
 
         Args:
             source (str): The agent proposing the action.
@@ -327,9 +333,8 @@ class IntentRouter:
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the
             # executor, so the normal integrate-result rearm never fires. Without
-            # this, enablement_dispatched stays stuck True and the run cannot
-            # advance the stall streak toward enablement_stalled. Treat the
-            # rejection as a no-progress round.
+            # this, the stall streak would never advance toward enablement_stalled.
+            # Treat the rejection as a no-progress round.
             try:
                 self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
@@ -348,10 +353,11 @@ class IntentRouter:
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task.
 
-        Drops pruned families and execution-order violations, re-routes
-        ``explore`` grids through the Critic-review path, and otherwise
-        materialises the delegated action (specialist, dynamic action, etc.)
-        into a task with the appropriate lanes, tools and warmed params.
+        Records an advisory observation for pruned families (the delegate still
+        proceeds), denies execution-order violations, and materialises the
+        delegated action — including ``explore``, which runs its variants
+        directly with no Critic pre-review — into a task with the appropriate
+        lanes, TTL and warmed params.
 
         Args:
             source (str): The agent issuing the delegation.
@@ -386,23 +392,25 @@ class IntentRouter:
             return
         # delegate explore runs variants directly (no Critic pre-review).
         params = dict(intent.payload.get("params") or {})
+        if action_name == "specialist":
+            # Capture proposal ownership at dispatch. Specialist work can finish
+            # after the state machine advances, so completion-time phase is not
+            # a reliable source for a later integrate_patch KEEP.
+            params.setdefault(
+                "source_phase",
+                str(getattr(self.shared_state, "phase", "") or ""),
+            )
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
         # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Parity with _materialize_approved_proposal: direct delegates need the same knobs.
+        # Delegates skip _materialize_approved_proposal, so seed the same params here.
+        # Both grid actions launch on top of current_best per their action contract.
+        if action_name in ("sweep", "explore"):
+            inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-            # Inject base_tput tied to current_best (or baseline_tput).
-            cb = getattr(self.shared_state, "current_best", None) or {}
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = (
-                cb_tput
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0
-                else getattr(self.shared_state, "baseline_tput", 0.0)
-            )
-            params.setdefault("base_tput", float(base or 0.0))
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
         # into N standard freeform specialist tasks, each dispatched through the
         # normal SpecialistRunner + TaskRegistry + lease + reap path.
@@ -896,18 +904,26 @@ class IntentRouter:
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
         """Prune an action family and cancel its in-flight tasks.
 
-        Adds the family to the persistent pruned set, cancels any tasks in that
-        family, and broadcasts a ``prune_branch`` event.
+        ``scope="family"`` (the default) adds the family to the persistent
+        pruned set so it stays retired. ``scope="queued"`` only drains the
+        backlog, leaving the family available — the move for an action whose
+        queue outlived its usefulness rather than one that has to stop.
 
         Args:
             source (str): The agent issuing the prune.
             intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
-                ``family`` and optional ``reason``.
+                ``family``, optional ``reason`` and optional ``scope``.
         """
         family = intent.payload["family"]
-        if self.shared_state.add_pruned_family(family):
+        reason = str(intent.payload.get("reason") or "prune_branch")
+        scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+        drain_only = scope == PRUNE_BRANCH_SCOPE_QUEUED
+        if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
-        cancelled = await self.tasks.cancel_family([family])
+        if drain_only and family == "baseline":
+            cancelled = await self._drain_queued_baselines(reason=reason)
+        else:
+            cancelled = await self.tasks.cancel_family([family], reason=reason)
         await self.bus.append_and_seq(
             Message.new(
                 source,
@@ -916,6 +932,7 @@ class IntentRouter:
                 {
                     "kind": "prune_branch",
                     "family": family,
+                    "scope": scope,
                     "cancelled_task_ids": cancelled,
                     "reason": intent.payload.get("reason"),
                 },

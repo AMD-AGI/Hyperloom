@@ -11,7 +11,7 @@ Why this script (vs the RayJob ``launch_multinode.py``):
     (``--dist-init-addr <leader>:5000 --nnodes N --node-rank K``); the LWS
     controller already injects ``$LWS_LEADER_ADDRESS`` / ``$LWS_WORKER_INDEX``
     into every pod, so this script just reads them and launches one rank.
-  * We launch ``infera.sglang`` (not raw ``sglang.launch_server``) so the
+  * We launch ``infera.engine.sglang`` (not raw ``sglang.launch_server``) so the
     worker registers with the Infera frontend over NATS — benchmarks then hit
     ``infera.frontend`` (:8000), never sglang rank-0 :8888.
 
@@ -20,8 +20,8 @@ Responsibilities:
      with a minimal env and would otherwise miss LWS_* / NATS_SERVER / INFERA_* /
      NCCL_* / SGLANG_* / PATH).
   2. PID-file kill of any prior server (IR-5: never ``pkill -f``).
-  3. Launch ``infera.sglang`` (or ``infera.vllm``) detached via nohup+setsid,
-     wired with ``--nnodes/--node-rank/--dist-init-addr``.
+  3. Launch ``infera.engine.sglang`` (or ``infera.engine.vllm``) detached via
+     nohup+setsid, wired with ``--nnodes/--node-rank/--dist-init-addr``.
   4. Optional readiness wait on the leader (``LWS_WORKER_INDEX == 0``).
 
 Stdlib only — this runs in the framework pod, not the optimizer venv.
@@ -44,7 +44,8 @@ from pathlib import Path, PurePosixPath
 _DEFAULT_DIST_INIT_PORT = 5000
 # Ray GCS port for the vllm multi-node bootstrap.
 _RAY_GCS_PORT = 6379
-# Default engine HTTP port for local readiness probes on node-rank 0.
+# Default HTTP port the infera engine binds via --port (no CLI override is
+# declared); the rank-0 readiness probe uses --health-port (default 8000).
 _DEFAULT_ENGINE_PORT = 30000
 
 # Keep in sync with multi_node/_internal/server_args_safety.py
@@ -181,12 +182,12 @@ _ENV_RECOVER_PREFIXES = (
     "UCX_",
     "NIXL_",
     "MC_",
-    # Hyperloom patch (operator-local): KUBERNETES_* must propagate too,
-    # otherwise infera's kubernetes discovery backend fails with
+    # KUBERNETES_* must propagate too, otherwise infera's kubernetes discovery
+    # backend fails with
     #   "Failed to create Kubernetes client: failed to infer config:
     #    in-cluster: (environment variable not found)"
-    # immediately on infera.sglang/infera.vllm start, and the SSH-launched
-    # server exits in <1s while the Infera frontend (always-up) keeps
+    # immediately on infera.engine.sglang/infera.engine.vllm start, and the
+    # SSH-launched server exits in <1s while the Infera frontend (always-up) keeps
     # returning /health 200 — causing baseline_failed with 0 completed
     # requests and no obvious sandbox-side log evidence.
     "KUBERNETES_",
@@ -458,16 +459,15 @@ def _kill_prior(pid_file: Path) -> None:
     _reap_stale_engine_ports()
 
 
-# Hyperloom operator patch (session 517be0c5): the infera decode/prefill
-# restart records the infera.engine wrapper PID in the pid-file, but the real
-# sglang.launch_server it spawns becomes its own process-group leader and
-# holds the engine ports (30000 HTTP, 30234 dist port_base, 30001 bootstrap,
-# 32760 kv-events). _kill_prior's pgid kill therefore misses it, so the NEXT
-# restart crashes with "port_base at 30234 is not available" and every explore
-# variant aborts at the health timeout. This reaper kills any residual process
-# that still holds those specific ports right before we relaunch. It targets
-# only the exact port owners we manage (not `pkill -f`), preserving IR-5's
-# "only kill what we launched" intent.
+# The infera decode/prefill restart records the infera.engine wrapper PID in
+# the pid-file, but the real sglang.launch_server it spawns becomes its own
+# process-group leader and holds the engine ports (30000 HTTP, 30234 dist
+# port_base, 30001 bootstrap, 32760 kv-events). _kill_prior's pgid kill
+# therefore misses it, so the NEXT restart crashes with "port_base at 30234 is
+# not available" and every explore variant aborts at the health timeout. This
+# reaper kills any residual process that still holds those specific ports right
+# before we relaunch. It targets only the exact port owners we manage (not
+# `pkill -f`), preserving IR-5's "only kill what we launched" intent.
 _REAP_PORTS = (30000, 30001, 30234, 32760)
 
 
@@ -571,7 +571,7 @@ def _build_sglang_cmd(
         "nats",
     ]
     # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the
-    # SaFE native infera.sglang launch. Passing them for an nnodes=1 disaggregated
+    # SaFE native infera.engine.sglang launch. Passing them for an nnodes=1 disaggregated
     # PD role made decode emit 0 output tokens (finish_reason=stop), while the
     # SaFE deploy (which omits them for single node) generates normally.
     if int(a.nnodes) > 1:
@@ -850,13 +850,15 @@ def main() -> int:
     """Launch (or kill) this pod's Infera multi-node server rank.
 
     Recovers the container env, resolves this pod's rank and rendezvous
-    leader, kills any prior server, then launches ``infera.sglang`` /
-    ``infera.vllm`` for this rank (optionally waiting for leader readiness).
-    With ``--kill-only`` it just tears down the prior server and exits.
+    leader, kills any prior server, then launches ``infera.engine.sglang`` /
+    ``infera.engine.vllm`` for this rank (optionally waiting for leader
+    readiness). With ``--kill-only`` it just tears down the prior server and
+    exits.
 
     Returns:
-        ``0`` on success, or ``2`` when required ``--model`` / ``--tp`` args
-        are missing.
+        ``0`` on success, ``2`` when required ``--model`` / ``--tp`` are
+        missing or ``--extra-args`` carries a denied server flag, ``3`` when
+        the prior server could not be killed (relaunch aborted).
     """
     p = argparse.ArgumentParser(prog="launch_infera_node.py")
     p.add_argument("--framework", required=True, choices=("sglang", "vllm"))

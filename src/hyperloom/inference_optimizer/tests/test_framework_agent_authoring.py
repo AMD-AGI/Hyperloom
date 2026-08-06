@@ -1152,12 +1152,8 @@ def test_framework_agent_repo_url_origin_framework_known() -> None:
         Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
     )
     assert (
-        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/Tencent-Hunyuan/HY-WorldPlay.git")
-        == "worldplay"
-    )
-    assert (
-        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/Tencent-Hunyuan/HY-World-2.0.git")
-        == "worldmirror"
+        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/xdit-project/xDiT.git")
+        == "xdit"
     )
 
 

@@ -12,6 +12,7 @@ import shlex
 import signal
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -77,6 +78,11 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from ..trace.orchestration_trace import (
+    OrchestrationTurnRecord,
+    append_orchestration_turn,
+    write_mcp_setup_once,
+)
 from .coordinator_helpers import (
     _infer_model_class_from_config,
     effective_closing_grace_sec,
@@ -868,6 +874,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_aggregate_research_evidence": "writeback",
         "_harvest_research_scout": "writeback",
         "_record_specialist_result": "writeback",
+        "_drain_queued_baselines": "writeback",
         # Phase handlers, grouped in the same call-chain order as
         # _COLLAB_MODULES/the @property block above:
         # machine -> prelude -> sweep -> close -> internal -> kernel_stack ->
@@ -996,7 +1003,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_discover_enablement_candidate_refs": "phase_framework",
         "_maybe_enqueue_enablement_specialist": "phase_framework",
         "_maybe_record_enablement_human_review": "phase_framework",
-        "_enablement_round_silently_finished": "phase_framework",
+        "_enablement_in_flight": "phase_framework",
         "_maybe_rearm_enablement": "phase_framework",
         "_maybe_escalate_to_targeted_build": "phase_framework",
         "_maybe_enqueue_specialist_requested_build": "phase_framework",
@@ -1042,7 +1049,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_run_framework_config_exploration": "phase_framework",
         "_framework_config_exploration_inflight": "phase_framework",
         "_framework_config_max_rounds": "phase_framework",
-        "_framework_config_new_variants": "phase_framework",
         "_finish_framework_config_lane": "phase_framework",
         "_framework_config_generation_context_lines": "phase_framework",
         "_dispatch_framework_config_generation_specialist": "phase_framework",
@@ -1742,6 +1748,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 max_turns=0,
             )
         except BackendError as exc:
+            self._trace_orchestration_turn(
+                agent_name=agent_name,
+                backend=backend,
+                prompt=prompt,
+                system_prompt=sys_prompt,
+                tools=tools,
+                outcome="backend_error",
+                error=exc,
+            )
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1750,6 +1765,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._track_backend_error_streak(agent_name, exc)
             return
         except NoIntentEmitted as exc:
+            self._trace_orchestration_turn(
+                agent_name=agent_name,
+                backend=backend,
+                prompt=prompt,
+                system_prompt=sys_prompt,
+                tools=tools,
+                outcome="no_intent",
+                error=exc,
+            )
             # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_observation(
                 "coordinator",
@@ -1758,6 +1782,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             return
         except Exception as exc:  # noqa: BLE001
+            self._trace_orchestration_turn(
+                agent_name=agent_name,
+                backend=backend,
+                prompt=prompt,
+                system_prompt=sys_prompt,
+                tools=tools,
+                outcome="exception",
+                error=exc,
+            )
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1777,6 +1810,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_alarm_armed[agent_name] = True
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
+        self._trace_orchestration_turn(
+            agent_name=agent_name,
+            backend=backend,
+            prompt=prompt,
+            system_prompt=sys_prompt,
+            tools=tools,
+            outcome="succeeded",
+            result=result,
+        )
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
@@ -1800,6 +1842,79 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
+
+    def _trace_orchestration_turn(
+        self,
+        *,
+        agent_name: str,
+        backend: Backend,
+        prompt: str,
+        system_prompt: str,
+        tools: list[str],
+        outcome: str,
+        result: BackendTurnResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Append one orchestration diagnostic row."""
+        if agent_name != "orchestration":
+            return
+        try:
+            getter = getattr(backend, "get_turn_diagnostic", None)
+            diagnostic = getter() if callable(getter) else {}
+            if not isinstance(diagnostic, dict):
+                diagnostic = {}
+            metadata = result.metadata if result is not None else {}
+            err_trace = (
+                "".join(traceback.format_exception(type(error), error, error.__traceback__))[-4000:]
+                if error is not None
+                else None
+            )
+            record = OrchestrationTurnRecord(
+                session_id=self.session_dir.name,
+                turn_id=uuid.uuid4().hex,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                outcome=outcome,
+                backend=str(diagnostic.get("backend") or type(backend).__name__),
+                model=diagnostic.get("model") or metadata.get("model") or getattr(backend, "model", None),
+                sdk_name=diagnostic.get("sdk_name"),
+                sdk_version=diagnostic.get("sdk_version"),
+                cli_version=diagnostic.get("cli_version"),
+                gateway_endpoint=diagnostic.get("gateway_endpoint"),
+                request_id=diagnostic.get("request_id"),
+                resume_requested=bool(diagnostic.get("resume_requested", False)),
+                previous_session_id_hash=diagnostic.get("previous_session_id_hash"),
+                session_id_hash=diagnostic.get("session_id_hash"),
+                new_session=diagnostic.get("new_session"),
+                max_turns=diagnostic.get("max_turns"),
+                timeout_sec=diagnostic.get("timeout_sec"),
+                reasoning_effort=diagnostic.get("reasoning_effort"),
+                thinking=diagnostic.get("thinking"),
+                prompt=str(diagnostic.get("prompt") or prompt),
+                system_prompt=str(diagnostic.get("system_prompt") or system_prompt),
+                allowed_tools=list(diagnostic.get("allowed_tools") or tools),
+                mcp_servers=list(diagnostic.get("mcp_servers") or []),
+                emit_intent_registered=bool(diagnostic.get("emit_intent_registered", False)),
+                messages=list(diagnostic.get("messages") or []),
+                result=str(diagnostic.get("result") or metadata.get("response") or ""),
+                raw_text=str(diagnostic.get("raw_text") or getattr(result, "raw_text", "") or ""),
+                tool_blocks=list(diagnostic.get("tool_blocks") or []),
+                parse_errors=list(diagnostic.get("parse_errors") or []),
+                usage=dict(diagnostic.get("usage") or {}),
+                stderr_tail=list(diagnostic.get("stderr_tail") or []),
+                sdk_boundary_error=diagnostic.get("sdk_boundary_error"),
+                error_type=type(error).__name__ if error is not None else None,
+                error_message=str(error) if error is not None else None,
+                traceback=err_trace,
+            )
+            append_orchestration_turn(session_dir=self.session_dir, record=record)
+            setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
+            if callable(setup_getter):
+                setup = setup_getter()
+                if isinstance(setup, dict):
+                    write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
+        except Exception:  # noqa: BLE001
+            log.debug("orchestration turn trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
         self,

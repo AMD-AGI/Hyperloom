@@ -50,7 +50,9 @@ class Symptom:
     subject:
         Identifying tuple for de-dup and downstream targetting.
     source:
-        Data source that produced the signal (``"server"`` / ``"local"``).
+        Data source that produced the signal (``"local"`` / ``"server"`` /
+        ``"coordinator_events"`` / ``"inbox"`` / ``"shared_state"``; defaults to
+        ``"unknown"``).
     suggestion:
         Optional hint for the ``escalate_strategy_change`` next_action_hint.
     """

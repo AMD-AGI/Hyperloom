@@ -4,7 +4,7 @@ myst:
         "description": "Submit Hyperloom optimization jobs to a Slurm cluster on AMD Instinct GPUs. Covers credentials, cluster setup, job submission, monitoring, and troubleshooting."
         "keywords": "Hyperloom, Slurm, cluster, AMD Instinct, MI300X, MI355X, sbatch, SGLang, vLLM, job submission, batch scheduler, ROCm"
 ---
-# Quickstart — Slurm
+# Slurm Installation Instructions
 
 Slurm mode submits Hyperloom optimization jobs to a **Slurm** cluster, where each
 job launches a ROCm serving container (sglang / vllm) on one node and runs the
@@ -204,21 +204,19 @@ utilization ramp up only after the model-load step.
 ## LLM model-name constraints
 
 The job calls the gateway for orchestration and for the kernel agent (GEAK).
-Model names must exist in your key's catalog, and the orchestration model is
-hard-allowlisted:
+Model names must exist in your key's catalog:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
-| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | `claude-opus-4-8` (preferred), or `claude-opus-4-7` / `claude-opus-4-6` | Enforced by the optimizer's model gate; other names are rejected. |
+| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-4-8` preferred, with `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
 | Kernel agent (GEAKv4 Claude Code workflow) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different Claude Code model. |
 | Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
 - Do *not* use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
   the gateway returns `Invalid model name` (which can surface misleadingly as
   `401 missing subscription key`).
-- To use an orchestration model outside the allowlist, set
-  `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1` (this switches to catalog
-  validation). Not recommended.
+- To restore the stricter AMD Claude allowlist instead of catalog validation,
+  set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 - These variables are set in `proxy.env` and are on the docker `-e` allowlist in
   `run_hyperloom.sbatch`. If you add a new model variable, add it to that
   allowlist too, or it will not reach the container.
@@ -235,7 +233,7 @@ hard-allowlisted:
 | `HL_SHARED_MOUNT` | `/path` | Shared FS bind-mounted into the container. |
 | `HL_DATA_ROOT` | `<shared-mount>/hyperloom-slurm` | Artifact root. |
 | `HL_CA_BUNDLE_HOST` | — | Combined CA bundle path (see [Build a combined CA bundle](#build-a-combined-ca-bundle)). |
-| `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL` | unset | Set `1` to relax the orchestration model allowlist (not recommended). |
+| `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL` | unset (custom models allowed) | Set `0` to enforce the stricter AMD Claude orchestration allowlist. |
 
 ---
 
@@ -248,7 +246,7 @@ The following items address common Slurm job and cluster configuration problems.
 - `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): the CA bundle has only the internal cert. Use a combined CA bundle.
 - `ModuleNotFoundError: No module named '...cli'`: the source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
 - `--gpu-type: invalid choice: 'MI355X'`: the CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
-- `--claude-model=... is not allowed`: the orchestration model is not in the allowlist. Use `claude-opus-4-8` for orchestration.
+- `--claude-model=... is not allowed`: the strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-4-8` for orchestration, or unset the variable to validate against the gateway catalog instead.
 - `Invalid model name` / `401 missing subscription key`: the model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
 - DNS failure / connection timeout to the gateway: the host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.

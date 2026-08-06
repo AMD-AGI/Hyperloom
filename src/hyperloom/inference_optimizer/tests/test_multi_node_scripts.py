@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``multi_node/scripts`` launch and kill helpers.
+"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the
+Infera SSH fan-out helpers, the mn CLI kernel-op routing, ``_multi_node_env``
+and the shell-quoting / credential hardening of the rendered entrypoints.
 
 A tiny ``sys.modules`` ray stub lets CI import the scripts without Ray.
 """
@@ -184,8 +186,8 @@ def test_denied_extra_args_matches_sandbox_speculative_draft_rules():
     assert mod._denied_extra_args("--download-dir /tmp/evil") == ["--download-dir"]
 
 
-def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], pids: dict, alive: set[int] = frozenset()):
-    """Run _wait_pd_legs_health against a fake urlopen/os.kill, with no sleeping."""
+def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = None):
+    """Run _wait_pd_legs_health against a fake urlopen, with no sleeping."""
 
     class _Resp:
         def __init__(self, status: int) -> None:
@@ -201,16 +203,11 @@ def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], pids: dict, alive: set
         role = "prefill" if "10.0.1.1" in url else "decode"
         return _Resp(200 if role in healthy else 503)
 
-    def _fake_kill(pid, _sig):
-        if pid not in alive:
-            raise ProcessLookupError(pid)
-
     import urllib.request
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
-    monkeypatch.setattr(lm.os, "kill", _fake_kill)
     monkeypatch.setattr(lm.time, "sleep", lambda _s: None)
-    return lm._wait_pd_legs_health("http://10.0.1.1:30000", "http://10.0.1.2:30001", 1, pids)
+    return lm._wait_pd_legs_health("http://10.0.1.1:30000", "http://10.0.1.2:30001", 1, log_dir=log_dir)
 
 
 def test_pd_launch_waits_for_both_legs_before_reporting_done(monkeypatch):
@@ -223,25 +220,48 @@ def test_pd_launch_waits_for_both_legs_before_reporting_done(monkeypatch):
     ambiguity the whole resume decision then had to work around.
     """
     lm = _load_script_module("lm_pd_ready", "launch_multinode.py")
-    pids = {"prefill_0": 111, "decode_0": 222}
 
-    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill", "decode"}, pids=pids, alive={111, 222}) is True
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill", "decode"}) is True
 
 
 def test_pd_launch_reports_undetermined_when_a_leg_never_answers(monkeypatch):
     """A slow boot must not be called a failure; the caller probes from there."""
     lm = _load_script_module("lm_pd_slow", "launch_multinode.py")
-    pids = {"prefill_0": 111, "decode_0": 222}
 
-    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111, 222}) is None
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}) is None
 
 
-def test_pd_launch_fails_fast_when_a_leg_leader_dies(monkeypatch):
-    """A dead leader is a confirmed failure, not something to wait out."""
-    lm = _load_script_module("lm_pd_dead", "launch_multinode.py")
-    pids = {"prefill_0": 111, "decode_0": 222}
+def test_pd_launch_does_not_false_fail_a_silent_remote_leg(monkeypatch, tmp_path):
+    """A decode leg that has not answered yet is not "dead" from a remote PID.
 
-    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, pids=pids, alive={111}) is False
+    The decode leader runs on a different node than this driver, so its PID is
+    in that node's namespace; the old os.kill early-abort raised
+    ProcessLookupError for a perfectly healthy remote leg and false-failed the
+    launch (the systematic ``mn_server_restart_failed`` seen only in rayjob PD).
+    With no fatal in the leg's log, a still-silent leg must read undetermined,
+    not failed.
+    """
+    lm = _load_script_module("lm_pd_silent_remote", "launch_multinode.py")
+    (tmp_path / "decode_0.log").write_text("loading weights...\n", encoding="utf-8")
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, log_dir=str(tmp_path)) is None
+
+
+def test_pd_launch_fails_fast_on_a_fatal_in_a_leg_log(monkeypatch, tmp_path):
+    """A crashed leg whose nohup wrapper lingers must abort, not wait the budget.
+
+    In PD mode the decode leg can log a fatal traceback while its wrapper PID
+    stays alive (and, being remote, is not ours to os.kill anyway). Scanning the
+    leg's own log is the cross-node-safe proof of death: it lets the driver bail
+    early and tells the caller it crashed rather than was killed.
+    """
+    lm = _load_script_module("lm_pd_fatal", "launch_multinode.py")
+    (tmp_path / "decode_0.log").write_text(
+        "loading weights...\nRuntimeError: HIP out of memory\n",
+        encoding="utf-8",
+    )
+
+    assert _pd_legs_probe(lm, monkeypatch, healthy={"prefill"}, log_dir=str(tmp_path)) is False
 
 
 def test_router_launch_replaces_a_live_router_instead_of_orphaning_it(tmp_path):

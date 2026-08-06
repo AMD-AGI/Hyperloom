@@ -95,7 +95,7 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
-def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
+def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
@@ -106,6 +106,7 @@ def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
         extra_envs={
             "ANTHROPIC_API_KEY": "anthropic-secret",
             "LD_PRELOAD": "/tmp/evil.so",
+            "LLM_GATEWAY_KEY": "gateway-secret",
             "OPENAI_API_KEY": "secret",
             "PYTHONSTARTUP": "/tmp/pwn.py",
             "SAFE_API_KEY": "safe-secret",
@@ -114,6 +115,7 @@ def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
             "BAD-NAME": "dropped",
         },
         reference_envs={
+            "DEEPSEEK_API_KEY": "deepseek-secret",
             "PYTHONPATH": "/tmp/evil",
             "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
@@ -121,12 +123,14 @@ def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
         },
     )
     envs = bench["envs"]
-    assert envs["ANTHROPIC_API_KEY"] == "anthropic-secret"
+    assert "ANTHROPIC_API_KEY" not in envs
     assert envs["LD_PRELOAD"] == "/tmp/evil.so"
-    assert envs["OPENAI_API_KEY"] == "secret"
+    assert "LLM_GATEWAY_KEY" not in envs
+    assert "OPENAI_API_KEY" not in envs
     assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
     assert envs["PYTHONPATH"] == "/tmp/evil"
-    assert envs["SAFE_API_KEY"] == "safe-secret"
+    assert "SAFE_API_KEY" not in envs
+    assert "DEEPSEEK_API_KEY" not in envs
     assert "BAD-NAME" not in envs
     assert "bad key" not in envs
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
@@ -221,7 +225,7 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "isl,osl,conc,factor",
     [
-        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 -> factor 3
+        (4000, 2000, 8, 3),  # 4096 < seq <= 16384 -> factor 3
         (3000, 1000, 8, 5),  # 1024 < seq <= 4096 -> factor 5
         (20000, 5000, 8, 2),  # > 16384 -> factor 2
     ],

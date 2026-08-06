@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
+"""Offline ``recover-session`` subcommand.
 
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
-CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
+Inspects a crashed session dir, rebuilds ``session_breakdown.json`` from the
+recorder fragments, and flushes / reconciles Langfuse.
 """
 
 from __future__ import annotations

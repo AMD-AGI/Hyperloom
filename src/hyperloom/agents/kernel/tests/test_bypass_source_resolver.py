@@ -7,9 +7,10 @@
 
 """Unit tests for the independent bypass op->source resolver.
 
-Covers the editability filter, container selection, dispatch-kind matching, and
-the trace ``kernel_file`` fast-path — all against a synthetic in-memory mapping
-so no real ``op_to_source.json`` / on-disk sources are required.
+Covers the editability filter, container selection, dispatch-kind matching, the
+trace ``kernel_file`` fast-path, and the repo-scan fallback. The mapping-driven
+paths run against a synthetic in-memory mapping so no real
+``op_to_source.json`` is required; the repo-scan tests write throwaway sources.
 """
 
 from __future__ import annotations

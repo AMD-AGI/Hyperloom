@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs candidate enumeration, workspace, commands, and metric evaluation to exercise explore() control flow."""
+"""Tests for hyperloom.agents.framework.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs candidate enumeration, workspace, commands, and metric evaluation to exercise explore() control flow."""
 
 from __future__ import annotations
 

@@ -34,7 +34,9 @@ params_schema:
   concs:
     type: list
     description: |
-      CONC ladder. Defaults to [1,2,4,8,16,32,64,128]. Each CONC is
+      CONC ladder. Defaults to [256,128,64,32,16,8,4,2] (high-to-low so the
+      single-server arm can be reused across rungs; mirrors
+      ``conc_sweep.DEFAULT_CONCS`` / ``--conc-sweep-concs``). Each CONC is
       benchmarked twice (baseline arm with empty overrides + optimized
       arm with current_best.extra_server_args/extra_envs).
   variant_timeout_sec:

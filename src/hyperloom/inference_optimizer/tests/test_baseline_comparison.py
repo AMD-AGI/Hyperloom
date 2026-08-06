@@ -57,7 +57,7 @@ def test_known_models_list_is_nonempty():
     assert len(KNOWN_INFERENCEX_MODELS) >= 5
 
 
-# inferencex_client — happy path against a local HTTP server
+# Shared InferenceX row shape the target_analyzer tests build their fixtures from.
 _SAMPLE_ROW = {
     "hardware": "b300",
     "framework": "vllm",

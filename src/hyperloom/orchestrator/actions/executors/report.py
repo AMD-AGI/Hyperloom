@@ -5,9 +5,15 @@
 
 Reads SharedState + the bus event log and writes
 ``$SESSION_DIR/reports/final.json`` (machine-readable, dashboard shape) and
-``final.md`` (human-readable). The returned dict surfaces both paths. Files
-are compact: stop_reason, baseline + best, cumulative gain, event counts,
-and a top-N highlight list.
+``final.md`` (human-readable). The returned dict surfaces both paths.
+``final.json`` carries the run identity, stop reason, baseline/best, per-round
+and validated cumulative gain, completeness annotations, event counts and
+highlights, plus optional blocks (failure summary, roofline comparison,
+external baseline, concurrency-sweep and kernel-optimization pointers) when the
+corresponding data exists; ``final.md`` renders the same content as sections.
+Side artifacts land in the same reports directory:
+``kernel_optimization_summary.json`` and ``conc_sweep_curve.png``. See
+:func:`_build_summary_dict` for the authoritative key set.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ log = logging.getLogger(__name__)
 def _count_server_boot_failures(session_dir: Path | None) -> int:
     """Count ``warmup_failed`` variants (server boot failures) from the journal.
 
-    ``crash_count`` only tracks coordinator restarts, so a run whose server
+    ``crash_count`` only counts Coordinator tick/agent exceptions, so a run whose server
     repeatedly fails to boot still reports ``crash_count: 0``. Surfacing this
     keeps the report honest. Fail-soft: returns 0 on any read error.
     """
@@ -138,8 +144,9 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
 def _classify_root_cause_type(error_class: str, error_text: str) -> str:
     """Map a baseline attempt's ``error_class`` + message to a coarse enum.
 
-    Returns one of ``oom`` / ``benchmark_timeout`` / ``engine_core_init`` /
-    ``worker_crash`` / ``unknown`` for the dashboard / ops contract.
+    Returns one of ``kv_cache_oom`` / ``oom`` / ``benchmark_timeout`` /
+    ``engine_core_init`` / ``worker_crash`` / ``unknown`` for the dashboard /
+    ops contract.
 
     Args:
         error_class: The attempt's recorded error class.

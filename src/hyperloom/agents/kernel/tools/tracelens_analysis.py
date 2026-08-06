@@ -135,7 +135,8 @@ class OpResolution:
         status: ``resolved`` / ``non_rewritable`` / ``no_kernel`` / ``unresolved``.
         patchable: The curated patchability verdict (may be ``None``).
         framework: Framework that owns the source (``aiter``/``vllm``/...).
-        sources: Absolute editable ``.cu`` path(s) this resolution owns;
+        sources: Absolute editable source path(s) this resolution owns
+            (``.cu``/``.cuh``/``.hip``/``.h`` or repo-resident ``.py``);
             empty when there is no editable source.
         reason: Skip reason (``triton``/``aten``/...) or the entry ``label``.
         matched_route: For ``dispatch``, the ``match`` glob that fired.
@@ -163,10 +164,11 @@ class OpResolution:
     # templates to the ck-fellow instead of the generic hip-fellow.
     kernel_kinds: list[str] = field(default_factory=list)
     prebuilt_binaries: list[str] = field(default_factory=list)
+    runtime_backends: list[str] = field(default_factory=list)
 
     @property
     def primary_source(self) -> str:
-        """The editable ``.cu`` this leaf optimizes (the GEAK ``--kernel-path``), or ``""``."""
+        """The editable kernel source this leaf optimizes (``.cu``/``.cuh``/``.hip``/``.h`` or a repo-resident Triton/TileLang ``.py``), or ``""``."""
         if 0 <= self.target_index < len(self.sources):
             return self.sources[self.target_index]
         return self.sources[0] if self.sources else ""
@@ -186,17 +188,24 @@ class OpResolution:
         return self.prebuilt_binaries[0] if self.prebuilt_binaries else ""
 
     @property
+    def primary_runtime_backend(self) -> str:
+        """The production attention/backend identity for the selected source."""
+        if 0 <= self.target_index < len(self.runtime_backends):
+            return self.runtime_backends[self.target_index]
+        return self.runtime_backends[0] if self.runtime_backends else ""
+
+    @property
     def is_routable(self) -> bool:
         """True when there is a resolved, patchable, editable source to optimize."""
         return self.status == _ROUTABLE_STATUS and bool(self.patchable) and bool(self.sources)
 
     def leaf_resolutions(self) -> list["OpResolution"]:
-        """Expand into one routable leaf per editable ``.cu`` to optimize.
+        """Expand into one routable leaf per editable source file to optimize.
 
         ``composite`` flattens its routable sub-routes; a routable
         ``single``/``dispatch`` with N ``sources`` yields N leaves (one per
-        ``.cu``); a non-routable resolution yields none. Each leaf routes to its
-        own GEAK run via :attr:`primary_source`.
+        editable source file); a non-routable resolution yields none. Each leaf
+        routes to its own GEAK run via :attr:`primary_source`.
 
         ``single`` (N flat ``sources``) and ``composite`` (N ``fanout``
         sub-routes) therefore expand to the same set of leaves -- one per
@@ -218,6 +227,9 @@ class OpResolution:
         item["op_to_source_reason"] = self.reason
         if self.matched_route:
             item["op_to_source_matched_route"] = self.matched_route
+        runtime_backend = self.primary_runtime_backend
+        if runtime_backend:
+            item["runtime_backend"] = runtime_backend
 
     def apply_to(self, item: dict[str, Any]) -> None:
         """Override an item's source with this leaf's editable ``.cu`` (ground truth).
@@ -515,6 +527,7 @@ class OpResolver:
                             matched_route=kname,
                             kernel_kinds=[str(info.get("kernel_kind") or "")],
                             prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
+                            runtime_backends=[str(info.get("backend") or "")],
                         )
                     return OpResolution(
                         op_name=op_name,
@@ -525,6 +538,7 @@ class OpResolver:
                         sources=[],
                         reason="dispatch route has no editable source",
                         matched_route=kname,
+                        runtime_backends=[str(info.get("backend") or "")],
                     )
         return OpResolution(
             op_name=op_name,
@@ -4622,7 +4636,7 @@ def run_command(
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 # Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "545396501e4024055b72a254e97306860f3f090d"
+_TRACELENS_REF_DEFAULT = "c3405111a2f9270fd820a1baa8edaaf6f61e7646"
 
 
 def _default_tracelens_root() -> Path:
@@ -6002,7 +6016,8 @@ def main() -> int:
                 raise FileNotFoundError(
                     f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)"
                 )
-            # A dir that exists but is not a git checkout is unusable; fail fast.
+            # A dir that exists but has neither git metadata nor the TraceLens
+            # skill tree is unusable; fail fast.
             if not _tracelens_checkout_complete(tl_root):
                 raise FileNotFoundError(
                     f"TraceLens root incomplete (not a git checkout): {tl_root} "

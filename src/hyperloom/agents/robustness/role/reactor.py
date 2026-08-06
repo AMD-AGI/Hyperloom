@@ -28,7 +28,7 @@ from .postmortem import PostmortemFinalizer
 from .prompt_inputs import ReactorContext
 
 
-import asyncio  # noqa: E402  — local import keeps the diff readable
+import asyncio  # noqa: E402
 
 
 log = logging.getLogger(__name__)

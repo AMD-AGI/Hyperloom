@@ -210,7 +210,7 @@ def test_preflight_covers_a_framework_install_sh_could_not_see(monkeypatch):
     """The regression that motivated the preflight pass.
 
     install.sh runs before --framework exists, so its own attempt no-ops. If
-    preflight did not repeat the pass, a worldmirror baseline would start with
+    preflight did not repeat the pass, an operator's baseline would start with
     none of HY-World-2.0's imports installed.
     """
     from hyperloom.inference_optimizer.cli import preflight
@@ -224,10 +224,10 @@ def test_preflight_covers_a_framework_install_sh_could_not_see(monkeypatch):
         return fd.Outcome(framework=framework)
 
     monkeypatch.setattr(fd, "ensure", fake_ensure)
-    args = argparse.Namespace(framework="worldmirror")
+    args = argparse.Namespace(framework="custom")
     preflight._ensure_framework_deps(args, "/venv/bin/python3", [])
 
-    assert seen == {"framework": "worldmirror", "python_exe": "/venv/bin/python3"}
+    assert seen == {"framework": "custom", "python_exe": "/venv/bin/python3"}
 
 
 def test_preflight_falls_back_to_env_then_default(monkeypatch):
@@ -237,12 +237,12 @@ def test_preflight_falls_back_to_env_then_default(monkeypatch):
     monkeypatch.setattr(fd, "ensure", lambda framework, **kw: (
         seen.append(framework), fd.Outcome(framework=framework))[1])
 
-    monkeypatch.setenv("FRAMEWORK", "worldmirror")
+    monkeypatch.setenv("FRAMEWORK", "custom")
     preflight._ensure_framework_deps(argparse.Namespace(framework=None), "py", [])
     monkeypatch.delenv("FRAMEWORK")
     preflight._ensure_framework_deps(argparse.Namespace(framework=None), "py", [])
 
-    assert seen == ["worldmirror", "sglang"]
+    assert seen == ["custom", "sglang"]
 
 
 def test_preflight_invokes_the_pass():
@@ -264,18 +264,3 @@ def test_install_sh_delegates_to_this_module():
 # --------------------------------------------------------------------------
 
 
-def test_shipped_worldmirror_manifest_is_well_formed():
-    """Properties that must hold however the package list evolves."""
-    reqs, refused, invalid = fd.parse_manifest(
-        (ASSETS / "framework_deps" / "worldmirror.txt").read_text(encoding="utf-8")
-    )
-    assert reqs, "manifest parsed to nothing"
-    assert refused == [], f"manifest names load-bearing packages: {refused}"
-    assert invalid == [], f"manifest entries with underivable import names: {invalid}"
-    names = {fd._package_base(r.spec) for r in reqs}
-    # flash-attn has no ROCm wheel and is served by the SDPA shim; listing it
-    # here would make every install attempt fail.
-    assert "flash-attn" not in names and "flash_attn" not in names
-    assert not names & fd.CORE_PACKAGES
-    # gsplat is called on the model forward path, so it cannot be dropped.
-    assert "gsplat" in names

@@ -249,7 +249,7 @@ def _deep_prefix_patch(depth: int) -> str:
 def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     repo = tmp_path / "repo"
     init_git_repo(repo)
-    # ``b/d0/.../d6/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
+    # ``b/d0/.../d5/src.py`` needs -p7 (1 for ``b/`` + 6 for d0..d5).
     patch = tmp_path / "deep.patch"
     patch.write_text(_deep_prefix_patch(6), encoding="utf-8")
     ok, err = _git_apply(repo, patch)
@@ -357,12 +357,19 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
 def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
     """``resolve_session_framework_root`` answers "which tree is this session
     optimising", which is a different question from "what may be edited"."""
-    from hyperloom.orchestrator.framework.paths import resolve_session_framework_root
+    from hyperloom.orchestrator.framework.paths import (
+        _scriptable_frameworks,
+        resolve_session_framework_root,
+    )
 
-    session = tmp_path / "HY-WorldPlay-e2e"
+    scriptable = _scriptable_frameworks()
+    assert scriptable, "no scriptable framework registered to exercise the prefixed path"
+    prefix = scriptable[0].upper()
+
+    session = tmp_path / "session-checkout"
     session.mkdir()
-    monkeypatch.delenv("WORLDPLAY_REPO_PATH", raising=False)
-    monkeypatch.delenv("WORLDPLAY_DIR", raising=False)
+    monkeypatch.delenv(f"{prefix}_REPO_PATH", raising=False)
+    monkeypatch.delenv(f"{prefix}_DIR", raising=False)
 
     monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
     assert resolve_session_framework_root() == ""
@@ -371,9 +378,9 @@ def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch
     assert resolve_session_framework_root() == f"{session}/"
 
     # The framework-prefixed name is the more specific statement and wins.
-    prefixed = tmp_path / "HY-WorldPlay-prefixed"
+    prefixed = tmp_path / "prefixed-checkout"
     prefixed.mkdir()
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(prefixed))
+    monkeypatch.setenv(f"{prefix}_REPO_PATH", str(prefixed))
     assert resolve_session_framework_root() == f"{prefixed}/"
 
 

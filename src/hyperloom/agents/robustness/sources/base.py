@@ -9,10 +9,11 @@ retries are silent. State machine::
 
     HEALTHY  --(fail_streak >= fail_threshold)-->  DEGRADED
     DEGRADED --(success after recheck_interval_s)--> HEALTHY
-    DEGRADED --(consecutive failures still over budget)--> FAILED  (M2+)
+    fallback --(SourceUnavailable)--> FAILED
 
-M1 uses only HEALTHY/DEGRADED: DEGRADED means "use the fallback this
-tick"; the next tick re-probes after ``recheck_interval_s``.
+DEGRADED means "use the fallback this tick"; the next tick re-probes
+after ``recheck_interval_s``. FAILED applies to the fallback source when
+it too is unavailable — the both-sources-unavailable snapshot.
 """
 
 from __future__ import annotations
@@ -34,9 +35,8 @@ class HealthState(str, Enum):
         HEALTHY (str): Source is being consulted normally.
         DEGRADED (str): Source failed enough times to be skipped; it is
             reprobed periodically.
-        FAILED (str): Reserved for when the fallback itself is
-            unhealthy and the reactor should report a degraded
-            heartbeat.
+        FAILED (str): Set when the fallback itself is unhealthy; the
+            reactor reports a degraded heartbeat.
     """
 
     HEALTHY = "healthy"
@@ -139,21 +139,10 @@ class _SourceState:
 class DegradeRouter:
     """Coordinator-tick routing across [primary, fallback] sources.
 
-    Parameters
-    ----------
-    primary, fallback:
-        :class:`Source` instances. The router consults the primary
-        first; on enough consecutive failures it switches to the
-        fallback for subsequent ticks and reprobes the primary every
-        ``recheck_interval_s`` seconds.
-    fail_threshold:
-        Consecutive primary failures required to mark it DEGRADED.
-    recheck_interval_s:
-        Time between primary reprobes once it is DEGRADED.
-    clock:
-        Optional ``Callable[[], float]`` providing the current time;
-        defaults to :func:`time.monotonic`. Tests inject a controllable
-        clock to assert recheck timing without sleeping.
+    The router consults the primary first; after ``fail_threshold``
+    consecutive failures it switches to the fallback for subsequent ticks
+    and reprobes the primary every ``recheck_interval_s`` seconds. See
+    :meth:`__init__` for the parameters.
     """
 
     def __init__(

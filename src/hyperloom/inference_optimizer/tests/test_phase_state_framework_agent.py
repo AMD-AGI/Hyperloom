@@ -129,7 +129,7 @@ def test_exit_normal_framework_agent_accepts_positional_remaining_minutes():
 
 
 def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
-    """3 consecutive resolved-no-keep candidates (here 'reject') trip the
+    """A full streak of resolved-no-keep candidates (here 'reject') trips the
     plateau exit."""
     batches = [
         {

@@ -763,7 +763,10 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
 
 
 # aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
-_AITER_CSRC_MARKER = "/aiter/csrc/"
+# aiter device sources ship either in-tree (``/aiter/csrc/``) or in the sibling
+# split wheel (``/aiter_meta/csrc/``); both feed the same importable ``aiter``
+# JIT build, so the rebuild gates must recognise both layouts.
+_AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
 
 
 def _isolated_aiter_pkg_root() -> Path | None:
@@ -787,9 +790,11 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
         target_file: The file path to test.
 
     Returns:
-        ``True`` if the path is under an ``aiter/csrc/`` directory.
+        ``True`` if the path is under an ``aiter/csrc/`` (in-tree) or
+        ``aiter_meta/csrc/`` (split-wheel) directory.
     """
-    return _AITER_CSRC_MARKER in str(target_file).replace(os.sep, "/")
+    norm = str(target_file).replace(os.sep, "/")
+    return any(marker in norm for marker in _AITER_CSRC_MARKERS)
 
 
 def _aiter_jit_build_dir() -> Path | None:
@@ -931,7 +936,7 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
 
 
 # aiter cpp_itfs kernels are runtime-compiled into parameter-keyed caches.
-_AITER_CPP_ITFS_MARKER = "/aiter/csrc/cpp_itfs/"
+_AITER_CPP_ITFS_MARKERS = ("/aiter/csrc/cpp_itfs/", "/aiter_meta/csrc/cpp_itfs/")
 _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 
 
@@ -941,9 +946,10 @@ def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
     Strict subset of :func:`_target_is_in_aiter_csrc`: these are the
     runtime-compiled kernels whose served ``.so`` lives in
     ``$HOME/.aiter/build`` rather than in ``<aiter>/jit/build`` or the
-    statically-linked wheel. Matches both the editable checkout
-    (``/sgl-workspace/aiter/csrc/cpp_itfs/...``) and the dist-packages
-    layout (``.../aiter/csrc/cpp_itfs/...``).
+    statically-linked wheel. Matches the editable checkout
+    (``/sgl-workspace/aiter/csrc/cpp_itfs/...``), the dist-packages layout
+    (``.../aiter/csrc/cpp_itfs/...``), and the split-wheel layout
+    (``.../aiter_meta/csrc/cpp_itfs/...``).
 
     Args:
         target_file: The file path to test.
@@ -951,7 +957,8 @@ def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
     Returns:
         ``True`` if the path is under an ``aiter/csrc/cpp_itfs/`` directory.
     """
-    return _AITER_CPP_ITFS_MARKER in str(target_file).replace(os.sep, "/")
+    norm = str(target_file).replace(os.sep, "/")
+    return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS)
 
 
 def _aiter_cpp_itfs_build_dir() -> Path:
@@ -1576,6 +1583,7 @@ def apply_kernel_patch(
     dry_run: bool = False,
     snapshot_dir: str | Path | None = None,
     repo_root: str | Path | None = None,
+    producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Apply an optimized kernel file with backup, rebuild, and fan-out.
 
@@ -1601,14 +1609,19 @@ def apply_kernel_patch(
         kernel_id (str): Identifier for the kernel being patched.
         artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
             back up in addition to discovered ones.
-        rebuild_command (list[str] | str | None): Override rebuild command; a
-            string is run via ``bash -lc``.
+        rebuild_command (list[str] | str | None): Override rebuild argv; a
+            string is shlex-split and run argv-only (shell=False), never via
+            ``bash -lc``. Commands using shell control operators, or invoking
+            ``bash``/``sh`` with ``-c``/``-lc``, return ``status='failed'``
+            with ``error_class='invalid_rebuild_command'``.
         rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
         skip_rebuild (bool): When ``True``, skip the rebuild step.
         allow_unknown_target (bool): Allow targets outside the known roots.
         dry_run (bool): Prepare backups/manifest only, without applying.
         snapshot_dir (str | Path | None): When set, enables snapshot mode and
             holds byte-exact final contents mirrored at each write path.
+        producer_manifest (str | Path | None): Canonical producer manifest
+            recorded for deployment provenance.
 
     Returns:
         dict[str, Any]: A result dict with ``status`` and, on success, the
@@ -1630,6 +1643,7 @@ def apply_kernel_patch(
             allow_unknown_target=allow_unknown_target,
             dry_run=dry_run,
             repo_root=repo_root,
+            producer_manifest=producer_manifest,
         )
     patch = Path(patch_path).resolve()
     target = Path(target_file).resolve()
@@ -1673,6 +1687,10 @@ def apply_kernel_patch(
         },
         "created_at": utc_now(),
     }
+    if producer_manifest:
+        manifest["producer_manifest"] = str(
+            Path(producer_manifest).resolve()
+        )
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
@@ -1855,6 +1873,7 @@ def _apply_kernel_patch_snapshot(
     allow_unknown_target: bool,
     dry_run: bool,
     repo_root: str | Path | None = None,
+    producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Snapshot-mode apply: land an entire multi-file patch atomically.
 
@@ -1940,6 +1959,10 @@ def _apply_kernel_patch_snapshot(
         "strategy": {"compiled": compiled, "root": str(repo_root)},
         "created_at": utc_now(),
     }
+    if producer_manifest:
+        manifest["producer_manifest"] = str(
+            Path(producer_manifest).resolve()
+        )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
         return {"status": "ok", "dry_run": True, "manifest_path": str(manifest_path)}

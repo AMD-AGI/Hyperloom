@@ -15,7 +15,8 @@ head, or touch persistent runtime config (would kill the optimizer, need
 root, or affect other tenants). A failed recover surfaces as
 ``state == "needs_review"``.
 
-Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
+Returned dict (the subset below is persisted to
+``runs/recover/<task_id>/result.json``)::
 
     {
         "state":                  "succeeded" | "needs_review",
@@ -25,6 +26,9 @@ Returned dict (also persisted to ``runs/recover/<task_id>/result.json``)::
         "pre_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # before cleanup
         "mid_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # after kills
         "error_class":            str,                        # only on failure
+        "cpu_only_sandbox":       True,   # multi-node short-circuit only
+        "workspace":              str,    # return value only, not persisted
+        "result_path":            str,    # return value only, not persisted
     }
 """
 
@@ -134,11 +138,11 @@ class RecoverExecutor:
             force_cleanup,
         )
 
-        # Infera CPU-only sandbox: no local GPUs to reclaim (they live on remote
-        # pods reached over SSH). Calling rocm-smi here deadlocks on the kfd
-        # ioctl and makes recover loop. Short-circuit to success so the
-        # orchestrator stops proposing recover; remote VRAM cleanup, when
-        # needed, is handled by the infera restart-server / kill-inference path.
+        # Multi-node (Infera or RayJob): the serving GPUs live on remote pods.
+        # Even when this sandbox lands on a GPU node, local rocm-smi reports
+        # OTHER workloads' VRAM, so _all_recovered would never pass and the
+        # orchestrator would propose recover forever. Short-circuit to success;
+        # remote VRAM cleanup goes through the restart-server / kill-inference path.
         if _is_multi_node_sandbox():
             log.info(
                 "recover_executor: infera CPU-only sandbox detected; skipping "

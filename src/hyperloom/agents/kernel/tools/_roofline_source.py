@@ -5,9 +5,8 @@ Records HOW a kernel's roofline bound was derived. Vocabulary:
     - ``placeholder``: no perf model; ``bound_type`` is a structural default
       (e.g. shapes not captured), treat as unknown.
     - ``analytical``: bound derived from an analytical roofline model.
-    - ``rocprof``: bound refined by a hardware measurement (strongest).
 
-The ladder ``placeholder`` -> ``analytical`` -> ``rocprof`` only ever upgrades.
+A later stage may upgrade ``placeholder`` -> ``analytical``, never the reverse.
 """
 
 from __future__ import annotations

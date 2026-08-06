@@ -5,7 +5,7 @@
 # OVERRIDDEN at runtime — see baseline_atom.yaml header for the full
 # rationale.
 #
-# atom-specific profiler wiring (IR-8; see atom_boost_tutorials.md §8):
+# atom-specific profiler wiring (IR-8):
 #   - atom's torch profiler is activated by the `--torch-profiler-dir`
 #     CLI flag injected by Magpie's `atom_mi*x.sh` from the
 #     `$ATOM_TORCH_PROFILER_DIR` env (set when PROFILE=1).
@@ -18,9 +18,12 @@
 #   - There is NO equivalent of vLLM's `--profiler-config.delay_iterations`
 #     / `--profiler-config.max_iterations` or SGLang's
 #     `PROFILE_EXTRA_BODY` start/stop protocol. The start/stop boundary
-#     is purely HTTP-driven; the bench window is bounded by `NUM_PROMPTS`
-#     (computed by `_workload_envs` from the same TraceLens steady-state
-#     formula used by sglang/vllm).
+#     is purely HTTP-driven; the profile window is deferred to Magpie's
+#     atom wrapper (`atom_mi*x.sh`, via the Magpie-side `ATOM_PROFILE_OSL` /
+#     `ATOM_PROFILE_NUM_PROMPTS`). `_workload_envs` sets
+#     `profile_num_prompts = None` for atom, skipping the sglang/vllm
+#     TraceLens steady-state `NUM_PROMPTS` override; any `NUM_PROMPTS` it
+#     still emits comes from the generic seq_cost default.
 #   - atom does have an `ATOM_PROFILER_MORE=1` toggle for detailed shape
 #     / callstack annotations (`atom/model_engine/model_runner.py::
 #     start_profiler`). It is intentionally left OFF here to match the

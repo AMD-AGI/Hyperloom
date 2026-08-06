@@ -4,10 +4,11 @@
 """Coordinator-event-driven signals.
 
 Watches repeated ``policy_denied`` observations from the same source
-(misconfigured / systemically-rejected agent → MEDIUM alert) and
+(misconfigured / systemically-rejected agent → MEDIUM alert),
 ``delegated_result`` failures clustering on one action family (stuck
-branch → ``prune_branch``). Reads both ``ctx.inbox`` and
-``data.coordinator_events``.
+branch → ``prune_branch``), ``recover_unsuccessful`` recovery outcomes,
+and B4 ``idempotency_replay`` (repeated idempotency keys). Reads both
+``ctx.inbox`` and ``data.coordinator_events``.
 """
 
 from __future__ import annotations

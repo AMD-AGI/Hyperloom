@@ -1110,27 +1110,13 @@ def _inferencex_checkout_ok(path: Path | str) -> bool:
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees.
 
-    Preflight installs Magpie (``pip install magpie-eval``) and clones
-    InferenceX on its own, entirely outside ``install.sh`` — which is where the
-    Magpie benchmark-script patches used to live exclusively. A Magpie
-    installed by preflight therefore still carries upstream's
+    Thin preflight wrapper around
+    :func:`hyperloom.orchestrator.actions.executors._magpie_patcher.ensure_eval_concurrency_compat`,
+    whose docstring is the authoritative account of why the flag must go.
 
-        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
-
-    in ``Magpie/scripts/benchmark/*.sh``. Magpie's ``_prepare_benchmark_scripts``
-    copies those scripts into ``<inferencex>/benchmarks/`` at run time, so the
-    copy that actually executes carries the flag; InferenceX's ``run_lm_eval``
-    rejects it (``Unknown parameter: --concurrent-requests``) and aborts the
-    benchmark before any ``results*.json`` is written, which the baseline
-    accuracy gate turns into a whole-run ``baseline_accuracy_failed`` stop.
-
-    The supported contract is the ``EVAL_CONCURRENT_REQUESTS`` env var (which
-    ``run_lm_eval`` already reads, falling back to ``CONC``), so the flag is
-    simply removed.
-
-    Warn-only: an unpatchable script is re-checked (and fails loudly) by the
-    baseline executor immediately before launch, where the effective mirrored
-    InferenceX checkout is known.
+    Warn-only here: an unpatchable script is re-checked (and fails loudly) by
+    the baseline executor immediately before launch, where the effective
+    mirrored InferenceX checkout is known.
 
     Args:
         magpie_path: Resolved Magpie root (``$MAGPIE_PATH``); may be empty.

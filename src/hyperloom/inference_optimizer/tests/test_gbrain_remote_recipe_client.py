@@ -22,7 +22,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import RemoteRecipeClientError
 
 
 def test_page_to_recipe_reads_legacy_framework_attr() -> None:
-    """The reader falls back to the legacy ``framework`` attr so the 5-tuple
+    """The reader falls back to the legacy ``framework`` attr so the 7-tuple
     identity (and canonical id) stays correct instead of degrading to the
     ``unknown_framework`` default slug."""
     frontmatter = {

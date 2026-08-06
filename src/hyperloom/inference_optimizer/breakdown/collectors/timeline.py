@@ -580,8 +580,9 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
     return {d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0} for d in _SPECIALIST_DOMAIN_KEYS}
 
 
-# Catalogue of the 7 SpecialistDomain.key strings, inlined to keep breakdown
-# free of orchestrator deps for offline use.
+# Mirror of the SpecialistDomain.key catalogue (orchestrator/specialists/domains.py),
+# inlined to keep breakdown free of orchestrator deps for offline use. Lags the
+# catalogue: static_recon / enablement / cross_framework_rewrite are not seeded.
 _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "serving_specialist",
     "kernel_switch_specialist",
@@ -749,7 +750,7 @@ def collect_phase_segments(
         # Session-level marker for legacy-proxy exits.
         warnings.append(
             "plateau_proxy_provisional: legacy params_no_promote_streak "
-            "proxy fired (R-09); set INFERENCE_OPTIMIZER_DISABLE_PLATEAU_PROXY=1 "
-            "once the fleet is fully v0.8 to fail closed"
+            "proxy fired (r09_provisional / m2_proxy evidence); treat the "
+            "affected plateau exits as provisional, not measured"
         )
     return segments

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``action_executors._robustness_pulse``.
+"""Unit tests for ``orchestrator.roles.robustness_pulse``.
 
 Exercises the gating and request-shaping helpers plus the ``pulse()`` coroutine
 via dependency injection over ``asyncio`` subprocess primitives.

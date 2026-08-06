@@ -7,7 +7,10 @@
 Usage:
     event_counts.py [SESSION_DIR] [--all] [--limit N]
 
-SESSION_DIR defaults to $USER_DATA_PATH or /workspace/hyperloom.
+SESSION_DIR defaults to $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run
+pin set by the launcher), else $USER_DATA_PATH, else /workspace/hyperloom. The
+latter two are the workspace root, not a per-session dir, so they will normally
+not contain storage/coordinator.db — pass SESSION_DIR explicitly in that case.
 Reads the last 500 events by default; pass ``--all`` for full history or
 ``--limit N`` for a custom window.
 """
@@ -37,7 +40,12 @@ def main() -> int:
         "session_dir",
         nargs="?",
         default=None,
-        help="Session directory (default: $USER_DATA_PATH or /workspace/hyperloom)",
+        help=(
+            "Session directory. Defaults to "
+            "$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run pin set by "
+            "the launcher), else $USER_DATA_PATH, else /workspace/hyperloom; "
+            "the latter two are the workspace root, not a per-session dir."
+        ),
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(

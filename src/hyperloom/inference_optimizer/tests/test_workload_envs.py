@@ -23,7 +23,7 @@ def _restore_environ():
     Materialization deliberately publishes the resolved checkout into the
     orchestrator's own environment (that is how PolicyGate sees a scriptable
     framework's source root), and monkeypatch cannot undo a direct write. Without
-    this, one test's published ``WORLDPLAY_DIR`` satisfies the next test's
+    this, one test's published ``MYFW_DIR`` satisfies the next test's
     resolution and the repo-URL fallback silently never runs.
     """
     import os
@@ -51,17 +51,17 @@ def _clear_env(monkeypatch):
         "PROFILE",
         "MODEL_PATH",
         "INFERENCEX_PATH",
-        "WORLDPLAY_REPO",
-        "WORLDPLAY_REPO_PATH",
-        "WORLDPLAY_DIR",
-        "WORLDPLAY_REPO_URL",
+        "MYFW_REPO",
+        "MYFW_REPO_PATH",
+        "MYFW_DIR",
+        "MYFW_REPO_URL",
         "FRAMEWORK_REPO_PATH",
-        "WORLDPLAY_BENCH",
-        "WORLDPLAY_ACTION_CKPT",
-        "WORLDMIRROR_REPO_PATH",
-        "WORLDMIRROR_REPO_URL",
-        "WORLDMIRROR_DIR",
-        "WORLDMIRROR_BENCH",
+        "MYFW_BENCH",
+        "MYFW_ACTION_CKPT",
+        "MYFW_REPO_PATH",
+        "MYFW_REPO_URL",
+        "MYFW_DIR",
+        "MYFW_BENCH",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
         "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
@@ -111,6 +111,34 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
+def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch):
+    # PD-disaggregated: force lm_eval string prompts so the sglang_router's
+    # /v1/completions (StringOrArray) does not 422 on token-id prompts.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "disaggregated"})
+    src = tmp_path / "base.yaml"
+    _write(src)
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"].get("MAGPIE_EVAL_TOKENIZED_REQUESTS") == "false"
+
+
+def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
+    # Aggregated hits the sglang server directly (accepts token-id prompts), so
+    # the env is left unset and the default tokenized path is preserved.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "aggregated"})
+    src = tmp_path / "base.yaml"
+    _write(src)
+    bench = _materialize(src, tmp_path / "out")
+    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+
+
 # ---- _visible_gpu_count ---------------------------------------------------
 def test_visible_gpu_count_override_valid(monkeypatch):
     _clear_env(monkeypatch)
@@ -154,8 +182,8 @@ def test_default_baseline_config(monkeypatch):
     assert we.default_baseline_config().name == "baseline_atom.yaml"
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert we.default_baseline_config().name == "baseline_vllm.yaml"
-    monkeypatch.setenv("FRAMEWORK", "worldmirror")
-    assert we.default_baseline_config().name == "baseline_worldmirror.yaml"
+    monkeypatch.setenv("FRAMEWORK", "custom")
+    assert we.default_baseline_config().name == "baseline_custom.yaml"
     monkeypatch.setenv("FRAMEWORK", "weird")
     assert we.default_baseline_config().name == "baseline_sglang.yaml"
 
@@ -174,215 +202,22 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     assert "benchmark_script" not in bench
 
 
-def test_worldplay_materialize_prefers_repo_path_env(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", "/repos/HY-WorldPlay")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        model_path="/models/HunyuanVideo-1.5",
-    )
-
-    envs = bench["envs"]
-    assert bench["model"] == "/models/HunyuanVideo-1.5"
-    assert envs["WORLDPLAY_REPO_PATH"] == "/repos/HY-WorldPlay"
-    assert envs["WORLDPLAY_DIR"] == "/repos/HY-WorldPlay"
-    assert envs["WORLDPLAY_BENCH"].endswith("/assets/benchmark_scripts/bench_fps.py")
-    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
-    assert envs["WORLDPLAY_ACTION_CKPT"] == (
-        "/models/HY-WorldPlay/ar_model/diffusion_pytorch_model.safetensors"
-    )
-
-
-def test_worldplay_materialize_configures_github_repo_fallback(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x")
-
-    envs = bench["envs"]
-    assert envs["WORLDPLAY_REPO_URL"] == "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
-    assert envs["WORLDPLAY_REPO_PATH"] == str(tmp_path / "cache" / "HY-WorldPlay")
-    assert envs["WORLDPLAY_DIR"] == str(tmp_path / "cache" / "HY-WorldPlay")
-    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldplay_mi355x.sh")
-
-
-@pytest.mark.parametrize("framework", ["worldplay", "worldmirror"])
-def test_bundled_script_path_survives_grid_rebuild(monkeypatch, tmp_path, framework):
-    """Grid rebuild must keep the bundled absolute script path.
-
-    ``apply_runtime_benchmark_overrides`` re-derives the bare
-    ``{framework}_{gpu_type}.sh`` from ``gpu_type``; without re-applying the
-    scriptable defaults every explore and sweep variant aborts with
-    ``magpie_nonzero_invalid_measurement``.
-    """
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
-        apply_runtime_benchmark_overrides,
-    )
-
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    src = _write(tmp_path / f"{framework}.yaml", framework=framework, model="/models/placeholder", envs={"TP": 1})
-    expected = f"/assets/benchmark_scripts/{framework}_mi355x.sh"
-
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/m")
-    assert bench["benchmark_script"].endswith(expected)
-
-    apply_runtime_benchmark_overrides(bench, model_path=bench["model"], gpu_type="mi355x")
-
-    assert bench["benchmark_script"].startswith("/")
-    assert bench["benchmark_script"].endswith(expected)
-
-
-@pytest.mark.parametrize("framework", ["worldplay", "worldmirror"])
-def test_bundled_script_resolves_from_bare_name(monkeypatch, tmp_path, framework):
-    """A bare script name must still resolve to the bundled entrypoint.
-
-    Magpie and InferenceX never ship the bundled scriptable entrypoints, so
-    without the package assets dir in the search list any caller that lost the
-    absolute path resolves to None.
-    """
-    from hyperloom.orchestrator.actions.executors import bypass_scriptable as bs
-
-    _clear_env(monkeypatch)
-    monkeypatch.delenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", raising=False)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    bench = {"benchmark_script": f"{framework}_mi355x.sh"}
-
-    resolved = bs.resolve_scriptable_script(framework, "mi355x", str(tmp_path / "no-inferencex"), bench)
-
-    assert resolved is not None
-    assert resolved.is_file()
-    assert str(resolved).endswith(f"/assets/benchmark_scripts/{framework}_mi355x.sh")
-
-
-def test_worldplay_extra_env_repo_path_updates_runtime_alias(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        extra_envs={"WORLDPLAY_REPO_PATH": "/custom/HY-WorldPlay"},
-    )
-
-    envs = bench["envs"]
-    assert envs["WORLDPLAY_REPO_PATH"] == "/custom/HY-WorldPlay"
-    assert envs["WORLDPLAY_DIR"] == "/custom/HY-WorldPlay"
-
-
-def test_worldplay_extra_env_dir_updates_runtime_alias(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        extra_envs={"WORLDPLAY_DIR": "/custom/HY-WorldPlay"},
-    )
-
-    envs = bench["envs"]
-    assert envs["WORLDPLAY_REPO_PATH"] == "/custom/HY-WorldPlay"
-    assert envs["WORLDPLAY_DIR"] == "/custom/HY-WorldPlay"
-
-
-def test_worldplay_extra_env_model_type_updates_default_action_ckpt(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        model_path="/models/HunyuanVideo-1.5",
-        extra_envs={"WORLDPLAY_MODEL_TYPE": "bi"},
-    )
-
-    assert bench["envs"]["WORLDPLAY_ACTION_CKPT"] == (
-        "/models/HY-WorldPlay/bidirectional_model/diffusion_pytorch_model.safetensors"
-    )
-
-
-def test_worldplay_action_ckpt_env_overrides_default(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("WORLDPLAY_ACTION_CKPT", "/operator/custom.safetensors")
-    src = _write(tmp_path / "worldplay.yaml", framework="worldplay", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        model_path="/models/HunyuanVideo-1.5",
-    )
-
-    assert bench["envs"]["WORLDPLAY_ACTION_CKPT"] == "/operator/custom.safetensors"
 
 
 def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
     from hyperloom.orchestrator.actions.executors import bypass_scriptable
 
-    script = tmp_path / "worldplay_mi355x.sh"
+    script = tmp_path / "custom_mi355x.sh"
     script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
     resolved = bypass_scriptable.resolve_scriptable_script(
-        "worldplay",
+        "custom",
         "mi355x",
         "",
         {"benchmark_script": str(script)},
     )
 
     assert resolved == script
-
-
-def test_worldmirror_materialize_configures_github_repo_fallback(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    src = _write(tmp_path / "worldmirror.yaml", framework="worldmirror", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        model_path="/models/HY-World-2.0",
-        gpu_type="mi355x",
-    )
-
-    envs = bench["envs"]
-    assert envs["WORLDMIRROR_REPO_URL"] == "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
-    assert envs["WORLDMIRROR_REPO_PATH"] == str(tmp_path / "cache" / "HY-World-2.0")
-    assert envs["WORLDMIRROR_DIR"] == str(tmp_path / "cache" / "HY-World-2.0")
-    assert envs["WORLDMIRROR_BENCH"].endswith("/assets/benchmark_scripts/worldmirror_bench.py")
-    assert bench["benchmark_script"].endswith("/assets/benchmark_scripts/worldmirror_mi355x.sh")
-
-
-def test_worldmirror_extra_env_dir_updates_runtime_alias(monkeypatch, tmp_path):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    src = _write(tmp_path / "worldmirror.yaml", framework="worldmirror", model="/models/placeholder", envs={"TP": 1})
-
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi355x",
-        extra_envs={"WORLDMIRROR_DIR": "/custom/HY-World-2.0"},
-    )
-
-    envs = bench["envs"]
-    assert envs["WORLDMIRROR_REPO_PATH"] == "/custom/HY-World-2.0"
-    assert envs["WORLDMIRROR_DIR"] == "/custom/HY-World-2.0"
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):
@@ -397,7 +232,7 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "isl,osl,conc,factor",
     [
-        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 -> factor 3
+        (4000, 2000, 8, 3),  # 4096 < seq <= 16384 -> factor 3
         (3000, 1000, 8, 5),  # 1024 < seq <= 4096 -> factor 5
         (20000, 5000, 8, 2),  # > 16384 -> factor 2
     ],
@@ -767,38 +602,7 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# WorldPlay baseline sampling cost (measurement contract values)
+# Scriptable baseline sampling cost (measurement contract values)
 # ---------------------------------------------------------------------------
 
 
-def test_worldplay_baseline_samples_the_fps_once_per_leg():
-    """Pin the sampling counts: every extra sample costs a full 6-minute generation.
-
-    Measured on 8x MI355X: one 125-frame generation takes ~345s, so each timed
-    repeat is 5.75 minutes of wall clock. Three repeats produced steady fps of
-    0.348 / 0.349 / 0.349 -- 0.3% apart, against a KEEP threshold of 1-2%, so the
-    second and third repeat cost 11.5 minutes to confirm a number the first one
-    already established. No gate reads the resulting std; it is reported only.
-
-    The warmup generation stays: run 1 of 3 was 346.1s against 344.1s and 344.9s
-    for the others, so it really is absorbing first-touch cost (autotune, memory
-    pool, first kernel compile) rather than being ceremonial.
-
-    Calibration samples are cheaper (8 frames, not 125) but the second one is
-    equally redundant: the band takes the *worst* drift of the samples, and on a
-    real run the worst was the first sample (ssim 0.5792 vs 0.6139), so sample 2
-    changed nothing. ``WORLDPLAY_QUALITY_CALIB_MARGIN`` is what widens the band.
-
-    If a workload ever shows run-to-run spread approaching the KEEP threshold,
-    raise ``WORLDPLAY_REPEATS`` -- that is the knob, and this test is the record
-    of why it is currently 1.
-    """
-    import yaml
-
-    from hyperloom.inference_optimizer.session.paths import asset_root
-
-    cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_worldplay.yaml").read_text())
-    envs = cfg["benchmark"]["envs"]
-    assert envs["WORLDPLAY_REPEATS"] == 1
-    assert envs["WORLDPLAY_QUALITY_CALIB_SAMPLES"] == 1
-    assert envs["WORLDPLAY_WARMUP_CHUNKS"] == 1

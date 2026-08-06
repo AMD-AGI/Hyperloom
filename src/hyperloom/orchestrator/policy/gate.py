@@ -34,7 +34,6 @@ from ..phases.machine_state import (
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
-    SPECIALIST_DOMAIN_KEYS,
     SPECIALIST_MAX_TURNS_HARD_CAP,
     domain_for_tag,
     get_domain,
@@ -146,6 +145,9 @@ EXPLORE_ACTION_NAME: str = "explore"
 # rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
 # action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
 SWEEP_ACTION_NAME: str = "sweep"
+
+# Reference measurement action; named constant for the ``baseline_phase_singleton`` rule.
+BASELINE_ACTION_NAME: str = "baseline"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -297,7 +299,9 @@ SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
-# Prefix the SubAgentRunner stamps on specialist emit-intents (``from_agent='specialist:<task_id>'``).
+# Specialist task identity prefix: the dispatcher stamps ``specialist:<task_id>`` as the
+# source of a specialist result (explore parses the task_id back out), and a send_message
+# addressed to ``specialist:<task_id>`` is delivered to that specialist's inbox.
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
@@ -321,10 +325,13 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: Web tools. R5 — specialist-only (other roles get ``tool_whitelist_role``); usable in any phase.
+#: Web tools. R5 — specialist-only in this map (other roles get ``tool_whitelist_role``);
+#: usable in any phase. Note :meth:`PolicyGate.allowed_tools_for_agent` separately grants
+#: ``WebSearch`` / ``WebFetch`` to the orchestration agent.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
-#: Role→allowed-toolset map (R5). Only the specialist sub-agent touches external knowledge tools.
+#: Role→allowed-toolset map (R5). Only the specialist sub-agent may invoke PR Monitor / web
+#: tools as an action name.
 TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
@@ -362,6 +369,17 @@ REVIEW_VERDICTS: frozenset[str] = frozenset(
 # kill_task sources; the other scheduling-police intents stay robustness-only.
 KILL_TASK_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"robustness", "orchestration"})
 KILL_TASK_ALLOWED_SCOPES: frozenset[str] = frozenset({"task"})
+
+# prune_branch scopes. ``family`` retires the action for the rest of the run;
+# ``queued`` only drains the backlog and leaves the family usable.
+PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
+PRUNE_BRANCH_SCOPE_QUEUED: str = "queued"
+PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
+    {
+        PRUNE_BRANCH_SCOPE_FAMILY,
+        PRUNE_BRANCH_SCOPE_QUEUED,
+    }
+)
 
 # Ceiling on a single extend_lease step; repeated extensions are allowed.
 EXTEND_LEASE_MAX_SEC: int = 3600
@@ -415,12 +433,12 @@ SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
-    """Multi-node profile trace path-prefix allowlist (runtime-resolved; trailing ``/`` is load-bearing for the startswith check).
+    """Multi-node profile trace path allowlist (runtime-resolved).
 
     Returns:
         tuple[str, ...]: a single-element tuple holding the multi-node profile
-            trace root with a trailing ``/`` so prefix ``startswith`` checks are
-            path-boundary safe.
+            trace root, normalized with a trailing ``/``. Boundary safety is
+            enforced by :func:`_resolved_within`, not by the trailing slash.
     """
     from hyperloom.inference_optimizer.session.paths import mn_profile_trace_root
 
@@ -542,7 +560,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "close_sequence_done",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
-        # structured gaps ledger; single writer (``_refresh_gaps``).
+        # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
+        # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
+        # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.
         "gaps",
         # Orchestration working-memory checkpoint; Coordinator-authored.
         "orchestration_memory",
@@ -676,6 +696,8 @@ class PolicyGate:
         self,
         action_name: str,
         params: dict[str, Any] | None,
+        *,
+        task_id: str = "",
     ) -> None:
         """Re-validate a persisted queued task before executor dispatch.
 
@@ -689,6 +711,8 @@ class PolicyGate:
         Args:
             action_name: The task ``kind`` / delegate action name.
             params: Task params deserialized from the DB row.
+            task_id: Persisted task id, used to admit the tracked enablement
+                revalidation baseline.
 
         Raises:
             PolicyDenied: When the task would have been rejected had it
@@ -713,7 +737,17 @@ class PolicyGate:
         # conc_sweep against itself and surface as a spurious conc_sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate_body(role, payload, check_phase=False)
+        skip_baseline_singleton = (
+            kind == BASELINE_ACTION_NAME
+            and bool(task_id)
+            and str(task_id) == str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "")
+        )
+        self._validate_delegate_body(
+            role,
+            payload,
+            check_phase=False,
+            skip_baseline_singleton=skip_baseline_singleton,
+        )
 
     def _closing_phase_denial(
         self,
@@ -778,13 +812,11 @@ class PolicyGate:
 
         Enforces, in order: the role's ``can_delegate_side_effects``
         capability, presence of ``action_name``, the
-        analysis/internal-only gate, the kernel_agent-owned-action guard, and
-        the per-action specialised paths (``specialist`` / ``dynamic_action``
-        / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
-        the GEMM-tuning ownership, gain-driven and explore-minimum kernel_opt gates, the
-        ActionRegistry unknown-action lookup, per-action source and
-        required-payload guards, the phase-compatibility check, and the
-        external-tool collision guard (R5).
+        kernel_agent-owned-action guard, the per-action specialised paths
+        (``specialist`` / ``integrate_patch`` / ``sweep``), the GEMM-tuning
+        ownership gate, the ActionRegistry unknown-action lookup, per-action
+        source and required-payload guards, the phase-compatibility check,
+        and the external-tool collision guard (R5).
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -806,6 +838,7 @@ class PolicyGate:
         payload: dict[str, Any],
         *,
         check_phase: bool,
+        skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
 
@@ -849,6 +882,8 @@ class PolicyGate:
         # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
+        if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
+            self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -897,14 +932,12 @@ class PolicyGate:
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
-        Requires ``action_name`` and applies the internal-only gate. The
-        ActionRegistry lookup here is soft — unknown names are only
-        rejected when a registry is wired and the action is neither
-        registered nor kernel_agent-owned. Mirrors the delegate channel's
-        explore-grid, sweep-singleton, GEMM-tuning ownership, gain-driven /
-        explore-minimum kernel_opt, phase, and external-tool collision
-        gates so an LLM cannot sidestep them by proposing instead of
-        delegating.
+        Requires ``action_name``, then hard-rejects kernel_agent-owned
+        actions (REQUEST-only) before the ActionRegistry lookup, which is
+        soft — unknown names are rejected only when a registry is wired.
+        Mirrors the delegate channel's sweep-singleton, per-action source,
+        GEMM-tuning ownership, phase, and external-tool collision gates so
+        an LLM cannot sidestep them by proposing instead of delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -915,8 +948,8 @@ class PolicyGate:
             None: returns silently when the proposal is permitted.
 
         Raises:
-            PolicyDenied: if ``action_name`` is missing, unknown (with a
-                registry wired), internal-only, or fails one of the
+            PolicyDenied: if ``action_name`` is missing, kernel_agent-owned,
+                unknown (with a registry wired), or fails one of the
                 mirrored action gates.
         """
         action_name = str(payload.get("action_name", "")).strip()
@@ -945,6 +978,8 @@ class PolicyGate:
                 payload,
                 intent_kind="propose_action",
             )
+        if action_name == BASELINE_ACTION_NAME:
+            self._validate_baseline_singleton(payload)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -970,10 +1005,9 @@ class PolicyGate:
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate an ``UPDATE_STATE`` intent's ``changes`` against core fields.
 
-        Requires a non-empty ``changes`` dict. Roles with
-        ``can_mutate_core_state`` (the Coordinator) may write anything;
-        every other role is blocked from mutating any field in
-        :data:`CORE_STATE_FIELDS`.
+        Requires a non-empty ``changes`` dict. No role may mutate a field in
+        :data:`CORE_STATE_FIELDS` — those are Coordinator-owned and written
+        directly, not through UPDATE_STATE.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -984,8 +1018,8 @@ class PolicyGate:
             None: returns silently when the state transition is permitted.
 
         Raises:
-            PolicyDenied: if ``changes`` is missing/empty, or a
-                non-privileged role attempts to mutate core state fields.
+            PolicyDenied: if ``changes`` is missing/empty, or any role
+                attempts to mutate core state fields.
         """
         changes = payload.get("changes")
         if not isinstance(changes, dict) or not changes:
@@ -1171,9 +1205,6 @@ class PolicyGate:
                     hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
                 )
 
-    # NOTE: no ``framework_atom_action_unsupported`` rule exists; the guards
-    # that enforce this live in ``tests/test_policy_atom_invariants.py``.
-
     # R1 phase_incompatible
     def _validate_phase_action(
         self,
@@ -1247,8 +1278,7 @@ class PolicyGate:
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
             f"action from that list, or wait for the Coordinator to "
-            f"advance the phase. See KB_design §3.2 for the per-phase "
-            f"action contract."
+            f"advance the phase."
         )
         if not self.strict_phase:
             # Warn-only: keep the run flowing but record the denial.
@@ -1302,7 +1332,7 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Reject an external tool name not on the caller's role whitelist (KB/PR/Web tools are specialist-only).
+        """Reject an external tool name not on the caller's role whitelist (:data:`TOOL_WHITELIST_BY_ROLE` grants PR Monitor + web tools to ``specialist`` only).
 
         Args:
             role_name (str): the name of the emitting role.
@@ -1327,10 +1357,12 @@ class PolicyGate:
             rule="tool_whitelist_role",
             hint=(
                 f"Tool {action_name!r} is restricted to "
-                f"specialist sub-agents. The "
+                f"specialist sub-agents as an action name. The "
                 f"primary agents (orchestration / kernel / critic / "
-                f"robustness) consult KB / PR Monitor via the "
-                f"Coordinator-mediated KnowledgePlane facade instead."
+                f"robustness) reach KB / PR Monitor through the "
+                f"Coordinator-mediated KnowledgePlane facade instead; "
+                f"orchestration additionally holds WebSearch / WebFetch "
+                f"directly via allowed_tools_for_agent."
             ),
         )
 
@@ -1400,6 +1432,42 @@ class PolicyGate:
                 f"set params.bypass_sweep_singleton=True on the "
                 f"{intent_kind} payload (the override is recorded "
                 f"on the audit trail)."
+            ),
+        )
+
+    # ``baseline_phase_singleton`` / ``enablement_round_in_flight``
+    def _validate_baseline_singleton(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        """Deny a baseline proposal when an enablement round is in flight or the anchor is established."""
+        ss = getattr(self, "shared_state", None)
+        if ss is None:
+            return
+        _en = getattr(ss, "enablement", None)
+        inflight_tid = str(getattr(_en, "inflight_task_id", "") or "") if _en is not None else ""
+        if inflight_tid:
+            raise PolicyDenied(
+                f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
+                rule="enablement_round_in_flight",
+                hint=(
+                    "Wait for the enablement specialist to finish and rearm "
+                    "before re-running baseline."
+                ),
+            )
+        anchor = getattr(ss, "baseline_tput", 0.0)
+        if not isinstance(anchor, (int, float)) or anchor <= 0:
+            return
+        raise PolicyDenied(
+            (
+                f"baseline: the session anchor is already established "
+                f"(baseline_tput={float(anchor):.1f}); a repeat baseline "
+                f"re-measures a reference the run already has."
+            ),
+            rule="baseline_phase_singleton",
+            hint=(
+                "PRELUDE is done with baseline; let the phase advance and "
+                "re-measure the candidate rather than the reference."
             ),
         )
 
@@ -2077,6 +2145,18 @@ class PolicyGate:
             family = str(payload.get("family", "")).strip()
             if not family:
                 raise PolicyDenied("prune_branch missing family", rule="payload")
+            scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
+            if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
+                raise PolicyDenied(
+                    f"prune_branch scope={scope!r} not allowed "
+                    f"(allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
+                    rule="prune_scope",
+                    hint=(
+                        f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
+                        f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
+                        f"only cancels the queued backlog."
+                    ),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -2184,11 +2264,15 @@ __all__ = [
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
+    "BASELINE_ACTION_NAME",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KILL_TASK_ALLOWED_SCOPES",
     "KILL_TASK_SOURCE_ALLOWLIST",
     "PATH_LIKE_FIELDS",
+    "PRUNE_BRANCH_ALLOWED_SCOPES",
+    "PRUNE_BRANCH_SCOPE_FAMILY",
+    "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
     "REQUEST_ROUTING",

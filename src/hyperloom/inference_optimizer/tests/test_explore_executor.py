@@ -53,6 +53,19 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
 
+def _force_cold_decision(monkeypatch) -> None:
+    """Make server_lifecycle reuse ineligible, one of the two warm-decision preconditions."""
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.resolve_lifecycle_params",
+        lambda _config_path: {
+            "eligible": False,
+            "framework": "sglang",
+            "port": 30000,
+            "reason": "test: server_lifecycle reuse disabled",
+        },
+    )
+
+
 def _write_baseline_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -740,9 +753,203 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
-    """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+@pytest.mark.parametrize(
+    ("source", "expected_base_tput", "expected_outcome", "has_winner"),
+    [
+        (None, 2358.80, "REVERT", False),
+        ("resume_stack_revalidate", 2192.52, "KEEP", True),
+    ],
+)
+async def test_explore_executor_supersedes_stale_params_base_tput(
+    sub_agent_runner,
+    tmp_path,
+    source,
+    expected_base_tput,
+    expected_outcome,
+    has_winner,
+):
+    """Use the live anchor except when revalidating the complete stack."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 2195.86
+    state.current_best = {"action": "replay_warm_recipe", "tput": 2358.80}
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-stale-anchor"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=2355.46)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    grid = [
+        {
+            "name": "minimax-fused-swiglu+moe-combine",
+            "extra_args": "--fused-flag",
+            "extra_envs": {},
+            "provenance": "specialist:research_scout",
+        }
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            # Snapshotted when the task was queued, before the warm replay landed.
+            "base_tput": 2192.52,
+            "grid": grid,
+            "variant_timeout_sec": 10,
+            **({"source": source} if source else {}),
+        },
+        idempotency_key="ex-stale-anchor",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    assert bool(out["winners"]) is has_winner
+    fp = canonical_fingerprint("--fused-flag", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    assert tested["base_tput"] == expected_base_tput
+    assert tested["outcome"] == expected_outcome
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Superseding a stale ``base_tput`` also re-reads the args it was measured on."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "--live-layer 1",
+        "extra_envs": {"LIVE_ENV": "1"},
+    }
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=1100.0)  # +10% vs the live 1000
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-live-base"),
+            # Snapshotted together at dispatch, before the newer layer landed.
+            "base_tput": 800.0,
+            "base_extra_args": "--stale-layer 1",
+            "enable_stack_rebench": False,
+            "grid": [
+                {
+                    "name": "on_live_stack",
+                    "extra_args": "--variant 2",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-live-base-args",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    fp = canonical_fingerprint("--variant 2", {})
+    assert out["explore_search_update"]["tested"][fp]["base_tput"] == 1000.0
+    winner = out["winners"][0]
+    assert "--live-layer 1" in winner["extra_server_args"]
+    assert "--variant 2" in winner["extra_server_args"]
+    assert "--stale-layer" not in winner["extra_server_args"]
+    assert winner["extra_envs"]["LIVE_ENV"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_explore_stack_rebench_floor_follows_the_in_batch_anchor(
+    sub_agent_runner,
+    tmp_path,
+):
+    """A 2nd KEEP that regresses against the 1st is evicted, not KEPT with a negative gain."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        # Match on path segments: ``tmp_path`` is named after the test, so a
+        # substring check would fire on every round.
+        parts = set(slot.parts)
+        if "v01_second" in parts:
+            # Round 1 clears the advanced bar (1260 vs 1200); the confirmation
+            # round drops below it while still beating the round-start 1000.
+            tput = 1100.0 if "stack_rebench" in parts else 1260.0
+        else:
+            tput = 1200.0
+        _fake_workspace(slot, tput=tput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-floor"),
+            "base_tput": 1000.0,
+            "grid": [
+                {"name": "first", "extra_args": "--first", "extra_envs": {}, "provenance": "llm_direct"},
+                {"name": "second", "extra_args": "--second", "extra_envs": {}, "provenance": "llm_direct"},
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-rebench-floor",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"]
+    assert tested[canonical_fingerprint("--first", {})]["outcome"] == "KEEP"
+    assert tested[canonical_fingerprint("--second", {})]["outcome"] == "KEEP_UNSTABLE"
+    assert {w["name"] for w in out["winners"]} == {"first"}
+    assert all(w["gain_pct"] > 0 for w in out["winners"])
+    # The evicted variant must not drag the stack anchor down with it.
+    assert out["running_base_tput"] == 1200.0
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant in explore_search.tested runs again; only same-grid exact duplicates are collapsed."""
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -764,10 +971,12 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
     fp_dup = canonical_fingerprint("--dup-flag", {})
     grid = [
-        # Already in ledger.tested -> SKIPPED
-        {"name": "v_dup", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
-        # New -> runs
+        # Historical REVERT in ledger — must now execute (no cross-round block).
+        {"name": "v_prior_revert", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        # New variant — runs.
         {"name": "v_fresh", "extra_args": "--fresh-flag", "extra_envs": {}, "provenance": "llm_direct"},
+        # Exact same-grid duplicate of v_prior_revert — collapsed to round_dup.
+        {"name": "v_same_again", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
     ]
     task = await tr.create(
         kind="explore",
@@ -791,7 +1000,6 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "name_index": {},
             },
             "variant_timeout_sec": 10,
-            # Disable stack rebench so bench calls count only single-variant runs.
             "enable_stack_rebench": False,
         },
         idempotency_key="ex-dedup",
@@ -804,9 +1012,13 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
         res = await sub.run_task(task)
 
     out = res.result
-    assert {d["name"] for d in out["skipped_dup"]} == {"v_dup"}
-    assert len(bench_calls) == 1
-    assert {w["name"] for w in out["winners"]} == {"v_fresh"}
+    # v_same_again is a same-grid round_dup; v_prior_revert runs (no cross-round block).
+    assert {d["name"] for d in out["skipped_dup"]} == {"v_same_again"}
+    assert {d["reason"] for d in out["skipped_dup"]} == {"round_dup"}
+    # Both historical and fresh variants execute (two bench calls, not one).
+    assert len(bench_calls) == 2
+    # Historical REVERT fingerprint was not blocked — it ran and can win.
+    assert "v_prior_revert" in {w["name"] for w in out["winners"]}
 
 
 @pytest.mark.asyncio
@@ -816,7 +1028,6 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     monkeypatch,
 ):
     """Default EXPLORE measures hot decisions, matching default hot baseline."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -884,7 +1095,6 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     """The overtime deadline is anchored on a throughput-only baseline, so the
     rounds it gates must measure throughput only. The warmup round is ungated and
     remains the accuracy source."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -941,9 +1151,9 @@ async def test_explore_cold_decision_keeps_eval(
     tmp_path,
     monkeypatch,
 ):
-    """With warm-decision disabled there is no warmup eval to fall back on, so
-    the decision round must still run its own accuracy gate."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    """Without server_lifecycle reuse there is no warmup round whose eval the
+    decision round could fall back on, so it must run its own accuracy gate."""
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -991,13 +1201,61 @@ async def test_explore_cold_decision_keeps_eval(
 
 
 @pytest.mark.asyncio
+async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run(
+    sub_agent_runner,
+    tmp_path,
+):
+    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available.
+
+    The baseline gates its cold+hot double run on ``baseline_double_run`` as well
+    as lifecycle eligibility, so warm-decision has to honour both or a hot
+    candidate is scored against a cold anchor.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_double_run = False
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    seen: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append(str(slot))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-singleround"),
+            "base_tput": 800.0,
+            "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
+            "variant_timeout_sec": 30,
+        },
+        idempotency_key="ex-no-double-run",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert not [slot for slot in seen if "warmup_round" in slot]
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Q4-a: a failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    """A failed warmup round records the variant FAILED(reason=warmup_failed), no decision run."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1145,8 +1403,8 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     tmp_path,
     monkeypatch,
 ):
-    """Fix E (Q3c): a fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
+    """A fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
+    _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1227,7 +1485,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     sub_agent_runner,
     tmp_path,
 ):
-    """Fix E (Q5): ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
+    """ratio<=0 disables the gate; executor must NOT pass ``soft_deadline_sec``."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1598,256 +1856,6 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.extra_server_args == "--max-num-seqs 256"
 
 
-# -- WorldPlay production workload-spec filter (regression) -----------------
-# `apply_compatibility_filter` is test-only; the live explore dispatch path
-# enforces the locked WorldPlay spec via `filter_worldplay_grid`. These guard
-# that (a) off-spec proposals are dropped and (b) a full-drop falls through to
-# the curated seed grid instead of stalling the round with `empty_grid`.
-
-
-def test_filter_worldplay_grid_drops_distill_env_variant():
-    from hyperloom.orchestrator.actions.executors.explore import (
-        filter_worldplay_grid,
-        _grid_variants_from_payload,
-    )
-
-    grid = _grid_variants_from_payload(
-        [
-            {
-                "name": "v00_distill-4step-resident",
-                "extra_envs": {
-                    "WORLDPLAY_NUM_STEPS": "4",
-                    "WORLDPLAY_FEW_STEP": "1",
-                    "WORLDPLAY_ACTION_CKPT": "/x/ar_distilled_action_model/x.safetensors",
-                    "WORLDPLAY_TRANSFORMER_RESIDENT": "1",
-                },
-            },
-            {"name": "legit_resident", "extra_envs": {"WORLDPLAY_TRANSFORMER_RESIDENT": "1"}},
-        ]
-    )
-    kept, dropped = filter_worldplay_grid(grid, model_class="")
-    kept_names = {v.name for v in kept}
-    dropped_names = {n for n, _ in dropped}
-    assert "v00_distill-4step-resident" in dropped_names
-    assert "legit_resident" in kept_names
-
-
-def test_filter_worldplay_grid_drops_native_cli_variant():
-    from hyperloom.orchestrator.actions.executors.explore import (
-        filter_worldplay_grid,
-        _grid_variants_from_payload,
-    )
-
-    grid = _grid_variants_from_payload(
-        [
-            {"name": "teacache", "extra_args": "--use_cache teacache --teacache_thresh 0.15"},
-            {"name": "step_distill", "extra_args": "--enable_step_distill --infer_steps 12"},
-            {"name": "legit_compile", "extra_envs": {"WORLDPLAY_USE_TORCH_COMPILE": "1"}},
-        ]
-    )
-    kept, dropped = filter_worldplay_grid(grid, model_class="")
-    assert {n for n, _ in dropped} >= {"teacache", "step_distill"}
-    assert "legit_compile" in {v.name for v in kept}
-
-
-def test_filter_worldplay_grid_falls_through_to_seed_when_all_dropped():
-    from hyperloom.orchestrator.actions.executors.explore import (
-        filter_worldplay_grid,
-        _grid_variants_from_payload,
-        _worldplay_default_grid,
-    )
-
-    # Every proposal off-spec (native CLI + distillation): must not return empty.
-    grid = _grid_variants_from_payload(
-        [
-            {"name": "teacache", "extra_args": "--use_cache teacache"},
-            {"name": "cfg_distill", "extra_args": "--cfg_distilled --infer_steps 50"},
-            {"name": "distill_env", "extra_envs": {"WORLDPLAY_NUM_STEPS": "4"}},
-        ]
-    )
-    kept, dropped = filter_worldplay_grid(grid, model_class="")
-    assert len(dropped) == 3
-    # Fell through to the curated seed grid — all legit, all pass a re-filter.
-    seed_names = {v.name for v in _worldplay_default_grid(model_class="")}
-    assert kept, "expected seed-grid fallthrough, got empty"
-    assert {v.name for v in kept} == seed_names
-
-
-def test_filter_worldplay_grid_no_fallthrough_when_some_kept():
-    from hyperloom.orchestrator.actions.executors.explore import (
-        filter_worldplay_grid,
-        _grid_variants_from_payload,
-    )
-
-    grid = _grid_variants_from_payload(
-        [
-            {"name": "distill_env", "extra_envs": {"WORLDPLAY_FEW_STEP": "1"}},
-            {"name": "legit_hw_queues", "extra_envs": {"GPU_MAX_HW_QUEUES": "2"}},
-        ]
-    )
-    kept, dropped = filter_worldplay_grid(grid, model_class="")
-    assert [v.name for v in kept] == ["legit_hw_queues"]
-    assert [n for n, _ in dropped] == ["distill_env"]
-
-
-# -- WorldPlay distilled action-ckpt value-level lock (regression) ----------
-# A variant could pass ONLY a distilled ckpt (no NUM_STEPS/FEW_STEP) and slip
-# past the key-presence blacklist; the value-level check closes that.
-
-
-def test_worldplay_blacklist_reason_locks_distilled_action_ckpt_env():
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_blacklist_reason,
-    )
-
-    distilled = {
-        "WORLDPLAY_ACTION_CKPT": "/m/HY-WorldPlay/ar_distilled_action_model/diffusion_pytorch_model.safetensors"
-    }
-    assert worldplay_blacklist_reason(distilled)
-    stock = {"WORLDPLAY_ACTION_CKPT": "/m/HY-WorldPlay/ar_model/diffusion_pytorch_model.safetensors"}
-    assert worldplay_blacklist_reason(stock) is None
-
-
-def test_worldplay_server_args_reason_locks_distilled_action_ckpt_cli():
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_server_args_reason,
-    )
-
-    assert worldplay_server_args_reason("--action_ckpt /m/ar_distilled_action_model/x.safetensors")
-    assert worldplay_server_args_reason("--action_ckpt /m/ar_model/x.safetensors") is None
-
-
-# -- WorldPlay TunableOp GPU-fault lock (regression) ------------------------
-# Session 20260730T135601Z recorded "Memory access fault by GPU node-2" with
-# "PYTORCH_TUNABLEOP BLACKLISTED for this pipeline — causes Memory access fault
-# by GPU node on gfx950 after MIOpen fails to find grouped-conv solver". The
-# fault path is MIOpen grouped-conv, NOT torch.compile, so ENABLED alone is not
-# safe either. A GPU memory fault outlives the variant that caused it, so this
-# must never reach dispatch on an unattended campaign.
-
-
-@pytest.mark.parametrize(
-    "key",
-    ["PYTORCH_TUNABLEOP_ENABLED", "PYTORCH_TUNABLEOP_TUNING"],
-)
-def test_worldplay_blacklist_reason_locks_tunableop(key):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_blacklist_reason,
-    )
-
-    assert worldplay_blacklist_reason({key: "1"}), f"{key} must be blacklisted"
-
-
-@pytest.mark.parametrize("key", ["WORLDPLAY_USE_FP8_GEMMS", "WORLDPLAY_USE_FP8_GEMM"])
-def test_worldplay_blacklist_reason_locks_fp8_gemm_aliases(key):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_blacklist_reason,
-    )
-
-    assert worldplay_blacklist_reason({key: "1"}), f"{key} must be blacklisted"
-
-
-# -- WorldPlay measurement-contract lock (regression) -----------------------
-# `--warmup` (discarded full generations) and `--repeats` (timed generations
-# aggregated into mean/std) define HOW the fps is sampled, not what runs. A
-# variant that shrinks either still produces a legal-looking steady-state fps,
-# but sampled differently from the baseline it is compared against. The lock is
-# on the key, not on a particular count: the baseline's own repeat count is set in
-# baseline_worldplay.yaml and has changed more than once.
-
-
-@pytest.mark.parametrize(
-    "envs",
-    [
-        {"WORLDPLAY_REPEATS": "1"},
-        {"WORLDPLAY_WARMUP_CHUNKS": "0"},
-    ],
-)
-def test_worldplay_blacklist_reason_locks_measurement_contract(envs):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_blacklist_reason,
-    )
-
-    assert worldplay_blacklist_reason(envs), f"{envs} must be blacklisted"
-
-
-@pytest.mark.parametrize("args", ["--repeats 1", "--warmup 0"])
-def test_worldplay_server_args_reason_locks_measurement_contract(args):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_server_args_reason,
-    )
-
-    assert worldplay_server_args_reason(args), f"{args!r} must be blacklisted"
-
-
-# -- WorldPlay store_true shape lock (regression) ----------------------------
-# Session 20260803T134328Z burned two full explore rounds: the proposer wrote
-# ``--enable_torch_compile true`` (the shape every other accepted flag uses),
-# argparse rejected the trailing token, and all four dispatches died in 2.3s as
-# "bench_fps.py: error: unrecognized arguments: true".
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        "--enable_torch_compile true",
-        "--enable_torch_compile=true",
-        "--enable_torch_compile false",
-        "--offloading 0 --transformer_resident_ar_rollout 1 --enable_torch_compile true",
-    ],
-)
-def test_worldplay_server_args_reason_drops_store_true_with_value(args):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_server_args_reason,
-    )
-
-    reason = worldplay_server_args_reason(args)
-    assert reason, f"{args!r} must be dropped before dispatch"
-    assert "store_true" in reason
-    assert "WORLDPLAY_USE_TORCH_COMPILE" in reason
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        "--enable_torch_compile",
-        "--enable_torch_compile --group_offloading block_level",
-        "--offloading 0 --group_offloading 0",
-        "--transformer_resident_ar_rollout 1",
-    ],
-)
-def test_worldplay_server_args_reason_keeps_valid_store_true_shape(args):
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        worldplay_server_args_reason,
-    )
-
-    assert worldplay_server_args_reason(args) is None, f"{args!r} must survive"
-
-
-def test_worldplay_seed_grid_survives_its_own_filter():
-    """Every curated seed variant must pass the WorldPlay spec filter.
-
-    The full-drop fallthrough returns the seed grid, so a seed variant that
-    trips the blacklist would bypass the guard entirely. This invariant keeps
-    the two lists from drifting apart.
-    """
-    from hyperloom.orchestrator.actions.executors.explore import (
-        _worldplay_default_grid,
-        filter_worldplay_grid,
-    )
-
-    seed = _worldplay_default_grid(model_class="")
-    assert seed, "seed grid must not be empty"
-    kept, dropped = filter_worldplay_grid(seed, model_class="")
-    assert not dropped, f"seed variants trip the spec filter: {dropped}"
-    assert {v.name for v in kept} == {v.name for v in seed}
-
-
-# -- abort_reason stderr passthrough (regression) --------------------------
-# magpie_nonzero_invalid_measurement lost the real diagnostic because the
-# bypass child's stderr lands in benchmark_stderr.log, not the parent pipe.
-
-
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     from hyperloom.orchestrator.actions.executors._grid_runner import (
         _on_disk_stderr_tail,
@@ -1860,3 +1868,77 @@ def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
     assert "unrecognized arguments" in tail
     # Empty dir → empty string (caller keeps its original blank error).
     assert _on_disk_stderr_tail(tmp_path / "nope") == ""
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_runner, tmp_path, monkeypatch):
+    """FAILED and accepted historical fingerprints may rerun; rejected contains latest attempt."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-rerun"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    fp_failed = canonical_fingerprint("--prev-failed", {})
+    fp_accepted = canonical_fingerprint("--prev-kept", {})
+    grid = [
+        {"name": "rerun_failed", "extra_args": "--prev-failed", "extra_envs": {}, "provenance": "llm_direct"},
+        {"name": "rerun_kept", "extra_args": "--prev-kept", "extra_envs": {}, "provenance": "llm_direct"},
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": grid,
+            "explore_search": {
+                "tested": {
+                    fp_failed: {
+                        "fingerprint": fp_failed,
+                        "name": "rerun_failed",
+                        "extra_server_args": "--prev-failed",
+                        "extra_envs": {},
+                        "outcome": "FAILED",
+                        "gain_pct": None,
+                    },
+                },
+                "rejected": [],
+                "accepted": [
+                    {
+                        "fingerprint": fp_accepted,
+                        "name": "rerun_kept",
+                        "extra_server_args": "--prev-kept",
+                        "extra_envs": {},
+                        "outcome": "KEEP",
+                        "gain_pct": 5.0,
+                    }
+                ],
+                "name_index": {},
+            },
+            "variant_timeout_sec": 10,
+            "enable_stack_rebench": False,
+        },
+        idempotency_key="ex-rerun-all",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # Neither historical FAILED nor accepted fingerprint is blocked.
+    assert not any(d["reason"] == "ledger_dup" for d in out["skipped_dup"])
+    # Both ran (first one wins; second measures same tput as updated base so it won't KEEP).
+    tested = out["explore_search_update"]["tested"]
+    assert fp_failed in tested
+    # The latest result for fp_failed overwrites the FAILED entry.
+    assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE", "KILLED_OVERTIME")

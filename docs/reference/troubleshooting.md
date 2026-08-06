@@ -180,7 +180,9 @@ the baseline benchmark fails with VRAM allocation errors.
    `pkill -f sglang.launch_server` (or `vllm`).
 2. Bump `TP` (for example, 4 → 8) so weights and KV cache fit.
 3. Lower `MAX_MODEL_LEN` to the smallest length your workload actually
-   needs (default 8192 is often too generous).
+   needs. When unset it is auto-derived as ISL + OSL + headroom, clamped
+   to the model's native context; pin a smaller value with
+   `--max-model-len`.
 4. Lower `CONC` to reduce simultaneous KV cache pressure.
 
 The Robustness agent classifies repeated OOMs as a `log_error_pattern`

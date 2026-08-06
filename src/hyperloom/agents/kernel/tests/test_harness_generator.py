@@ -460,7 +460,7 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
 
     maybe_generate_harness does ``from validate_harness import static_check``
     against the real module on disk; patch its attribute on the real (or a
-    freshly injected) module object so both L1/L2 call sites see the stub.
+    freshly injected) module object so both call sites see the stub.
     """
     stub = _fake_static_check(harness_ok, bench_ok)
     validator_dir = _TOOLS_DIR.parent / "skills" / "unittest"
@@ -517,7 +517,7 @@ def test_aiter_shape_from_candidate_empty():
     assert hg._aiter_shape_from_candidate({}) == {}
 
 
-# ---- new type-inference predicates (P1) ----
+# ---- type-inference predicates ----
 
 
 @pytest.mark.parametrize(
@@ -579,7 +579,7 @@ def test_is_dtype_param(name, expected):
     assert hg._is_dtype_param(name) is expected
 
 
-# ---- attention-like harness: union keys + correct types (P1 + P2) ----
+# ---- attention-like harness: union keys + correct types ----
 
 ATTN_BENCH_SRC = """\
 import torch
@@ -650,7 +650,7 @@ def _referenced_keys(body: str) -> set[str]:
 
 
 def test_setup_inputs_union_covers_ref_only_keys():
-    """run_ref must never reference a key setup_inputs didn't create (P2)."""
+    """run_ref must never reference a key setup_inputs didn't create."""
     a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
     dec = a.get_decorated_functions()
     test_func = a.get_test_function(dec)
@@ -670,7 +670,7 @@ def test_setup_inputs_union_covers_ref_only_keys():
 
 
 def test_setup_inputs_infers_correct_types():
-    """Index/scalar/dtype args must not be built as 2D float tensors (P1)."""
+    """Index/scalar/dtype args must not be built as 2D float tensors."""
     a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
     dec = a.get_decorated_functions()
     test_func = a.get_test_function(dec)
@@ -695,7 +695,7 @@ def test_setup_inputs_infers_correct_types():
 
 
 def test_run_func_body_uses_get_not_subscript():
-    """run_* bodies must use inputs.get to avoid KeyError (P2)."""
+    """run_* bodies must use inputs.get to avoid KeyError."""
     a = hg.BenchmarkAnalyzer(ATTN_BENCH_SRC)
     dec = a.get_decorated_functions()
     test_func = a.get_test_function(dec)

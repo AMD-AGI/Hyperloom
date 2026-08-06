@@ -363,7 +363,7 @@ def test_model_family(tmp_path: Path, model_type, arches, name, expected_family)
 
 
 def test_shared_expert_detected_via_n_shared_experts(tmp_path: Path) -> None:
-    """MiniMax-M3 / DeepSeek-style: n_shared_experts key emits has_shared_expert."""
+    """DeepSeek-style: n_shared_experts key emits has_shared_expert."""
     m = _write_config(
         tmp_path / "m",
         {

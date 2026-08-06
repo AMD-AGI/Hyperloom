@@ -3,9 +3,9 @@
 
 """Environment-variable knobs for the trace subsystem.
 
-Centralizes bool parsing for the trace package so the Langfuse toggle reads
-identically everywhere. Owns only the trace-related names, prefixed
-``HYPERLOOM_*`` for cross-component escape hatches.
+Owns the ``HYPERLOOM_LANGFUSE_ENABLE`` master switch plus the official
+``LANGFUSE_*`` connection and flush-cadence vars, and provides the shared
+boolean-token parser used across the trace package.
 """
 
 from __future__ import annotations

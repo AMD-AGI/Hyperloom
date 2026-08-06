@@ -565,7 +565,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         target_functions=["kernel_impl", "device_kernel"],
     )
 
-    # The loop result is a 7-field outcome; unpacking it as a bare tuple is what
+    # The loop result is a named outcome; unpacking it as a bare tuple is what
     # silently broke the recovery channels before.
     assert forge_submit.ForgeLoopOutcome._fields == (
         "baseline_ms",

@@ -105,7 +105,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             for a in attempts[:10]
         ]
         md_parts.append("")
-        md_parts.append("**Baseline attempts** (last 10):")
+        md_parts.append("**Baseline attempts** (first 10):")
         md_parts.append(
             md_table(
                 ["ts", "status", "decision", "key_metric", "error_class"],

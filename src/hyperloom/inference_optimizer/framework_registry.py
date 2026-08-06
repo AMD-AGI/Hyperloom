@@ -3,8 +3,8 @@
 
 """Single source of truth for inference-framework capabilities.
 
-A *framework* is one serving/execution backend a session optimizes
-(``sglang`` / ``vllm`` / ``atom`` / ``xdit``). This module centralizes the
+A *framework* is one serving/execution backend a session optimizes (see the
+``FRAMEWORKS`` table below for the current set). This module centralizes the
 allowed set and per-framework behavior (extra-args env name, repo URL,
 server-reuse eligibility) so adding a framework is a single-table edit.
 
@@ -103,30 +103,20 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
-    # HY-WorldPlay (HunyuanVideo-1.5): a server-less autoregressive video
-    # diffusion pipeline. A "bench" is one `torchrun bench_fps.py` sequence-
-    # parallel rollout; the metric is steady-state GENERATED FRAMES PER SECOND
-    # (higher = better). Driven by the customer's vendored bench-kit via the
-    # worldplay_{runner_type}.sh entrypoint. BF16-locked; correctness is a
-    # self-calibrating SSIM/MSE/LPIPS quality band vs a BF16 reference clip.
-    "worldplay": FrameworkSpec(
-        name="worldplay",
+    # An operator's own workload. Everything the entries above hardcode — the
+    # checkout, the entrypoint, the knobs the script reads — arrives at launch
+    # instead: ``--framework-path`` and ``--benchmark-scripts-dir`` (or their
+    # env forms), plus ``--extra-env`` for whatever the script itself reads.
+    # There is no upstream repo to discover PRs from, and the throughput unit
+    # is deliberately neutral: only the operator's own report knows whether the
+    # number it produced counts frames, images or anything else.
+    "custom": FrameworkSpec(
+        name="custom",
         kind=SCRIPTABLE,
-        extra_args_env="EXTRA_WORLDPLAY_ARGS",
-        repo_url="https://github.com/Tencent-Hunyuan/HY-WorldPlay.git",
+        extra_args_env="EXTRA_CUSTOM_ARGS",
+        repo_url=None,
         supports_server_reuse=False,
-        throughput_unit="fps",
-    ),
-    # WorldMirror (HunyuanWorld-Mirror 2.0): feed-forward 3D reconstruction
-    # from multi-view images/video. The scriptable wrapper measures one
-    # reconstruction pass per scene and gates geometry by per-head relative L1.
-    "worldmirror": FrameworkSpec(
-        name="worldmirror",
-        kind=SCRIPTABLE,
-        extra_args_env="EXTRA_WORLDMIRROR_ARGS",
-        repo_url="https://github.com/Tencent-Hunyuan/HY-World-2.0.git",
-        supports_server_reuse=False,
-        throughput_unit="recon/s",
+        throughput_unit="unit/s",
     ),
 }
 

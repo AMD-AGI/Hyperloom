@@ -13,7 +13,7 @@ Script resolution (bypass owns its choice; it does NOT depend on Magpie being
 importable):
   1. ``$HYPERLOOM_BYPASS_SCRIPTS_DIR`` (operator override / vendored dir),
   2. the package's bundled ``assets/benchmark_scripts`` (frameworks whose
-     entrypoint ships with Hyperloom, e.g. worldplay / worldmirror),
+     entrypoint is supplied by the operator),
   3. Magpie's ``scripts/benchmark`` via ``$MAGPIE_PATH`` (reuse when present),
   4. ``<inferencex>/benchmarks`` (staged copies).
 """
@@ -26,7 +26,7 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.inference_optimizer.session.paths import asset_root
 
 
@@ -97,7 +97,7 @@ def build_scriptable_env(
     Returns:
         The environment mapping for the scriptable subprocess.
     """
-    env = scrub_child_process_env(os.environ.copy())
+    env = scrub_benchmark_process_env(os.environ.copy())
     env["MODEL"] = str(bench.get("model") or env.get("MODEL", ""))
     if bench.get("precision"):
         env["PRECISION"] = str(bench["precision"])
@@ -115,7 +115,7 @@ def build_scriptable_env(
         if profile_dir:
             env["VLLM_TORCH_PROFILER_DIR"] = profile_dir
             env["SGLANG_TORCH_PROFILER_DIR"] = profile_dir
-    return env
+    return scrub_benchmark_process_env(env)
 
 
 def run_scriptable(

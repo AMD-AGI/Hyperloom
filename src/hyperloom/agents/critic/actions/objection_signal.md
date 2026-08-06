@@ -39,13 +39,8 @@ When in doubt, return one `send_message{topic="advice"}` plus
 `verdict = "advise"`. The runtime will package it into the intent
 envelope without blocking dispatch.
 
-## Step 3 — Commit
+## No commit step
 
-```bash
-python -m runtime.cli commit-review \
-  --request "$CRITIC_WORKDIR/request.json" \
-  --review "$CRITIC_WORKDIR/review.json" \
-  --out "$CRITIC_WORKDIR/emit.json"
-```
-
-The host should treat the resulting envelope as informational only.
+An `objection_signal` turn ends at `prepare-review`: `commit-review`
+does not dispatch this kind and fails with a `ReviewValidationError`.
+The host consumes the advice body directly as informational input.

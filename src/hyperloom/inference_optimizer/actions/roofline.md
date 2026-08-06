@@ -29,7 +29,9 @@ The executor **does not invoke any LLM** and **does not produce a
 structured `RooflineAnalysis` dict**. The Orchestration LLM consumes
 the raw `analysis.md` from the prompt and makes decisions directly —
 this is the TraceLens-team-mandated "no second interpretation"
-contract (see design/roofline-v2.md §6.2).
+contract (enforced by RooflineExecutor — see the "Design constraints"
+docstring in `src/hyperloom/orchestrator/actions/executors/roofline.py`,
+which makes no LLM call).
 
 ## Who enqueues it
 

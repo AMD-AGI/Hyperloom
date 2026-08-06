@@ -85,7 +85,9 @@ def _resolve_kb_root() -> Path:
 
     Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) IO's
     ``INFERENCE_OPTIMIZER_FA_KB_PATH`` compatibility override;
-    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``${repo}/framework-agent/kb``.
+    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``<hyperloom package>/kb``, a
+    last-resort path that does not exist in the tree or in an install --
+    installs always set ``FRAMEWORK_AGENT_ROOT``, so step (3) wins.
 
     Returns:
         The resolved KB root path.

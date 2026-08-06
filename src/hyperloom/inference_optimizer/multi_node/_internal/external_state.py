@@ -20,6 +20,19 @@ log = logging.getLogger(__name__)
 # across a hand-off reload without having to be registered here.
 _SESSION_KEY_PREFIX = "last_"
 
+# Launcher-derived, cluster-specific keys that lack the ``last_`` prefix but must
+# still survive a same-hand-off reload. The PD prefill/decode leg URLs are read
+# from the launcher's summary and describe THIS cluster's legs; dropping them on
+# reload makes the CLI's mid-restart checkpoint persist a state without them, so
+# any later launch failure leaves them wiped on disk, and the PD serving/resume
+# probe (:func:`serving_probe._serving_legs`) then sees no legs and can never
+# resume. A stale value (legs rescheduled to new IPs) only fails the probe
+# safely -- it health-checks the leg URLs -- and a full restart overwrites it.
+_HANDOFF_CARRIED_KEYS = (
+    "pd_prefill_url",
+    "pd_decode_url",
+)
+
 # The fields that identify *which* cluster a state describes. Connection
 # endpoints rather than counts: a replacement cluster is reachable at different
 # addresses, while its node count or PD split is typically identical.
@@ -427,7 +440,8 @@ def load_multi_node_state() -> dict[str, Any]:
                 )
             elif disk:
                 for key, value in disk.items():
-                    if key.startswith(_SESSION_KEY_PREFIX) and key not in ext_state:
+                    carried = key.startswith(_SESSION_KEY_PREFIX) or key in _HANDOFF_CARRIED_KEYS
+                    if carried and key not in ext_state:
                         ext_state[key] = value
             return ext_state
 

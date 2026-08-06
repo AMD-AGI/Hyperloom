@@ -10,18 +10,16 @@ lane; the manager raises :class:`LaneFull` at capacity vs :class:`LaneBusy`
 on a cross-lane conflict. ``benchmark_lane`` holds at most one holder via the
 default capacity=1 for serving-side lanes.
 
-Ray-managed GPU execution (ray_modify.plan.md §12 T7, decision 1): under
-single-node Ray execution the **authoritative** physical GPU mutex is now Ray's
-custom resources — serving-family work (serving / benchmark / profile /
-gpu_research) holds a whole-machine ``serving_slot`` and GPU specialists hold
-``num_gpus``, so Ray physically prevents card sharing regardless of what these
-SQLite lanes do. These lanes are kept as a **scheduling / observability /
-accounting view**: they still gate dispatch cheaply and their acquire / release
-/ expiry events feed the lane timeline, resume reconciliation and prompt
-displays, but they are no longer the truth source for GPU mutual exclusion (Ray
-is). The two layers are redundant — either alone keeps serving and specialists
-off the same card — so the SQLite gate is retained (not deleted) for its
-observability + resume value.
+Ray-managed GPU execution: under single-node Ray execution the **authoritative**
+physical GPU mutex is Ray's custom resources — serving-family work (serving /
+benchmark / profile / gpu_research) holds a whole-machine ``serving_slot`` and
+GPU specialists hold ``num_gpus``, so Ray physically prevents card sharing
+regardless of what these SQLite lanes do. These lanes are a **scheduling /
+observability / accounting view**: they gate dispatch cheaply and their acquire
+/ release / expiry events feed the lane timeline, resume reconciliation and
+prompt displays, but they are not the truth source for GPU mutual exclusion.
+The two layers are redundant — either alone keeps serving and specialists off
+the same card — so the SQLite gate is kept for its observability + resume value.
 """
 
 from __future__ import annotations
@@ -150,7 +148,7 @@ class StaleLeaseError(RuntimeError):
 
 
 class SqliteLeaseBackend:
-    """Default ``ResourceLockBackend`` (ADR-42); ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
+    """Lease backend behind :class:`ResourceLockManager`; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
     def __init__(self, db: SqliteConnection):
         """Bind the backend to a SQLite connection.
@@ -502,8 +500,9 @@ class SqliteLeaseBackend:
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` for lanes with live rows.
 
-        Used by the breakdown ``lane_timeline`` collector + by dispatchers
-        to gauge research_lane occupancy.
+        Used by the dispatcher to gauge research_lane occupancy. (The
+        breakdown ``lane_timeline`` collector reads the ``leases`` table
+        directly and does not go through this method.)
 
         Returns:
             dict[str, int]: Map of lane name to its live holder count.

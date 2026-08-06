@@ -5,7 +5,8 @@
 
 Covers the shell invariants unit tests can't reach: missing-builtin exit, no-pid
 fail-loud, aiperf rc gating, happy-path mapping, AIPERF_* scrub keeping
-AIPERF_BIN, and GPU_TYPE lowercasing. POSIX-only (skipped elsewhere).
+AIPERF_BIN, GPU_TYPE lowercasing, warmup-flag gating, and builtin resolution
+from FRAMEWORK / AGENTX_SERVER_SCRIPT. POSIX-only (skipped elsewhere).
 """
 
 from __future__ import annotations

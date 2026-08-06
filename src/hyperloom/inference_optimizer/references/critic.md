@@ -22,9 +22,10 @@ Default is overridable per pod via `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 
-`_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory with
+CLI startup checks that `CRITIC_AGENT_ROOT` resolves to a real directory with
 `runtime/cli.py`, then runs `python -m hyperloom.agents.critic.runtime.cli --help`
-(5s timeout) before the Coordinator boots. Missing or broken runtime aborts the
+(90s timeout; override via `CRITIC_AGENT_PROBE_TIMEOUT_SEC`) before the
+Coordinator boots. Missing or broken runtime aborts the
 run with a clear error pointing at `--critic-mock` as the offline bypass.
 
 ## Per-turn artefacts (audit trail)

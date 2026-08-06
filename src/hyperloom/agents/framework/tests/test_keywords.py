@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.keywords.extract_keywords. Hermetic - pure-Python, no network/GPU/disk."""
+"""Tests for hyperloom.agents.framework.keywords.extract_keywords. Hermetic - pure-Python, no network/GPU/disk."""
 
 from __future__ import annotations
 

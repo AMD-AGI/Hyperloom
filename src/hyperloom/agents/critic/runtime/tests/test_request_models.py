@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Schema validation for :mod:`critic-agent.runtime.request_models`."""
+"""Schema validation for :mod:`runtime.request_models`."""
 
 from __future__ import annotations
 

@@ -28,8 +28,8 @@ DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
 
 # Custom Ray resource declared on the single-node head so serving-family work
 # (serving / benchmark / profile / gpu_research) can hold a whole-machine
-# ``serving_slot`` as the authoritative physical mutex (ray_modify.plan.md §12
-# T6, decision 1). Capacity 1 => at most one serving-family task holds the node
+# ``serving_slot`` as the authoritative physical mutex.
+# Capacity 1 => at most one serving-family task holds the node
 # at a time; GPU specialists request ``num_gpus`` only (serving-disjoint) and do
 # not take the slot. Declared here (rather than only in the orchestrator) so
 # whichever caller starts the local head first — kernel-agent or orchestrator —
@@ -289,7 +289,7 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     # Free, probed GCS/dashboard/client ports so co-located host-network sessions
     # never collide on Ray's fixed defaults (6379/8265/10001).
     cmd.extend(iso_args)
-    # Declare the ``serving_slot`` custom resource (§12 T6 authoritative mutex).
+    # Declare the ``serving_slot`` custom resource (authoritative mutex).
     cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +365,7 @@ def force_restart_local_cluster(
         start_cmd.append(f"--num-gpus={num_gpus}")
     # Free, probed GCS/dashboard/client ports (see ensure_ray_cluster).
     start_cmd.extend(iso_args)
-    # Re-declare the ``serving_slot`` custom resource after a fresh head (§12 T6).
+    # Re-declare the ``serving_slot`` custom resource after a fresh head.
     start_cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

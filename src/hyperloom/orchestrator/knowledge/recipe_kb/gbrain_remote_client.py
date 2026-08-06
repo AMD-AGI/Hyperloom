@@ -151,6 +151,9 @@ class _GbrainMcp:
 
         Args:
             resp: The open ``http.client.HTTPResponse`` from ``urlopen``.
+            allow_bare_result: Accept a bare (non-JSON-RPC-enveloped) tool
+                result as a complete response, loosening the read loop's stop
+                condition; set by ``call()`` for tools in ``_BARE_RESULT_TOOLS``.
 
         Returns:
             The decoded response body text.

@@ -62,7 +62,7 @@ def test_format_search_state():
     out = SharedState._format_search_state(search)
     assert "cursor=3" in out
     assert "accepted:" in out
-    assert "rejected (last 5):" in out
+    assert "rejected (last 15):" in out
 
 
 def test_format_optimization_stack():

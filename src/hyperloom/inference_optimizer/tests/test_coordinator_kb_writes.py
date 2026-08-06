@@ -72,7 +72,7 @@ def _expected_cid() -> str:
 
 
 def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
-    """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id`` and the gap anchor."""
+    """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id``."""
     coord = _make_coordinator(tmp_path)
     assert hasattr(coord, "_workload_canonical_id")
     assert coord._workload_canonical_id() == _expected_cid()

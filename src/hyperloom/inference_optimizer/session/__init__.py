@@ -11,7 +11,8 @@ Subpackage defining "where a session lives on disk":
   *inside* a session directory: ``manifest_path``, ``runs_dir``,
   ``reports_dir``, ``recipe_kb_*``, ...).
 * ``lock.py`` — the single-optimizer advisory ``flock`` guard.
-* ``manifest.py`` — the ``manifest.json`` writer/reader (schema v3).
+* ``manifest.py`` — the ``manifest.json`` writer/reader (see
+  ``manifest.SCHEMA_VERSION``).
 
 This ``__init__.py`` intentionally does **not** re-export the submodules'
 public symbols: callers import the fully-qualified submodule path so the

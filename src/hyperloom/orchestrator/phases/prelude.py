@@ -12,6 +12,7 @@ from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
 )
+from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
@@ -144,8 +145,8 @@ class PreludePhase(PhaseHandler):
     ) -> list:
         """Filter replay patches using KG advisory blocks, expiry, conflicts.
 
-        Removes patches that are (a) advisory-blocked at/above the
-        configurable confidence threshold, (b) flagged ``expired`` by the
+        Removes patches that are (a) advisory-blocked at/above a fixed 0.75
+        confidence threshold, (b) flagged ``expired`` by the
         warm-start validity check, or (c) in a ``CONFLICTS_WITH`` relation
         with another patch in the set. Best-effort: any failure returns the
         input patches unchanged so replay never breaks on a KG hiccup.
@@ -698,22 +699,7 @@ class PreludePhase(PhaseHandler):
             "reason": str(reason),
         }
         if reason != "prelude_initial":
-            cb = state.current_best or {}
-            if isinstance(cb, dict):
-                cb_args = str(cb.get("extra_server_args") or "")
-                if cb_args:
-                    params["base_extra_args"] = cb_args
-                cb_envs = cb.get("extra_envs")
-                if isinstance(cb_envs, dict) and cb_envs:
-                    params["base_extra_envs"] = dict(cb_envs)
-                for source, target in (
-                    ("remove_args", "base_remove_args"),
-                    ("unset_envs", "base_unset_envs"),
-                    ("args_mode", "base_args_mode"),
-                ):
-                    value = cb.get(source)
-                    if value not in (None, "", [], ()):
-                        params[target] = value
+            inject_stack_base_params(params, state)
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own
             # server args (never current_best's) so a later warm-replay can't

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared pytest fixtures for framework_agent tests."""
+"""Shared pytest fixtures for the framework-agent tests."""
 
 from __future__ import annotations
 

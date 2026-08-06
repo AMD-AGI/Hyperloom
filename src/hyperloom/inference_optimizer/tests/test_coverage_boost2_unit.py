@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.specialist_profile                                             #
+# orchestrator.specialists.profile                                            #
 # --------------------------------------------------------------------------- #
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
@@ -41,7 +41,7 @@ def test_uses_whole_machine_gpu_lane() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.action_executors._accuracy_gate.parse_quality_gate            #
+# orchestrator.actions.executors._accuracy_gate.parse_quality_gate            #
 # --------------------------------------------------------------------------- #
 def test_parse_quality_gate_paths(tmp_path) -> None:
     from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
@@ -83,7 +83,7 @@ def test_env_flag_tokens(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.gpu_pool._parse_gpu_list                                       #
+# orchestrator.bus.gpu_pool._parse_gpu_list                                   #
 # --------------------------------------------------------------------------- #
 def test_parse_gpu_list() -> None:
     from hyperloom.orchestrator.bus.gpu_pool import _parse_gpu_list

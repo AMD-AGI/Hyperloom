@@ -28,7 +28,8 @@ SCHEMA_VERSION = 1
 
 
 def _safe_rel(rel: str) -> str | None:
-    """Normalize + reject unsafe (absolute / traversal) repo-relative paths."""
+    """Normalize a repo-relative path (strip whitespace and leading slashes);
+    return None for empty paths or any containing ``..``."""
     rel = str(rel or "").strip().lstrip("/")
     if not rel:
         return None
@@ -51,9 +52,9 @@ def snapshot_source_layer(
 
     Args:
         framework_root: The framework checkout the KEEP was applied into.
-        base_sha: HEAD sha *before* the KEEP was applied (the clean base the
-            snapshot is an overlay on top of). Empty/None => materialization
-            falls back to copying the current framework tree.
+        base_sha: HEAD sha *before* the KEEP was applied, recorded verbatim in
+            the manifest for downstream provenance. Empty/None is stored as an
+            empty string; nothing in this module branches on it.
         rel_paths: Repo-relative paths the KEEP created / modified / deleted.
         dest_dir: Session-scoped destination directory (durable; must survive
             any later git hygiene on ``framework_root``).

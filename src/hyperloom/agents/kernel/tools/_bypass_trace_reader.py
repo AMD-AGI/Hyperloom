@@ -399,9 +399,14 @@ def _finalize(
         window: Optional ``(start_us, end_us)`` steady-state filter; a device
             event is kept when its start ``ts`` falls in ``[start, end)``.
         top_k: Row cap for the returned lists (``<= 0`` keeps all).
+        emit_launches: When true, also emit the time-ordered per-launch rows.
+        graph_launch_corrs: Correlation ids belonging to graph replays.
+        graph_launch_count: Number of observed graph launches.
+        corr_to_launch_geom: ``correlation -> (grid, block)`` launch geometry.
 
     Returns:
-        A dict with ``timeline`` / ``ops`` / ``kernels`` / ``attribution``.
+        A dict with ``kernel_launches`` (when ``emit_launches``) / ``timeline`` /
+        ``ops`` / ``kernels`` / ``attribution`` / ``graph_coverage``.
     """
     ws = we = None
     if window is not None:
@@ -516,7 +521,8 @@ def _finalize(
     def _majority_op(kernel_name: str) -> str:
         """Return the highest-GPU-time real launching op for a kernel name.
 
-        Ignores the ``(unlinked)`` bucket; returns ``""`` when no op resolved.
+        Ignores the synthetic ``(unlinked)`` and ``(graph)`` buckets; returns
+        ``""`` when no real op resolved.
         """
         best, best_dur = "", 0.0
         for op, d in (kern_op.get(kernel_name) or {}).items():
