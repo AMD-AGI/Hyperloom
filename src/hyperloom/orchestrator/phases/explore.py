@@ -1028,8 +1028,13 @@ class ExplorePhase(PhaseHandler):
                         }
 
         # Pack bottleneck signals into roofline_evidence for the specialist.
+        # Hot kernels alone are enough: a trace whose quality gate withheld
+        # analysis.md still names where device time goes.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
-        if isinstance(last_ta, dict) and last_ta.get("analysis_md_text") and "roofline_evidence" not in params:
+        has_evidence = isinstance(last_ta, dict) and bool(
+            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
+        )
+        if has_evidence and "roofline_evidence" not in params:
             from ..kernel.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
