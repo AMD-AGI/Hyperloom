@@ -1379,6 +1379,10 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         resolved["producer_manifest"] = str(
             bundle["producer_manifest"]
         )
+    if not resolved.get("patch_write_paths"):
+        write_paths = [str(path) for path in (bundle.get("write_paths") or []) if str(path or "").strip()]
+        if write_paths:
+            resolved["patch_write_paths"] = write_paths
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
@@ -6511,10 +6515,19 @@ async def integrate_handler(
     # Only the strict sub-flag enforces it, and only on positive non-import
     # evidence (confirmed is False); an "unknown" (None) never penalizes.
     source_import_confirmed: bool | None = None
+    source_import_evidence: dict[str, bool | None] = {}
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        _src = str(payload.get("target_file") or payload.get("source_file") or "")
-        source_import_confirmed = _confirm_source_imported(_src, bench_result.get("workspace"))
+        # A multi-file patch is only attributable when every file it wrote was
+        # loaded, so grade the whole write set and fall back to the single
+        # target only when the bundle did not declare one.
+        _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
+        if not _written:
+            _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
+        source_import_confirmed, source_import_evidence = _confirm_sources_imported(
+            _written,
+            bench_result.get("workspace"),
+        )
         if (
             decision == "KEEP"
             and source_import_confirmed is False
@@ -6650,6 +6663,8 @@ async def integrate_handler(
         result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
     if source_import_confirmed is not None:
         result["source_import_confirmed"] = source_import_confirmed
+    if len(source_import_evidence) > 1:
+        result["source_import_evidence"] = source_import_evidence
     if source_not_imported_downgrade:
         result["decision_reason"] = "source_not_confirmed_imported"
     if paired_ab is not None:

@@ -815,6 +815,147 @@ async def test_applyback_losing_throughput_leaves_the_verdict_unsettled(session_
     assert "validation_tier" not in res
 
 
+def _runner_with_server_log(*, tput: float, accuracy: float | None, server_log: str):
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        workspace = _fake_workspace(Path(cmd[out_idx + 1]), tput=tput, accuracy=accuracy)
+        (workspace / "server.log").write_text(server_log, encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    return _fake_run
+
+
+@pytest.mark.asyncio
+async def test_multi_file_patch_records_per_file_import_evidence(session_dir, tmp_path):
+    """Every file the patch wrote is graded, not just the primary target."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = _applyback_payload(base_yaml, target, patch_file, "k_ab_multi")
+    payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner_with_server_log(
+            tput=900.0,
+            accuracy=0.79,
+            server_log=f"INFO importing {target.stem}.py\nINFO importing flydsl_gemm.py\n",
+        ),
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "KEEP"
+    assert res["source_import_confirmed"] is True
+    assert res["source_import_evidence"] == {
+        str(target): True,
+        "vllm/flydsl_gemm.py": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_multi_file_patch_that_never_loaded_loses_its_keep(session_dir, tmp_path):
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = _applyback_payload(base_yaml, target, patch_file, "k_ab_unloaded")
+    payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner_with_server_log(
+            tput=900.0,
+            accuracy=0.79,
+            server_log="INFO serving an unrelated model\n",
+        ),
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["decision_reason"] == "source_not_confirmed_imported"
+    assert res["source_import_confirmed"] is False
+    # The downgrade replaces the KEEP, so the verdict stays unsettled.
+    assert "integration_validation_status" not in res
+
+
+@pytest.mark.asyncio
+async def test_partly_traced_multi_file_patch_keeps_and_only_annotates(session_dir, tmp_path):
+    """Lazy or folded-in modules must not cost a patch its KEEP."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = _applyback_payload(base_yaml, target, patch_file, "k_ab_partial")
+    payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner_with_server_log(
+            tput=900.0,
+            accuracy=0.79,
+            server_log=f"INFO importing {target.stem}.py\n",
+        ),
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["decision"] == "KEEP"
+    assert res["integration_validation_status"] == "passed"
+    assert "source_import_confirmed" not in res
+    assert res["source_import_evidence"]["vllm/flydsl_gemm.py"] is False
+
+
+@pytest.mark.asyncio
+async def test_import_evidence_never_substitutes_for_accuracy(session_dir, tmp_path):
+    """Fully-confirmed imports still cannot carry a patch past the accuracy gate."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = _applyback_payload(base_yaml, target, patch_file, "k_ab_acc_over_import")
+    payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner_with_server_log(
+            tput=900.0,
+            accuracy=0.60,
+            server_log=f"INFO importing {target.stem}.py\nINFO importing flydsl_gemm.py\n",
+        ),
+    ):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["source_import_confirmed"] is True
+    assert res["decision"] == "REVERT"
+    assert res["decision_reason"] == "accuracy_regression"
+
+
+@pytest.mark.asyncio
+async def test_single_file_patch_import_behaviour_is_unchanged(session_dir, tmp_path):
+    """Without a declared write set the check still grades the one target."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner_with_server_log(
+            tput=900.0,
+            accuracy=0.79,
+            server_log="INFO serving an unrelated model\n",
+        ),
+    ):
+        res = await krh.integrate_handler(
+            _accuracy_payload(base_yaml, target, patch_file, "k_single_import"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["decision_reason"] == "source_not_confirmed_imported"
+    assert "source_import_evidence" not in res
+
+
 @pytest.mark.asyncio
 async def test_integrate_accuracy_verdict_lands_in_attempt_ledger(session_dir, tmp_path):
     """The attempt ledger must carry the accuracy evidence for post-hoc audit."""
