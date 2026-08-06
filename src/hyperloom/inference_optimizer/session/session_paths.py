@@ -447,21 +447,24 @@ def agent_dir(session_dir: Path, role: str) -> Path:
     return Path(session_dir) / "agents" / role
 
 
-def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
+def agent_prompt_snapshot(session_dir: Path, role: str, *, phase: str = "") -> Path:
     """Compute the path to the per-agent system-prompt snapshot.
 
-    Written once at Coordinator start, then read for resume / drift
-    inspection.
+    The unsuffixed name holds the boot prompt; a phase suffix names one scope
+    the Coordinator later re-scoped orchestration into.
 
     Args:
         session_dir (Path): The session root directory.
         role (str): The agent role name.
+        phase (str): Pipeline phase this prompt was scoped to; ``""`` selects
+            the unsuffixed boot snapshot.
 
     Returns:
         Path: The absolute path to
-            ``<session_dir>/agents/<role>/system_prompt.snapshot.md``.
+            ``<session_dir>/agents/<role>/system_prompt[.<PHASE>].snapshot.md``.
     """
-    return agent_dir(session_dir, role) / "system_prompt.snapshot.md"
+    stem = f"system_prompt.{phase.strip().upper()}" if phase.strip() else "system_prompt"
+    return agent_dir(session_dir, role) / f"{stem}.snapshot.md"
 
 
 def agent_mcp_setup_path(session_dir: Path, role: str) -> Path:

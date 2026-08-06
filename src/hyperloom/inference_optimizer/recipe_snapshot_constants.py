@@ -60,11 +60,7 @@ ORDER_BY_UPDATED_AT_ASC: Final[str] = "updated_at ASC"
 ORDER_BY_CREATED_AT_ASC: Final[str] = "created_at ASC"
 
 
-# Two HTTP timeout budgets (single attempt each; no retry). Foreground: gbrain
-# reads on the Coordinator main loop fail fast and fall back to the local
-# recipe store. Background: the best-effort gbrain write-side mirror
-# (gbrain_ingest.build_mirror_mcp_from_env) gets the larger budget.
-DEFAULT_HTTP_TIMEOUT_SEC: Final[float] = 10.0  # background / flusher
+# Foreground GBrain reads use one fail-fast attempt on the Coordinator loop.
 FOREGROUND_HTTP_TIMEOUT_SEC: Final[float] = 2.0  # Coordinator main loop
 
 # Default confidence when caller doesn't override (spec [0.0, 1.0]).
@@ -355,7 +351,6 @@ __all__ = [
     "ORDER_BY_UPDATED_AT_DESC",
     "ORDER_BY_UPDATED_AT_ASC",
     "ORDER_BY_CREATED_AT_ASC",
-    "DEFAULT_HTTP_TIMEOUT_SEC",
     "FOREGROUND_HTTP_TIMEOUT_SEC",
     "DEFAULT_CONFIDENCE",
     "DEFAULT_MODEL_SLUG",

@@ -536,6 +536,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         [
             ({"status": "ok", "backup_path": "/b0"}, {"rc": 0, "stderr": ""}),
             ({"status": "failed", "error": "nope"}, {"rc": 1, "stderr": "bad"}),
+            ({"status": "restored"}, {"rc": 0, "stderr": ""}),
         ]
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: next(responses))
@@ -983,15 +984,19 @@ def test_framework_audit_llm_refine_fallbacks(monkeypatch: pytest.MonkeyPatch) -
     assert out["layer"] == "static"
     assert "missing SAFE_API_KEY" in out["risks"][-1]
 
-    class _Message:
+    class _Delta:
         content = '{"semantic_status":"partially_present","applicability":"needs_rewrite","confidence":0.77,"recommended_next_step":"author_via_specialist","note":"drift"}'
 
     class _Choice:
-        message = _Message()
+        delta = _Delta()
+
+    class _Chunk:
+        usage = None
+        choices = [_Choice()]
 
     class _Completions:
         def create(self, **_kwargs):
-            return SimpleNamespace(choices=[_Choice()])
+            return iter([_Chunk()])
 
     class _OpenAI:
         def __init__(self, **_kwargs):
@@ -1218,9 +1223,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as opt_mn
-    import hyperloom.inference_optimizer.multi_node._internal.external_state as ext_state
-    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
-    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
 
     root = tmp_path / "gc"
     root.mkdir()

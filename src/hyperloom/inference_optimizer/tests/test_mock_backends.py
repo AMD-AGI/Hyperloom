@@ -29,7 +29,6 @@ def _backends_with_mock_critic_and_robustness(
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(plans.get("orchestration", silent), name="o"),
-        "kernel_agent": MockBackend(plans.get("kernel_agent", silent), name="k"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -153,7 +152,7 @@ async def test_e2e_mock_robustness_keeps_emitting_heartbeats(session_dir):
     try:
         await c.tick(3)
         beats = await c.bus.tail(topic="heartbeat", to_agent="*")
-        assert len(beats) >= 12
+        assert len(beats) >= 9
         assert any(m.from_agent == "robustness" for m in beats)
     finally:
         await c.stop()

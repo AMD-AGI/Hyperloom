@@ -1,14 +1,16 @@
 """Path constraints for kernel patch apply/revert on inference pods (stdlib only).
 
 Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
-(RayJob). Keeps patch targets under framework install roots and backups under
-``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default ``/var/kernel_patch_backups``), and
-hosts the atomic write both apply paths use to land a patched file.
+(RayJob). Restricts patch targets to vLLM/SGLang/AITER install roots, keeps
+backups under ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default
+``/var/kernel_patch_backups``), and hosts the atomic write both apply paths use.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -20,25 +22,28 @@ _DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
-    "/app/ATOM/atom/",
-    "/app/xDiT/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/aiter_meta/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
     "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/aiter_meta/",
     "/opt/venv/lib/python3.12/site-packages/sglang/",
     "/opt/venv/lib/python3.12/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
     "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/aiter_meta/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/aiter_meta/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-    "/aiter_meta/csrc/",
+)
+_ALLOWED_PATCH_PACKAGES = frozenset(
+    {"aiter", "aiter_meta", "sglang", "vllm"}
+)
+_ALLOWED_EDITABLE_ROOTS = frozenset(
+    {"/sgl-workspace/aiter", "/sgl-workspace/sglang", "/sgl-workspace/vllm"}
 )
 
 
@@ -85,8 +90,29 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
         tuple[str, ...]: Normalized framework root prefixes.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots = tuple(_normalize_root(p) for p in env.split(":") if p.strip()) if env else ()
-    return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, env_roots)
+    env_roots: list[str] = []
+    for raw in env.split(":") if env else ():
+        candidate = Path(raw.strip())
+        if not candidate.is_absolute():
+            sys.stderr.write(
+                "WARN ignoring unsafe framework source root for pod patching: "
+                f"{raw!r}\n"
+            )
+            continue
+        resolved = candidate.resolve()
+        is_package = (
+            resolved.name in _ALLOWED_PATCH_PACKAGES
+            and resolved.parent.name in {"site-packages", "dist-packages"}
+        )
+        is_editable = str(resolved) in _ALLOWED_EDITABLE_ROOTS
+        if is_package or is_editable:
+            env_roots.append(_normalize_root(str(resolved)))
+        else:
+            sys.stderr.write(
+                "WARN ignoring unsafe framework source root for pod patching: "
+                f"{raw!r}\n"
+            )
+    return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, tuple(env_roots))
 
 
 def resolve_kernel_backup_root() -> Path:
@@ -176,6 +202,93 @@ def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
     """
     assert_target_path_allowed(target, must_exist=False)
     assert_backup_path_allowed(backup)
+
+
+def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
+    """Validate an AITER ``jit/build`` path before recursive mutation."""
+    resolved = jit_build.resolve()
+    assert_target_path_allowed(resolved, must_exist=False)
+    if (
+        resolved.name != "build"
+        or resolved.parent.name != "jit"
+        or resolved.parent.parent.name != "aiter"
+        or not (resolved.parent / "__init__.py").is_file()
+        or not (resolved.parent.parent / "__init__.py").is_file()
+    ):
+        raise ValueError(f"invalid AITER jit/build path: {jit_build}")
+
+
+def invalidate_aiter_jit_build(
+    jit_build: Path | None,
+    backup_dir: Path,
+    backup_name: str,
+) -> dict:
+    """Move one pod's stale AITER JIT cache aside before patched serving."""
+    if jit_build is None:
+        return {"status": "skipped", "reason": "no jit_build_dir supplied"}
+    assert_aiter_jit_build_allowed(jit_build)
+    assert_backup_dir_allowed(backup_dir)
+    resolved = jit_build.resolve()
+    if not resolved.exists() or not any(resolved.iterdir()):
+        return {"status": "clean", "src": str(resolved)}
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{backup_name}_jit_build"
+    assert_backup_path_allowed(backup)
+    if backup.exists():
+        raise ValueError(f"JIT backup already exists: {backup}")
+    shutil.move(str(resolved), str(backup))
+    return {
+        "status": "ok",
+        "src": str(resolved),
+        "backup_path": str(backup),
+    }
+
+
+def restore_aiter_jit_build(record: dict) -> dict:
+    """Remove candidate JIT output and restore a pod's baseline cache."""
+    if not isinstance(record, dict) or record.get("status") not in {"ok", "clean"}:
+        return {"status": "skipped", "reason": "no JIT invalidation record"}
+    src = Path(str(record.get("src") or ""))
+    assert_aiter_jit_build_allowed(src)
+    if record.get("status") == "clean":
+        if src.exists():
+            shutil.rmtree(src)
+        return {"status": "restored_clean", "restored_to": str(src)}
+    backup = Path(str(record.get("backup_path") or ""))
+    assert_backup_path_allowed(backup)
+    if not backup.exists():
+        raise FileNotFoundError(f"JIT backup does not exist: {backup}")
+    if src.exists():
+        shutil.rmtree(src)
+    src.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(backup), str(src))
+    return {"status": "restored", "restored_to": str(src)}
+
+
+def finalize_patch_records(records: list[dict]) -> dict:
+    """Delete source/JIT backups after a patch becomes the accepted baseline."""
+    deleted: list[str] = []
+    jit_backups: set[str] = set()
+    for record in records:
+        backup_raw = str(record.get("backup_path") or "").strip()
+        if backup_raw:
+            backup = Path(backup_raw)
+            assert_backup_path_allowed(backup)
+            if backup.is_file():
+                backup.unlink()
+                deleted.append(str(backup))
+        jit_record = record.get("jit_backup")
+        if isinstance(jit_record, dict):
+            jit_backup = str(jit_record.get("backup_path") or "").strip()
+            if jit_backup:
+                jit_backups.add(jit_backup)
+    for backup_raw in sorted(jit_backups):
+        backup = Path(backup_raw)
+        assert_backup_path_allowed(backup)
+        if backup.is_dir():
+            shutil.rmtree(backup)
+            deleted.append(str(backup))
+    return {"status": "finalized", "deleted": deleted}
 
 
 def atomic_write_bytes(target: Path, data: bytes) -> None:

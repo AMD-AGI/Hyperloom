@@ -48,7 +48,6 @@ def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -69,6 +68,18 @@ def test_target_gain_basic_progress():
     s.cumulative_gain = 12.0
     assert obj.progress(s) == 1.0
     assert obj.reached(s)
+
+
+def test_target_gain_gap_pct_counts_down_to_zero():
+    obj = TargetGainObjective(target_gain_pct=15.0)
+    s = SharedState(baseline_tput=1000.0, cumulative_gain=0.0)
+    assert obj.gap_pct(s) == pytest.approx(15.0)
+
+    s.cumulative_gain = 9.89
+    assert obj.gap_pct(s) == pytest.approx(5.11)
+
+    s.cumulative_gain = 20.0
+    assert obj.gap_pct(s) == 0.0
 
 
 def test_target_gain_zero_or_negative_rejected():
@@ -95,6 +106,18 @@ def test_target_tput_falls_back_to_baseline_when_no_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=750.0, current_best={})
     assert obj.progress(s) == pytest.approx(750.0 / 900.0)
+
+
+def test_target_tput_gap_pct_is_relative_to_current():
+    obj = TargetTputObjective(target_tput_per_gpu=1000.0)
+    s = SharedState(baseline_tput=800.0, current_best={"tput": 800.0})
+    assert obj.gap_pct(s) == pytest.approx(25.0)
+
+    s.current_best = {"tput": 1000.0}
+    assert obj.gap_pct(s) == 0.0
+
+    # No measurement yet => no distance to report.
+    assert obj.gap_pct(SharedState()) == 0.0
 
 
 def test_target_tput_zero_rejected():
@@ -143,6 +166,7 @@ def test_time_only_never_reached():
     assert obj.kind() == "time_only"
     assert obj.progress(s) == 0.0
     assert not obj.reached(s)
+    assert obj.gap_pct(s) == 0.0
 
 
 # build_objective factory
@@ -296,7 +320,6 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     spy = _SpyBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="o")
     backends = {
         "orchestration": spy,
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="k"),
         "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
         "robustness": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
     }

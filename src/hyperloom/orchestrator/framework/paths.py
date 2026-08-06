@@ -205,11 +205,13 @@ def _glob_install_package_roots() -> tuple[str, ...]:
     """
     patterns = (
         "python*/dist-packages/aiter",
+        "python*/dist-packages/aiter_meta",
         "python*/dist-packages/sglang",
         "python*/dist-packages/vllm",
         "python*/dist-packages/atom",
         "python*/dist-packages/xfuser",
         "python*/site-packages/aiter",
+        "python*/site-packages/aiter_meta",
         "python*/site-packages/sglang",
         "python*/site-packages/vllm",
         "python*/site-packages/atom",
@@ -272,6 +274,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
                 "python*/site-packages/vllm",
                 "python*/site-packages/sglang",
                 "python*/site-packages/aiter",
+                "python*/site-packages/aiter_meta",
                 "python*/site-packages/atom",
                 "python*/site-packages/xfuser",
             ):
@@ -289,6 +292,7 @@ def _discover_installed_framework_roots() -> tuple[str, ...]:
                 for pattern in (
                     "python*/site-packages/vllm",
                     "python*/site-packages/aiter",
+                    "python*/site-packages/aiter_meta",
                 ):
                     for match in sorted(site.glob(pattern)):
                         if match.is_dir():

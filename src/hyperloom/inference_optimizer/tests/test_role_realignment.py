@@ -62,8 +62,9 @@ def test_orchestration_prompt_explains_kill_task_resource_lifetime(registry):
         rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
     )
 
-    assert "does **not** terminate an already-running specialist process" in text
-    assert "Do not use this to promptly free capacity" in text
+    # Detailed kill_task semantics moved to specialist_rescue.md reference doc.
+    assert "kill_task" in text
+    assert "read_reference('specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
@@ -122,20 +123,36 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     assert "(DISABLED:" not in text
 
 
-def test_role_md_files_carry_phase_awareness():
-    """Static rules fragments + Robustness markdown carry phase awareness."""
+def test_orchestration_md_carries_phase_awareness():
+    """The orchestration rules fragment names the phase chain it plans against."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
-    root = asset_system_prompts_dir()
-    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
-        body = (root / f"{name}.md").read_text(encoding="utf-8")
-        if name == "critic":
-            assert "Phase-specific rules" in body
-        else:
-            assert "Phase awareness" in body, f"{name}.md missing phase awareness"
-        assert "PRELUDE" in body or "PHASE_PRELUDE" in body
-        assert "EXPLORE" in body
-        assert "KERNEL_AGENT" in body
+    body = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
+    assert "Phase awareness" in body
+    assert "PRELUDE" in body or "PHASE_PRELUDE" in body
+    assert "EXPLORE" in body
+    assert "KERNEL_AGENT" in body
+
+
+def test_critic_phase_orientation_is_delivered_not_inlined():
+    """Critic phase awareness lives in the per-phase injector, not in critic.md.
+
+    ``critic.md`` keeps the framing (how to treat a phase question) and points
+    at the delivered fields; the per-phase contracts are injected one at a time
+    so the Critic never reads five phases' rules to use one.
+    """
+    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+    from hyperloom.orchestrator.phases import machine_state as _ps
+    from hyperloom.orchestrator.roles.critic_agent import _PHASE_ORIENTATION
+
+    body = (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
+    assert "Phase-specific rules" in body
+    assert "judge_bundle.phase" in body
+    assert "phase_orientation" in body
+    # The five-phase bullet list must not come back as always-on text.
+    assert "Per-phase orientation:" not in body
+
+    assert set(_PHASE_ORIENTATION) == set(_ps.PHASE_NAMES)
 
 
 # SharedState renderers
@@ -281,7 +298,6 @@ def coordinator_with_mocks(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -294,7 +310,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
 ):
     c = coordinator_with_mocks
     try:
-        for role in ("orchestration", "kernel_agent", "critic", "robustness"):
+        for role in ("orchestration", "critic", "robustness"):
             prompt = await c._compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"

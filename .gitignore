@@ -100,3 +100,6 @@ gates.findings.md
 # Working plan / investigation notes for the FlyDSL integration (not product)
 flydsl-plan/
 Hyperloom-Flydsl.integrate.md
+
+# Local prompt-audit scratch (rendered prompts, session dumps, audit notes)
+.prompt-audit/

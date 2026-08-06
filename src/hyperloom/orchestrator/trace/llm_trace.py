@@ -17,6 +17,13 @@ Design contract:
   ``BackendTurnResult.metadata``. Backends without a prompt-cache split
   (OpenAI / GEAK) report ``None`` for the two ``cache_*`` counters so the
   collector can tell "no cache concept" from "zero cache hits".
+* **Success and failure**: a row carries a terminal ``status``. Only
+  ``status="ok"`` rows have token accounting; ``status="error"`` rows record a
+  call that never produced a usable response (built via
+  :meth:`LLMCallRecord.for_failure`). Without them a failed call is simply
+  absent from the ledger, which reads as "never happened" rather than "failed"
+  — the reason Langfuse showed a 0% error rate while calls were demonstrably
+  failing. Spend rollups must therefore filter on ``status``.
 
 The record is a dataclass so call sites get constructor-time field checking
 and a single :meth:`to_row` serialization path; the closed-schema check in
@@ -61,6 +68,17 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
 )
 
 
+# Closed vocabulary for a row's terminal status, so a typo'd status cannot make
+# a failed call silently rejoin the success rollups.
+LLM_STATUS_OK = "ok"
+LLM_STATUS_ERROR = "error"
+VALID_STATUSES: frozenset[str] = frozenset({LLM_STATUS_OK, LLM_STATUS_ERROR})
+
+# A gateway error body can embed an entire upstream payload (litellm wraps the
+# provider response verbatim), so cap what reaches the ledger.
+_ERROR_MESSAGE_MAX = 500
+
+
 # Canonical field contract for one ``llm_calls.jsonl`` row; the closed-schema
 # check compares serialized keys against this set exactly.
 _ROW_FIELDS: frozenset[str] = frozenset(
@@ -81,6 +99,9 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "cache_read_input_tokens",
         "latency_ms",
         "reviewed_msg_ids",
+        "status",
+        "error_type",
+        "error_message",
     }
 )
 
@@ -120,6 +141,11 @@ class LLMCallRecord:
     * ``cache_creation_input_tokens`` / ``cache_read_input_tokens`` —
       ``None`` for backends with no prompt-cache split.
 
+    Terminal status:
+
+    * ``status`` — ``ok`` or ``error`` (:data:`VALID_STATUSES`).
+    * ``error_type`` / ``error_message`` — set on ``error`` rows only.
+
     ``ts`` is filled by :meth:`to_row` at serialization time so a record
     built ahead of the actual write still timestamps the write.
     """
@@ -144,6 +170,11 @@ class LLMCallRecord:
     # Proposal ``msg_id``s this call reviewed (critic only), so the call can be
     # attributed to the decision it served. ``None`` for non-critic producers.
     reviewed_msg_ids: list[str] | None = None
+    # An ``error`` row records a call that never produced a usable response, so
+    # its token counters stay ``None``; spend rollups must exclude it.
+    status: str = LLM_STATUS_OK
+    error_type: str | None = None
+    error_message: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs).
@@ -172,6 +203,9 @@ class LLMCallRecord:
             "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
             "latency_ms": _coerce_optional_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
+            "status": str(self.status),
+            "error_type": _coerce_optional_str(self.error_type),
+            "error_message": _coerce_optional_str(self.error_message),
         }
 
     @classmethod
@@ -230,6 +264,61 @@ class LLMCallRecord:
             latency_ms=latency_ms if latency_ms is not None else md.get("latency_ms"),
         )
 
+    @classmethod
+    def for_failure(
+        cls,
+        *,
+        session_id: str,
+        component: str,
+        error: BaseException | str,
+        model: str | None = None,
+        role: str | None = None,
+        task_id: str | None = None,
+        dyn_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+        turn: int | None = None,
+        latency_ms: int | None = None,
+    ) -> "LLMCallRecord":
+        """Build an ``error`` record for a call that produced no usable response.
+
+        A failed call has no ``BackendTurnResult``, so :meth:`from_metadata`
+        cannot describe it and the token counters stay ``None``. The join keys
+        are still known at the call site, which is what lets the failure land on
+        the same trace / phase / agent as the successful calls around it.
+
+        Args:
+            session_id: Cross-process aggregation primary key.
+            component: Producer label; must be in :data:`VALID_COMPONENTS`.
+            error: The raised exception, or a pre-formatted message.
+            model: Backend model id, when the call site knows it.
+            role: Reactor role name, when known.
+            task_id: Decision-association task id, when known.
+            dyn_id: Dynamic-action id, when known.
+            tick: Timeline tick, when known.
+            phase: Phase name, when known.
+            turn: Multi-turn sub-agent sequence index, when known.
+            latency_ms: Time spent before failing, when measured.
+
+        Returns:
+            A populated :class:`LLMCallRecord` with ``status="error"``.
+        """
+        return cls(
+            session_id=session_id,
+            component=component,
+            role=role,
+            task_id=task_id,
+            dyn_id=dyn_id,
+            tick=tick,
+            phase=phase,
+            turn=turn,
+            model=model,
+            latency_ms=latency_ms,
+            status=LLM_STATUS_ERROR,
+            error_type=type(error).__name__ if isinstance(error, BaseException) else None,
+            error_message=str(error)[:_ERROR_MESSAGE_MAX],
+        )
+
 
 def _coerce_optional_str_list(value: Any) -> list[str] | None:
     """Coerce an iterable of ids to a list of non-empty strings, or ``None``.
@@ -286,6 +375,9 @@ def append_llm_call(
         error_cls=LLMTraceRowError,
         label="llm_calls",
     )
+    status = row.get("status")
+    if status not in VALID_STATUSES:
+        raise LLMTraceRowError(f"llm_calls row 'status'={status!r} is not one of {sorted(VALID_STATUSES)!r}")
     dest = llm_calls_path(session_dir)
     try:
         append_jsonl(dest, row, make_parents=True, sort_keys=True)
@@ -315,8 +407,11 @@ assert _DATACLASS_FIELDS | {"ts"} == _ROW_FIELDS, (
 
 
 __all__ = [
+    "LLM_STATUS_ERROR",
+    "LLM_STATUS_OK",
     "LLMCallRecord",
     "LLMTraceRowError",
     "VALID_COMPONENTS",
+    "VALID_STATUSES",
     "append_llm_call",
 ]

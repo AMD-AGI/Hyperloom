@@ -30,7 +30,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 
@@ -257,7 +257,7 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
 
 def test_kernel_and_explore_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
-    assert coord._kernel_enabled() == ("kernel_agent" in coord.role_registry)
+    assert coord._kernel_enabled() is True
     coord.shared_state.kernel_enabled = False
     assert coord._kernel_enabled() is False
 

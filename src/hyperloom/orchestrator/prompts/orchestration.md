@@ -1,5 +1,16 @@
 > This file is the **rules fragment** consumed by
-> ``prompt_builder.build_orchestration_prompt`` as section 7.
+> ``prompt_builder.build_orchestration_prompt`` as section 7. This leading
+> blockquote is maintainer-only — the builder strips it, so it never reaches
+> the model.
+>
+> **Phase scoping.** Put ``<!-- phase: A, B -->`` on the line directly above a
+> ``### `` heading to render that block only in those pipeline phases. The tag
+> covers the heading and its body up to the next ``### `` / ``## ``. Untagged
+> blocks render in every phase — that is the default, so a new section stays
+> always-on until you scope it. Tag a block when the behaviour it documents is
+> unreachable elsewhere (e.g. specialist dispatch outside EXPLORE /
+> FRAMEWORK_AGENT), not merely when it feels less relevant: the agent still
+> plans across phases from PHASE CONTRACT and the action catalogue.
 
 ### Operating model — one continuous conversation
 
@@ -20,6 +31,7 @@ is usually a **thin delta**, not a full state dump:
     events since your last turn. A `=== Context (pull on demand) ===` note
     marks these delta turns.
 
+<!-- phase: EXPLORE -->
 ### Web search (upstream comparison)
 
 You may also call the built-in `WebSearch` and `WebFetch` tools directly.
@@ -69,63 +81,28 @@ of your working memory; it persists that and re-seeds a fresh
 conversation from it so the context stays bounded on long runs. Capture
 intent and rationale in that summary, not raw numbers you can re-pull.
 
+<!-- phase: EXPLORE, FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
-Nothing in this message reports in-flight specialists: the prompt renders
-between blocking actions, so a running specialist is exactly what you are
-waiting on and never appears here. Never read silence as "nothing is
-running". Two signals do reach you:
+Nothing in this message reports in-flight specialists. Two signals reach you:
+`specialist_progress` inbox observations (sparse checkpoints) and
+`get_running_tasks` (live view). Never read silence as "nothing is running".
 
-- **`specialist_progress` inbox observations** — pushed whenever a
-  specialist rewrites its checkpoint, carrying `task_id`, `elapsed_sec`,
-  summary, proposal count, findings and `residual_questions`. Sparse (often
-  2-3 per specialist, the first lagging dispatch by minutes), so read each
-  as a sample of work that has been running unobserved.
-- **`get_running_tasks`** — the live view (see above). Call it whenever a
-  `specialist_progress` lands, before a phase change, and when a stretch of
-  turns has passed with no specialist news.
-
-Elapsed time alone decides nothing: an offline autotune legitimately runs
-for an hour, a five-minute agent can already be wedged. Judge on what you
-asked for, whether successive checkpoints advance or repeat, and what is
-queued behind the lane or GPUs it holds. Three moves:
-
-- `kill_task{task_id, scope='task', reason}` — cancel the coordinator task.
-  This does **not** terminate an already-running specialist process: its lane
-  and GPU leases release only when its worker exits or its reaper terminates
-  it. Do not use this to promptly free capacity; use it when the mandate is a
-  dead end and the remaining task budget is not worth spending.
-- `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
-  and it acts without restarting. Prefer this when the agent works well but
-  on the wrong question, or to answer its `residual_questions`.
-- `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and its
-  lane rows, in bounded steps. For live work near expiry that the TTL
-  watchdog would otherwise fail out.
-
-A fourth move covers the queue rather than a single task:
-
-- `prune_branch{family, reason, scope='queued'}` — cancels every *queued*
-  task of one family and leaves the family usable. Use it when a backlog
-  outlived its purpose: several turns queued the same measurement before the
-  first one returned, and the answer is now in hand. The default
-  `scope='family'` instead retires the action for the rest of the run, so
-  reach for it only when the family itself is a dead end. Queued baselines
-  are drained automatically once `baseline_tput > 0` (a `baseline_drain`
-  observation reports what was cancelled); this is the manual equivalent for
-  any family.
+Rescue moves: `kill_task` / `send_message` / `extend_lease` for a single task;
+`prune_branch{scope='queued'}` for the queue. Full semantics and judgment
+criteria: ``read_reference('specialist_rescue')``.
 
 Doing nothing is a legitimate choice; doing nothing because nothing
 prompted you is not.
 
+### Pulling context on a delta turn
+
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
-exactly what you need** with the read-only context tools:
-`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
-`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
-`get_recent_outcomes`, `get_running_tasks` (and `Read` for sandboxed
-files). They return the
-same projections the old prompt used to push. Maintain your own running
-plan; treat the delta + your memory as the source of truth and pull
-facts only when a decision actually depends on them.
+exactly what you need** with the read-only context tools listed in the
+`=== Context (pull on demand) ===` block. They return the same projections
+the old prompt used to push. Maintain your own running plan; treat the
+delta + your memory as the source of truth and pull facts only when a
+decision actually depends on them.
 
 ### Phase awareness
 
@@ -165,76 +142,102 @@ cross-phase ideas as gaps or request a phase advance — see PHASE CONTRACT
 for the allowed-action sets, the `skip_to_close` caveat, and the per-tick
 `=== Phase ===` block format.
 
-Per-phase goals (allowed action sets are in PHASE CONTRACT; `roofline` and
-`profile` are Coordinator-managed and never proposable):
-
-  - **PRELUDE**: drive `baseline_tput > 0` so the Coordinator advances.
-  - **EXPLORE**: stack KEEPs onto `optimization_stack`. On entry, dispatch
-    specialists for the top-K gaps in parallel in the same tick — they fan
-    out up to `research_lane_capacity` (`2 × visible GPU count` ceiling).
-    Specialist results provide KB/PR/source evidence for `explore` grids
-    and may produce patches for `integrate_patch`. An Orchestration-authored
-    grid is fine when no specialist has covered the gap yet.
-
-    **GPU specialists** hold the same cards as the serving stack and acquire
-    `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
-    lanes). Use them opportunistically in the idle research window — while
-    waiting for a research specialist and between variant benchmarks, the
-    whole machine sits idle and the lane is free. A GPU specialist will queue
-    behind a live benchmark but never co-locate. GPU specialists also
-    serialize against each other; prefer one specialist with the cards it
-    needs over several competing ones. For a specialist running a real
-    serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
-    `gpu_count >= TP`; use `gpu_count: 1` only for single-card microbench
-    that never starts a serving server.
-
-    **Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
-    with `"atomic": true` is a coupled set that only works together. Dispatch
-    it verbatim as one explore variant — never split, drop, or re-author.
-
-    **Advisory proposal scores**: the prompt MAY carry a
-    `=== Specialist proposal scores (advisory) ===` block — independent 0-10
-    priors from anonymized raters. Weigh alongside `gaps[]`, KB sub-graph,
-    recent winners, and `analysis.md` 🔴/🟡/🟢 markers with no extra
-    authority. Rater identities are hidden; do NOT speculate which model a
-    `rater_N` is. Cross-rater disagreement is an uncertainty signal.
-
-    **EXPLORE plateau**: when the Coordinator surfaces a `Plateau advisory`, a
-    detected EXPLORE plateau will deterministically advance EXPLORE →
-    KERNEL_AGENT (`reason=explore_no_more_leverage`) at the next phase-compute
-    — you still have this tick, so drain / hand off first. KERNEL and FRAMEWORK
-    plateaus remain advisory only.
-
-  - **KERNEL**: integrate KEEP'd kernel patches. Coordinator exits to SWEEP
-    on REVERT streak or budget cap. Roofline is auto-managed.
-
-    **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
-    `integrate` each `pending_keep_kernels` entry before emitting any
-    `skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
-    are not yet in `optimization_stack` and not e2e validated; benchmarking
-    while any KEEP is pending silently omits its contribution.
-
-    **No actionable kernel lever → `skip_to_sweep`, do not stall.** When
-    `reusable_native_kernel_ids` is empty and no compute/fusion candidates
-    exist (e.g. dominant kernels are RCCL collectives or closed CK/hipBLASLt
-    GEMMs), drain `pending_keep_kernels` then emit
-    `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
-    tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
-    reloop gives EXPLORE another round.
-
-    **Never fabricate a measurement.** Only report outcomes you dispatched
-    and observed via `get_recent_outcomes` / `delegated_result` / SharedState.
-
-  - **SWEEP**: validate `current_best` over the workload grid. Coordinator
-    exits to CLOSE on `sweep_done` automatically.
-  - **CLOSE**: `report` / `session_breakdown`. Coordinator auto-enqueues
-    `report` at the deadline; propose it earlier for a richer narrative.
+The goal of the phase you are in is stated in its own block below; the other
+phases' goals are omitted because you cannot act on them from here.
 
 **Decision priority**: pick the next action by reading facts in this order:
 (a) current phase + `allowed_actions`, (b) gaps / KB sub-graph / recent
 winners / specialist proposal_set, (c) mandatory ordering (baseline first;
 `explore` revalidates the stack inline — no separate rebench step),
 (d) `phase_budget_remaining_pct` as the urgency signal.
+
+<!-- phase: PRELUDE -->
+### PRELUDE — phase goal
+
+Drive `baseline_tput > 0` so the Coordinator advances.
+
+<!-- phase: FRAMEWORK_AGENT -->
+### FRAMEWORK — phase goal
+
+Land Critic-gated upstream framework patches via `integrate_patch`. Discovery
+and benchmarking are Coordinator-driven. Your role is to steer the direction
+(which candidates to prioritise), unblock stuck candidates, and emit
+`escalate_strategy_change{next_action_hint='skip_to_explore'}` once
+discovery is exhausted and no candidates remain.
+
+<!-- phase: EXPLORE -->
+### EXPLORE — phase goal
+
+Stack KEEPs onto `optimization_stack`. On entry, dispatch specialists for the
+top-K gaps in parallel in the same tick — they fan out up to
+`research_lane_capacity` (`2 × visible GPU count` ceiling). Specialist results
+provide KB/PR/source evidence for `explore` grids and may produce patches for
+`integrate_patch`. An Orchestration-authored grid is fine when no specialist
+has covered the gap yet.
+
+**GPU specialists** hold the same cards as the serving stack and acquire
+`gpu_research_lane` (mutually exclusive with benchmark/profile/serving
+lanes). Use them opportunistically in the idle research window — while
+waiting for a research specialist and between variant benchmarks, the
+whole machine sits idle and the lane is free. A GPU specialist will queue
+behind a live benchmark but never co-locate. GPU specialists also
+serialize against each other; prefer one specialist with the cards it
+needs over several competing ones. For a specialist running a real
+serving benchmark, omit `gpu_count` (defaults to serving TP) or pass
+`gpu_count >= TP`; use `gpu_count: 1` only for single-card microbench
+that never starts a serving server.
+
+**Honor `atomic` proposals.** A `specialist_done.proposal_set` entry
+with `"atomic": true` is a coupled set that only works together. Dispatch
+it verbatim as one explore variant — never split, drop, or re-author.
+
+**Advisory proposal scores**: the prompt MAY carry a
+`=== Specialist proposal scores (advisory) ===` block — independent 0-10
+priors from anonymized raters. Weigh alongside `gaps[]`, KB sub-graph,
+recent winners, and `analysis.md` 🔴/🟡/🟢 markers with no extra
+authority. Rater identities are hidden; do NOT speculate which model a
+`rater_N` is. Cross-rater disagreement is an uncertainty signal.
+
+**EXPLORE plateau**: when the Coordinator surfaces a `Plateau advisory`, a
+detected EXPLORE plateau will deterministically advance EXPLORE →
+KERNEL_AGENT (`reason=explore_no_more_leverage`) at the next phase-compute
+— you still have this tick, so drain / hand off first. KERNEL and FRAMEWORK
+plateaus remain advisory only.
+
+<!-- phase: KERNEL_AGENT -->
+### KERNEL — phase goal
+
+Integrate KEEP'd kernel patches. Coordinator exits to SWEEP on REVERT streak
+or budget cap. Roofline is auto-managed.
+
+**Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
+`integrate` each `pending_keep_kernels` entry before emitting any
+`skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
+are not yet in `optimization_stack` and not e2e validated; benchmarking
+while any KEEP is pending silently omits its contribution.
+
+**No actionable kernel lever → `skip_to_sweep`, do not stall.** When
+`reusable_native_kernel_ids` is empty and no compute/fusion candidates
+exist (e.g. dominant kernels are RCCL collectives or closed CK/hipBLASLt
+GEMMs), drain `pending_keep_kernels` then emit
+`escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
+tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
+reloop gives EXPLORE another round.
+
+**Never fabricate a measurement.** Only report outcomes you dispatched
+and observed via `get_recent_outcomes` / `delegated_result` / SharedState.
+
+<!-- phase: SWEEP -->
+### SWEEP — phase goal
+
+Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
+`sweep_done` automatically.
+
+<!-- phase: CLOSE -->
+### CLOSE — phase goal
+
+`report` / `session_breakdown`. Coordinator auto-enqueues `report` at the
+deadline; propose it earlier for a richer narrative.
 
 ### SESSION_DIR contract
 
@@ -259,14 +262,6 @@ on the next tick.
 
 ### Hard rules
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
-  `run_optimization` / `integrate` / `apply_patch` (these have
-  programmatic handlers). `kernel_opt` is NOT a recognised kind — never
-  use it as a request kind. Use `trace_analyze` for candidate analysis.
-  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
-  and it is valid only for FP8 SGLang workloads.
-* Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
-  verbatim.
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
   failures as `--concurrent-requests` unless that literal flag appears in
   the executed command or stderr.
@@ -309,6 +304,19 @@ on the next tick.
   per-phase proposable set; any proposal/delegate is denied by R1
   `phase_incompatible`.
 
+<!-- phase: KERNEL_AGENT -->
+### Kernel request kinds
+
+* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
+  `run_optimization` / `integrate` / `apply_patch` (these have
+  programmatic handlers). `kernel_opt` is NOT a recognised kind — never
+  use it as a request kind. Use `trace_analyze` for candidate analysis.
+  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
+  and it is valid only for FP8 SGLang workloads.
+* Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
+  verbatim.
+
+<!-- phase: PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT -->
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
 The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE
@@ -338,6 +346,7 @@ map to actions — **follow them**:
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
 
+<!-- phase: EXPLORE -->
 ### Choosing specialist domain by bottleneck
 
 * **attention / AllReduce / MoE expert dispatch** → `kernel_switch_specialist`
@@ -349,6 +358,7 @@ map to actions — **follow them**:
   host-pacing GPU idle** → `system_specialist`
 * **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
 
+<!-- phase: EXPLORE -->
 ### One specialist, four dials (scope / mode / bench / lane)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code
