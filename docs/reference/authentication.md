@@ -29,10 +29,11 @@ configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
 disables the features that speak its protocol; a half-configured side fails
 preflight rather than being silently completed from the other provider.
 
-The only values still filled for you are the internal GEAK / LLM aliases
-(`GEAK_API_KEY`, `LLM_API_KEY`, `AMD_LLM_API_KEY`, `GEAK_BASE_URL`,
-`LLM_API_BASE`), which the inference optimizer CLI preflight copies from the
-OpenAI side. You do not set those by hand.
+The only values still filled for you are the internal LLM aliases
+(`LLM_API_KEY`, `AMD_LLM_API_KEY`, `LLM_API_BASE`), which the inference optimizer
+CLI preflight copies from the OpenAI side. You do not set those by hand.
+`GEAK_API_KEY` / `GEAK_BASE_URL` are never filled from either side: GEAK runs on
+the Anthropic side, so set them only to point GEAK at something else.
 
 ---
 
@@ -75,8 +76,8 @@ three shapes are accepted; anything else fails preflight.
 
 | Shape | Set | Effect |
 |-------|-----|--------|
-| OpenAI side only | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | Codex / GEAK run; Claude-side features are disabled |
-| Anthropic side only | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` | Claude runs; Codex / GEAK (OpenAI-protocol) are disabled |
+| OpenAI side only | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | Codex runs; Claude and GEAK are disabled |
+| Anthropic side only | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` | Claude and GEAK run; Codex (OpenAI-protocol) is disabled |
 | Both sides | all four, each side self-consistent | Everything runs |
 
 One gateway serving both providers is the third shape: point both base URLs at
@@ -91,14 +92,16 @@ it and set both keys, even when the key value is the same.
 
 Downstream tooling reads the side it belongs to:
 
-* GEAK and kernel tools inherit the OpenAI-side credential from preflight
-  (`GEAK_API_KEY` / `LLM_API_KEY` / `AMD_LLM_API_KEY`).
+* GEAK runs Claude Code, so it uses the Anthropic-side base URL + key plus
+  `GEAK_CLAUDE_MODEL`. An OpenAI-only deployment cannot start it.
+* Kernel tools inherit the OpenAI-side credential from preflight
+  (`LLM_API_KEY` / `AMD_LLM_API_KEY`).
 * Orchestration Claude uses the Anthropic-side base URL + key, including the
   generated `~/.claude/config.json` primary key.
 * Robustness-agent uses the OpenAI side for the optional LLM RCA engine.
 * Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
-You *never* need to copy a key into the internal GEAK / LLM slots in `.env`;
+You *never* need to copy a key into the internal LLM slots in `.env`;
 preflight fills those from the OpenAI-side key. Preflight does **not** cross-fill
 the per-provider primary keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
 `ANTHROPIC_AUTH_TOKEN`), and an explicitly set provider key is never overwritten.
@@ -139,8 +142,8 @@ Set each side explicitly.
 Preflight resolves `(anthropic_base_url, openai_base_url)` independently: each
 side is its own explicit base URL, or the official SDK endpoint implied by that
 side's own key, or empty. Claude CLI auth uses `ANTHROPIC_API_KEY` (or
-`ANTHROPIC_AUTH_TOKEN`); GEAK uses the OpenAI-side URL and key. Neither side is
-ever completed from the other.
+`ANTHROPIC_AUTH_TOKEN`); GEAK uses the same Anthropic-side URL and key. Neither
+side is ever completed from the other.
 
 To pin models in split mode:
 
@@ -234,8 +237,8 @@ At preflight, the inference optimizer CLI:
   Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
   (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
   `OPENAI_API_KEY`).
-- Fills the internal GEAK / LLM aliases from the provider key for child
-  processes; the per-provider primary keys are not cross-filled.
+- Fills the internal LLM aliases from the OpenAI-side key for child processes;
+  the per-provider primary keys and the GEAK aliases are not filled.
 
 **401 recovery:**
 
