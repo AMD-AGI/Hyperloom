@@ -2,9 +2,9 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, quickstart, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, Install, ROCm"
 ---
-# Hyperloom Quickstart
+# Hyperloom Installation Instructions
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
@@ -25,8 +25,7 @@ or Codex before running the install command.
 > and keeps your host untouched. Bare-metal mode is for advanced users: it
 > depends on your host's existing ROCm/torch and installs framework components
 > into your environment, which can cause environment-specific issues or
-> conflicts. When running Hyperloom inside a docker container, select the
-> "baremetal" option as the run mode during setup.
+> conflicts. Docker is preferred for a validated, reproducible stack.
 
 ### Prerequisites
 
@@ -87,6 +86,11 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
+
+```note
+If you are performing the Hyperloom setup inside of a Docker container, select
+the "baremetal" option as the run mode during setup.
+```
 
 ## Setup scenarios
 

@@ -22,8 +22,7 @@ Claude Code, or Codex before running the install command.
 > and keeps your host untouched. Bare-metal mode is for advanced users: it
 > depends on your host's existing ROCm/torch and installs framework components
 > into your environment, which can cause environment-specific issues or
-> conflicts. When running Hyperloom inside a docker container, select the
-> "baremetal" option as the run mode during setup.
+> conflicts. Docker is preferred for a validated, reproducible stack.
 
 ### Prerequisites
 
@@ -83,6 +82,11 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
+
+```note
+If you are performing the Hyperloom setup inside of a Docker container, select
+the "baremetal" option as the run mode during setup.
+```
 
 ## Setup Scenarios
 
