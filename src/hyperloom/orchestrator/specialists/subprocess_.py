@@ -276,26 +276,49 @@ class SpecialistSubprocessResult:
 
 
 # Worktree management
-def _pick_worktree_base(roots: tuple[str, ...]) -> Path | None:
-    """Return the first ``roots`` entry that looks like a git checkout.
+def _pick_worktree_base(
+    roots: tuple[str, ...],
+    *,
+    preferred: str = "",
+) -> Path | None:
+    """Return the checkout to branch the specialist's worktree off.
 
-    Falls back to None when none exist — the runner then runs the
+    ``preferred`` wins whenever it is a checkout. It names the framework the
+    session is actually optimising, which ``roots`` cannot express: that is the
+    source-file *allowlist*, a permission set whose order says nothing about the
+    session. Selecting by position worked only while exactly one trusted root
+    happened to be a git checkout. When a pod started shipping aiter as one it
+    sorted first, so WorldPlay specialists were handed an aiter worktree; the
+    patches they wrote against ``hyvideo/`` paths could not be grounded against
+    it and patch-safety dropped every one as ``missing_target``, leaving the
+    session to bench switches with no code behind them.
+
+    Falls back to None when nothing qualifies — the runner then runs the
     specialist without an isolated worktree.
 
     Args:
         roots: Candidate root paths to probe for a ``.git`` marker.
+        preferred: Checkout of the framework under optimisation, if any. Skipped
+            when it is absent or not a checkout, so a pip-installed framework
+            costs the specialist nothing.
 
     Returns:
-        The first git-checkout root, or ``None`` when none qualify.
+        The chosen checkout root, or ``None`` when none qualify.
     """
-    for r in roots:
-        p = Path(r)
-        if not p.is_dir():
-            continue
+
+    def _is_checkout(path: str) -> Path | None:
+        p = Path(path)
         # ``.git`` may be a file (worktree) or a dir (repo).
-        git_marker = p / ".git"
-        if git_marker.exists():
-            return p
+        return p if p.is_dir() and (p / ".git").exists() else None
+
+    if preferred:
+        chosen = _is_checkout(preferred)
+        if chosen is not None:
+            return chosen
+    for r in roots:
+        chosen = _is_checkout(r)
+        if chosen is not None:
+            return chosen
     return None
 
 
