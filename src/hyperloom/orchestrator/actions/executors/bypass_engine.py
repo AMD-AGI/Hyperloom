@@ -13,9 +13,11 @@ Python instead of shelling out to Magpie's scripts:
 * build the lm-eval command,
 * poll an HTTP endpoint for server readiness.
 
-Every function here is side-effect free except ``wait_for_server_ready``, whose
-HTTP probe is injectable, so the whole layer is unit-testable without a GPU,
-a real server, or the Magpie repository.
+The command builders are pure. ``wait_for_server_ready`` and
+``server_health_ok`` take an injectable HTTP probe; ``resolve_inferencex_root``
+reads env vars; ``lifecycle_files_present`` / ``write_lifecycle_files`` touch
+the filesystem under a caller-supplied ``pid_dir``. All of it is therefore
+unit-testable without a GPU, a real server, or the Magpie repository.
 """
 
 from __future__ import annotations

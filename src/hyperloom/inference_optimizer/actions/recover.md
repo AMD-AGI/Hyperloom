@@ -31,7 +31,13 @@ regression — that path goes through `integrate` REVERT instead.
   `delegate{action_name="recover", params={force_gpu_cleanup: True,
   reason: "gpu_memory_leaked", evidence: {...}}}` with a tick-indexed
   `idempotency_key`. PolicyGate accepts it under
-  `ROBUSTNESS_DELEGATE_ACTIONS`.
+  `DELEGATE_ACTION_SOURCE_ALLOWLIST` (`policy/gate.py`), and additionally
+  requires a non-empty `reason` + `evidence` on the payload via
+  `DELEGATE_ACTION_REQUIRED_PAYLOAD` — missing either is denied as
+  `rule="delegate_action_evidence"`. The robustness-agent envelope has its own
+  pre-emit guard, `ROBUSTNESS_DELEGATE_ACTIONS`
+  (`agents/robustness/role/envelope.py`); that constant is agent-local and is
+  not read by PolicyGate.
 
   `recover` is a `ROBUSTNESS_DELEGATE_ONLY_ACTIONS` member
   (see `protocol/action_surfaces.py`): it is **not** in
@@ -48,9 +54,9 @@ regression — that path goes through `integrate` REVERT instead.
 
 | Key                  | Type     | Default | Description |
 |----------------------|----------|---------|-------------|
-| `reason`             | string   | `""`    | Trigger label echoed into `result.json`. Robustness sets `"gpu_memory_leaked"`; Orchestration may use `"crash_after_revert"` etc. |
+| `reason`             | string   | required (non-empty) | Trigger label echoed into `result.json`; Robustness sets `"gpu_memory_leaked"`. PolicyGate rejects an empty value on the delegate path (`delegate_action_evidence`); the executor-side `""` default only applies to a hypothetical non-delegate invocation. |
 | `force_gpu_cleanup`  | bool     | `False` | Walk the SIGTERM -> SIGKILL ladder against every PID matching an inference-server owner pattern. Robustness sets `True`. When `False` the executor only probes the GPUs and returns a `needs_review` diagnostic. |
-| `evidence`           | object   | `{}`    | Optional per-GPU evidence carried over from the symptom (free MiB, consecutive_hits, owner patterns). Stored verbatim in `result.json`; the executor does not branch on it. |
+| `evidence`           | object   | required (non-empty) | Per-GPU evidence carried over from the symptom (free MiB, consecutive_hits, owner patterns). Stored verbatim in `result.json`; the executor does not branch on it. An empty `{}` is denied on the delegate path, same rule as `reason`. |
 
 ## Tiered cleanup
 
@@ -107,10 +113,11 @@ free_mb_threshold).
 
 When the executor returns `state == "needs_review"`, the recover task
 itself is still marked `succeeded` by the SubAgentRunner (the dict
-shape is structurally valid). The ladder cooldown
-(`cooldown_ticks=5`) prevents Robustness from immediately re-firing
-`gpu_memory_leaked` -> `delegate(recover)`. Once the cooldown elapses,
-the escalate_strategy_change advisory from the same tick instructs
-Orchestration to fall back to a deterministic `report` proposal so the
-session can finalize at the last validated gain instead of burning
-budget on doomed validate_stack retries.
+shape is structurally valid), but the robustness event detector raises a
+`recover_unsuccessful` HIGH symptom (`signals/event.py`). On that same
+tick the ActionLadder converts it directly into `delegate(report)` with
+idempotency_key `report-recover-unsuccessful-tick-<N>`, so the session
+finalizes at the last validated gain instead of burning budget on further
+doomed recover attempts. The `gpu_memory_leaked` cooldown
+(`cooldown_ticks=5`) is per-dedup_key and only suppresses re-firing of that
+symptom; it does not delay the report delegation.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the resume-safe CLI flag helpers in ``cli.py``."""
+"""Tests for the resume-safe CLI flag helpers in the ``cli`` package."""
 
 from __future__ import annotations
 

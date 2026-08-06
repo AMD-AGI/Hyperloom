@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.isolation (disk preflight + cleanup)."""
+"""Tests for hyperloom.agents.framework.isolation (disk preflight + cleanup)."""
 
 from __future__ import annotations
 

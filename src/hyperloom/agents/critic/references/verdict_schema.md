@@ -145,34 +145,9 @@ Allowed values:
 - `kb_drafts[].category`: one of the categories in `actions/draft_kb.md`
 - `kb_drafts[].confidence`: number from `0.0` to `1.0`
 
-## Combined Request
+## Two Outputs in One Turn
 
-If the caller requests both outputs in one response, return:
-
-```json
-{
-  "kind": "critic_response",
-  "review_verdict": {
-    "kind": "review_verdict",
-    "target_proposal_msg_id": "msg_123",
-    "verdict": "approve",
-    "source": "critic",
-    "confidence": "high",
-    "reasoning": "Approved.",
-    "predicted_gain_pct": 2.5,
-    "kb_evidence": [],
-    "packet_evidence": [],
-    "risks": [],
-    "required_evidence": [],
-    "alternative_action": null,
-    "advice_text": "",
-    "notes": []
-  },
-  "kb_draft": {
-    "kind": "kb_draft",
-    "kb_drafts": [],
-    "rejected_candidates": [],
-    "notes": []
-  }
-}
-```
+There is no combined wrapper object. When both a review and a KB draft
+are produced, they are supplied as two separate JSON payloads — the
+review via `commit-review --review`, the draft via `close-session
+--kb-draft` — each matching its own schema above.

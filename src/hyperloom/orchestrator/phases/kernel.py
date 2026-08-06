@@ -43,6 +43,12 @@ log = _logging.getLogger(__name__)
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
+# Idempotency key of the same-harness GEAK rebench enqueued by
+# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
+# ``geak_pending`` before the task row exists, so the phase guard already sees a
+# pending revalidation while the enqueue is in flight.
+_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
+
 
 class KernelPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
@@ -746,6 +752,20 @@ class KernelPhase(PhaseHandler):
 
         async def _enqueue_geak_revalidation(*, reason: str) -> bool:
             """Enqueue and persist the rebench that keeps a GEAK win pending."""
+            # Reserve the pending slot BEFORE the task exists. The rebench runs
+            # as an ``explore`` task, a kind no later phase allows, so the phase
+            # boundary cancels it on sight; ``kernel_work_pending`` is what holds
+            # KERNEL open until the rebench lands. Publishing the reservation
+            # after enqueue left a window where the guard saw no revalidation id,
+            # let KERNEL exit, and the cancel swept the freshly queued task —
+            # stranding a validated win as audit-only.
+            reserved = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
+            reserved["status"] = "awaiting_rebench"
+            reserved.setdefault("revalidation_task_id", _GEAK_REVALIDATE_IDEMPOTENCY_KEY)
+            reserved.pop("revalidation_error", None)
+            state.geak_pending = reserved
+            state.save(self.session_dir)
+
             try:
                 summary = await self._enqueue_internal_stack_rebench(reason=reason)
             except Exception as exc:  # noqa: BLE001 - defensive
@@ -763,6 +783,9 @@ class KernelPhase(PhaseHandler):
                 return True
 
             pending["status"] = "rebench_unavailable"
+            # Drop the reservation placeholder so no stale id outlives the slot.
+            if pending.get("revalidation_task_id") == _GEAK_REVALIDATE_IDEMPOTENCY_KEY:
+                pending.pop("revalidation_task_id", None)
             pending["revalidation_error"] = str(
                 (summary or {}).get("reason") or f"task settled before dispatch ({task_state or 'unknown'})"
             )[:500]
@@ -779,7 +802,16 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        if recovered.get("status") == "ok" and not self._geak_win_already_recorded():
+        # Tombstone: a result already dropped by 2b as no-material must not be
+        # re-recovered from the stale (still status=ok) result.json, else each
+        # KERNEL entry re-enqueues a wasted rebench in a loop.
+        prev_geak = (
+            self.shared_state.geak_result
+            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+            else {}
+        )
+        dropped_no_material = str(prev_geak.get("revalidation_status") or "") == "no_material"
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded() and not dropped_no_material:
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -1365,6 +1397,7 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         current_best_tput: float,
         provenance: str,
+        rejection_reason: str = "rebench_did_not_beat_current_best",
     ) -> None:
         """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
 
@@ -1403,7 +1436,7 @@ class KernelPhase(PhaseHandler):
                     "revalidation_measured_tput": measured_tput,
                     "revalidation_current_best_tput": current_best_tput,
                     "revalidation_provenance": provenance,
-                    "rejection_reason": "rebench_did_not_beat_current_best",
+                    "rejection_reason": rejection_reason,
                 }
             )
             try:
@@ -1443,12 +1476,6 @@ class KernelPhase(PhaseHandler):
         normally removed with the serving process, so fall back to rebuilding the
         same table from the installed aiter package. Overlay the candidate by the
         untuned schema's dispatch keys and write one self-contained CSV for E2E.
-
-        Implemented on the stdlib ``csv`` module on purpose: this runs in the
-        orchestrator process, which must not carry a hard pandas dependency (it
-        is not declared in ``pyproject.toml`` and is absent from the CI/test
-        environment). Values are carried through as text, so a config round-trips
-        byte-for-byte instead of being re-formatted by a dataframe writer.
 
         Implemented on the stdlib ``csv`` module on purpose: this runs in the
         orchestrator process, which must not carry a hard pandas dependency
@@ -1926,9 +1953,13 @@ class KernelPhase(PhaseHandler):
         and stamps ``cumulative_gain`` / ``cumulative_gain_validated`` since
         the GEMM benchmark is itself an end-to-end serving measurement.
 
-        For forge-gemm-tune results (``requires_e2e_validation=True``), the
-        entry is promoted but ``cumulative_gain_validated`` is NOT stamped —
-        downstream E2E validation (explore action) must confirm the gain.
+        Forge results that requested per-tuner E2E validation
+        (``requires_e2e_validation``), or that are eligible for the CK
+        block-scale switch (``_ck_blockscale_switch_eligible``), are routed to
+        ``_validate_forge_gemm_tuning_e2e`` by ``_handle_gemm_tuning_result``
+        and normally never reach this promoter. Anything that does reach it —
+        including a forge result whose validation already completed — has its
+        gain stamped as validated.
 
         Args:
             result (dict[str, Any]): The GEMM tuning handler result; ignored if

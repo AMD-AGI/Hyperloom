@@ -3,9 +3,9 @@
 
 """Shared invocation-block renderer for baseline / final sections.
 
-Centralised so both renderers emit the identical five-line block. The
-``_`` prefix keeps it out of ``compose.py``'s auto-imported renderer walk
-(it registers no renderer).
+Centralised so both renderers emit an identical block. The ``_`` prefix
+marks it as a helper: it registers no renderer and is not listed in
+``compose.py``'s renderer imports.
 """
 
 from __future__ import annotations

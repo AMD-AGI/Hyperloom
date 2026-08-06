@@ -506,7 +506,7 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "advice=" not in line
 
 
-# 5. _materialize_approved_proposal — filter semantics (unit)
+# 4. _materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     """Pin the ``approved_variant_names`` filter contract independently."""
@@ -618,7 +618,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
-# 6. _handle_delegate — explore grid runs directly (no Critic pre-review)
+# 5. _handle_delegate — explore grid runs directly (no Critic pre-review)
 def _delegate_coord(tmp_path: Path):
     """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
@@ -688,7 +688,103 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     assert create_calls[0]["params"]["grid"] == grid
 
 
-# 7. Specialist prompt — proposal self-curation contract (Section 1 + 8)
+@pytest.mark.asyncio
+async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
+    """A delegate explore carries current_best's args/envs, not just its throughput.
+
+    Seeding the anchor alone launched every variant on a bare config and graded it
+    against the established recipe, so a whole round read as a ~40% regression.
+    """
+    coord = _delegate_coord(tmp_path)
+    coord.shared_state.baseline_tput = 4663.79
+    coord.shared_state.current_best = {
+        "tput": 7725.6,
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3 --max-num-seqs 64",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    created: list[dict[str, Any]] = []
+
+    class _TaskRegistry:
+        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+            created.append(dict(kwargs["params"]))
+            from hyperloom.orchestrator.state.task_registry import Task
+
+            return (
+                Task(
+                    task_id="t-explore-stack",
+                    kind=kwargs["kind"],
+                    state="queued",
+                    params=kwargs["params"],
+                    idempotency_key=kwargs["idempotency_key"],
+                ),
+                False,
+            )
+
+    coord.tasks = _TaskRegistry()
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "explore",
+            "params": {"grid": [{"name": "v_a", "extra_args": "--flag-a"}]},
+            "idempotency_key": "explore-round-4",
+        },
+    )
+    await coord._handle_delegate("orchestration", intent)
+    assert len(created) == 1
+    params = created[0]
+    assert params["base_tput"] == 7725.6
+    assert params["base_extra_args"] == "--kv-cache-dtype fp8_e4m3 --max-num-seqs 64"
+    assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+@pytest.mark.asyncio
+async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
+    """A delegated sweep scans on top of current_best, as its action contract states.
+
+    ``executors/sweep.py`` assembles each (CONC, ISL, OSL) point from the
+    ``base_*`` params, so seeding only ``explore`` left a delegated sweep
+    measuring the bare baseline config.
+    """
+    coord = _delegate_coord(tmp_path)
+    coord.shared_state.baseline_tput = 4663.79
+    coord.shared_state.current_best = {
+        "tput": 7725.6,
+        "extra_server_args": "--max-num-seqs 64",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    created: list[dict[str, Any]] = []
+
+    class _TaskRegistry:
+        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+            created.append(dict(kwargs["params"]))
+            from hyperloom.orchestrator.state.task_registry import Task
+
+            return (
+                Task(
+                    task_id="t-sweep-stack",
+                    kind=kwargs["kind"],
+                    state="queued",
+                    params=kwargs["params"],
+                    idempotency_key=kwargs["idempotency_key"],
+                ),
+                False,
+            )
+
+    coord.tasks = _TaskRegistry()
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "sweep", "params": {}, "idempotency_key": "sweep-1"},
+    )
+    await coord._handle_delegate("orchestration", intent)
+    assert len(created) == 1
+    params = created[0]
+    assert params["base_extra_args"] == "--max-num-seqs 64"
+    assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    # explore-only runtime knobs must not leak onto a sweep task.
+    assert "explore_overtime_kill_ratio" not in params
+
+
+# 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
     from hyperloom.orchestrator.prompts.specialist_prompt_builder import (

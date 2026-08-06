@@ -14,8 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# MCP URL passed to specialist LLM backend. Empty means PR Monitor MCP is not
-# advertised unless the operator explicitly configures --pr-monitor-mcp-url.
+# MCP URL passed to specialist LLM backends. Empty means PR Monitor MCP is not
+# advertised; the CLI overrides it from --pr-monitor-mcp-url, which itself
+# defaults to $PRIMUS_CORTEX_PR_API + '/mcp/'.
 DEFAULT_PR_MONITOR_MCP_URL: str = ""
 
 

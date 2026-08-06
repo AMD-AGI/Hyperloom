@@ -11,6 +11,7 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_frame
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
+from ..state.shared_state import inject_stack_base_params
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -363,7 +364,8 @@ class ProposalsCollaborator:
                 "variant_timeout_safety_margin",
                 safety_margin_override,
             )
-        # Thread the persisted explore_search ledger so ExploreExecutor's dedup has cross-turn memory.
+        # Thread the persisted explore_search ledger so the executor seeds its
+        # tested history; it is evidence only, not an eligibility gate.
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
@@ -394,7 +396,7 @@ class ProposalsCollaborator:
         *,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Grid executors get current best tput as base_tput; approved_variant_names filters the explore grid (None keeps full).
+        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full).
 
         Args:
             pending: The approved proposal to materialise into a task.
@@ -436,57 +438,16 @@ class ProposalsCollaborator:
                     0,
                     original_grid_len - len(approved_variant_names),
                 )
-        cb = self.shared_state.current_best or {}
-        cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
-        # Cumulative env base for stack-aware actions; without it explore stacks
-        # args but not envs and current_best.extra_envs collapses to the last delta.
-        cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb, dict) else {}
-
-        def _list_control(value: Any) -> list[str]:
-            if isinstance(value, str):
-                return [value] if value.strip() else []
-            return [str(v) for v in (value or []) if str(v).strip()]
-
-        cb_remove_args = _list_control(cb.get("remove_args")) if isinstance(cb, dict) else []
-        cb_unset_envs = _list_control(cb.get("unset_envs")) if isinstance(cb, dict) else []
-        cb_args_mode = str(cb.get("args_mode") or "").strip().lower() if isinstance(cb, dict) else ""
         if pending.action_name == "profile":
             # Stamp the server config that produced this trace.
-            params.setdefault("base_extra_args", cb_args)
-            if cb_remove_args:
-                params.setdefault("base_remove_args", cb_remove_args)
-            if cb_unset_envs:
-                params.setdefault("base_unset_envs", cb_unset_envs)
-            if cb_args_mode == "replace":
-                params.setdefault("base_args_mode", "replace")
+            inject_stack_base_params(params, self.shared_state)
         if pending.action_name == "sweep":
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
-            params.setdefault("base_extra_args", cb_args)
-            if cb_remove_args:
-                params.setdefault("base_remove_args", cb_remove_args)
-            if cb_unset_envs:
-                params.setdefault("base_unset_envs", cb_unset_envs)
-            if cb_args_mode == "replace":
-                params.setdefault("base_args_mode", "replace")
+            inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self._inject_explore_runtime_params(params)
-            # Inject base_tput/base_extra_args tied to current_best (or baseline_tput) so _gain_pct resolves.
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
-            params.setdefault("base_extra_args", cb_args)
-            if cb_envs:
-                params.setdefault("base_extra_envs", dict(cb_envs))
-            if cb_remove_args:
-                params.setdefault("base_remove_args", cb_remove_args)
-            if cb_unset_envs:
-                params.setdefault("base_unset_envs", cb_unset_envs)
-            if cb_args_mode == "replace":
-                params.setdefault("base_args_mode", "replace")
+            inject_stack_base_params(params, self.shared_state, anchor=True)
         if pending.action_name == "integrate_patch":
             keep = self._decaying_keep_threshold_pct()
             if keep is not None:
@@ -494,16 +455,7 @@ class ProposalsCollaborator:
             # Seed the patched-eval server with the same base args/config every
             # other eval server uses, else it launches on bare framework defaults
             # and crashes at startup regardless of the patch.
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
-            params.setdefault("base_tput", float(base or 0.0))
-            params.setdefault("base_extra_args", cb_args)
-            if cb_remove_args:
-                params.setdefault("base_remove_args", cb_remove_args)
-            if cb_unset_envs:
-                params.setdefault("base_unset_envs", cb_unset_envs)
-            if cb_args_mode == "replace":
-                params.setdefault("base_args_mode", "replace")
+            inject_stack_base_params(params, self.shared_state, anchor=True)
             if self.shared_state.baseline_config_path:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)

@@ -17,6 +17,7 @@ Used by ``baseline.py`` (materializes once, surfaces the path) and the
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -30,6 +31,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
+    filter_benchmark_env_mapping,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -78,10 +80,6 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
-_WORLDPLAY_REPO_URL = "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git"
-_WORLDPLAY_REPO_DIRNAME = "HY-WorldPlay"
-_WORLDMIRROR_REPO_URL = "https://github.com/Tencent-Hunyuan/HY-World-2.0.git"
-_WORLDMIRROR_REPO_DIRNAME = "HY-World-2.0"
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -139,8 +137,11 @@ def prepare_agentx_runtime(
     return None
 
 
-def _worldplay_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
-    """Resolve the WorldPlay benchmark runner suffix."""
+def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
+    """Resolve the runner suffix a scriptable entrypoint is named after.
+
+    Framework-independent: the suffix names the machine, not the workload.
+    """
     return (
         str(gpu_type or "").strip().lower()
         or str(bench.get("runner_type") or "").strip().lower()
@@ -150,99 +151,35 @@ def _worldplay_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
     )
 
 
-def _worldplay_script_path(runner_type: str) -> Path:
-    """Return the shipped WorldPlay benchmark entrypoint path."""
-    scripts_dir = asset_root() / "assets" / "benchmark_scripts"
-    preferred = scripts_dir / f"worldplay_{runner_type}.sh"
-    if preferred.is_file():
-        return preferred
-    return scripts_dir / "worldplay_mi355x.sh"
 
-
-def _worldmirror_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
-    """Resolve the WorldMirror benchmark runner suffix."""
-    return (
-        str(gpu_type or "").strip().lower()
-        or str(bench.get("runner_type") or "").strip().lower()
-        or os.environ.get("GPU_TYPE", "").strip().lower()
-        or os.environ.get("RUNNER_TYPE", "").strip().lower()
-        or "mi355x"
-    )
-
-
-def _worldmirror_script_path(runner_type: str) -> Path:
-    """Return the shipped WorldMirror benchmark entrypoint path."""
-    scripts_dir = asset_root() / "assets" / "benchmark_scripts"
-    preferred = scripts_dir / f"worldmirror_{runner_type}.sh"
-    if preferred.is_file():
-        return preferred
-    return scripts_dir / "worldmirror_mi355x.sh"
-
-
-def _default_worldplay_action_ckpt(model_path: str, model_type: str) -> str:
-    """Infer the sibling HY-WorldPlay action checkpoint from model path."""
-    model = Path(str(model_path or ""))
-    if not model.is_absolute():
-        return ""
-    subdir = "bidirectional_model" if str(model_type or "").strip().lower() == "bi" else "ar_model"
-    return str(model.parent / "HY-WorldPlay" / subdir / "diffusion_pytorch_model.safetensors")
-
-
-def _sync_worldplay_repo_aliases(
+def _sync_repo_aliases(
     bench: dict[str, Any],
     envs: dict[str, Any],
     *,
+    framework: str,
     prefer_dir: bool = False,
 ) -> None:
-    """Keep WORLDPLAY_REPO_PATH and WORLDPLAY_DIR pointing at the same checkout."""
-    if str(bench.get("framework") or "").strip().lower() != "worldplay":
+    """Keep ``<FRAMEWORK>_REPO_PATH`` and ``<FRAMEWORK>_DIR`` on one checkout.
+
+    Both spellings reach the benchmark and a script may read either, so letting
+    them drift points one half of a run at a different tree than the other.
+
+    Args:
+        bench: The ``benchmark`` section; the sync applies only to its framework.
+        envs: The ``benchmark.envs`` mapping, updated in place.
+        framework: Framework whose prefix the two aliases carry.
+        prefer_dir: Resolve ``_DIR`` first, for the caller that saw the operator
+            supply only that spelling.
+    """
+    if str(bench.get("framework") or "").strip().lower() != framework.strip().lower():
         return
-    if prefer_dir:
-        repo_path = str(envs.get("WORLDPLAY_DIR") or envs.get("WORLDPLAY_REPO_PATH") or "").strip()
-    else:
-        repo_path = str(envs.get("WORLDPLAY_REPO_PATH") or envs.get("WORLDPLAY_DIR") or "").strip()
+    prefix = framework.strip().upper()
+    order = (f"{prefix}_DIR", f"{prefix}_REPO_PATH") if prefer_dir else (f"{prefix}_REPO_PATH", f"{prefix}_DIR")
+    repo_path = str(envs.get(order[0]) or envs.get(order[1]) or "").strip()
     if repo_path:
-        envs["WORLDPLAY_REPO_PATH"] = repo_path
-        envs["WORLDPLAY_DIR"] = repo_path
+        envs[f"{prefix}_REPO_PATH"] = repo_path
+        envs[f"{prefix}_DIR"] = repo_path
 
-
-def _sync_worldmirror_repo_aliases(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    prefer_dir: bool = False,
-) -> None:
-    """Keep WORLDMIRROR_REPO_PATH and WORLDMIRROR_DIR pointing at one checkout."""
-    if str(bench.get("framework") or "").strip().lower() != "worldmirror":
-        return
-    if prefer_dir:
-        repo_path = str(envs.get("WORLDMIRROR_DIR") or envs.get("WORLDMIRROR_REPO_PATH") or "").strip()
-    else:
-        repo_path = str(envs.get("WORLDMIRROR_REPO_PATH") or envs.get("WORLDMIRROR_DIR") or "").strip()
-    if repo_path:
-        envs["WORLDMIRROR_REPO_PATH"] = repo_path
-        envs["WORLDMIRROR_DIR"] = repo_path
-
-
-def _sync_worldplay_action_ckpt(bench: dict[str, Any], envs: dict[str, Any]) -> None:
-    """Keep autogenerated action checkpoint aligned with final model_type."""
-    if str(bench.get("framework") or "").strip().lower() != "worldplay":
-        return
-    model = str(bench.get("model") or "")
-    current = str(envs.get("WORLDPLAY_ACTION_CKPT") or "").strip()
-    default_values = {
-        _default_worldplay_action_ckpt(model, "ar"),
-        _default_worldplay_action_ckpt(model, "bi"),
-        "",
-    }
-    if current not in default_values:
-        return
-    action_ckpt = _default_worldplay_action_ckpt(
-        model,
-        str(envs.get("WORLDPLAY_MODEL_TYPE") or "ar"),
-    )
-    if action_ckpt:
-        envs["WORLDPLAY_ACTION_CKPT"] = action_ckpt
 
 
 def _publish_scriptable_repo_root(framework: str, repo_path: str) -> None:
@@ -314,83 +251,102 @@ def _resolve_framework_repo_path(
     return ""
 
 
-def _apply_worldplay_runtime_defaults(
+
+
+def _custom_script_path(runner_type: str) -> str:
+    """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
+
+    Prefers the ``custom_{runner_type}.sh`` convention, then a lone ``.sh`` in
+    the directory, which is what an operator who wrote one script for one
+    machine actually has. Returns ``""`` when neither applies, leaving the
+    resolution chain in ``bypass_scriptable`` to report the miss.
+    """
+    raw = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if not raw:
+        return ""
+    scripts_dir = Path(raw)
+    if not scripts_dir.is_dir():
+        return ""
+    preferred = scripts_dir / f"custom_{runner_type}.sh"
+    if preferred.is_file():
+        return str(preferred)
+    candidates = sorted(p for p in scripts_dir.glob("*.sh") if p.is_file())
+    return str(candidates[0]) if len(candidates) == 1 else ""
+
+
+def _operator_extra_env() -> dict[str, str]:
+    """Return the ``--extra-env`` pins the CLI serialized, or ``{}``.
+
+    Args:
+        None.
+
+    Returns:
+        The operator's ``NAME=VALUE`` pins; empty when unset or unparseable,
+        because a malformed pin must not take the run down with it.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("custom: ignoring unparseable INFERENCE_OPTIMIZER_EXTRA_ENV")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+
+
+def _apply_custom_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
     *,
     gpu_type: str | None,
     explicit_benchmark_script: bool,
 ) -> None:
-    """Resolve WorldPlay repo/script paths at materialization time."""
-    if str(bench.get("framework") or "").strip().lower() != "worldplay":
+    """Resolve an operator-supplied workload's checkout, entrypoint and pins.
+
+    The other scriptable helpers know their framework's repo URL and shipped
+    script; here both arrive at launch, so this only wires what was given and
+    leaves anything missing to fail where it is diagnosable.
+
+    ``--extra-env`` is the only channel an operator has for the knobs their own
+    script reads, so those pins are written into ``benchmark.envs`` rather than
+    left in the orchestrator's environment: the materialized config is what the
+    measurement contract is read from, and a pin that never lands there is
+    neither delivered to the benchmark nor protected from being overwritten by
+    a variant.
+    """
+    if str(bench.get("framework") or "").strip().lower() != "custom":
         return
 
-    runner_type = _worldplay_runner_type(bench, gpu_type)
+    runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
-        bench["benchmark_script"] = str(_worldplay_script_path(runner_type))
+        script = _custom_script_path(runner_type)
+        if script:
+            bench["benchmark_script"] = script
 
-    repo_path = _resolve_framework_repo_path(
-        envs,
-        framework="worldplay",
-        extra_aliases=("WORLDPLAY_REPO",),
-    )
+    # A variant's own overrides are applied after this hook, so they still win
+    # for keys the operator did not pin; setdefault only fills the gaps.
+    for key, value in _operator_extra_env().items():
+        envs.setdefault(key, value)
+
+    repo_path = _resolve_framework_repo_path(envs, framework="custom")
     if not repo_path:
-        repo_path = str(deps_cache_root() / _WORLDPLAY_REPO_DIRNAME)
-        envs["WORLDPLAY_REPO_URL"] = (
-            os.environ.get("WORLDPLAY_REPO_URL", "").strip()
-            or str(envs.get("WORLDPLAY_REPO_URL") or "").strip()
-            or _WORLDPLAY_REPO_URL
-        )
-    envs["WORLDPLAY_REPO_PATH"] = repo_path
-    envs["WORLDPLAY_DIR"] = repo_path
-    envs.pop("WORLDPLAY_REPO", None)
-    _publish_scriptable_repo_root("worldplay", repo_path)
-
-    bench_py = (
-        os.environ.get("WORLDPLAY_BENCH", "").strip()
-        or str(envs.get("WORLDPLAY_BENCH") or "").strip()
-        or str(asset_root() / "assets" / "benchmark_scripts" / "bench_fps.py")
-    )
-    envs["WORLDPLAY_BENCH"] = bench_py
-    action_ckpt_override = os.environ.get("WORLDPLAY_ACTION_CKPT", "").strip()
-    if action_ckpt_override:
-        envs["WORLDPLAY_ACTION_CKPT"] = action_ckpt_override
-    _sync_worldplay_action_ckpt(bench, envs)
-
-
-def _apply_worldmirror_runtime_defaults(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    gpu_type: str | None,
-    explicit_benchmark_script: bool,
-) -> None:
-    """Resolve WorldMirror repo/script paths at materialization time."""
-    if str(bench.get("framework") or "").strip().lower() != "worldmirror":
         return
-
-    runner_type = _worldmirror_runner_type(bench, gpu_type)
-    bench["runner_type"] = runner_type
-    if not explicit_benchmark_script:
-        bench["benchmark_script"] = str(_worldmirror_script_path(runner_type))
-
-    repo_path = _resolve_framework_repo_path(envs, framework="worldmirror")
-    if not repo_path:
-        repo_path = str(deps_cache_root() / _WORLDMIRROR_REPO_DIRNAME)
-    envs["WORLDMIRROR_REPO_URL"] = (
-        os.environ.get("WORLDMIRROR_REPO_URL", "").strip()
-        or str(envs.get("WORLDMIRROR_REPO_URL") or "").strip()
-        or _WORLDMIRROR_REPO_URL
-    )
-    envs["WORLDMIRROR_REPO_PATH"] = repo_path
-    envs["WORLDMIRROR_DIR"] = repo_path
-    _publish_scriptable_repo_root("worldmirror", repo_path)
-    envs["WORLDMIRROR_BENCH"] = (
-        os.environ.get("WORLDMIRROR_BENCH", "").strip()
-        or str(envs.get("WORLDMIRROR_BENCH") or "").strip()
-        or str(asset_root() / "assets" / "benchmark_scripts" / "worldmirror_bench.py")
-    )
+    envs["CUSTOM_REPO_PATH"] = repo_path
+    envs["CUSTOM_DIR"] = repo_path
+    # Also under the framework-agnostic name, and in the config rather than only
+    # in os.environ. An entrypoint Hyperloom did not write can only be expected
+    # to know the generic spelling, and the benchmark inherits its environment
+    # from whichever process launched the runner — a Ray worker carries the
+    # environment the raylet booted with, hours or days earlier, so a stale
+    # <FRAMEWORK>_DIR there outranks anything published later. Config envs are
+    # applied on top of that inherited environment, so this is what actually
+    # reaches the script.
+    envs["FRAMEWORK_REPO_PATH"] = repo_path
+    _publish_scriptable_repo_root("custom", repo_path)
 
 
 def apply_scriptable_runtime_defaults(
@@ -400,14 +356,14 @@ def apply_scriptable_runtime_defaults(
     gpu_type: str | None,
     explicit_benchmark_script: bool,
 ) -> None:
-    """Re-pin bundled scriptable entrypoints and their runtime paths.
+    """Re-pin an operator's scriptable entrypoint and its runtime paths.
 
     Every config path that re-derives ``benchmark_script`` from ``gpu_type``
     must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
-    replaces the bundled absolute path. Each per-framework helper is a no-op
-    for other frameworks, so a new scriptable framework is added here once.
+    replaces the resolved absolute path. Each helper is a no-op for frameworks
+    other than its own, so a new one is added here once.
     """
-    for apply in (_apply_worldplay_runtime_defaults, _apply_worldmirror_runtime_defaults):
+    for apply in (_apply_custom_runtime_defaults,):
         apply(
             bench,
             envs,
@@ -568,8 +524,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "vllm": Path("assets/configs/baseline_vllm.yaml"),
     "xdit": Path("assets/configs/baseline_xdit.yaml"),
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
-    "worldplay": Path("assets/configs/baseline_worldplay.yaml"),
-    "worldmirror": Path("assets/configs/baseline_worldmirror.yaml"),
+    "custom": Path("assets/configs/baseline_custom.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
@@ -599,6 +554,17 @@ def _finalize_framework_server_args(
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
+
+    1. --context-length cap: sglang sizes max_total_tokens off the model's
+       max_position_embeddings, so a huge native window balloons the aiter
+       workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
+       native window AND to the run's MAX_MODEL_LEN.
+    2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
+       first-request aiter JIT compile survives (the 300s default fires
+       SIGQUIT mid-warmup on a cold aiter cache).
+
+    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale.
 
     ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
     already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
@@ -1141,18 +1107,12 @@ def materialize_config_with_envs(
         log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
-    _sync_worldplay_repo_aliases(
+    _sync_repo_aliases(
         bench,
         envs,
-        prefer_dir="WORLDPLAY_DIR" in safe_extra_envs and "WORLDPLAY_REPO_PATH" not in safe_extra_envs,
+        framework="custom",
+        prefer_dir="CUSTOM_DIR" in safe_extra_envs and "CUSTOM_REPO_PATH" not in safe_extra_envs,
     )
-    _sync_worldmirror_repo_aliases(
-        bench,
-        envs,
-        prefer_dir="WORLDMIRROR_DIR" in safe_extra_envs and "WORLDMIRROR_REPO_PATH" not in safe_extra_envs,
-    )
-    if "WORLDPLAY_ACTION_CKPT" not in safe_extra_envs:
-        _sync_worldplay_action_ckpt(bench, envs)
     framework_env = server_args_env_name(bench.get("framework"))
     # Final dedup after reference/server_args merges: collapse repeated
     # vLLM/atom single-value flags to last-wins so recipe/variant values
@@ -1285,17 +1245,9 @@ def materialize_config_with_envs(
                     if _sp_existing
                     else f"--block-size {_sparse_bs}"
                 )
-    # sglang server-arg guards, applied at the FINAL framework env so any
-    # operator-pinned flag is honored and never doubled. No-ops for vllm/atom.
-    # Single choke point every benchmark path funnels through.
-    #
-    # 1. --context-length cap: sglang sizes max_total_tokens off the model's
-    #    max_position_embeddings, so a huge native window balloons the aiter
-    #    workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
-    #    native window AND to the run's MAX_MODEL_LEN.
-    # 2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
-    #    first-request aiter JIT compile survives (the 300s default fires
-    #    SIGQUIT mid-warmup on a cold aiter cache).
+    # Single choke point every benchmark path funnels through: the final
+    # server-arg guards, applied at the FINAL framework env so any
+    # operator-pinned flag is honored and never doubled.
     _finalize_framework_server_args(
         envs,
         bench,
@@ -1351,6 +1303,32 @@ def materialize_config_with_envs(
     _eval_limit_env = os.environ.get("MAGPIE_EVAL_LIMIT", "").strip()
     if _eval_limit_env and "MAGPIE_EVAL_LIMIT" not in envs:
         envs["MAGPIE_EVAL_LIMIT"] = _eval_limit_env
+    # PD (router-fronted): lm_eval's default token-id prompts are rejected by the
+    # sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
+    # accuracy eval. Force string prompts so the gate works. Explicit env /
+    # extra_envs win; only disaggregated runs are touched (aggregated hits the
+    # sglang server directly, which accepts token-id prompts).
+    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    if not _eval_tok_env:
+        try:
+            from ._multi_node_env import resolve_kb_topology
+
+            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+                _eval_tok_env = "false"
+        except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
+            # Don't degrade silently: if this IS a PD run, failing to resolve the
+            # topology leaves MAGPIE_EVAL_TOKENIZED_REQUESTS unset, lm_eval keeps
+            # sending token-id prompts, and the sglang_router 422s every request
+            # -> accuracy reads 0 with no other clue pointing back here.
+            log.warning(
+                "_workload_envs: could not resolve PD topology to gate the lm_eval prompt format (%s); "
+                "if this is a disaggregated run, MAGPIE_EVAL_TOKENIZED_REQUESTS stays unset and the "
+                "sglang_router may reject token-id prompts with HTTP 422 (accuracy eval would read 0)",
+                exc,
+            )
+            _eval_tok_env = ""
+    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
+        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
     if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
@@ -1399,6 +1377,15 @@ def materialize_config_with_envs(
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
             envs[str(key)] = str(extra_envs[key])
+    filtered_envs = filter_benchmark_env_mapping(envs)
+    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    if dropped_credentials:
+        log.warning(
+            "Dropping control-plane credentials from benchmark envs: %s",
+            ", ".join(dropped_credentials),
+        )
+        envs.clear()
+        envs.update(filtered_envs)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

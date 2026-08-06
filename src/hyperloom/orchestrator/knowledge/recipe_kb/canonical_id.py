@@ -11,7 +11,7 @@ Adds two local-store-specific helpers:
 
 * :func:`cid_to_path_components` — decompose a canonical id back into
   its seven identity slugs (``model / hardware / framework_name /
-  framework_version / precision / model_type / architectures``). The
+  model_type / architectures / framework_version / precision``). The
   local store maps each slug to a directory level, so the round-trip
   ``recipe_canonical_id`` → ``cid_to_path_components`` →
   ``Path(*components)`` must be lossless.

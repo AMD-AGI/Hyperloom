@@ -14,12 +14,12 @@ dicts. Every put_recipe is the local equivalent of the v2
 * whole sequence runs under an exclusive file-lock so concurrent
   processes can't tear a write.
 
-Layout (one directory per identity dimension; cid → 5-level path):
+Layout (one directory per identity dimension; cid → 7-level path):
 
 ::
 
     <root>/
-      <model>/<hardware>/<framework_name>/<framework_version>/<precision>/
+      <model>/<hardware>/<framework_name>/<model_type>/<architectures>/<framework_version>/<precision>/
         recipe.json              # current live row
         history/
           v1.json
@@ -32,7 +32,7 @@ after rename is best-effort durability.
 
 The local store is the source of truth in degraded/offline mode and a
 best-effort cache in healthy mode. ``search`` is an O(N) walk + in-memory
-filter (N bounded by the number of distinct 5-tuples ever seen).
+filter (N bounded by the number of distinct 7-tuples ever seen).
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ _COUNTED_COLLECTIONS: tuple[str, ...] = (
 )
 
 
-# Order_by whitelist — mirrors the central /recipes/search contract.
+# Order_by whitelist accepted by :meth:`LocalRecipeStore.search`.
 # Everything else raises ValueError.
 _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
     "updated_at DESC": ("updated_at", True),
@@ -246,10 +246,10 @@ class LocalRecipeStore:
     only the dataclass overhead.
 
     Args:
-        root: store root (typically
-            ``$USER_DATA_PATH/recipe_kb/``). Created lazily on first
-            write; reads against an absent root return ``None`` /
-            empty list.
+        root: store root (``--local-kb-root`` →
+            ``$HYPERLOOM_LOCAL_KB_ROOT`` → ``workspace_root()/kb``).
+            Created lazily on first write; reads against an absent root
+            return ``None`` / empty list.
     """
 
     root: Path
@@ -546,11 +546,15 @@ class LocalRecipeStore:
         returned rows, so the local store only honours the ``required``
         (``label_match`` / metric / updated_since) filter.
 
-        Mirrors the central server's ``POST /recipes/search``:
+        Filter semantics:
 
-        * ``label_match``: dict containment — rows whose ``labels`` is a
-          strict superset of every (key, value) pair match. Empty/None means
-          no filter.
+        * ``label_match``: key-value match against the row's TOP-LEVEL
+          identity fields (there is no ``labels`` map on disk). Most keys
+          are exact equality; ``architectures`` uses contains semantics,
+          ``model_type`` treats empty/default on either side as a wildcard,
+          and ``framework_name`` falls back to the legacy ``framework``
+          key. Unknown keys match the row's splatted extras. Empty/None
+          means no filter.
         * ``metric_filters``: ``{name: {min?, max?}}`` numeric range bounds;
           rows missing the key are excluded.
         * ``updated_since``: ISO-8601 string compared lexically (valid because

@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``tools/robustness_monitor.sh.example`` session-dir resolution.
+"""Tests for ``tools/robustness_monitor.sh.example`` session-dir resolution and
+resume gating.
 
 The monitor resolves the session dir from an explicit env var or the
 ``$LAUNCH_INFO_FILE`` ``.session_dir`` field (polling a bounded window if not
-yet flushed), and refuses to guess a default path.
+yet flushed), refuses to guess a default path, and only resumes past the
+startup grace once the dead-pid streak is confirmed.
 """
 
 from __future__ import annotations

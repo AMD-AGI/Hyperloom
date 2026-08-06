@@ -5,8 +5,8 @@
 
 Never raises for transport / 4xx errors — catches, dead-letters, and
 returns a typed :class:`WriteResult` so the pipeline never blocks on KB
-issues. Triggers: :meth:`write_verdict` (upsert; defer/inconclusive/advise
-skipped), :meth:`write_kb_drafts` (batch insert ``on_conflict=upsert``),
+issues. Triggers: :meth:`write_verdict` (upsert; ``advise`` skipped),
+:meth:`write_kb_drafts` (batch insert ``on_conflict=upsert``),
 :meth:`add_contradiction` (contradicts edge). Plus :meth:`list_priors`
 (read, TTL'd cache backed by :class:`SessionMemory`).
 """
@@ -48,8 +48,8 @@ from .session_memory import SessionMemory
 from .slugify import slugify, slugify_safe
 
 
-# Verdicts that should produce a KB write (defer/inconclusive/advise are pure
-# dispatch decisions with no reusable lesson).
+# Verdicts that should produce a KB write. ``advise`` is a pure dispatch
+# decision with no reusable lesson, so it is skipped.
 _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",

@@ -925,8 +925,9 @@ async def run_tracelens_skill(
         analysis_mode (str): The requested analysis mode.
         capture_folder (Path | None): Graph-capture folder for inference runs.
         budget_minutes (float): Soft time budget for the run (informational).
-        model (str | None): Optional model override; defaults to
-            :data:`DEFAULT_MODEL` when unset/empty.
+        model (str | None): Optional model override. Defaults to
+            ``claude-opus-4-8`` on the Claude SDK path, or ``$CODEX_MODEL`` /
+            :data:`DEFAULT_CODEX_MODEL` on the OpenAI tool-runner path.
         sdk_query_factory (Callable[..., Any] | None): Optional injected query
             factory (used by tests); imported from the SDK when ``None``.
         sdk_options_cls (Any | None): Optional injected options class (used by

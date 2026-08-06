@@ -87,9 +87,9 @@ def test_repo_urls_cover_global_allowlist_with_framework_primary():
 def test_scriptable_repo_urls_skip_serving_allowlist_when_primary_repo_exists():
     """Scriptable model repos are not compatible with serving-framework PR diffs."""
     stub = _CoordinatorStub(Path("/tmp"))
-    urls = stub._framework_agent_discover_repo_urls("worldmirror")
+    urls = stub._framework_agent_discover_repo_urls("xdit")
 
-    assert urls == ["https://github.com/Tencent-Hunyuan/HY-World-2.0.git"]
+    assert urls == ["https://github.com/xdit-project/xDiT.git"]
 
 
 def test_discover_merges_candidates_across_repos(
@@ -102,7 +102,9 @@ def test_discover_merges_candidates_across_repos(
     async def _spy(**kwargs: Any) -> dict[str, Any]:
         repo_url = kwargs["repo_url"]
         seen_repo_urls.append(repo_url)
-        tag = repo_url.rsplit("/", 1)[-1].replace(".git", "")
+        # owner/name, not just name: the allowlist holds same-named repos
+        # under different owners (ROCm/vllm vs vllm-project/vllm).
+        tag = "/".join(repo_url.replace(".git", "").rsplit("/", 2)[-2:])
         return {
             "batch_id": "b-merge",
             "candidates": [{"pr_url": f"https://example.com/{tag}/pr/1"}],

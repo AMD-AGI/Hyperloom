@@ -16,7 +16,11 @@ The suite checks:
    ``gpu_specialist_capacity=0``;
 3. holding ``gpu_research_lane`` serializes the serving lanes (mutex);
 4. the EXPLORE GPU-specialist path is unchanged (carved pool, still gated by
-   ``gpu_specialist_capacity``).
+   ``gpu_specialist_capacity``);
+5. bench-capable EXPLORE specialists take the whole-machine time-shared lane,
+   while non-bench GPU probes keep the carved pool;
+6. serving-priority defers a GPU specialist (stays queued) and releases its
+   ``gpu_research_lane`` lease.
 """
 
 from __future__ import annotations

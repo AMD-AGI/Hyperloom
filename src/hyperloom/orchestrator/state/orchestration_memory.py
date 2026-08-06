@@ -217,9 +217,9 @@ def is_degenerate_checkpoint(parsed: dict[str, Any]) -> bool:
     """True when a parsed checkpoint reply carries no usable working memory.
 
     Degenerate iff parsing failed (``parse_error`` set) OR all four content
-    fields are empty. The Coordinator skips compaction (preserving the live
-    conversation + prior memory) on a degenerate reply unless the hard
-    context-token guardrail forces a fallback compaction.
+    fields are empty. The Coordinator skips compaction on a degenerate reply,
+    preserving the live conversation and prior memory, and counts the reply
+    toward the consecutive-degenerate advisory.
 
     Args:
         parsed: A parsed checkpoint reply from :func:`parse_checkpoint_reply`.

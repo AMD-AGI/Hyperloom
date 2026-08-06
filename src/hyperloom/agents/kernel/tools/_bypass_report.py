@@ -712,8 +712,8 @@ def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
     requires the reader to have been called with ``top_k=0``.
 
     Returns:
-        Category rows sorted by GPU time desc, each with gpu_ms / gpu_pct /
-        kernel count / reusable_ms.
+        Category rows sorted by GPU time desc, each with category / gpu_ms /
+        gpu_pct / kernel_count.
     """
     kernels = analyze_out.get("kernels") or []
     total_us = sum(float(k.get("gpu_time_us") or 0.0) for k in kernels) or 1.0

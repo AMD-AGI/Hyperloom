@@ -16,13 +16,13 @@ observable change:
 
 Sites intentionally NOT delegated here (kept local by design):
 
-* ``action_executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
+* ``orchestrator/actions/executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
   takes keyword args, ``chmod``-mirrors the target, and relies on
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
 * ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
   ``shutil.copystat`` preserves the target's mode.
-* ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
-  standalone, so they must not gain a ``hyperloom`` import dependency.
+* ``multi_node/scripts/patch_path_safety.atomic_write_bytes`` — shipped to remote
+  nodes and run standalone, so it must not gain a ``hyperloom`` import dependency.
 """
 
 from __future__ import annotations
@@ -59,7 +59,8 @@ def atomic_write_bytes(
             exist_ok=True``) before writing.
         fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
             rename (OSError swallowed on mounts that reject the syscall).
-        mode: Optional file mode applied to the temp file before rename.
+        mode: Optional file mode for the temp file before rename. Masked with
+            ``& 0o700``, so group/other bits are always stripped.
 
     Raises:
         Exception: Re-raised after a best-effort unlink of the temp file when
@@ -104,7 +105,8 @@ def atomic_write_text(
         make_parents: When ``True``, create ``path.parent`` before writing.
         fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
             rename (OSError swallowed on mounts that reject the syscall).
-        mode: Optional file mode applied to the temp file before rename.
+        mode: Optional file mode for the temp file before rename. Masked with
+            ``& 0o700``, so group/other bits are always stripped.
 
     Raises:
         Exception: Re-raised after a best-effort unlink of the temp file when
@@ -153,7 +155,8 @@ def atomic_write_json(
         trailing_newline: Append a final ``"\\n"`` after the JSON body.
         make_parents: When ``True`` (default), create ``path.parent`` first.
         fsync: When ``True``, best-effort ``os.fsync`` before the rename.
-        mode: Optional file mode applied to the temp file before rename.
+        mode: Optional file mode; see :func:`atomic_write_text` (masked with
+            ``& 0o700``).
     """
     text = _json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
     if trailing_newline:

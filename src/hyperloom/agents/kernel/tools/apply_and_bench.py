@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import statistics
 import subprocess
@@ -78,13 +79,76 @@ def _diff_unsupported_ops(diff_text: str) -> list[str]:
     return sorted(set(bad))
 
 
+def _is_git_tree(path: Path) -> bool:
+    """True when ``path`` is inside an initialised git work tree."""
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return cp.returncode == 0 and cp.stdout.strip() == "true"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _diff_target_paths(diff_text: str) -> list[tuple[str, str]]:
+    """Return raw ``(old, new)`` header paths for every file section in a diff."""
+    pairs: list[tuple[str, str]] = []
+    old: str | None = None
+    for ln in diff_text.splitlines():
+        if ln.startswith("--- "):
+            old = ln[4:].split("\t", 1)[0].strip()
+        elif ln.startswith("+++ ") and old is not None:
+            new = ln[4:].split("\t", 1)[0].strip()
+            pairs.append((old, new))
+            old = None
+    return pairs
+
+
+def _seed_base_tree_from_disk(diff_text: str, repo_root: Path, wt: Path, level: int) -> None:
+    """Copy each modified file's on-disk base into ``wt`` at its stripped rel path.
+
+    Added files (``--- /dev/null``) have no base and are left for ``git apply`` to
+    create. Used for non-git installs (e.g. the ``aiter_meta`` split wheel under
+    dist-packages) where a hermetic ``git worktree`` checkout is unavailable.
+    """
+    for old_raw, _new_raw in _diff_target_paths(diff_text):
+        if old_raw in ("/dev/null", ""):
+            continue
+        rel = _strip_diff_prefix(old_raw, level)
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            continue
+        base = repo_root / rel
+        if base.is_file():
+            dst = wt / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(base.read_bytes())
+
+
+def _strip_diff_prefix(path: str, level: int) -> str:
+    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
+    if level <= 0:
+        return path
+    parts = path.split("/")
+    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
+
+
 def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
     """Reconstruct the byte-exact optimized source for every file a diff touches.
 
-    Applies the diff to a throwaway copy of the repo's committed tree and reads back each
-    resulting file. delete / rename / copy / mode-only / binary ops are detected up front
-    (the function fails). Done in an isolated ``git worktree`` so the live tree is never
-    mutated. Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
+    Applies the diff to a throwaway copy of the base tree and reads back each
+    resulting file. delete / rename / copy / mode-only / binary ops are detected up
+    front (the function fails). The base tree is materialized hermetically:
+
+    * git install -> an isolated ``git worktree`` checked out at ``HEAD``;
+    * non-git install (e.g. the ``aiter_meta`` split wheel under dist-packages,
+      which is not a git repo) -> a temp tree seeded with each touched file's
+      current on-disk contents.
+
+    ``git apply`` runs in that temp tree either way (it does not require a repo).
+    Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
     """
     try:
         diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
@@ -99,17 +163,27 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
         }
     files: dict[str, str] = {}
     wt = out_dir / f"_recon_wt_{diff_path.stem}"
-    # Detached worktree at HEAD for hermetic reconstruction.
-    rm = subprocess.run(
-        ["git", "-C", str(repo_root), "worktree", "add", "--detach", "-f", str(wt), "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if rm.returncode != 0:
-        return {"status": "failed", "error": f"git worktree add: {rm.stderr[:200]}"}
+    is_git = _is_git_tree(repo_root)
+    if is_git:
+        # Detached worktree at HEAD for hermetic reconstruction.
+        rm = subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "add", "--detach", "-f", str(wt), "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if rm.returncode != 0:
+            return {"status": "failed", "error": f"git worktree add: {rm.stderr[:200]}"}
     try:
         applied = False
         for lvl in (1, 0, 2):
+            if not is_git:
+                # Non-git: rebuild the temp tree from the current on-disk base for
+                # this strip level before probing (each level maps headers to a
+                # different rel path).
+                if wt.exists():
+                    shutil.rmtree(wt)
+                wt.mkdir(parents=True, exist_ok=True)
+                _seed_base_tree_from_disk(diff_text, repo_root, wt, lvl)
             chk = subprocess.run(
                 ["git", "-C", str(wt), "apply", f"-p{lvl}", "--check", str(diff_path)], capture_output=True, text=True
             )
@@ -138,7 +212,8 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
                 applied = True
                 _log(
                     out_dir,
-                    f"reconstructed {len(files)} file(s) from diff -p{lvl}: "
+                    f"reconstructed {len(files)} file(s) from diff -p{lvl} "
+                    f"({'git' if is_git else 'nogit-disk'}): "
                     f"{', '.join(r.split('/')[-1] for r in files)}",
                 )
                 break
@@ -146,9 +221,12 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
             return {"status": "failed", "error": "git apply: no -p level (0/1/2) applies this diff cleanly"}
         return {"status": "ok", "files": files}
     finally:
-        subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "remove", "-f", str(wt)], capture_output=True, text=True
-        )
+        if is_git:
+            subprocess.run(
+                ["git", "-C", str(repo_root), "worktree", "remove", "-f", str(wt)], capture_output=True, text=True
+            )
+        elif wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
 
 
 def _find_benchmark_serving() -> str | None:
@@ -167,6 +245,33 @@ def _find_benchmark_serving() -> str | None:
 
 def _aiter_prebuilt_so(aiter_root: Path) -> list[Path]:
     return list(aiter_root.rglob("module_aiter_core*.so"))
+
+
+# aiter device sources live in-tree (``/aiter/``) or in the sibling split
+# wheel (``/aiter_meta/``); both must trigger the aiter re-JIT path.
+_AITER_PATH_MARKERS = ("/aiter/", "/aiter_meta/")
+
+
+def _is_aiter_cu(target: Path) -> bool:
+    """Whether ``target`` is an aiter device source (``.cu``/``.cuh``).
+
+    Recognises both the in-tree ``/aiter/`` layout and the split-wheel
+    ``/aiter_meta/`` layout so patched aiter kernels always force a rebuild.
+    """
+    if target.suffix not in {".cu", ".cuh"}:
+        return False
+    norm = str(target).replace(os.sep, "/")
+    return any(marker in norm for marker in _AITER_PATH_MARKERS)
+
+
+def _aiter_source_root(target: Path) -> Path | None:
+    """Return the aiter/aiter_meta package root a source resides under, if any."""
+    parts = target.parts
+    for name in ("aiter_meta", "aiter"):
+        if name in parts:
+            idx = len(parts) - 1 - parts[::-1].index(name)
+            return Path(*parts[: idx + 1])
+    return None
 
 
 def _launch_server(
@@ -661,7 +766,7 @@ def apply_and_bench(
             return {"status": "error", "error": "need pairs=[(patch,target),...] or patch_path+target_file"}
         pairs = [(patch_path, target_file)]
     targets = [Path(t) for _, t in pairs]
-    any_aiter_cu = any("/aiter/" in str(t) and t.suffix in {".cu", ".cuh"} for t in targets)
+    any_aiter_cu = any(_is_aiter_cu(t) for t in targets)
     patched_env: dict[str, str] = {}
     if aiter_rebuild or any_aiter_cu:
         patched_env["AITER_REBUILD"] = "1"
@@ -705,7 +810,12 @@ def apply_and_bench(
     for i, (pp, tf) in enumerate(pairs):
         if _looks_like_diff(Path(pp)):
             # Reconstruct byte-exact source for every file the diff touches, then deploy each.
-            repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
+            if "/aiter/" in str(tf):
+                repo_root = Path("/sgl-workspace/aiter")
+            elif "/aiter_meta/" in str(tf):
+                repo_root = _aiter_source_root(Path(tf)) or Path(tf).parents[2]
+            else:
+                repo_root = Path(tf).parents[2]
             rec = _reconstruct_sources_from_diff(Path(pp), repo_root, out)
             if rec.get("status") != "ok":
                 _revert_all()
@@ -746,7 +856,7 @@ def apply_and_bench(
         engagement = [
             dict(
                 target=str(t),
-                **_engagement_proof(out / "server_patched.log", t, "/aiter/" in str(t) and t.suffix in {".cu", ".cuh"}),
+                **_engagement_proof(out / "server_patched.log", t, _is_aiter_cu(t)),
             )
             for t in targets
         ]

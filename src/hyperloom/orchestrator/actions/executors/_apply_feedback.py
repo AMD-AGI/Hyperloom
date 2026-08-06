@@ -6,8 +6,10 @@
 Public surface:
 
 * :class:`ApplyFeedback`            — structured patch-apply failure record.
-* :func:`read_patch_source_context` — resolve a file path + extract a
-  line window; used by both apply feedback and enablement source context.
+* :func:`read_patch_source_context` — parse a unified diff and extract a line
+  window near the first failing hunk; used by the patch-apply path.
+* :func:`source_context_for_file`   — shared file-resolve + window primitive;
+  used by the enablement source-context path.
 * :func:`build_apply_feedback`      — convenience factory from raw error info.
 """
 

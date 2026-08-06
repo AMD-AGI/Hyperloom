@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical UTC ISO-8601 timestamp helpers (``_time``). Stdlib-only."""
+"""Canonical UTC ISO-8601 timestamp helpers (``hyperloom.common.timeutil``). Stdlib-only."""
 
 from __future__ import annotations
 

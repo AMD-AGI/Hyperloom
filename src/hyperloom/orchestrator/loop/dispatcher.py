@@ -334,7 +334,7 @@ class DispatcherCollaborator:
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-        # §3.4 serving priority: pre-compute whether serving-priority is enabled
+        # Serving priority: pre-compute whether serving-priority is enabled
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
@@ -363,8 +363,8 @@ class DispatcherCollaborator:
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
-                # SQLite lane gate. Under single-node Ray execution (§12 T7,
-                # decision 1) the authoritative GPU mutex is Ray's custom
+                # SQLite lane gate. Under single-node Ray execution the
+                # authoritative GPU mutex is Ray's custom
                 # resources (``serving_slot`` + ``num_gpus`` on the leases below),
                 # not this gate — but it is kept as a cheap, resume-safe
                 # scheduling / observability view (its acquire/release events feed
@@ -409,7 +409,7 @@ class DispatcherCollaborator:
                 )
                 extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
                 if needs_gpu:
-                    # §3.4: probe serving-slot state immediately before admitting
+                    # Probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
                     # that races the pass does not slip through. Still best-effort:
                     # any probe failure is treated as False (no pause).
@@ -420,7 +420,7 @@ class DispatcherCollaborator:
                         except Exception:  # noqa: BLE001 — never block dispatch
                             _immediate_pause = False
                     if _immediate_pause:
-                        # §3.4: serving is active — defer this GPU specialist to a
+                        # Serving is active — defer this GPU specialist to a
                         # later pass (keep it queued) rather than piling onto the
                         # contended GPU. Release the SQLite lane lease taken above
                         # so it does not sit held while the task waits.
@@ -483,14 +483,13 @@ class DispatcherCollaborator:
                         int(task.lease_ttl_sec or 0),
                         params=params,
                     )
-                    # §3.2: under single-node Ray the physical GPU mutex is Ray's
+                    # Under single-node Ray the physical GPU mutex is Ray's
                     # ``num_gpus``, not this SQLite pool. Admit by a count-based
                     # pending limit so multiple specialists can queue on one
                     # physical GPU (Ray time-multiplexes them) instead of the
                     # legacy physical-capacity hard gate that pinned it to one at
                     # a time. Off the Ray path (multi-node / RAY_EXEC off /
-                    # pytest) the SQLite pool stays the physical mutex
-                    # (invariant §6.7).
+                    # pytest) the SQLite pool stays the physical mutex.
                     from ..actions.executors._ray_backend import (
                         ray_gpu_pending_limit,
                         ray_gpu_specialist_exec_enabled,
@@ -520,10 +519,10 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
-                    # Ray-managed GPU execution (§12 T4): route the whole
+                    # Ray-managed GPU execution: route the whole
                     # specialist subprocess into a ``num_gpus`` actor. Ray
                     # assigns + masks the physical cards, so the SQLite ids above
-                    # are now only capacity/TTL accounting (decision 3 / §12 T5).
+                    # are now only capacity/TTL accounting.
                     # Advertise the logical 0..N-1 view the specialist actually
                     # sees under Ray's mask. ``None`` off the Ray path (multi-node
                     # / RAY_EXEC off / tests) keeps the SQLite-gpu-id device path.
@@ -531,12 +530,12 @@ class DispatcherCollaborator:
                         maybe_gpu_specialist_lease,
                     )
 
-                    # serving_slot (phase-3 §4 / invariant §6.3): only
+                    # serving_slot: only
                     # bench-capable specialists that start their OWN serving
                     # loop hold the whole-machine serving_slot mutex. Authoring-
                     # only specialists (incl. framework authoring, which does not
                     # self-bench — its real benchmark runs through integrate_patch
-                    # / _bench_candidate under a run_grid serving lease, §3.1)
+                    # / _bench_candidate under a run_grid serving lease)
                     # take ``num_gpus`` only, so they share the GPU queue with
                     # other specialists instead of blocking serving for their
                     # whole (mostly CPU-bound authoring) lifetime. Physical GPU
@@ -603,7 +602,7 @@ class DispatcherCollaborator:
         even if the pump coroutine is cancelled or the reap never runs.
         ``release`` is idempotent, so the release in
         :meth:`_reap_dispatched_task` remains harmless. When a Ray
-        ``GpuSpecialistLease`` was acquired (§12 T4) it is closed here too so
+        ``GpuSpecialistLease`` was acquired it is closed here too so
         the ``num_gpus`` lease is released on every exit path.
 
         Args:
@@ -1066,6 +1065,16 @@ class DispatcherCollaborator:
                         task.task_id,
                     )
                 try:
+                    self._record_explore_variant_failures(
+                        task=task,
+                        result=result_dict,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "explore: per-variant failure recording failed for task=%s",
+                        task.task_id,
+                    )
+                try:
                     await self._refresh_gaps(reason="explore_round")
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
@@ -1181,9 +1190,9 @@ class DispatcherCollaborator:
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using forge-gemm-tune backend: eligible for any framework
-        (sglang/vllm) and any precision with a MoE model or FP8 dense.
-        When using GEAK backend: only FP8 + SGLang (legacy behavior).
+        When using the forge-gemm-tune backend: eligible on any supported
+        framework (sglang / vllm / vllm-aiter), with no precision or MoE
+        pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
 
         Returns:
             bool: ``True`` when GEMM tuning should run before source-level

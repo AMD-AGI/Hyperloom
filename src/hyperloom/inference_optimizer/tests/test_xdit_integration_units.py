@@ -6,7 +6,8 @@
 Covers the cross-cutting contracts for xDiT: the framework registry, the
 server-args env resolver, the do-not-set blacklist + compatibility filter, the
 scriptable quality gate, scriptable measurement validity, the per-framework
-YAML resolvers, and the explore cold-start grid.
+YAML resolvers, the explore cold-start grid, the roofline snapshot units and
+their latency sidecar, the TraceLens arch spec, and scriptable trace health.
 """
 
 from __future__ import annotations
@@ -586,7 +587,7 @@ class TestValidateTraceStructureScriptable:
         """An unset framework must not be treated as serving.
 
         Session 20260803T134328Z: the roofline-composite ctx carries no
-        framework, so the worldplay profile leg was validated as serving and
+        framework, so the scriptable profile leg was validated as serving and
         reported the two serving-only issues ([1] capture_traces/ missing and
         [3] no execute_*), each pointing at EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS
         that a scriptable framework never sets.
@@ -594,7 +595,7 @@ class TestValidateTraceStructureScriptable:
         from hyperloom.orchestrator.actions.executors import profile as pf
 
         self._write_trace(tmp_path, with_kernels=True)
-        monkeypatch.setenv("FRAMEWORK", "worldplay")
+        monkeypatch.setenv("FRAMEWORK", "custom")
 
         health = pf._validate_trace_structure(tmp_path, "")
 

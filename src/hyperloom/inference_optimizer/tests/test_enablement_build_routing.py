@@ -21,6 +21,7 @@ from hyperloom.orchestrator.phases.framework import (
     _derive_gpu_arch,
     _repo_matches_targeted_build_component,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +229,7 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
             }
         )
     )
-    coord.shared_state.enablement_last_specialist_task_id = tid
+    coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
 
@@ -240,7 +241,7 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     assert action.ref == "PR:1234"
     assert action.gpu_arch == "gfx950"
     # Consume-once: the marker is cleared so the next tick does not re-enqueue.
-    assert coord.shared_state.enablement_last_specialist_task_id == ""
+    assert coord.shared_state.enablement.last_specialist_task_id == ""
 
 
 @pytest.mark.asyncio
@@ -291,7 +292,7 @@ async def test_specialist_requested_build_rejects_repo_component_mismatch(coord,
             }
         )
     )
-    coord.shared_state.enablement_last_specialist_task_id = tid
+    coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
 
@@ -313,7 +314,7 @@ async def test_specialist_requested_build_defaults_component_to_vllm_source(coor
     (wd / "specialist_done.json").write_text(
         json.dumps({"needs_targeted_build": {"capability": "deepseek_v4", "reason": "new arch"}})
     )
-    coord.shared_state.enablement_last_specialist_task_id = tid
+    coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
 
@@ -333,19 +334,19 @@ async def test_specialist_requested_build_noop_without_request(coord, monkeypatc
     wd = coord.session_dir / "runs" / "specialist" / tid
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "specialist_done.json").write_text(json.dumps({"empty": False, "patches_written": ["p.patch"]}))
-    coord.shared_state.enablement_last_specialist_task_id = tid
+    coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
 
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
     # Marker is still consumed (cleared) even when there is no request.
-    assert coord.shared_state.enablement_last_specialist_task_id == ""
+    assert coord.shared_state.enablement.last_specialist_task_id == ""
 
 
 @pytest.mark.asyncio
 async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.enablement_last_specialist_task_id = ""
+    coord.shared_state.enablement.last_specialist_task_id = ""
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
 
@@ -479,7 +480,7 @@ async def test_route_failed_timeout_calls_advanced(coord):
                                  capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
     # Simulate failure recorded by lifecycle
-    coord.shared_state.enablement_last_build_failure = {
+    coord.shared_state.enablement.last_build_failure = {
         "failure_class": "timeout",
         "failure_summary": "build exceeded budget",
     }
@@ -494,7 +495,7 @@ async def test_route_failed_compile_error_novel_calls_advanced(coord):
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement_last_build_failure = {
+    coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error",
         "failure_summary": "hipcc failed",
     }
@@ -512,10 +513,10 @@ async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path)
                                  capability="fp4_moe", ref="v1")
     # Pre-seed the ledger with this exact novelty key.
     key = list(build_novelty_key(action))
-    coord.shared_state.enablement_build_novelty = [key]
+    coord.shared_state.enablement.build_novelty = [key]
 
     await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement_last_build_failure = {
+    coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error",
         "failure_summary": "hipcc failed again",
     }
@@ -532,17 +533,17 @@ async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1")
     # Seed ledger with 20 different entries so the cap truncates old ones.
-    coord.shared_state.enablement_build_novelty = [
+    coord.shared_state.enablement.build_novelty = [
         ["aiter", f"v{i}", "gfx950", []] for i in range(20)
     ]
     await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement_last_build_failure = {
+    coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error",
         "failure_summary": "overflow",
     }
     await Coordinator._maybe_route_build_outcomes(coord)
 
-    ledger = coord.shared_state.enablement_build_novelty
+    ledger = coord.shared_state.enablement.build_novelty
     assert len(ledger) == 20  # bounded
     assert list(build_novelty_key(action)) in ledger  # new entry present
 
@@ -552,7 +553,7 @@ async def test_route_same_row_not_processed_twice(coord):
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement_last_build_failure = {
+    coord.shared_state.enablement.last_build_failure = {
         "failure_class": "compile_error", "failure_summary": "x"
     }
     await Coordinator._maybe_route_build_outcomes(coord)
@@ -571,11 +572,13 @@ def _make_params_fake(**kw):
         framework=kw.get("framework", "vllm"),
         model_name=kw.get("model_name", "deepseek-ai/DeepSeek-V4"),
         gpu_type=kw.get("gpu_type", "mi355x"),
-        enablement_kept_patches=[],
-        enablement_kept_stack_action={},
-        enablement_setup_commands=[],
-        enablement_localization_manifest=[],
-        enablement_last_build_failure=kw.get("enablement_last_build_failure", {}),
+        enablement=EnablementRound(
+            kept_patches=[],
+            kept_stack_action={},
+            setup_commands=[],
+            localization_manifest=[],
+            last_build_failure=kw.get("enablement_last_build_failure", {}),
+        ),
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
     fake._build_enablement_specialist_params = types.MethodType(
@@ -643,7 +646,7 @@ async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
 
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement_candidate_refs = [
+    coord.shared_state.enablement.candidate_refs = [
         "https://github.com/ROCm/aiter/pull/77",
     ]
 
@@ -665,11 +668,11 @@ async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
 
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement_kept_stack_action = {
+    coord.shared_state.enablement.kept_stack_action = {
         "ref": "v0.99.0",
         "repo_url": "https://github.com/ROCm/aiter",
     }
-    coord.shared_state.enablement_candidate_refs = [
+    coord.shared_state.enablement.candidate_refs = [
         "https://github.com/ROCm/aiter/pull/77",
     ]
 
@@ -690,7 +693,7 @@ async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeyp
 
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement_candidate_refs = [
+    coord.shared_state.enablement.candidate_refs = [
         "https://github.com/sgl-project/sglang/pull/5",  # wrong repo for aiter
     ]
 

@@ -27,8 +27,11 @@ __all__ = [
 class Decision:
     """One structured verdict surfaced by a renderer.
 
-    ``kind`` vocabulary: ``kept`` / ``reverted`` / ``rejected`` /
-    ``partial`` / ``attempted`` / ``not_attempted``.
+    Fixed-kind renderers emit ``kept`` / ``reverted`` / ``rejected`` /
+    ``attempted`` / ``not_attempted``. ``capability_summary`` additionally
+    forwards the raw per-capability status verbatim as ``kind``, so values
+    such as ``tried`` / ``completed`` / ``stale_validated`` also reach
+    consumers; ``reporters/llm_prompt.py``'s allowlist does not cover them.
     """
 
     kind: str

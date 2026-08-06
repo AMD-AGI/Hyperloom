@@ -24,13 +24,16 @@ from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
+from ...state.shared_state import inject_stack_base_params, resolve_grading_anchor_tput
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
     accuracy_meets_floor,
     accuracy_passed,
     classify_accuracy_failure,
+    eval_probe_summary,
     parse_eval_results,
+    read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
@@ -463,7 +466,8 @@ def _preflight_missing_targets(
     build) can never apply; flagging it here yields an actionable advisory
     instead of an opaque ``git_apply_failed`` after a wasted apply attempt.
     Patches supplied directly via ``params.patches`` bypass the
-    authoring-time ``specialist_patch_safety`` gate, so they are checked here.
+    authoring-time ``specialists.patch_safety`` vetting gate
+    (:func:`vet_patches`), so they are checked here.
 
     Args:
         framework_root: The git checkout the patches target.
@@ -1483,7 +1487,6 @@ class IntegratePatchExecutor:
         # _stage_resolve populates these onto ctx for stage communication.
         specialist_task_id: str = ctx._ip_specialist_task_id  # type: ignore[attr-defined]
         shared_state = ctx._ip_shared_state  # type: ignore[attr-defined]
-        specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         done_payload: dict[str, Any] = ctx._ip_done_payload  # type: ignore[attr-defined]
 
         # Provision an attempt-scoped runtime AFTER the Critic gate (in
@@ -1610,25 +1613,10 @@ class IntegratePatchExecutor:
                     "the patches to integrate)"
                 ),
             }
-        # Rebind execution-time base from live current_best so a task queued
-        # before an Explore KEEP always measures against the real stack top.
-        # (``shared_state`` and the accuracy_baseline fill are already resolved above.)
+        # Rebind from live current_best so a task queued before an Explore KEEP
+        # still measures against the real stack top.
         if shared_state is not None:
-            cb = getattr(shared_state, "current_best", None)
-            if isinstance(cb, dict):
-                cb_tput = cb.get("tput")
-                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                    params["base_tput"] = float(cb_tput)
-                cb_args = str(cb.get("extra_server_args") or "").strip()
-                if cb_args:
-                    params["base_extra_args"] = cb_args
-                cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
-                if cb_envs:
-                    params["base_extra_envs"] = cb_envs
-                for _ctrl in ("remove_args", "unset_envs", "args_mode"):
-                    cb_ctrl = cb.get(_ctrl)
-                    if cb_ctrl and not params.get(f"base_{_ctrl}"):
-                        params[f"base_{_ctrl}"] = cb_ctrl
+            inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
         # Specialist workspace conventionally at runs/specialist/<id>/.
         specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
@@ -2782,15 +2770,16 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Throughput KEEP / REVERT decision with optional stack rebench."""
         base_tput = float(params.get("base_tput") or 0.0)
-        if base_tput <= 0 and shared_state is not None:
-            cb = getattr(shared_state, "current_best", None)
-            cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                base_tput = float(cb_tput)
-            else:
-                ss_base = getattr(shared_state, "baseline_tput", 0.0)
-                if isinstance(ss_base, (int, float)) and ss_base > 0:
-                    base_tput = float(ss_base)
+        # Grade against the current live anchor, not a stale task snapshot.
+        live_anchor = resolve_grading_anchor_tput(shared_state)
+        if live_anchor > base_tput:
+            if base_tput > 0:
+                log.warning(
+                    "integrate_patch: anchor drift, params base_tput=%.1f but live anchor is %.1f; using live",
+                    base_tput,
+                    live_anchor,
+                )
+            base_tput = live_anchor
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
         new_tput = bench_result.get("output_throughput")
@@ -2960,6 +2949,9 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
+            _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
+            if _probe_reason:
+                reasons.append(_probe_reason)
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
@@ -3097,9 +3089,11 @@ class IntegratePatchExecutor:
             )
 
         source_snapshot_dir = ""
+        source_manifest_path = ""
+        source_target_files: list[str] = []
         source_base_sha = ""
         try:
-            from ...source_snapshot import snapshot_source_layer
+            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
 
             if framework_root is not None:
                 _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
@@ -3123,6 +3117,15 @@ class IntegratePatchExecutor:
                 )
                 if snap:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
+                    if source_snapshot_dir:
+                        source_manifest_path = str(
+                            Path(source_snapshot_dir) / MANIFEST_NAME
+                        )
+                    source_target_files = [
+                        str(item.get("rel") or "")
+                        for item in (snap.get("files") or [])
+                        if isinstance(item, dict) and item.get("rel")
+                    ]
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
@@ -3133,6 +3136,18 @@ class IntegratePatchExecutor:
             {
                 "status": "kept",
                 "specialist_task_id": specialist_task_id,
+                # Proposal ownership must survive delegated-result persistence
+                # so resume replay cannot replace it with the then-current phase.
+                "source_phase": str(params.get("source_phase") or ""),
+                "domain": str(
+                    params.get("domain") or params.get("source_domain") or ""
+                ),
+                "provenance": str(params.get("provenance") or ""),
+                "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
+                "gap_layer": str(params.get("gap_layer") or ""),
+                "framework_agent_authoring": bool(
+                    params.get("framework_agent_authoring")
+                ),
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
@@ -3148,6 +3163,8 @@ class IntegratePatchExecutor:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 "source_snapshot": source_snapshot_dir,
+                "source_manifest": source_manifest_path,
+                "target_files": source_target_files,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,
                 # The bundle cleared the gate, so its switches join the running
@@ -3687,9 +3704,6 @@ class IntegratePatchExecutor:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run a 1-variant Magpie bench under the patched server + accuracy gate.
 
-        Returns ``(bench_result_dict, gate_evidence)`` where gate_evidence
-        carries ``accuracy_pass`` (True / False / None).
-
         Args:
             params: The task params (config / model / bench knobs).
             output_root: The per-task workspace root for the bench.
@@ -3706,7 +3720,8 @@ class IntegratePatchExecutor:
 
         Returns:
             A ``(bench_result_dict, gate_evidence)`` tuple where
-            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None).
+            ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
+            and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
@@ -3855,12 +3870,16 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — eval may not produce a result
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
+        # Guarded: an empty root would send the recursive scan over the cwd.
+        eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
+
         return bench, {
             "accuracy_pass": accuracy_pass,
             "accuracy": measured_accuracy,
             "enablement_accuracy": enablement_accuracy,
             "enablement_accuracy_task": enablement_accuracy_task,
             "enablement_accuracy_metric": enablement_accuracy_metric,
+            "eval_probe": eval_probe,
         }
 
     @staticmethod

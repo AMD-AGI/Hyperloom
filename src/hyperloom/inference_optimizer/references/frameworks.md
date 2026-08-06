@@ -2,34 +2,37 @@
 
 ## Framework Selection
 
-A session is single-framework. Pick `sglang` (default), `vllm`, `atom`,
-`xdit`, `hunyuan_image3`, or `worldplay` via `--framework` or `$FRAMEWORK`:
+A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`,
+`hunyuan_image3`, or `custom` via `--framework` or
+`$FRAMEWORK`:
 
 ```bash
 python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
 FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
 python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
 python3 -m hyperloom.inference_optimizer.cli optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
-python3 -m hyperloom.inference_optimizer.cli optimize --framework worldplay --model "$MODEL_PATH" --max-hours 12  # scriptable AR video (fps)
+python3 -m hyperloom.inference_optimizer.cli optimize --framework custom --model "$MODEL_PATH" --max-hours 12  # your own scriptable workload
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
-- Which Magpie YAML the executors default to — `baseline_{sglang,vllm,atom,xdit}.yaml`
-  and `profile_{sglang,vllm,atom,xdit}.yaml`. The per-framework resolver
+- Which Magpie YAML the executors default to —
+  `baseline_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`
+  and `profile_{sglang,vllm,atom,xdit,hunyuan_image3}.yaml`. The per-framework resolver
   `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks the right
   file from `$FRAMEWORK`.
 - Which framework-specific seed grid the `explore` action falls back to when no
-  `params.grid` is supplied. atom is the only framework with a programmatic seed
-  today (`_default_grid_for_framework("atom", ...)` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py`, populated by `_atom_default_grid()`); sglang
+  `params.grid` is supplied. atom and xdit are the frameworks with programmatic
+  seeds today (`_default_grid_for_framework` in
+  `src/hyperloom/orchestrator/actions/executors/explore.py` dispatches to
+  `_atom_default_grid()` / `_xdit_default_grid()`); sglang
   and vllm continue to rely on the orchestration LLM emitting
   `provenance='default_grid'` variants and will fail with
   `error_class="empty_grid"` on a cold-start with no LLM input.
 - Which extra-args env name `_grid_runner` writes (`EXTRA_VLLM_ARGS` /
   `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS` /
-  `EXTRA_WORLDPLAY_ARGS`).
+  `EXTRA_HUNYUAN_IMAGE3_ARGS` / `EXTRA_CUSTOM_ARGS`).
 - Which KB partition orchestration reads for hints.
 
 Mixing frameworks in a single session is not supported; the CLI locks
@@ -44,44 +47,48 @@ Single-node only (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml`
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`) are in
 PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
 `https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`. Unlike
-sglang/vllm, atom is the only framework with a programmatic cold-start seed grid
+sglang/vllm, atom ships a programmatic cold-start seed grid
 (`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on
 FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,
-`atom_cudagraph_bracket`) — sglang/vllm fail `error_class="empty_grid"` on a
+`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), while
+sglang/vllm fail `error_class="empty_grid"` on a
 cold start with no LLM variants.
 
-### `--framework worldplay` specifics (HY-WorldPlay / HunyuanVideo-1.5)
+### `--framework custom` specifics (your own workload)
 
-Scriptable (server-less) autoregressive **video** diffusion; the metric is
-steady-state **generated frames per second** (`throughput_unit="fps"`, higher =
-better), surfaced as `output_throughput`. Requires the bypass benchmark backend:
+Every other entry in the registry describes a framework this repository knows:
+its upstream, its entrypoint, the knobs worth exploring. `custom` describes none
+of that, because the workload is yours. It is scriptable (server-less), and two
+paths at launch replace everything the shipped frameworks hardcode:
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-export WORLDPLAY_REPO_PATH=/path/to/HY-WorldPlay        # code checkout
 python3 -m hyperloom.inference_optimizer.cli -v optimize \
-  --framework worldplay --gpu-type mi355x \
-  --model /path/to/models/HunyuanVideo-1.5 \
-  --tp 8 --max-hours 12
+  --framework custom \
+  --framework-path /path/to/my-framework \
+  --benchmark-scripts-dir /path/to/my-scripts \
+  --gpu-type mi355x --model /path/to/weights --tp 8 --max-hours 12 \
+  --extra-env MYFW_STEPS=50 --extra-env MYFW_CKPT=/path/to/ckpt
 ```
 
-Shipped configs `baseline_worldplay.yaml` / `profile_worldplay.yaml`. The
-entrypoint `worldplay_{runner_type}.sh`, `worldplay_bench_common.sh` and
-`bench_fps.py` all ship in `assets/benchmark_scripts/` and are pinned by
-absolute path at materialization, so `HYPERLOOM_BYPASS_SCRIPTS_DIR` is only an
-operator override, not a requirement. The entrypoint supplies on-disk
-`--model_path`/`--action_ckpt` because an HF hub cache may hold empty snapshot
-stubs; `--action_ckpt` defaults to
-`<model_parent>/HY-WorldPlay/<ar|bidirectional>_model/diffusion_pytorch_model.safetensors`.
+`--framework-path` is the **code** checkout, separate from the weights under
+`--model`. It registers the tree as a framework source root, which PolicyGate
+requires before any specialist patch against your code can land — the probe
+finds pip-installed packages on its own but never a git checkout. Both flags are
+friendlier spellings of `FRAMEWORK_REPO_PATH` and `HYPERLOOM_BYPASS_SCRIPTS_DIR`;
+an exported value still wins. Neither is optional here: with no shipped
+entrypoint to fall back on, a missing path fails at launch rather than at the
+first benchmark.
 
-`WORLDPLAY_REPO_PATH` is the HY-WorldPlay **code** checkout (the `hyvideo`
-package), separate from the weights under `--model`. It registers the checkout as
-a framework source root, which PolicyGate requires before any specialist or
-framework-agent patch against `hyvideo/` can land — the probe cannot find a git
-checkout on its own, only pip-installed packages. Materialization now publishes
-the resolved path into the orchestrator's own environment, so a session that did
-not export it still gets the source root (an operator-set value always wins).
-Leave it unset and the entrypoint clones into `$HYPERLOOM_CACHE_DIR`.
+The entrypoint is taken as `custom_<gpu-type>.sh`, or the single `.sh` in the
+directory. It **must** emit a `quality_gate` block in its report: for a
+server-less workload that gate is the only correctness signal, and a missing one
+scores zero accuracy, which rejects every candidate the run produces.
+
+`--extra-env` carries the knobs your script reads; Hyperloom interprets none of
+them. Whatever you pin there becomes part of the measurement contract — a
+variant may add keys but may not overwrite one, because the baseline number was
+measured with it. Pin what must not move, and leave the rest for exploration.
 
 ### Naming the source tree without the framework prefix
 
@@ -105,15 +112,15 @@ kind:
 - **A pip-installed framework** (`sglang`, `vllm`, `atom`) needs neither. Its source
   root is discovered from the import machinery and the site-packages scan, which is
   why patching those has never required a path.
-- **A scriptable framework** (`worldplay`, `worldmirror`, `xdit`) runs from a git
+- **A scriptable framework** (`xdit`, `custom`) runs from a git
   checkout that neither mechanism can see, so one of the two variables is required.
 - **An editable checkout of a normally-installed framework** — a `vllm` source tree
   you build yourself rather than the wheel — is equally invisible, and the generic
   variable is the supported way to point at it. Previously that case had to be
   handled by hand through `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS`.
 
-The FRAMEWORK phase works here (the registry carries the HY-WorldPlay
-`repo_url`) and is the only phase that can restructure the pipeline itself —
+The FRAMEWORK phase works here (for a shipped framework the registry carries
+the `repo_url`; for `custom` the checkout arrives at launch) and is the only phase that can restructure the pipeline itself —
 sequence-parallel all-to-all, per-step host-to-device copies, repeated work
 hoisted out of the AR rollout. `explore` cannot reach any of that: a variant is
 only CLI flags plus env, and the accepted flag surface is four knobs. Pass
@@ -121,7 +128,7 @@ only CLI flags plus env, and the accepted flag surface is four knobs. Pass
 
 #### Framework-level source rewrites (the high-ceiling path)
 
-Because worldplay is scriptable, the FRAMEWORK phase's authoring arm dispatches
+Because a scriptable framework has no server, the FRAMEWORK phase's authoring arm dispatches
 `framework_rewrite_specialist` rather than `serving_specialist`. The two share no
 optimization surface: an AR video rollout has no scheduler, no continuous
 batching and no KV-cache admission policy, and its wins are the redundant work
@@ -161,74 +168,6 @@ That last point is not a nicety. A hoist whose only value is making a downstream
 cache hit measures flat on its own; a greedy accept/reject loop rejects it and
 then measures every dependent rewrite against a permanently cold cache, losing
 the bundle rather than the lever.
-
-Locked / workload-spec (blacklisted in `_WORLDPLAY_ENV_BLACKLIST`, never explored):
-precision is BF16 (`WORLDPLAY_USE_FP8_GEMMS`/`FP4_GEMMS`/`SAGEATTN` forced off),
-and resolution / frame-count / step-count (`WORLDPLAY_HEIGHT`/`WIDTH`/
-`NUM_FRAMES`/`NUM_STEPS`) + `WORLDPLAY_FEW_STEP` are part of the workload spec, not
-tunables. The operating point is the customer's headline: 50 steps, 125 frames,
-832×480, `model_type=ar`.
-
-Correctness is a **self-calibrating** SSIM/MSE/LPIPS band (not a fixed
-threshold): the baseline (establish) leg measures the pipeline's own drift under
-an eps latent perturbation and stores the accept band in the reference `.npz`;
-compare legs read it back. This matters because the best configs land near
-SSIM≈0.79 — a fixed 0.85 threshold would false-fail them. Enabled via
-`WORLDPLAY_QUALITY_CALIBRATE=1` in the baseline yaml. The scriptable quality-ref
-choke point injects `XDIT_QUALITY_REF_WRITE` (establish) / `XDIT_QUALITY_REF`
-(compare), which the customer body reads.
-
-Seed grid `_worldplay_default_grid` (`worldplay_resident_ar`,
-`worldplay_torch_compile`, `worldplay_group_offload_block`,
-`worldplay_buffer_ops`, `worldplay_scratch_reclaim_off`). `TP` is the
-sequence-parallel degree and must match the GPU count you compare against — the
-customer's headline is 8-GPU `sp=8`, so fps from a different `TP` is **not
-directly comparable**.
-
-Measured on 8×MI355X at the headline operating point: baseline lands at
-0.352 fps with run-to-run std 0.26–0.45%, and one generation takes ~345s, so a
-leg costs `(1 warmup + WORLDPLAY_REPEATS) × 5.75 min` plus a ~9.5 min model load
-(the probe puts the start of the hot loop at 569s), and the baseline leg adds
-`WORLDPLAY_QUALITY_CALIB_SAMPLES` cheap 8-frame calibration generations. Both
-sampling counts are 1: three repeats measured 0.348/0.349/0.349 fps, 0.3% apart
-against a 1–2% keep threshold, and the calibration band takes the worst sample,
-which on a real run was the first. A `roofline` leg costs far more than its
-generation time — with the torch profiler on, exporting a 2.6 GB trace took 31.6
-of its 55.3 minutes. Of the seed grid, `torch.compile` is a
-reproducible **regression** (−13%: attention is `@torch.compiler.disable`, so
-compile covers none of the hot path and still pays its overhead) and the
-offloading / resident / ROCm-env knobs all measured inside the noise band. The
-+51.8% win on that node came from the kernel path rewriting `attn_fwd`
-(37.9% of GPU time) in Triton, not from `explore`.
-
-**Knob surface for proposers (LLM explore + specialists) — read this before
-proposing variants.** The customer's byte-identical `bench_fps.py` is a thin
-wrapper that exposes ONLY a small CLI; it is **not** the model's full
-HunyuanVideo CLI. Do NOT propose the model's native diffusion knobs
-(`--use_cache teacache`/`fbcache`/`magcache`, `--attention_backend`,
-`--enable_step_distill`, `--cfg_distilled`, `--enable_tiling`/`--enable_slicing`,
-`--infer_steps`): the wrapper rejects them with an argparse error and the leg
-dies as `no_measurement` (they are auto-dropped pre-dispatch by
-`worldplay_server_args_reason`). Instead search these two productive surfaces:
-
-- **Accepted workload tunables (CLI or `WORLDPLAY_*` env):**
-  `--enable_torch_compile` (`WORLDPLAY_USE_TORCH_COMPILE=1`),
-  `--group_offloading <block_level|leaf_level>` (`WORLDPLAY_GROUP_OFFLOADING`),
-  `--offloading 0|1` (`WORLDPLAY_OFFLOADING`, baseline already 0),
-  `--transformer_resident_ar_rollout` (`WORLDPLAY_TRANSFORMER_RESIDENT=1`).
-- **Runtime / system env (does NOT touch the customer scripts — injected around
-  them; this is where gains beyond the customer's own knobs live):** rocBLAS/
-  hipBLASLt autotune (`PYTORCH_TUNABLEOP_ENABLED`, but NOT
-  `PYTORCH_TUNABLEOP_TUNING` with torch.compile — GPU fault), allocator
-  (`PYTORCH_HIP_ALLOC_CONF`/`PYTORCH_CUDA_ALLOC_CONF`), MIOpen find-mode,
-  `GPU_MAX_HW_QUEUES`, attention-backend env toggles, and the seed-grid ROCm
-  knobs above. Any numerics-altering env (fp8/fp4/sageattn) is blacklisted.
-
-**Step count is LOCKED at 50.** Step-distillation / few-step (4-step etc.) hits
-~24× fps but is a *different operating point*, not an optimization — it is out of
-scope, cannot pass the self-calibrating gate (no quality-ref emitted → gate
-skipped → not a valid KEEP), and must not be recommended in findings. The
-customer explicitly moved away from the distilled path.
 
 ## GPU Runner Type
 

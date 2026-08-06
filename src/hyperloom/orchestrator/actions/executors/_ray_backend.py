@@ -14,6 +14,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.env_safety import scrub_benchmark_process_env
+
 log = logging.getLogger(__name__)
 
 # Env vars Ray owns inside its workers; never let a caller override them.
@@ -139,11 +141,12 @@ def serving_slot_busy() -> bool:
 
 @dataclass
 class SubprocessResult:
-    """Result of a subprocess executed inside a Ray worker.
+    """Declarative shape for a subprocess executed inside a Ray worker.
 
-    Mirrors the ``(returncode, stdout, stderr)`` triple the local path returns
-    so executor-side parsing (``extract_benchmark_measurement`` etc.) is reused
-    unchanged.
+    Mirrors the ``(returncode, stdout, stderr)`` triple the local path returns.
+    Not currently constructed anywhere: ``_run_subprocess_worker`` returns the
+    raw tuple, which executor-side parsing (``extract_benchmark_measurement``
+    etc.) consumes unchanged.
     """
 
     returncode: int
@@ -169,7 +172,7 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
         if key in _RAY_OWNED_VISIBLE_DEVICE_VARS:
             continue
         merged[key] = value
-    return merged
+    return scrub_benchmark_process_env(merged)
 
 
 def _run_subprocess_worker(

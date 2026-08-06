@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.runtime.cli.main. Hermetic - argv-only; ``candidates`` / ``explore`` subcommands stub ``sources.enumerate_candidates`` / ``explorer.explore`` so no network or git is required."""
+"""Tests for hyperloom.agents.framework.runtime.cli.main. Hermetic - argv-only; ``candidates`` / ``explore`` subcommands stub ``sources.enumerate_candidates`` / ``explorer.explore`` so no network or git is required."""
 
 from __future__ import annotations
 

@@ -57,7 +57,8 @@ asyncio.run(main())
 
 def _spawn(session_dir: Path, install_handler: bool) -> subprocess.Popen:
     env = dict(os.environ)
-    # Make the worktree's package importable in the child.
+    # The child imports ``hyperloom`` from the inherited PYTHONPATH, which must
+    # already carry the worktree's ``src/``.
     env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     env["USER_DATA_PATH"] = str(session_dir)
     proc = subprocess.Popen(

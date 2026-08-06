@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared provenance builder (P0-A / WP-0).
+"""Shared provenance builder.
 
 Single source of truth for the provenance block that pins *exactly which run*
 produced an artifact -- model revision, framework/stack commits, GPU arch,
 parallelism, graph mode, dtype/quant, workload, and full server args. A tuned
 CSV or a TraceShapeManifest is only valid under the conditions it was made
-under, so both the session manifest (WP-7) and the TraceShapeManifest producer
-(WP-1) consume this one builder to avoid drift.
+under, so both the session manifest and the TraceShapeManifest producer
+consume this one builder to avoid drift.
 
 Design:
 
@@ -20,8 +20,11 @@ Design:
   ``probe`` so unit tests stay hermetic.
 * **stdlib-only**: any package may import it without an import cycle.
 
-This module owns the detection helpers going forward; ``session/manifest.py``
-will delegate to it (WP-7), replacing its local ``_detect_*`` copies.
+``session/manifest.py`` and the TraceShapeManifest producer both call
+``build_provenance`` for gfx/EP/graph-mode/server-args, but ``manifest.py``
+still keeps its own ``_detect_stack_fingerprint`` / ``_detect_image`` /
+``_git_revision`` for the fields it writes directly, so those detectors are
+currently duplicated here.
 """
 
 from __future__ import annotations
@@ -38,8 +41,8 @@ PROVENANCE_VERSION = 1
 #: Tags a full shared provenance block apart from a placeholder stub.
 PROVENANCE_SOURCE = "shared_v1"
 
-# Env var priority per stack component (operator pins beat auto-detect). Mirrors
-# session/manifest.py so the two agree; that module will delegate here (WP-7).
+# Env var priority per stack component (operator pins beat auto-detect).
+# Duplicated in session/manifest.py; keep the two in sync.
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "rocm": ("ROCM_VERSION", "HIP_VERSION"),
     "aiter": ("AITER_COMMIT", "AITER_VERSION"),

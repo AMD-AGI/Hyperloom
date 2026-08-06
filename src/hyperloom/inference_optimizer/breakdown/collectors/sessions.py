@@ -76,6 +76,19 @@ _ENV_DENY_PATTERN = re.compile(
 )
 
 
+# Non-secret keys kept verbatim even when the deny pattern matches a substring.
+# ``MAGPIE_EVAL_TOKENIZED_REQUESTS`` records the accuracy eval's prompt wire
+# format (``false`` => string prompts, forced on PD so the sglang_router does
+# not 422; absent => lm_eval's default token-id prompts). Recording it lets a
+# reader tell a PD run's accuracy from an aggregated one's -- but "TOKENIZED"
+# contains "TOKEN", so the credential denylist would otherwise drop it.
+_ENV_ALLOWLIST_FORCE: frozenset[str] = frozenset(
+    {
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    }
+)
+
+
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
     """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` with stringified values.
 
@@ -93,10 +106,13 @@ def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
     for k, v in envs.items():
         if not isinstance(k, str):
             continue
-        keep = (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
+        forced = k in _ENV_ALLOWLIST_FORCE
+        keep = forced or (k in _ENV_ALLOWLIST_EXACT) or any(k.startswith(p) for p in _ENV_ALLOWLIST_PREFIXES)
         if not keep:
             continue
-        if _ENV_DENY_PATTERN.search(k):
+        # Force-listed keys are known non-secret; skip the substring denylist
+        # (it would otherwise strip e.g. TOKENIZED for containing "TOKEN").
+        if not forced and _ENV_DENY_PATTERN.search(k):
             continue
         out[k] = "" if v is None else str(v)
     return out
@@ -159,6 +175,14 @@ _SERVER_LOG_MAX_BYTES = 256 * 1024
 
 # Tail kept for enablement trigger evidence: tracebacks put the real error last.
 _ENABLEMENT_LOG_EXCERPT_CHARS = 2000
+
+
+def _eg(state: dict, name: str, default: Any = None) -> Any:
+    """Read an enablement round field from a v4 nested or v3 flat state dict."""
+    nested = state.get("enablement")
+    if isinstance(nested, dict):
+        return nested.get(name, default)
+    return state.get(f"enablement_{name}", default)
 
 
 def _strip_log_prefix(line: str) -> str:
@@ -838,6 +862,7 @@ def collect_baseline(
                 "error_excerpt": a.get("error_excerpt"),
                 "stderr_tail": a.get("stderr_tail"),
                 "stderr_log_path": a.get("stderr_log_path"),
+                "extras": a.get("extras") or {},
             }
         )
 
@@ -994,6 +1019,8 @@ def _reconstruct_baseline_attempts(
                 "error_excerpt": None,
                 "stderr_tail": None,
                 "stderr_log_path": None,
+                # Reconstruction reads the on-disk reports; audit extras are state-only.
+                "extras": {},
             }
         )
     return out
@@ -1010,7 +1037,8 @@ def collect_final(
     Reads ``current_best`` plus the validated cumulative-gain bookkeeping,
     builds the ordered ``action_path`` from ``optimization_stack``, and — when
     ``current_best`` lacks ttft / e2el — reconstructs them from disk (latest
-    ``validate_stack`` report first, then the top stack entry's report),
+    ``validate_stack`` report first, then ``current_best``'s own workspace,
+    then the top stack entry's report),
     recording the provenance in ``ttft_e2el_source`` and a ``warnings`` note.
     Also assembles the replayable launch ``invocation``.
 
@@ -1379,24 +1407,24 @@ def collect_enablement(
     stays hidden, while "opted out" explains why nothing tried to repair a run
     that failed to establish a baseline.
     """
-    stack_actions_raw = state.get("enablement_stack_actions")
-    active_runtime_raw = state.get("enablement_active_runtime")
-    attempt_runtimes_raw = state.get("enablement_attempt_runtimes")
-    failure_kind = str(state.get("enablement_failure_kind") or "")
-    build_manifest_raw = state.get("enablement_build_manifest")
-    last_build_failure_raw = state.get("enablement_last_build_failure")
-    kept_patches_raw = state.get("enablement_kept_patches")
-    kept_stack_action_raw = state.get("enablement_kept_stack_action")
+    stack_actions_raw = _eg(state, "stack_actions")
+    active_runtime_raw = _eg(state, "active_runtime")
+    attempt_runtimes_raw = _eg(state, "attempt_runtimes")
+    failure_kind = str(_eg(state, "failure_kind", "") or "")
+    build_manifest_raw = _eg(state, "build_manifest")
+    last_build_failure_raw = _eg(state, "last_build_failure")
+    kept_patches_raw = _eg(state, "kept_patches")
+    kept_stack_action_raw = _eg(state, "kept_stack_action")
 
-    origin = str(state.get("enablement_origin") or "")
+    origin = str(_eg(state, "origin", "") or "")
     # eval_kind is NOT cleared on success, so it can identify an eval-origin
     # enablement even after the run succeeds and origin is reset to "".
-    eval_kind = str(state.get("enablement_baseline_eval_kind") or "")
+    eval_kind = str(_eg(state, "baseline_eval_kind", "") or "")
     # Sessions predating the flag load with the SharedState default, so that is
     # also the right value to report for them.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
-    attempts = _as_int(state.get("enablement_attempts"))
-    dispatched = bool(state.get("enablement_dispatched"))
+    attempts = _as_int(_eg(state, "attempts"))
+    dispatched = bool(_eg(state, "inflight_task_id"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
@@ -1422,64 +1450,61 @@ def collect_enablement(
         "origin": "eval" if have_eval else "boot",
         "attempts": attempts,
         "dispatched": dispatched,
-        "succeeded": bool(state.get("enablement_succeeded")),
-        "pending": bool(state.get("enablement_pending")),
-        "validation_pending": bool(state.get("enablement_validation_pending")),
-        "stall_streak": _as_int(state.get("enablement_stall_streak")),
+        "succeeded": bool(_eg(state, "succeeded")),
+        "pending": bool(_eg(state, "pending")),
+        "validation_pending": bool(_eg(state, "validation_pending")),
+        "stall_streak": _as_int(_eg(state, "stall_streak")),
     }
-    inflight_tid = str(state.get("enablement_inflight_task_id") or "")
+    inflight_tid = str(_eg(state, "inflight_task_id", "") or "")
     if inflight_tid:
         out["inflight_task_id"] = inflight_tid
-    last_spec_tid = str(state.get("enablement_last_specialist_task_id") or "")
+    last_spec_tid = str(_eg(state, "last_specialist_task_id", "") or "")
     if last_spec_tid:
         out["last_specialist_task_id"] = last_spec_tid
-    dispatch_tick = _as_int(state.get("enablement_dispatch_tick"), default=-1)
-    if dispatch_tick >= 0:
-        out["dispatch_tick"] = dispatch_tick
-    reval_gen = _as_int(state.get("enablement_revalidation_generation"))
+    reval_gen = _as_int(_eg(state, "revalidation_generation"))
     if reval_gen:
         out["revalidation_generation"] = reval_gen
-    reval_tid = str(state.get("enablement_revalidation_task_id") or "")
+    reval_tid = str(_eg(state, "revalidation_task_id", "") or "")
     if reval_tid:
         out["revalidation_task_id"] = reval_tid
     # The boot-origin trigger evidence: without it a launch-failure round shows
     # no reason for having run at all.
-    launch_log = str(state.get("enablement_launch_log") or "")
+    launch_log = str(_eg(state, "launch_log", "") or "")
     if launch_log:
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
         out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
-    candidate_refs = state.get("enablement_candidate_refs")
+    candidate_refs = _eg(state, "candidate_refs")
     if isinstance(candidate_refs, list) and candidate_refs:
         out["candidate_refs"] = [str(r) for r in candidate_refs]
-    setup_commands = state.get("enablement_setup_commands")
+    setup_commands = _eg(state, "setup_commands")
     if isinstance(setup_commands, list) and setup_commands:
         out["setup_commands"] = [str(c) for c in setup_commands]
-    localization = state.get("enablement_localization_manifest")
+    localization = _eg(state, "localization_manifest")
     if isinstance(localization, list) and localization:
         out["localization_manifest"] = [str(p) for p in localization]
-    build_novelty = state.get("enablement_build_novelty")
+    build_novelty = _eg(state, "build_novelty")
     if isinstance(build_novelty, list) and build_novelty:
         out["build_novelty"] = [str(k) for k in build_novelty]
-    human_review = state.get("enablement_human_review_logged")
+    human_review = _eg(state, "human_review_logged")
     if isinstance(human_review, list) and human_review:
         out["human_review_count"] = len(human_review)
-    accepted_cfg = str(state.get("enablement_accepted_config_path") or "")
+    accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
     if accepted_cfg:
         out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
     if have_eval:
         out["trigger_kind"] = eval_kind
-        out["observed_accuracy"] = float(state.get("enablement_observed_accuracy") or 0.0)
-        out["accuracy_floor"] = float(state.get("enablement_accuracy_floor") or 0.0)
-        out["observed_task"] = str(state.get("enablement_observed_task") or "")
-        out["observed_metric"] = str(state.get("enablement_observed_metric") or "")
-        out["eval_contract_fingerprint"] = str(state.get("enablement_eval_contract_fingerprint") or "")
-        probe_cfg = str(state.get("enablement_probe_config_path") or "")
+        out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)
+        out["accuracy_floor"] = float(_eg(state, "accuracy_floor", 0.0) or 0.0)
+        out["observed_task"] = str(_eg(state, "observed_task", "") or "")
+        out["observed_metric"] = str(_eg(state, "observed_metric", "") or "")
+        out["eval_contract_fingerprint"] = str(_eg(state, "eval_contract_fingerprint", "") or "")
+        probe_cfg = str(_eg(state, "probe_config_path", "") or "")
         if probe_cfg:
             out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
-        evidence = str(state.get("enablement_baseline_eval_evidence") or "")
+        evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
         if evidence:
             out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
     if have_actions:

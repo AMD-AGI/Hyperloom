@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Post-optimization concurrency sweep.
+"""Concurrency sweep over the CONC ladder.
 
 Runs the Magpie grid over CONC values for baseline vs ``current_best``,
-producing JSON/CSV curves. cli.py post-hook (opt out via
-``--no-enable-conc-sweep``).
+producing JSON/CSV curves. Auto-enqueued by the Coordinator as a SWEEP-phase
+action on SWEEP entry (opt out via ``--no-enable-conc-sweep``); never
+LLM-proposable.
 """
 
 from __future__ import annotations
@@ -424,6 +425,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         gpu_type: Resolved GPU type string.
         variant_timeout_sec: Per-variant hard timeout in seconds.
         soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
+        deadline: Absolute wall-clock epoch (``time.time()`` basis) at which the
+            total conc-sweep budget expires, or None when unbounded. Distinct
+            from ``soft_deadline_sec``, which is a duration.
         state: Shared run state (for incremental checkpoint metadata).
         session_dir: Session directory (for incremental checkpoints).
         json_path: Pre-resolved JSON report path.
@@ -463,7 +467,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     if not grid:
         return arm_results
 
-    # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
+    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``)
     # spans this arm's persistent server — boot + every CONC reuse round, or the
     # Option B per-variant restarts — so the shared server's whole lifetime is
     # covered by a single lease and no GPU process outlives it. ``None`` on the
@@ -819,6 +823,8 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         gpu_type: Resolved GPU type string.
         variant_timeout_sec: Per-variant hard timeout in seconds.
         soft_deadline_sec: Session-clamped soft deadline in seconds, or None.
+        deadline: Absolute epoch (``time.time()``) at which the total budget
+            expires, or None when budget tracking is off (``has_budget`` False).
         state: Shared run state.
         session_dir: Session directory.
         json_path: Pre-resolved JSON report path.
@@ -830,6 +836,8 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         opt_envs: Optimized server env vars.
         _all_results_ref: Shared results list (mutated in place).
         _budget_state: Shared budget-status dict (mutated in place).
+        serving_lease: Caller-owned Ray serving lease forwarded to ``run_grid``;
+            None when the arm runs on the local (non-Ray) path.
 
     Returns:
         List of VariantResult for the arm (one per CONC).
@@ -933,10 +941,10 @@ def _maybe_flush(  # noqa: PLR0913
     budget_skip_reason: str,
     budget_remaining_sec: float | None,
 ) -> None:
-    """Build a partial payload from *all_results* and call _flush_conc_sweep_report.
+    """Build a partial payload from *all_results* and flush it via :func:`_flush_partial_conc_sweep_report`.
 
-    A thin convenience wrapper around :func:`_flush_partial_conc_sweep_report`
-    that avoids repeating the argument list at every call site.
+    A thin convenience wrapper that avoids repeating the argument list at every
+    call site.
 
     Args:
         state: Shared run state (metadata fields).
@@ -1137,7 +1145,7 @@ async def run_conc_sweep(
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
 ) -> dict[str, Any]:
-    """Run the full conc-sweep post-hook end-to-end (always returns a dict; never raises; no files written when skipped).
+    """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
 
     Args:
         state: Shared run state (baseline, current_best, workload shape).

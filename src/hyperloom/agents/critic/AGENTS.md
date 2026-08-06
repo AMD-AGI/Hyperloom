@@ -37,7 +37,7 @@ return `emit.json["critic_decision_review"]` instead.
 | `KB_DEAD_LETTER_DIR` | PVC mount for dead-letter JSONL files. |
 | `KB_WRITE_ENABLED` | Set to `false` to disable KB writes globally. |
 | `KB_READ_ENABLED` | Set to `false` to disable KB priors lookup. |
-| `KB_SERVICE_TOKEN` | Reserved for v2 auth. |
+| `KB_SERVICE_TOKEN` | Bearer credential for live KB requests (sent as `Authorization: Bearer <token>`); omitted when unset, unused by the default `inmemory` path. |
 | `CRITIC_PRIOR_CACHE_TTL_SECONDS` | Per-session KB prior cache TTL. |
 | `CRITIC_KB_BREAKER_THRESHOLD` | Consecutive transport errors before the circuit breaker opens (default `1` — first failure short-circuits the rest of the request). |
 | `CRITIC_KB_BREAKER_COOLDOWN_SECONDS` | How long the breaker stays open before allowing another KB attempt (default `60`). |

@@ -90,11 +90,45 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-explore`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
+- **Session / resume:** `--resume`, `--resume-from`, `--force-resume`,
   `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
+
+---
+
+## Accuracy gates
+
+A candidate that clears the throughput bar must also hold accuracy before it is
+kept. Grading runs only *after* the throughput bar is cleared, and reads the
+score back from the run's own eval output, so a gate never costs an extra eval
+and a regressing candidate never spends a verdict on itself.
+
+In every lane a measured drop beyond the tolerance is a `REVERT`. A missing
+verdict while a positive baseline accuracy is on record drops to
+`NEEDS_REVIEW` — eval should have worked and didn't. No baseline accuracy at
+all degrades to a throughput-only `KEEP` rather than blocking every candidate,
+so eval-less environments still make progress.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable (xDiT) workloads, whose correctness signal is the image `quality_gate` in `benchmark_report.json`. |
+| `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
+| `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
+| `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
+
+The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
+`src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py` is a fixed
+`0.05`, i.e. a candidate must stay within 5 percentage points of the recorded
+baseline accuracy.
+
+Note that the score is measured once per candidate, not averaged over repeats.
+On a full GSM8K run (1319 problems) the 5-point tolerance sits several standard
+errors away from the baseline, so single-run noise does not trip it. Capping the
+eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
+the gate noise-sensitive — prefer the full task set whenever a gate decision
+depends on the result.
 
 ---
 

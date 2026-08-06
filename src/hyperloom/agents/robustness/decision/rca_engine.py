@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""RCA engines, both exposing ``async def summarize(symptom) -> str``.
+"""RCA engines, all exposing ``async def summarize(symptom) -> str``.
 
 * :class:`NoopRcaEngine` — default; returns "" (ladder skips ``rca_text``).
 * :class:`LlmRcaEngine` — OpenAI-compatible chat endpoint, cost-bounded by
   :class:`RcaThrottle`: severity gate (default high), per-dedup-key cooldown
   (default 60s), per-tick cap (default 1 call).
+* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass speaking the
+  Anthropic Messages API; the factory selects it when the discovered provider
+  is ``anthropic``.
 """
 
 from __future__ import annotations

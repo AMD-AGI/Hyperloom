@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""
+"""Tests for hyperloom.agents.framework.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# framework_agent.kb module
+# hyperloom.agents.framework.kb module
 # ---------------------------------------------------------------------------
 
 

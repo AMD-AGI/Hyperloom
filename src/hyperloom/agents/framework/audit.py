@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK semantic audit — static local-source judging (Step 2 MVP).
+"""FRAMEWORK semantic audit — static local-source judging.
 
 Given a candidate PR's unified diff and the live framework source roots,
 decide whether the PR's change is **already present** in the local tree

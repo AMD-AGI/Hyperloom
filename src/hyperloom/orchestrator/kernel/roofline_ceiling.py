@@ -1,15 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Theoretical peak ``output_throughput`` ceiling (decode memory roofline).
+"""Analytic performance ceilings for the roofline snapshot.
 
-Formula (decode-only, memory-bound)::
+Four capabilities live here:
 
-    peak_output_tok_per_sec
-      = (HBM_BW_per_gpu × num_gpus)
-        / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
+1. The top-down memory-bound decode formula::
 
-Prefill is not modelled; ``batch = max(concurrency, 1)``. Outputs are an upper bound.
+       peak_output_tok_per_sec
+         = (HBM_BW_per_gpu × num_gpus)
+           / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
+
+   This formula does not model prefill; ``batch = max(concurrency, 1)``.
+2. The compute-bound ceiling (``compute_compute_bound_ceiling_tok_per_sec``)
+   and the ``min(T_mem, T_cmp)`` selector (``select_peak_and_bound``).
+3. The bottom-up per-op ``PerfModel`` breakdown, which does produce a
+   ``prefill_tok_per_s`` figure.
+4. The xDiT diffusion images/sec ceiling.
+
+All outputs are upper bounds.
 """
 
 from __future__ import annotations
@@ -147,9 +156,9 @@ def _parse_server_arg(args: str, flag: str) -> str:
     return value
 
 
-#: Magpie ``benchmark.envs`` keys that carry the runtime server args, one
-#: per framework. The baseline yaml only ever sets the one matching its
-#: framework, so reading all three and concatenating is safe.
+#: Magpie ``benchmark.envs`` keys that carry the runtime server args for the
+#: text-serving frameworks. The baseline yaml only ever sets the one matching
+#: its framework, so reading these and concatenating is safe.
 _RUNTIME_SERVER_ARG_ENV_KEYS = (
     "EXTRA_SGLANG_ARGS",
     "EXTRA_VLLM_ARGS",
@@ -1101,8 +1110,8 @@ def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
 def _read_diffusion_num_steps(state: Any) -> int:
     """Read the denoising step count from the baseline yaml.
 
-    Reads ``XDIT_NUM_STEPS`` (xDiT) with a ``WORLDPLAY_NUM_STEPS`` fallback
-    (HY-WorldPlay) so both scriptable diffusion workloads feed the roofline.
+    Reads ``XDIT_NUM_STEPS`` (xDiT) with a ``CUSTOM_NUM_STEPS`` fallback so an
+    operator-supplied diffusion workload can feed the roofline too.
 
     Args:
         state: Shared run state carrying the materialized baseline yaml.
@@ -1111,14 +1120,14 @@ def _read_diffusion_num_steps(state: Any) -> int:
         The positive step count, or ``0`` when unavailable.
     """
     envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-    return _env_int(envs, "XDIT_NUM_STEPS") or _env_int(envs, "WORLDPLAY_NUM_STEPS")
+    return _env_int(envs, "XDIT_NUM_STEPS") or _env_int(envs, "CUSTOM_NUM_STEPS")
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """Read the image/frame resolution from the baseline yaml.
 
-    Reads ``XDIT_HEIGHT``/``XDIT_WIDTH`` (xDiT) with ``WORLDPLAY_HEIGHT``/
-    ``WORLDPLAY_WIDTH`` fallback (HY-WorldPlay). Needed for models (e.g. FLUX,
+    Reads ``XDIT_HEIGHT``/``XDIT_WIDTH`` (xDiT) with ``CUSTOM_HEIGHT``/
+    ``CUSTOM_WIDTH`` fallback. Needed for models (e.g. FLUX,
     SD3) whose transformer config carries no ``sample_size`` -- the DiT sequence
     length is set by the runtime resolution.
 
@@ -1130,8 +1139,8 @@ def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
     """
     try:
         envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
-        height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "WORLDPLAY_HEIGHT")
-        width = _env_int(envs, "XDIT_WIDTH") or _env_int(envs, "WORLDPLAY_WIDTH")
+        height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "CUSTOM_HEIGHT")
+        width = _env_int(envs, "XDIT_WIDTH") or _env_int(envs, "CUSTOM_WIDTH")
         return height, width
     except (AttributeError, TypeError, ValueError):
         return 0, 0

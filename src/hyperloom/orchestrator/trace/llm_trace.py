@@ -206,6 +206,8 @@ class LLMCallRecord:
             tick: Timeline tick, when known.
             phase: Phase name, when known.
             turn: Multi-turn sub-agent sequence index, when known.
+            latency_ms: Measured call latency in ms; overrides
+                ``metadata["latency_ms"]`` when not ``None``.
 
         Returns:
             A populated :class:`LLMCallRecord`.

@@ -218,7 +218,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "kernel_no_more_leverage",  # KERNEL_AGENT → SWEEP (non-terminal) via skip_to_sweep
         # FRAMEWORK_AGENT phase transitions.
         "framework_agent_phase_done",  # FRAMEWORK_AGENT → EXPLORE normal completion (no more candidates)
-        "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive benchmarked candidate tests with no KEEP
+        "framework_agent_plateau",  # FRAMEWORK_AGENT → EXPLORE; N consecutive resolved candidates with no KEEP (benchmarked or not)
         "framework_agent_force_exit_low_budget",  # FRAMEWORK_AGENT → EXPLORE; remaining wall-clock dropped below configured fraction of max_hours
         "framework_agent_budget_cap",  # FRAMEWORK_AGENT → EXPLORE; per-phase wall-clock budget fraction reached
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
@@ -398,13 +398,14 @@ def _default_framework_force_exit_ratio() -> float:
 
 
 DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
-# FRAMEWORK per-candidate plateau: after this many consecutive benchmarked
-# candidate tests without a KEEP, the phase exits to EXPLORE. A KEEP resets it.
+# FRAMEWORK per-candidate plateau: after this many consecutive resolved
+# candidates without a KEEP (including non-benchmarked terminal outcomes), the
+# phase exits to EXPLORE. A KEEP — or a macro-cycle boundary — resets it.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 
-# R1 cyclic phase machine: when enabled, SWEEP loops back to EXPLORE (a new
-# macro-cycle) while budget remains and the run hasn't globally converged.
+# R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT (else EXPLORE) for
+# a new macro-cycle while budget remains and the run hasn't globally converged.
 
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
@@ -1444,6 +1445,14 @@ def kernel_work_pending(state: Any) -> bool:
     attempt is only partially recorded, or while trace analysis still exposes
     hot reusable kernels that have not received a kernel_opt attempt. Hard
     time/budget exits are still handled by :func:`exit_normal_kernel`.
+
+    Short-circuits in order: a terminal GEAK phase answers on its own (True only
+    while an ``ok`` result has an ``awaiting_rebench`` pending with a
+    revalidation task, else False); then the optional
+    ``has_keep_pending_integrate`` and ``untried_hot_reusable_kernels`` capability
+    probes, whose failures are treated as 'not available'; then the kernel_opt
+    attempt ledger, filtered by task group, source file, integration status and
+    rejected kernel ids.
     """
     if _geak_phase_terminal(state):
         result = getattr(state, "geak_result", None) or {}
@@ -1573,9 +1582,9 @@ def enablement_engaged(state: Any) -> bool:
     if resolve_enablement_mode(state) == ENABLEMENT_MODE_OFF:
         return False
     return bool(
-        (getattr(state, "enablement_kept_patches", None) or [])
-        or getattr(state, "enablement_dispatched", False)
-        or int(getattr(state, "enablement_attempts", 0) or 0) > 0
+        (getattr(state.enablement, "kept_patches", None) or [])
+        or getattr(state.enablement, "inflight_task_id", "")
+        or int(getattr(state.enablement, "attempts", 0) or 0) > 0
     )
 
 
@@ -2094,7 +2103,7 @@ def exit_normal_framework_agent(
             "pending_candidate_count": _framework_agent_pending_candidate_count(state),
         }
 
-    # Per-candidate plateau: N consecutive benchmarked tests with no KEEP means
+    # Per-candidate plateau: N consecutive resolved candidates with no KEEP means
     # the current batch is not yielding leverage — exit to EXPLORE rather than
     # grind through the remaining candidates.
     streak = _framework_agent_consecutive_no_keep(state)

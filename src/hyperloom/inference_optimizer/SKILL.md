@@ -205,7 +205,7 @@ round-trip saved); `manifest.json` then records `reason=explicit_flag`.
 Pass `--degraded-kb` and `--degraded-pr` together to short-circuit the entire
 IR-3 step.
 
-### IR-4 / IR-6 / IR-7 — EXPLORE phase contracts (Coordinator-internal)
+### IR-4 / IR-6 — EXPLORE phase contracts (Coordinator-internal)
 
 These govern the optimizer's EXPLORE phase, not the launcher; the full
 contract lives in `src/hyperloom/orchestrator/prompts/orchestration.md`. In
@@ -257,8 +257,8 @@ deterministic discovery-order fallback). The chosen candidate is
 Critic-gated, then `git apply`d against the live framework_source_roots
 and benchmarked; KEEP commits to the live tree (next candidate stacks on
 top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), **plateau (3 consecutive benchmarked candidate tests
-with no KEEP**),
+(<0.6 × max_hours), **plateau (5 consecutive benchmarked candidate tests
+with no KEEP)**, the per-phase budget cap,
 or an empty discovery batch. Resume skips completed candidates by
 idempotency key. The launcher only chooses whether the phase runs
 (`--no-framework-agent`).
@@ -283,7 +283,7 @@ unified specialist-informed `explore` flow. Do not recreate the retired
 Rules that look reasonable but break the current flow:
 
 - **No `framework first-explore priority` rule** in
-  `system_prompts/orchestration.md` — conflicts with the EXPLORE
+  `prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow.
   Framework-agent runs in the dedicated **FRAMEWORK** phase
   before EXPLORE; the LLM never proposes the `framework`
@@ -340,7 +340,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
 | **Magpie** (`pip install "$MAGPIE_PACKAGE_SPEC"`; default spec pins `magpie-eval` to `$MAGPIE_REF`) | `ensure_magpie` |
-| `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
+| `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
 Chained from `src/hyperloom/agents/kernel/scripts/install.sh` (single chain at the end
@@ -460,10 +460,10 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
 `classify` actions were deleted; the SKILL caller is now expected to
 supply session metadata directly via CLI flags. **Any workload value the
-operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget) MUST
-be forwarded as the matching CLI flag** — these flags are the only source of
-truth; an omitted flag silently falls back to its default and the operator's
-stated value is lost (issue #903):
+operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget, and
+every `--extra-env`) MUST be forwarded as the matching CLI flag** — these flags
+are the only source of truth; an omitted flag silently falls back to its default
+and the operator's stated value is lost:
 
 | Surface | CLI flag | Notes |
 |---|---|---|
@@ -481,6 +481,7 @@ stated value is lost (issue #903):
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+| Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -568,9 +569,11 @@ aliases from `SAFE_API_KEY`, derive/override `ANTHROPIC_BASE_URL`,
 auto-`pip install` the SDKs / `ray` / `Magpie` /
 `InferenceX`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
-reports). Two checks **abort** the run on failure: the hard model gate
-(`--claude-model` ∈ {`claude-opus-4-7` preferred, `claude-opus-4-6`
-fallback}, probed against `<OPENAI_BASE_URL>/models`; see
+reports). Two checks **abort** the run on failure: the model gate
+(probed against `<OPENAI_BASE_URL>/models`; the allowlist
+{`claude-opus-4-8` preferred, `claude-opus-4-7`, `claude-opus-4-6` fallback}
+binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
+the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
 critic-agent runtime probe (`## Critic Backend Selection`).
 
@@ -705,10 +708,13 @@ elsewhere; the default `{framework}_{runner_type}.sh` already respects
 Operators only interact through two `task.params` knobs (full schema in
 each `actions/_meta/<action>.yaml`): `params.benchmark_script` (bare
 sanitized `*.sh` name; overrides the gpu_type auto-pick) and
-`params.result_dir` (forwarded as `$RESULT_DIR`). The Coordinator's
-`baseline_no_param_change` PolicyGate rule denies any baseline proposal
-that changes params after a failure — the agent must retry with
-identical params and the run terminates after 3 consecutive failures.
+`params.result_dir` (forwarded as `$RESULT_DIR`). A baseline retry after a
+failure MUST change at least one of `params.benchmark_script` /
+`params.result_dir` / `params.extra_server_args` / `params.extra_envs`
+(prompt RULE F1 — LLM-side judgement, not a PolicyGate deny); a proposal
+repeating a recent failing params fingerprint is dropped as a duplicate.
+Three consecutive baseline failures with no enablement engaged stop the run
+with `stop_reason='baseline_failed'` and route PRELUDE to CLOSE.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -764,9 +770,10 @@ Default is overridable per pod via
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 
-`_preflight()` checks `CRITIC_AGENT_ROOT` resolves to a real directory
+CLI startup checks that `CRITIC_AGENT_ROOT` resolves to a real directory
 with `runtime/cli.py`, then runs `python -m hyperloom.agents.critic.runtime.cli --help`
-(5s timeout) before the Coordinator boots. Missing or broken runtime aborts
+(90s timeout, override via `CRITIC_AGENT_PROBE_TIMEOUT_SEC`) before the
+Coordinator boots. Missing or broken runtime aborts
 the run with a clear error pointing at `--critic-mock` as the offline
 bypass.
 
@@ -897,10 +904,11 @@ where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 ### Per-Run Asset Override (advanced)
 
 To override shipped configs without editing them, materialize a per-run asset
-root and pass `--asset-root`. `mkdir -p "$ASSET_ROOT/scripts/configs"`,
-`ln -sfn` `actions/` from `$REPO_ROOT/src/hyperloom/inference_optimizer/` and
-`orchestrator/` from `$REPO_ROOT/src/hyperloom/`, plus the two
-`scripts/ab_torch_compile_*.py` from `$REPO_ROOT/src/hyperloom/inference_optimizer/`, then
+root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
+CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
+`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
+`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
+`$REPO_ROOT/src/hyperloom/`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 (e.g. per-yaml `profiler.torch_profiler.enabled`); otherwise `--model` /
@@ -1032,18 +1040,17 @@ guess). Edit the example before copying if defaults need to change.
 
 Poll at most every 5 minutes unless debugging a startup failure.
 
+Resolve `$SESSION` the same way the Robustness Monitor does — never from
+`$USER_DATA_PATH`, which is the workspace root, not the session dir.
+
 ```bash
-export SESSION="${USER_DATA_PATH:-/workspace/hyperloom}"
-python3 - <<'PY'
-import json, os, pathlib
-s = json.loads((pathlib.Path(os.environ["SESSION"]) / "state.json").read_text())
-for k in ("stop_reason", "baseline_tput", "cumulative_gain", "current_best",
-          "last_kernel_opt", "last_trace_analyze", "last_sweep"):
-    print(f"{k}: {s.get(k)}")
-print("explore_last_round:", s.get("explore_search", {}).get("last_round"))
-print("phase:", s.get("phase"))
-PY
+export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")}"
+python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
+
+It prints `stop_reason`, `baseline_tput`, `cumulative_gain`, `current_best`,
+`last_kernel_opt`, `last_trace_analyze`, `last_sweep`, `explore_last_round`,
+`phase`, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1111,13 +1118,16 @@ First launch on this pod; change to `--max-model-len` / `--max-num-seqs` /
 
 ### Auto-detection + timeout
 
-The baseline/profile executors count aiter `.so` files (**< 20 = COLD**)
-and pick a subprocess timeout accordingly: COLD → 3600s, WARM → 2400s
-(`task.params['timeout_sec']` always wins). Each launch logs a
+The baseline executor counts aiter `.so` files (**< 20 = COLD**)
+and picks a subprocess timeout accordingly: COLD → 9000s, WARM → 7800s
+(`task.params['timeout_sec']` always wins). The profile executor inherits
+the same probe with a 14400s warm default, so a COLD probe there lowers the
+cap to 9000s. Each launch logs a
 `baseline_executor: ...` marker and the cache state lands in the
 `Preflight diagnostics:` block. If COLD_START repeats across retries the
 JIT was killed mid-`hipcc` — bump
-`INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC=5400` (don't just relaunch).
+`INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC` above its 9000s default (e.g.
+`=12000`; it replaces the cold cap, so a smaller value shortens it).
 Override the probe dir via `INFERENCE_OPTIMIZER_AITER_JIT_DIR`.
 
 ## Pre-GEAK Unittest Harness (unittest skill)
@@ -1216,7 +1226,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `stop_reason=policy_loop`: Coordinator hit ≥10 consecutive `policy_denied` events for the same action/rule pair; all top actions may be locked or pruned. Inspect `SharedState.policy_denial_history` and the per-tick `Policy denials` block. To recover: manually edit `state.json` to remove the action from `pruned_families`, clear `policy_denial_streak` / `stop_reason`, and re-propose with fresh `params.grid` content (omit stale `idempotency_key`).
+- `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied` for the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume`); do not start fresh.
 
 ## Report Back To User

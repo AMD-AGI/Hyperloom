@@ -229,12 +229,13 @@ def _bootstrap_knowledge_plane(
     recipe_kb_client: Any = None,
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
-    """Construct the :class:`KnowledgePlane` facade. Wires the optional PR
-    Monitor REST client (KB reads go through RecipeKB, no Recipe KB client).
-    Both backends fail-soft; --degraded-pr yields a disabled PRMonitorClient.
+    """Construct the :class:`KnowledgePlane` facade. Wires the PR Monitor MCP
+    URL and the PRMonitorClient enablement stub (KB reads go through RecipeKB).
+    Fail-soft; --degraded-pr yields a disabled PRMonitorClient.
 
     Args:
-        args: Parsed CLI arguments (PR Monitor enablement, URLs, window).
+        args: Parsed CLI arguments (``pr_monitor_enabled``,
+            ``pr_monitor_mcp_url``, ``pr_degraded_reason``).
         recipe_kb_client: Optional recipe KB client; unused (KB reads go via RecipeKB).
         session_dir: Optional session directory; when set a status marker is
             written for breakdown warnings.

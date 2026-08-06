@@ -273,9 +273,10 @@ def ensure_sglang_patched_for_tracelens(
     tracelens_root: Path | str | None = None,
 ) -> bool:
     """SGLang counterpart of :func:`ensure_vllm_patched_for_tracelens`.
-    Applies the 10-patch roofline / shape-discovery set as a single
-    atomic transaction (``--check`` all first, rollback on mid-apply
-    failure).
+    Applies the TraceLens roofline / shape-discovery patch set for the running
+    SGLang version as one transaction: pre-check every patch (strict, then
+    fuzzy, then already-applied/optional skip), apply, and roll back on
+    mid-apply or post-apply sentinel failure.
 
     Args:
         tracelens_root (Path | str | None): TraceLens checkout root;
@@ -935,9 +936,11 @@ def _is_patched(plan: _PatchPlan) -> bool:
 def _apply_atomic(plan: _PatchPlan) -> bool:
     """Apply every patch in ``plan.patches`` as a transaction.
 
-    ``git apply --check`` every patch first (any failure → apply none); then
-    apply one at a time, reverse-applying the already-applied ones if a later
-    patch fails.
+    Precheck every patch first: strict ``git apply --check``, else a fuzzy
+    ``patch --fuzz=2 --dry-run``, else an already-applied reverse check, else an
+    optional-patch skip; a patch failing all four aborts the set. Then apply one
+    at a time, reverse-applying the already-applied ones if a later patch or the
+    post-apply sentinel check fails.
 
     Args:
         plan: The resolved patch plan to apply as a transaction.

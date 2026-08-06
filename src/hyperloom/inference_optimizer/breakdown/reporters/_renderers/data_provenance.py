@@ -3,8 +3,9 @@
 
 """Data-provenance renderer — per-section source-artifact probes explaining why a section is empty/partial.
 
-Backwards-compatible: older breakdowns without ``data_provenance`` skip
-the section.
+No producer currently emits ``data_provenance`` — no collector, recorder
+section, or exporter key writes it — so the section is skipped on every
+session today; the renderer is retained for breakdowns that carry the field.
 """
 
 from __future__ import annotations
@@ -38,7 +39,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     Shows, for each tracked section, whether it was populated and which
     required source artifacts were missing, so empty/partial sections are
-    explainable. Skipped on breakdowns built before provenance shipped.
+    explainable. Skipped whenever the breakdown carries no
+    ``data_provenance`` entries, which is currently every session.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.

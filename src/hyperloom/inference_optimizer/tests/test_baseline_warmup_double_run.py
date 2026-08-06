@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for the baseline cold-start "warmup artifact"."""
+"""Regression tests for the baseline cold-start "warmup artifact".
+
+Covers the cold+hot double-run and its server-lifecycle reuse, the pre-start /
+teardown cleanup around the reused port, the local InferenceX mirror, and the
+subprocess-failure classifier.
+"""
 
 from __future__ import annotations
 
@@ -130,7 +135,7 @@ def _executor(
 
 
 def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
-    """The opt-in double-run reports the HOT second-round throughput."""
+    """The double-run reports the HOT second-round throughput."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -167,6 +172,159 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
     assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
+    tmp_path,
+):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured)
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT + 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 2
+    assert all(
+        cfg["benchmark"]["envs"]["RUN_EVAL"] == "false"
+        for cfg in captured
+    )
+    assert result["accuracy_stage"]["status"] == "skipped"
+    assert (
+        result["accuracy_stage"]["reason"]
+        == "throughput_below_threshold"
+    )
+
+
+def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
+    tmp_path,
+):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+    state = {"calls": 0}
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        cfg_idx = cmd.index("--benchmark-config")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        captured.append(cfg)
+        tput = _COLD_TPUT if state["calls"] == 0 else _HOT_TPUT
+        state["calls"] += 1
+        _fake_workspace(slot, tput=tput)
+        if cfg["benchmark"]["envs"].get("RUN_EVAL") == "true":
+            (slot / "results_gsm8k.json").write_text(
+                json.dumps(
+                    {
+                        "results": {
+                            "gsm8k": {
+                                "exact_match,strict-match": 0.9,
+                            }
+                        }
+                    }
+                )
+            )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=True)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state["calls"] == 3
+    assert [
+        cfg["benchmark"]["envs"]["RUN_EVAL"]
+        for cfg in captured
+    ] == ["false", "false", "true"]
+    assert [
+        cfg["benchmark"]["server_lifecycle"]["cleanup"]
+        for cfg in captured
+    ] == [False, False, True]
+    assert result["accuracy"] == pytest.approx(0.9)
+    assert result["accuracy_stage"]["status"] == "succeeded"
+
+
+def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
+    """Ineligible lifecycle fallback must retain accuracy in its only round."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    captured: list = []
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        cfg_idx = cmd.index("--benchmark-config")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        captured.append(cfg)
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        (slot / "results_gsm8k.json").write_text(
+            json.dumps(
+                {
+                    "results": {
+                        "gsm8k": {
+                            "exact_match,strict-match": 0.9,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = _executor(base, tmp_path, baseline_double_run=False)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert len(captured) == 1
+    assert captured[0]["benchmark"]["envs"]["RUN_EVAL"] == "true"
+    assert result["accuracy"] == pytest.approx(0.9)
+    assert "accuracy_stage" not in result
 
 
 def test_baseline_double_run_by_default(tmp_path, monkeypatch):
@@ -522,7 +680,8 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         (slot / "server.log").write_text(
             "(APIServer pid=42) RuntimeError: Engine core initialization "
-            "failed. See root cause above. Failed core proc(s): {}\n",
+            "failed. See root cause above. Failed core proc(s): {} "
+            "SAFE_API_KEY=ak-invalid-measurement-secret\n",
             encoding="utf-8",
         )
         # Classification must be driven by the server.log marker, not returncode.
@@ -546,6 +705,8 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     assert result["status"] == "failed"
     assert result["error_class"] == "server_init_dead", result
     assert "Engine core initialization failed" in result["error"]
+    assert "invalid-measurement-secret" not in result["error"]
+    assert "[REDACTED]" in result["error"]
 
 
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):

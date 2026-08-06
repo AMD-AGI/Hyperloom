@@ -129,9 +129,7 @@ def test_role_md_files_carry_phase_awareness():
     root = asset_system_prompts_dir()
     for name in ("orchestration", "kernel_agent", "critic", "robustness"):
         body = (root / f"{name}.md").read_text(encoding="utf-8")
-        if name == "robustness":
-            assert "Phase & specialist awareness" in body
-        elif name == "critic":
+        if name == "critic":
             assert "Phase-specific rules" in body
         else:
             assert "Phase awareness" in body, f"{name}.md missing phase awareness"
@@ -201,9 +199,9 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
         ts_unix=1_000_060.0,
     )
     out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
-    # PRELUDE: 60s elapsed, cap 180s (5% of 3600s), used 33%.
+    # PRELUDE: 60s elapsed, cap 108s (3% of 3600s), used 56%.
     assert "PRELUDE: elapsed=60s" in out
-    # EXPLORE: 240s elapsed (300-60), cap 2160s (60% of 3600s), used 11%.
+    # EXPLORE: 240s elapsed (300-60), cap 1260s (35% of 3600s), used 19%.
     assert "EXPLORE: elapsed=240s" in out
     # Both lines present.
     assert out.count("elapsed=") == 2

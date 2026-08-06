@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 
 
 def test_scriptable_frameworks_get_no_watchdog_log(tmp_path):
-    for framework in ("worldmirror", "worldplay", "xdit", "hunyuan_image3"):
+    for framework in ("custom", "custom", "xdit", "hunyuan_image3"):
         assert _watchdog_server_log_path(tmp_path, framework) is None
 
 
@@ -33,8 +33,8 @@ def test_serving_frameworks_keep_the_watchdog_log(tmp_path):
 
 def test_config_framework_reads_materialized_yaml(tmp_path):
     cfg = tmp_path / "materialized.yaml"
-    cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "WorldMirror"}}), encoding="utf-8")
-    assert _config_framework(cfg) == "worldmirror"
+    cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "Custom"}}), encoding="utf-8")
+    assert _config_framework(cfg) == "custom"
     assert _config_framework(tmp_path / "missing.yaml") == ""
 
 

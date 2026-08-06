@@ -8,32 +8,40 @@ Sibling of the *live* emitter
 (:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
 path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
-projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`)
-so a backfilled trace and a live-pushed trace are shaped identically.
+projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
+this CLI does emit are shaped like the live ones. Not replayed here: ext token
+shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
+GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
     Trace                 = one session
       phase span          = PRELUDE / EXPLORE / KERNEL_AGENT / SWEEP / ...
-        agent span        = component (orchestration / kernel / specialist /
-                            critic / geak / forge / proposal_scorer / ...)
+        agent span        = component (orchestration / kernel_agent /
+                            specialist / critic / geak / forge /
+                            proposal_scorer / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response
                             paired from conversations.jsonl when available)
       Score               = one decision (decision_trace.jsonl), attached to
                             the agent span that produced it (trace-level
-                            fallback):
-                              - gain_pct (NUMERIC)  when present
-                              - outcome  (CATEGORICAL: KEEP/REVERT/no_promote)
+                            fallback). Projected by
+                            ``langfuse_mapping.decision_to_scores``:
+                              - decision_outcome (CATEGORICAL:
+                                KEEP/REVERT/no_promote)
+                              - gain_pct / predicted_gain_pct /
+                                proposal_score (NUMERIC) when present
 
 Source files (under the session dir)
 -------------------------------------
 * ``reports/trace/llm_calls.jsonl``      -- every LLM call (model + token
                             usage + phase).
 * ``reports/trace/conversations.jsonl``  -- prompt+response text for the
-                            subset that recorded it; paired by (component,
-                            tick, role, UTC-second of ts).
+                            subset that recorded it; paired by
+                            :func:`langfuse_mapping.pair_key`.
 * ``reports/trace/decision_trace.jsonl`` -- per-action
                             KEEP/REVERT/no_promote + gain_pct.
+* ``runtime/recipe_snapshot/.audit.jsonl`` -- recipe-KB read/write audit rows
+                            (rendered as the ``agent:recipe_kb`` span subtree).
 * ``manifest.json``                      -- trace-level metadata +
                             claw_session_id.
 
@@ -332,8 +340,9 @@ def ingest(plan: dict[str, Any]) -> int:
             last_end = p_hi
 
     # Recipe-KB reads + writes -> spans under a recipe_kb agent. Mirrors the
-    # live emitter's ``_flush_recipe_kb_audit`` / ``_emit_recipe_write_span``
-    # so a backfilled trace is shaped like a live one.
+    # live emitter's ``_flush_recipe_kb_audit`` (which projects each row via
+    # ``lfmap.recipe_read_span`` / ``lfmap.recipe_write_span`` and emits it
+    # through ``record_kb_span``) so a backfilled trace is shaped like a live one.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
         ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]

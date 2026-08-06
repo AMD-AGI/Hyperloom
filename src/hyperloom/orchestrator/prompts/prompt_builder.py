@@ -4,9 +4,9 @@
 """Compose the Orchestration agent's system prompt from typed inputs.
 
 Wraps the ``orchestration.md`` rules fragment with generated sections
-(mission, session context, pipeline/budget, action catalogue, decision
-framework, optional kernel-opt reference, rules). Deterministic for given
-inputs; the only IO is reading the rules fragment.
+(mission, session context, pipeline/budget, phase contract, action catalogue,
+decision framework, cycle directive, optional kernel-opt reference, rules).
+Deterministic for given inputs; the only IO is reading the rules fragment.
 """
 
 from __future__ import annotations
@@ -93,6 +93,9 @@ def _section_session_context(
     Args:
         framework (str): The framework name shown verbatim.
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
+        explore_enabled (bool): Whether the EXPLORE phase is enabled.
+        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
+            is enabled.
         objective_kind (str): The objective kind (e.g. ``time_only``,
             ``gain_pct``).
         objective_value (float | str | None): Optional objective target value
@@ -136,8 +139,8 @@ def _section_phase_semantics(
     explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
-    """Render the per-phase allowed-action contract (current phase injected
-    dynamically by the Coordinator).
+    """Render the per-phase LLM-proposable action contract (current phase
+    injected dynamically by the Coordinator).
 
     Phases switched off by ``--no-explore`` / ``--no-kernel`` /
     ``--no-framework-agent`` keep their row in the 6-phase chain but are annotated
@@ -368,8 +371,9 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
-    ``integrate_patch`` / ``dynamic_action`` render their closed ``delegate``
-    payload contracts; everything else renders a ``propose_action`` template.
+    ``integrate_patch`` render their closed ``delegate`` payload contracts;
+    ``report`` renders a fixed zero-gain propose_action; everything else
+    renders a ``propose_action`` template.
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
@@ -434,9 +438,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode) — rename alone does NOT "
-            "bypass dedup. Use remove_args/unset_envs to ablate harmful "
-            "base flags; args_mode='replace' to drop inherited server args. "
+            "remove_args+unset_envs+args_mode); only exact duplicates within "
+            "the same submitted grid are collapsed, so any prior fingerprint "
+            "may be re-proposed. "
+            "Use remove_args/unset_envs to ablate harmful base flags; "
+            "args_mode='replace' to drop inherited server args. "
             "provenance values: 'llm_direct', 'default_grid', "
             "'specialist:<domain-or-tag>' (audit/advisory, not a gate)."
         )
@@ -560,8 +566,11 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "6. **Phase budget awareness**. The `=== Phase ===` block carries",
             "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
             "   prefer lower-cost / known-good actions (explore over kernel_opt).",
-            "   The Plateau advisory block is informational only; it does not",
-            "   advance the phase. When you judge the current phase exhausted,",
+            "   The Plateau advisory block is informational only for KERNEL /",
+            "   FRAMEWORK plateaus (they never auto-advance the phase); a detected",
+            "   EXPLORE plateau, by contrast, deterministically advances",
+            "   EXPLORE -> KERNEL_AGENT (``reason=explore_no_more_leverage``) at the",
+            "   next phase-compute. When you judge the current phase exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
             "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (see",
             "   PHASE CONTRACT for the skip_to_close exception).",
@@ -626,11 +635,10 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
             "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
             "  attempt salvages the leak.",
-            "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-            "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-            "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-            "  switch action families just to dodge the failure; Robustness'",
-            "  escalation policy needs the heartbeat to fire its RCA.",
+            "* **RULE F3 — repeated `error_class='subprocess_nonzero'` on `baseline`",
+            "  ⇒ stop retrying baseline.** Heartbeat with `body_md='blocked: subprocess",
+            "  repeatedly nonzero baseline'` and let Robustness intervene. Explore",
+            "  variants may be re-proposed; read the failure log first.",
             "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
             "  `why_denied` context tool (and the `Recent policy denials` block on a",
             "  seed turn) shows repeated (action, rule) collisions. The system no",
@@ -661,9 +669,10 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   sweep a winning boolean's related `*_AITER_*` family.",
             "2. **Synergy** — combine last round's winners via",
             "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
-            "3. **Retry rejects** — for each `explore_search.rejected` variant,",
-            "   change the value or pair it with a winner (a `-2%` reject is a",
-            "   dead flag; `-0.3%` just needs a different value).",
+            "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
+            "   whether the failure is stale, fixable, or ruled out; re-propose the",
+            "   same config to revalidate or change the value (a `-2%` reject is a",
+            "   dead flag; `-0.3%` may clear the bar once patched).",
             "4. **Mine flags** — when winners are empty, pull untested boolean",
             "   toggles from `discovered_flags.<framework>.backend_flags`.",
             "5. **Ablate harmful base config** — when a user/base flag or env may",
@@ -671,7 +680,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   `unset_envs` instead of only adding more knobs.",
             "",
             "Variant identity is content-based (args+envs+remove_args+",
-            "unset_envs+args_mode) — rename alone does NOT bypass dedup.",
+            "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
             "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
             "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
             "",
@@ -758,7 +767,8 @@ allowed action until the patch lands on `optimization_stack`:
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
   while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with `gpu_pct >= 3%` and zero attempts) remain —
+  (reusable hot kernels with zero attempts and `gpu_pct >= 10%`, the
+  default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
   drain them with `run_optimization{candidates_path: <from
   last_trace_analyze>}` (the batch handler fans out automatically).
 

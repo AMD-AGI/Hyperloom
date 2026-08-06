@@ -53,6 +53,7 @@ from ...knowledge.kb_writeback import (
     OUTCOME_REVERTED_SMOKE_FAIL,
     write_framework_record,
 )
+from ...state.shared_state import resolve_grading_anchor_tput
 
 
 log = logging.getLogger(__name__)
@@ -443,8 +444,12 @@ class FrameworkAgentExecutor:
 
         Returns:
             dict[str, Any]: A result dict whose ``status`` is one of ``kept``,
-                ``reverted``, ``apply_failed``, ``no_patch``, ``fetch_failed``,
-                ``applied_no_bench`` or ``failed``, plus throughput / accuracy
+                ``reverted``, ``accuracy_unavailable_reject`` (accuracy gate
+                required but never evaluated, so the patch was reverted despite
+                an acceptable throughput delta), ``apply_failed``, ``no_patch``,
+                ``fetch_failed``, ``applied_no_bench``, ``skipped`` (multi-node
+                mode; no patch applied and no failure tallied, see
+                ``skipped_reason``) or ``failed``, plus throughput / accuracy
                 / patch bookkeeping fields.
         """
         params = dict(ctx.task.params or {})
@@ -844,10 +849,9 @@ class FrameworkAgentExecutor:
 
         # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
-        if base_tput <= 0:
-            ss = extra.get("shared_state") or extra.get("state")
-            if ss is not None:
-                base_tput = float(getattr(ss, "baseline_tput", 0.0) or 0.0)
+        live_anchor = resolve_grading_anchor_tput(extra.get("shared_state") or extra.get("state"))
+        if live_anchor > base_tput:
+            base_tput = live_anchor
         keep_threshold_pct = float(
             params.get("keep_threshold_pct", self.keep_threshold_pct),
         )

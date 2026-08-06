@@ -5,9 +5,10 @@
 
 No-tools by default, so the intent transport is a JSON-in-text envelope
 (``{"intents": [...]}``) validated with the same ``validate_envelope`` the
-Claude path uses. The AMD gateway serves both Claude and OpenAI models from
-one URL, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``
-(``OPENAI_BASE_URL`` canonical; ``ANTHROPIC_BASE_URL`` legacy fallback).
+Claude path uses. The AMD gateway hosts both protocols on one host under split
+paths, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``:
+``OPENAI_BASE_URL`` wins, otherwise ``ANTHROPIC_BASE_URL`` is rewritten
+(``/anthropic`` -> ``/Unified/v1``) by ``derive_openai_base_url``.
 
 Optional web search: when ``HYPERLOOM_CODEX_WEB_SEARCH`` is enabled, every turn
 uses the OpenAI **Responses API** with the built-in server-side ``web_search``
@@ -192,11 +193,13 @@ class CodexBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,  # ignored — single API call per turn
     ) -> BackendTurnResult:
-        """Run one turn via a single chat-completion call and parse intents.
+        """Run one turn via a single API call and parse intents.
 
         Appends the JSON-envelope output instructions to ``prompt``, issues one
-        bounded chat-completion request, extracts and validates the returned
-        envelope, and records call telemetry.
+        bounded request -- ``chat.completions`` by default, or the Responses API
+        with the built-in server-side ``web_search`` tool when ``web_search`` is
+        enabled -- extracts and validates the returned envelope, and records
+        call telemetry.
 
         Args:
             prompt (str): The composed turn prompt.

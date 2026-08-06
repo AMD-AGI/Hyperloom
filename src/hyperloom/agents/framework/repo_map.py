@@ -3,9 +3,11 @@
 
 """Canonical mapping from serving framework name to upstream git repo URL.
 
-Lives in ``framework_agent`` so the standalone ``fa`` CLI need not
-reverse-import ``inference_optimizer``. IO keeps an in-process copy in
-``framework_agent_client.repo_url_for_framework`` that must not drift.
+Lives in ``hyperloom.agents.framework`` so the ``fa`` CLI need not
+reverse-import the orchestrator. ``hyperloom.orchestrator.framework.client``
+imports and re-exports :func:`repo_url_for_framework` from here. Note
+``hyperloom.inference_optimizer.framework_registry`` carries the same URLs in
+``FrameworkSpec.repo_url``; the two tables must stay in sync.
 """
 
 from __future__ import annotations
@@ -15,8 +17,6 @@ _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "vllm": "https://github.com/ROCm/vllm.git",
     "atom": "https://github.com/ROCm/ATOM.git",
     "xdit": "https://github.com/xdit-project/xDiT.git",
-    "worldplay": "https://github.com/Tencent-Hunyuan/HY-WorldPlay.git",
-    "worldmirror": "https://github.com/Tencent-Hunyuan/HY-World-2.0.git",
 }
 
 

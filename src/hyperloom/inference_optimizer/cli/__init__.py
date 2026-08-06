@@ -131,6 +131,47 @@ def _normalise_framework_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
+    """Publish ``--framework-path`` / ``--benchmark-scripts-dir`` as env.
+
+    Both flags are friendlier spellings of env vars the executors already read,
+    so this only forwards them; an explicitly exported env still wins, matching
+    how every other path override in the loop behaves.
+
+    ``custom`` has no shipped checkout or entrypoint to fall back on, so a
+    missing or non-existent directory is fatal here rather than at the first
+    benchmark, half an hour in.
+    """
+    fatal: list[str] = []
+    for flag, value, env_name in (
+        ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
+        (
+            "--benchmark-scripts-dir",
+            getattr(args, "benchmark_scripts_dir", None),
+            "HYPERLOOM_BYPASS_SCRIPTS_DIR",
+        ),
+    ):
+        raw = str(value or "").strip()
+        # An exported-but-empty var is not a choice, it is an unset one; treating
+        # it as set would let a stray `export FRAMEWORK_REPO_PATH=` silently
+        # swallow the flag.
+        already = os.environ.get(env_name, "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                fatal.append(f"{flag}={raw!r} is not a directory")
+                continue
+            if not already:
+                os.environ[env_name] = str(path.resolve())
+        elif framework == "custom" and not already:
+            fatal.append(f"{flag} is required for --framework custom (or export {env_name})")
+
+    if fatal:
+        for line in fatal:
+            print(f"ERROR: {line}", file=sys.stderr)
+        sys.exit(2)
+
+
 def _enforce_expected_framework(
     framework: str,
     *,
@@ -239,7 +280,7 @@ def _build_orchestration_prompt(
 
 
 def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``system_prompts/critic.md``.
+    """Return the Critic system prompt sourced from ``orchestrator/prompts/critic.md``.
 
     Returns:
         str: The contents of ``critic.md``.
@@ -685,10 +726,14 @@ def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
 ) -> set[str] | None:
-    """Hard-gate Claude model selection (must be in _CLAUDE_ALLOWED_MODELS); mutates ``args.claude_model``.
+    """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``.
 
     Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
-    catalog id set on success (reused by the codex smoke-test).
+    catalog id set on success (reused by the codex smoke-test). The AMD
+    ``_CLAUDE_ALLOWED_MODELS`` allowlist is enforced only when the operator sets
+    ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL`` to 0/false/no/off (and is
+    additionally waived on the codex-follow path); otherwise the catalog probe
+    is the sole gate.
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace; ``claude_model``
@@ -1726,6 +1771,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _enforce_expected_framework(framework)
         os.environ["FRAMEWORK"] = framework
         print(f"Framework       : {framework}")
+        _apply_operator_supplied_paths(args, framework)
 
         # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
         if framework == "atom":
@@ -2127,11 +2173,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         max_minutes=max_minutes_for_prompt,
     )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
-    # ``--framework-discover-timeout-sec`` lands on argparse dest
-    # ``framework_discover_timeout_sec``; reading only the ``framework_agent_``
-    # spelling always missed it, so the flag silently did nothing and discovery
-    # stayed on the default budget. Accept the parser's dest first and keep the
-    # longer name as a fallback for callers that set it directly.
+    # Reads the parser dest ``framework_discover_timeout_sec`` first, then the
+    # longer ``framework_agent_`` spelling for callers that set it directly.
     try:
         coordinator.framework_agent_discover_timeout_sec = float(
             getattr(args, "framework_discover_timeout_sec", 0.0)
