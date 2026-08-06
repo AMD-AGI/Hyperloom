@@ -315,6 +315,18 @@ def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None
     assert coord._framework_agent_ranker_client() is None
 
 
+def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkeypatch) -> None:
+    """The ranker speaks the OpenAI protocol: an Anthropic-only deploy leaves it
+    disabled instead of caching a client aimed at the Anthropic endpoint."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-user-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    assert coord._framework_agent_ranker_client() is None
+
+
 def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
     pytest.importorskip("openai")
     coord._fa_ranker_client = None  # type: ignore[attr-defined]

@@ -2808,7 +2808,8 @@ class FrameworkPhase(PhaseHandler):
         then the orchestration backend's own client (so the LLM ranker is on by
         default whenever orchestration has LLM credentials); otherwise builds
         one from the orchestration backend's configured key/URL env (falling
-        back to ``OPENAI_API_KEY``/``ANTHROPIC_API_KEY`` + ``OPENAI_BASE_URL``).
+        back to ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``). Returns ``None`` when
+        no OpenAI-side key is configured, which leaves the LLM ranker disabled.
         Cached on first successful build.
         """
         import os
@@ -2843,18 +2844,17 @@ class FrameworkPhase(PhaseHandler):
         # shared gateway defaults.
         api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
         base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
-        api_key = (
-            os.environ.get(api_key_env)
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-        )
+        # This client speaks the OpenAI protocol, so only the OpenAI-side key and
+        # base URL are usable: an Anthropic key or an Anthropic base URL would
+        # build a client that 404s on /chat/completions, and it is cached, so
+        # every later ranking call would fail. Preflight already exports the
+        # resolved OPENAI_BASE_URL (an Anthropic-compatible gateway derives one),
+        # so no cross-provider fallback is needed. Without an OpenAI-side key the
+        # ranker stays disabled.
+        api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return None
-        base_url = (
-            os.environ.get(base_url_env)
-            or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("ANTHROPIC_BASE_URL")
-        )
+        base_url = os.environ.get(base_url_env) or os.environ.get("OPENAI_BASE_URL")
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()
