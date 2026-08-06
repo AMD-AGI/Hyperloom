@@ -984,7 +984,7 @@ def _invalidate_aiter_jit_build(
             "src": str(jit_build),
         }
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / "jit_build"
+    backup_path = backup_dir / f"jit_build_{time.time_ns()}"
     if backup_path.exists():
         return {
             "status": "failed",

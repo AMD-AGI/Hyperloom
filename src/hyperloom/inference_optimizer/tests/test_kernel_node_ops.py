@@ -28,8 +28,8 @@ def _repo_root() -> Path:
 
 @pytest.fixture
 def patch_env(tmp_path, monkeypatch):
-    fw = tmp_path / "fw"
-    fw.mkdir()
+    fw = tmp_path / "lib" / "python3.12" / "site-packages" / "vllm"
+    fw.mkdir(parents=True)
     bak = tmp_path / "bak"
     bak.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", f"{fw}/")

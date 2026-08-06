@@ -47,6 +47,10 @@ def test_pod_jit_transaction_restores_baseline_cache(
         "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
         str(backup_root),
     )
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        str(_aiter),
+    )
 
     record = safety.invalidate_aiter_jit_build(
         build,
@@ -76,6 +80,10 @@ def test_pod_jit_transaction_clears_candidate_when_baseline_was_clean(
     monkeypatch.setenv(
         "HYPERLOOM_MN_KERNEL_BACKUP_DIR",
         str(backup_root),
+    )
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        str(_aiter),
     )
 
     record = safety.invalidate_aiter_jit_build(

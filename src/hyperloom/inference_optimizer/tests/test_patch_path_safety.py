@@ -29,13 +29,59 @@ def _load_patch_path_safety(unique_name: str):
 
 @pytest.fixture
 def patch_env(tmp_path, monkeypatch):
-    fw = tmp_path / "fw"
-    fw.mkdir()
+    fw = tmp_path / "lib" / "python3.12" / "site-packages" / "vllm"
+    fw.mkdir(parents=True)
     bak = tmp_path / "bak"
     bak.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", f"{fw}/")
     monkeypatch.setenv("HYPERLOOM_MN_KERNEL_BACKUP_DIR", str(bak))
     return fw, bak
+
+
+@pytest.mark.parametrize("unsafe_root", ("/", "relative/path", "/tmp"))
+def test_discovery_env_cannot_expand_patch_roots(
+    monkeypatch,
+    unsafe_root,
+):
+    pps = _load_patch_path_safety(f"pps_unsafe_{unsafe_root!r}")
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        unsafe_root,
+    )
+
+    roots = pps.resolve_patch_target_roots()
+
+    assert unsafe_root not in roots
+
+
+def test_custom_installed_framework_root_is_allowed(tmp_path, monkeypatch):
+    pps = _load_patch_path_safety("pps_custom_package")
+    root = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "aiter"
+    root.mkdir(parents=True)
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        str(root),
+    )
+
+    assert f"{root}/" in pps.resolve_patch_target_roots()
+
+
+def test_fake_aiter_shape_outside_framework_root_is_rejected(
+    tmp_path,
+    monkeypatch,
+):
+    pps = _load_patch_path_safety("pps_fake_aiter")
+    fake = tmp_path / "random" / "aiter"
+    (fake / "jit" / "build").mkdir(parents=True)
+    (fake / "__init__.py").write_text("", encoding="utf-8")
+    (fake / "jit" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.delenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="framework patch roots"):
+        pps.assert_aiter_jit_build_allowed(fake / "jit" / "build")
 
 
 def test_assert_revert_paths_allowed_happy_path(patch_env):

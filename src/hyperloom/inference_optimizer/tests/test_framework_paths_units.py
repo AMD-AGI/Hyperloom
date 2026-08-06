@@ -608,7 +608,37 @@ def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_p
 
     assert res["status"] == "ok", res
     assert not jit_build.exists()  # moved aside so the next import re-JITs
-    assert (backup_dir / "jit_build" / "module_aiter_core.so").is_file()
+    backups = list(backup_dir.glob("jit_build_*/module_aiter_core.so"))
+    assert len(backups) == 1
+
+
+def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
+    apply_tool,
+    tmp_path,
+) -> None:
+    jit_build = tmp_path / "aiter" / "jit" / "build"
+    jit_build.mkdir(parents=True)
+    (jit_build / "first.so").write_bytes(b"first")
+    backup_dir = tmp_path / "backup"
+
+    first = apply_tool._invalidate_aiter_jit_build(
+        _AITER_META_CU,
+        backup_dir,
+        jit_build_dir=jit_build,
+    )
+    jit_build.mkdir(parents=True)
+    (jit_build / "second.so").write_bytes(b"second")
+    second = apply_tool._invalidate_aiter_jit_build(
+        _AITER_META_CU,
+        backup_dir,
+        jit_build_dir=jit_build,
+    )
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert first["backup_path"] != second["backup_path"]
+    assert Path(first["backup_path"]).is_dir()
+    assert Path(second["backup_path"]).is_dir()
 
 
 _APPLY_BENCH_PATH = (

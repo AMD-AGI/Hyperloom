@@ -21,25 +21,28 @@ _DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
     "/sgl-workspace/vllm/",
-    "/app/ATOM/atom/",
-    "/app/xDiT/",
     "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/aiter_meta/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
     "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
     "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/aiter_meta/",
     "/opt/venv/lib/python3.12/site-packages/sglang/",
     "/opt/venv/lib/python3.12/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
     "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/aiter_meta/",
     "/usr/local/lib/python3.12/dist-packages/sglang/",
     "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
     "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/aiter_meta/",
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-    "/aiter_meta/csrc/",
+)
+_ALLOWED_PATCH_PACKAGES = frozenset(
+    {"aiter", "aiter_meta", "sglang", "vllm"}
+)
+_ALLOWED_EDITABLE_ROOTS = frozenset(
+    {"/sgl-workspace/aiter", "/sgl-workspace/sglang", "/sgl-workspace/vllm"}
 )
 
 
@@ -86,8 +89,20 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
         tuple[str, ...]: Normalized framework root prefixes.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots = tuple(_normalize_root(p) for p in env.split(":") if p.strip()) if env else ()
-    return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, env_roots)
+    env_roots: list[str] = []
+    for raw in env.split(":") if env else ():
+        candidate = Path(raw.strip())
+        if not candidate.is_absolute():
+            continue
+        resolved = candidate.resolve()
+        is_package = (
+            resolved.name in _ALLOWED_PATCH_PACKAGES
+            and resolved.parent.name in {"site-packages", "dist-packages"}
+        )
+        is_editable = str(resolved) in _ALLOWED_EDITABLE_ROOTS
+        if is_package or is_editable:
+            env_roots.append(_normalize_root(str(resolved)))
+    return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, tuple(env_roots))
 
 
 def resolve_kernel_backup_root() -> Path:
@@ -182,6 +197,7 @@ def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
 def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
     """Validate an AITER ``jit/build`` path before recursive mutation."""
     resolved = jit_build.resolve()
+    assert_target_path_allowed(resolved, must_exist=False)
     if (
         resolved.name != "build"
         or resolved.parent.name != "jit"
