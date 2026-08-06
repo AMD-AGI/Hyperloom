@@ -82,6 +82,19 @@ The per-kernel Forge backend is an opt-in:
 GEAK GEMM tuning uses `run_gemm_tuning_handler`, which also defaults to GEAK
 unless `KERNEL_OPT_BACKEND_ORDER=forge` is set.
 
+### Optional Origami GEMM pre-tuner
+
+When `HYPERLOOM_ORIGAMI_GEMM_FALLBACK=1`, `run_gemm_tuning_handler` first runs
+the [Origami](../components/origami.md) pre-tuner for plain FP8 A8W8 blockscale
+config misses. Origami ranks the real AITER CK templates, then Hyperloom
+directly benchmarks the selected template against AITER's default for the exact
+shape. Only correct, measured wins are added to the AITER config inherited by
+GEAK or Forge.
+
+Origami does not replace the selected backend and does not make the final
+end-to-end KEEP/REVERT decision. When the feature variable is unset or false,
+the handler goes directly to GEAK/Forge without touching any Origami path.
+
 FlyDSL kernels (`source_type=flydsl`) and multi-GPU collective kernels
 (`is_multigpu: True`) are handled by Forge when it is enabled.
 
@@ -99,7 +112,9 @@ source "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh"
 ```
 
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
-env file. Re-run it after a venv rebuild or before each session.
+env file. When the Origami feature is enabled, it also installs the pinned
+Origami Python API from a sparse `rocm-libraries` checkout. Re-run it after a
+venv rebuild or before each session.
 
 Required env vars:
 
@@ -115,6 +130,8 @@ Optional:
 | Variable | Purpose |
 |---|---|
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
+| `HYPERLOOM_ORIGAMI_GEMM_FALLBACK` | Set to `1` to install and enable the Origami A8W8 blockscale pre-tuner |
+| `ORIGAMI_ROOT` | Existing `rocm-libraries/shared/origami` checkout; overrides the managed sparse clone |
 | `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
 

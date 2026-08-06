@@ -8,6 +8,7 @@
 #   - ray[default]==2.44.1 + click<8.3.0
 #   - TraceLens editable install + CLI verification
 #   - GEAK per-kernel + e2e optimizer backends
+#   - Origami Python API only when HYPERLOOM_ORIGAMI_GEMM_FALLBACK=1
 #
 # The installer prepares all kernel-agent backends in one pass.
 
@@ -234,7 +235,8 @@ DOTENV="${REPO_ROOT}/.env"
 _DOTENV_PROTECTED_VARS='REPO_ROOT KERNEL_AGENT_ROOT HYPERLOOM_KERNEL_AGENT_ROOT
 USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
 MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
-GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
+GEAK_ROOT GEAK_E2E_RUNNER ORIGAMI_ROOT ORIGAMI_REPO ORIGAMI_REF
+HYPERLOOM_ORIGAMI_GEMM_FALLBACK PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
    || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${DEEPSEEK_API_KEY:-}" ] \
@@ -274,6 +276,15 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
+# Optional Origami analytical GEMM selector. Keep this out of the base wheel
+# and install it only when the runtime feature is explicitly enabled.
+ORIGAMI_REPO="${ORIGAMI_REPO:-https://github.com/ROCm/rocm-libraries.git}"
+# Last Origami-affecting commit validated with Hyperloom's baseline mapping API.
+ORIGAMI_REF="${ORIGAMI_REF:-2fb6827e5d7901dc4a4508a3fc71ca637be8fe8e}"
+_origami_root_was_set="${ORIGAMI_ROOT:+1}"
+ORIGAMI_REPO_ROOT="${ORIGAMI_REPO_ROOT:-${_open_source_root}/rocm-libraries@${ORIGAMI_REF}}"
+ORIGAMI_ROOT="${ORIGAMI_ROOT:-${ORIGAMI_REPO_ROOT}/shared/origami}"
+
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -349,6 +360,9 @@ Options:
 Environment (optional):
   SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
                                         Installs ray/click but defers daemon startup to runtime.
+  HYPERLOOM_ORIGAMI_GEMM_FALLBACK=1    Install the pinned Origami Python API.
+  ORIGAMI_ROOT=/path/to/shared/origami Use an operator-provided Origami source tree.
+  ORIGAMI_REPO / ORIGAMI_REF            Override the managed repository and full commit pin.
 EOF
 }
 
@@ -921,6 +935,119 @@ raise SystemExit(0)
 PY
 }
 
+_origami_install_enabled() {
+  case "${HYPERLOOM_ORIGAMI_GEMM_FALLBACK:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_verify_origami_api() {
+  python3 - <<'PY' >/dev/null 2>&1
+import origami
+
+required = (
+    "config_t",
+    "compute_total_latency",
+    "get_hardware_for_device",
+)
+missing = [name for name in required if not hasattr(origami, name)]
+if missing:
+    raise SystemExit(f"origami Python API missing: {', '.join(missing)}")
+PY
+}
+
+ensure_origami() {
+  if ! _origami_install_enabled; then
+    log "Origami pre-tuner disabled; skipping checkout, build, and install"
+    return 0
+  fi
+
+  log "ensuring Origami Python API (${ORIGAMI_REPO}@${ORIGAMI_REF})"
+  if [ -z "${_origami_root_was_set:-}" ]; then
+    ORIGAMI_REF="$(_resolve_ref_sha "$ORIGAMI_REPO" "$ORIGAMI_REF")"
+    ORIGAMI_REPO_ROOT="${_open_source_root}/rocm-libraries@${ORIGAMI_REF}"
+    ORIGAMI_ROOT="${ORIGAMI_REPO_ROOT}/shared/origami"
+  fi
+  local repo_root="${ORIGAMI_REPO_ROOT}"
+  local root="${ORIGAMI_ROOT}"
+  local pyproject="${root%/}/python/pyproject.toml"
+  local rocm_path="${ROCM_PATH:-/opt/rocm}"
+  local cmake_prefix="${rocm_path}/hip:${rocm_path}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+  local cxx="${CMAKE_CXX_COMPILER:-${rocm_path}/bin/amdclang++}"
+
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    [ -f "$pyproject" ] \
+      || warn "Origami source missing at ${root} (expected ${pyproject})"
+    _verify_origami_api \
+      || warn "Origami Python API is not importable or incomplete"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -n "${_origami_root_was_set:-}" ]; then
+      log "would: validate operator Origami checkout at ${root}"
+    else
+      log "would: sparse clone ${ORIGAMI_REPO}@${ORIGAMI_REF} into ${repo_root}"
+      log "would: git -C ${repo_root} sparse-checkout set shared/origami"
+    fi
+    log "would: pip install ${root}/python with ROCm prefix ${cmake_prefix}"
+    log "would: verify import origami and required Hyperloom API"
+    return 0
+  fi
+
+  if [ -z "${_origami_root_was_set:-}" ]; then
+    if [ ! -d "${repo_root}/.git" ]; then
+      local tmp="${repo_root}.clone.$$"
+      [ ! -e "$repo_root" ] \
+        || { warn "incomplete managed Origami checkout at ${repo_root}; rebuilding"; rm -rf "$repo_root"; }
+      rm -rf "$tmp"
+      mkdir -p "$(dirname "$repo_root")"
+      if ! git clone --filter=blob:none --no-checkout --sparse "$ORIGAMI_REPO" "$tmp" \
+        || ! git -C "$tmp" sparse-checkout set shared/origami \
+        || ! git -C "$tmp" fetch --depth 1 origin "$ORIGAMI_REF" \
+        || ! git -C "$tmp" checkout -q FETCH_HEAD; then
+        rm -rf "$tmp"
+        die "Origami sparse clone/pin failed for ${ORIGAMI_REPO}@${ORIGAMI_REF}"
+      fi
+      mv "$tmp" "$repo_root"
+    else
+      run git -C "$repo_root" sparse-checkout set shared/origami
+      run git -C "$repo_root" fetch --depth 1 origin "$ORIGAMI_REF"
+      run git -C "$repo_root" checkout -q FETCH_HEAD
+    fi
+    root="${repo_root}/shared/origami"
+    ORIGAMI_ROOT="$root"
+  fi
+
+  pyproject="${root%/}/python/pyproject.toml"
+  [ -f "$pyproject" ] \
+    || die "Origami checkout invalid: expected ${pyproject}"
+  if ! command -v hipcc >/dev/null 2>&1 && [ ! -x "${rocm_path}/bin/hipcc" ]; then
+    die "Origami requires ROCm/HIP; hipcc not found (ROCM_PATH=${rocm_path})"
+  fi
+
+  local project_name
+  project_name="$(_project_name_from_pyproject "${root}/python")"
+  if [ -z "$project_name" ] || ! _local_install_matches_root "$project_name" "${root}/python"; then
+    run env \
+      CMAKE_PREFIX_PATH="$cmake_prefix" \
+      CMAKE_CXX_COMPILER="$cxx" \
+      MAX_JOBS="${MAX_JOBS:-8}" \
+      python3 -m pip install --no-cache-dir --break-system-packages "${root}/python"
+  else
+    log "Origami already installed from ${root}/python; skipping reinstall"
+  fi
+
+  _verify_origami_api \
+    || die "Origami installed but required Python API verification failed"
+  if [ -n "${_origami_root_was_set:-}" ] && git -C "$root" rev-parse HEAD >/dev/null 2>&1; then
+    ORIGAMI_REF="$(git -C "$root" rev-parse HEAD)"
+  fi
+  export ORIGAMI_ROOT ORIGAMI_REF
+  log "Origami Python API verified: root=${ORIGAMI_ROOT} ref=${ORIGAMI_REF}"
+}
+
 # Internal extension is opt-in: enabled iff $TRACELENS_INTERNAL_ROOT is set.
 _tracelens_internal_enabled() {
   [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]
@@ -1110,6 +1237,11 @@ write_env_file() {
       echo "export TL_EXTENSION='TraceLens_internal'"
     fi
     [ -n "${HYPERLOOM_ROOT:-}" ] && echo "export HYPERLOOM_ROOT='${HYPERLOOM_ROOT}'"
+    if _origami_install_enabled; then
+      echo "export HYPERLOOM_ORIGAMI_GEMM_FALLBACK='1'"
+      [ -n "${ORIGAMI_ROOT:-}" ] && echo "export ORIGAMI_ROOT='${ORIGAMI_ROOT}'"
+      [ -n "${ORIGAMI_REF:-}" ] && echo "export ORIGAMI_REF='${ORIGAMI_REF}'"
+    fi
     # e2e optimizer ("geak") checkout + runner (GEAK_ROOT / GEAK_E2E_RUNNER),
     # consumed by src/hyperloom/agents/kernel/tools/backends/geak_runner.py.
     [ -n "${GEAK_E2E_RUNNER}" ] && echo "export GEAK_E2E_RUNNER='${GEAK_E2E_RUNNER}'"
@@ -1188,6 +1320,11 @@ write_env_file() {
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
   [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
+  if _origami_install_enabled; then
+    upsert_dotenv_var HYPERLOOM_ORIGAMI_GEMM_FALLBACK "1"
+    [ -n "${ORIGAMI_ROOT:-}" ] && upsert_dotenv_var ORIGAMI_ROOT "$ORIGAMI_ROOT"
+    [ -n "${ORIGAMI_REF:-}" ] && upsert_dotenv_var ORIGAMI_REF "$ORIGAMI_REF"
+  fi
   [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
   [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
@@ -1335,6 +1472,15 @@ PY
   else
     warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
   fi
+  if _origami_install_enabled; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "Origami Python API verification deferred (dry-run)"
+    elif _verify_origami_api; then
+      log "Origami Python API available: ${ORIGAMI_ROOT}"
+    else
+      warn "Origami feature enabled but Python API is unavailable"
+    fi
+  fi
   for tool in git patch; do
     if command -v "$tool" >/dev/null 2>&1; then
       log "found ${tool}: $(command -v "$tool")"
@@ -1371,12 +1517,16 @@ main() {
   # GEAK clones + mirrors). System-package steps above (apt/pip)
   # do not touch source-mirrors, so they stay outside the lock.
   acquire_install_lock
+  ensure_origami
   ensure_tracelens
 
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
   _prune_dep_cache "TraceLens" "GEAK"
+  if _origami_install_enabled; then
+    _prune_dep_cache "rocm-libraries"
+  fi
   ensure_forge_claude_cli
   write_env_file
 

@@ -59,6 +59,9 @@ class WriteEnvFilePythonPathTest(unittest.TestCase):
         magpie_path: str,
         preexisting_pythonpath: str | None = None,
         preexisting_dotenv_pythonpath: str | None = None,
+        origami_enabled: bool = False,
+        origami_root: str = "",
+        origami_ref: str = "",
     ) -> tuple[str, str]:
         """Source the installer and invoke ``write_env_file`` in isolation.
 
@@ -104,6 +107,9 @@ export USER_DATA_PATH={workdir!s}
 export HYPERLOOM_RUNTIME_DIR={runtime_dir!s}
 export KERNEL_AGENT_ENV={kernel_agent_env!s}
 export MAGPIE_PATH={magpie_path}
+export HYPERLOOM_ORIGAMI_GEMM_FALLBACK={1 if origami_enabled else 0}
+export ORIGAMI_ROOT={origami_root}
+export ORIGAMI_REF={origami_ref}
 """
         if preexisting_pythonpath is not None:
             script += f"export PYTHONPATH={preexisting_pythonpath}\n"
@@ -214,6 +220,44 @@ write_env_file
             1,
             f"duplicate MAGPIE_PATH entry in PYTHONPATH: {pythonpath_line}",
         )
+
+    def test_enabled_origami_values_are_written_to_runtime_and_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            repo_root = work / "target-install"
+            repo_root.mkdir()
+            env_text, dotenv_text = self._run_write_env_file(
+                work,
+                repo_root=repo_root,
+                magpie_path="/data/.cache/Magpie@abc1234",
+                origami_enabled=True,
+                origami_root="/data/.cache/rocm-libraries@abc/shared/origami",
+                origami_ref="abc123",
+            )
+
+        for text in (env_text, dotenv_text):
+            self.assertIn("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", text)
+            self.assertIn("ORIGAMI_ROOT", text)
+            self.assertIn("ORIGAMI_REF", text)
+
+    def test_disabled_origami_values_are_not_written(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            repo_root = work / "target-install"
+            repo_root.mkdir()
+            env_text, dotenv_text = self._run_write_env_file(
+                work,
+                repo_root=repo_root,
+                magpie_path="/data/.cache/Magpie@abc1234",
+                origami_enabled=False,
+                origami_root="/should/not/be/written",
+                origami_ref="should-not-be-written",
+            )
+
+        for text in (env_text, dotenv_text):
+            self.assertNotIn("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", text)
+            self.assertNotIn("ORIGAMI_ROOT", text)
+            self.assertNotIn("ORIGAMI_REF", text)
 
 
 if __name__ == "__main__":

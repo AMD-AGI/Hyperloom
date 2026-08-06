@@ -23,6 +23,25 @@ AITER config, or add Origami telemetry.
 - An importable `origami` package and AITER checkout/package containing
   `csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_instance.py`.
 
+## Installation
+
+See the Hyperloom component guide at
+`docs/components/origami.md` for the pipeline placement, environment reference,
+artifacts, and safety model.
+
+With `HYPERLOOM_ORIGAMI_GEMM_FALLBACK=1`, the kernel-agent installer sparse
+clones the pinned `rocm-libraries` revision into Hyperloom's dependency cache,
+installs `shared/origami/python`, and verifies the required API:
+
+```bash
+bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
+```
+
+Set `ORIGAMI_ROOT=/path/to/rocm-libraries/shared/origami` to use an existing
+checkout instead. The checkout must contain `python/pyproject.toml`. Building
+the bindings requires ROCm/HIP and CMake 3.25 or newer. Use `--check-only` to
+verify an enabled installation without cloning or installing.
+
 ## Workflow
 
 1. Run the deterministic selector:
