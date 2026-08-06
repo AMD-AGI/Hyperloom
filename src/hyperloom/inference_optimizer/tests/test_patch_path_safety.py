@@ -42,6 +42,7 @@ def patch_env(tmp_path, monkeypatch):
 def test_discovery_env_cannot_expand_patch_roots(
     monkeypatch,
     unsafe_root,
+    capsys,
 ):
     pps = _load_patch_path_safety(f"pps_unsafe_{unsafe_root!r}")
     monkeypatch.setenv(
@@ -52,6 +53,7 @@ def test_discovery_env_cannot_expand_patch_roots(
     roots = pps.resolve_patch_target_roots()
 
     assert unsafe_root not in roots
+    assert "ignoring unsafe framework source root" in capsys.readouterr().err
 
 
 def test_custom_installed_framework_root_is_allowed(tmp_path, monkeypatch):

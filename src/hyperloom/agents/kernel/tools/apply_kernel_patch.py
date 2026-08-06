@@ -1886,6 +1886,19 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     """Delete backups after an integrated patch becomes the new baseline."""
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest_status = str(manifest.get("status") or "")
+    if manifest_status == "finalized":
+        return {
+            "status": "ok",
+            "manifest_path": str(manifest_file),
+            "reason": "already finalized",
+        }
+    if manifest_status not in {"applied", "finalized_partial"}:
+        return {
+            "status": "failed",
+            "manifest_path": str(manifest_file),
+            "error": f"cannot finalize manifest in state {manifest_status!r}",
+        }
     backup_root = manifest_file.resolve().parent
     deleted: list[str] = []
     issues: list[dict[str, Any]] = []
@@ -1912,6 +1925,15 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
 
     for raw in sorted(path for path in candidates if path):
         path = Path(raw)
+        if path.resolve() == backup_root:
+            issues.append(
+                {
+                    "kind": "untrusted_backup",
+                    "path": str(path),
+                    "error": "backup path equals manifest directory",
+                }
+            )
+            continue
         if not _within_root(path, backup_root):
             issues.append(
                 {"kind": "untrusted_backup", "path": str(path)}

@@ -549,6 +549,66 @@ def test_finalize_keeps_patch_and_deletes_local_backups(
     assert not jit_backup.exists()
 
 
+def test_finalize_rejects_reverted_manifest(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    target.write_text(
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n',
+        encoding="utf-8",
+    )
+    patch = tmp_path / "v1_forge.cu"
+    patch.write_text(
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n',
+        encoding="utf-8",
+    )
+    applied = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k-reverted",
+    )
+    assert akp.revert_kernel_patch(applied["manifest_path"])["status"] == "ok"
+
+    finalized = akp.finalize_kernel_patch(applied["manifest_path"])
+
+    assert finalized["status"] == "failed"
+    assert "reverted" in finalized["error"]
+
+
+def test_finalize_never_deletes_manifest_directory(akp, tmp_path):
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    manifest = backup_root / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "applied",
+                "source_backup": {
+                    "backup_path": str(backup_root),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = akp.finalize_kernel_patch(manifest)
+
+    assert result["status"] == "partial"
+    assert manifest.is_file()
+    assert result["issues"][0]["error"] == "backup path equals manifest directory"
+
+
 @pytest.mark.parametrize("multinode", (False, True))
 def test_installed_snapshot_can_span_aiter_and_vllm(
     akp,

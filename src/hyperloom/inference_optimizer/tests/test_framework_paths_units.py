@@ -129,6 +129,7 @@ class TestGlobInstallPackageRoots:
     def test_finds_dist_packages_under_usr_local(self, tmp_path, monkeypatch):
         base = tmp_path / "usr_local_lib" / "python3.12" / "dist-packages"
         (base / "vllm").mkdir(parents=True)
+        (base / "aiter_meta").mkdir()
         monkeypatch.setattr(
             fp,
             "_INSTALL_GLOB_PARENTS",
@@ -136,6 +137,7 @@ class TestGlobInstallPackageRoots:
         )
         roots = fp._glob_install_package_roots()
         assert any("dist-packages/vllm/" in r for r in roots)
+        assert any("dist-packages/aiter_meta/" in r for r in roots)
 
 
 class TestResolvePatchTargetRoots:
@@ -173,24 +175,24 @@ class TestProbeFrameworkSourceRootsForEnv:
     ):
         venv = tmp_path / "venv"
         site = venv / "lib" / "python3.12" / "site-packages"
-        for name in ("vllm", "sglang", "aiter"):
+        for name in ("vllm", "sglang", "aiter", "aiter_meta"):
             (site / name).mkdir(parents=True)
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         result = fp.probe_framework_source_roots_for_env()
-        for name in ("vllm", "sglang", "aiter"):
+        for name in ("vllm", "sglang", "aiter", "aiter_meta"):
             assert f"{name}/" in result
 
     def test_isolated_vllm_venv_root_fallback(self, tmp_path, monkeypatch):
         # Isolated vLLM: main VIRTUAL_ENV has no vllm; VLLM_VENV_ROOT points at
-        # the isolated venv holding vllm + aiter, which must still be discovered.
+        # the isolated venv holding vllm + split AITER, which must be discovered.
         main_venv = tmp_path / "opt-venv"
         (main_venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
         iso_venv = tmp_path / "vllm-venv"
         iso_site = iso_venv / "lib" / "python3.12" / "site-packages"
-        for name in ("vllm", "aiter"):
+        for name in ("vllm", "aiter", "aiter_meta"):
             (iso_site / name).mkdir(parents=True)
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
@@ -199,6 +201,7 @@ class TestProbeFrameworkSourceRootsForEnv:
         result = fp._discover_installed_framework_roots()
         assert any(r.endswith("/vllm/") for r in result)
         assert any(r.endswith("/aiter/") for r in result)
+        assert any(r.endswith("/aiter_meta/") for r in result)
 
     def test_dedupes_origins_against_defaults(self, tmp_path, monkeypatch):
         shared = tmp_path / "shared"

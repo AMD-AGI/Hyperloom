@@ -1,15 +1,16 @@
 """Path constraints for kernel patch apply/revert on inference pods (stdlib only).
 
 Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
-(RayJob). Keeps patch targets under framework install roots and backups under
-``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default ``/var/kernel_patch_backups``), and
-hosts the atomic write both apply paths use to land a patched file.
+(RayJob). Restricts patch targets to vLLM/SGLang/AITER install roots, keeps
+backups under ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default
+``/var/kernel_patch_backups``), and hosts the atomic write both apply paths use.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -93,6 +94,10 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
     for raw in env.split(":") if env else ():
         candidate = Path(raw.strip())
         if not candidate.is_absolute():
+            sys.stderr.write(
+                "WARN ignoring unsafe framework source root for pod patching: "
+                f"{raw!r}\n"
+            )
             continue
         resolved = candidate.resolve()
         is_package = (
@@ -102,6 +107,11 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
         is_editable = str(resolved) in _ALLOWED_EDITABLE_ROOTS
         if is_package or is_editable:
             env_roots.append(_normalize_root(str(resolved)))
+        else:
+            sys.stderr.write(
+                "WARN ignoring unsafe framework source root for pod patching: "
+                f"{raw!r}\n"
+            )
     return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, tuple(env_roots))
 
 
