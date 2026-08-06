@@ -47,6 +47,8 @@ def test_family_routing_for_each_class(tmp_path):
         "ZImageTransformer2DModel": "single",
         "SanaTransformer2DModel": "sana",
         "UNet2DConditionModel": "unet",
+        "Flux2Transformer2DModel": "flux",
+        "WanTransformer3DModel": "wan",
     }
     for cls, fam in cases.items():
         d = _write_denoiser(
@@ -349,3 +351,174 @@ def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(bad)])
     assert df.main() == 1
     assert "could not resolve" in capsys.readouterr().out
+
+
+# ---- Wan (3D video) + FLUX.2 ---------------------------------------------
+# Real geometry from the shipped configs: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+# transformer/config.json and black-forest-labs/FLUX.2-dev.
+_WAN_CFG = {
+    "_class_name": "WanTransformer3DModel",
+    "num_layers": 40,
+    "num_attention_heads": 40,
+    "attention_head_dim": 128,
+    "in_channels": 16,
+    "out_channels": 16,
+    "patch_size": [1, 2, 2],
+    "text_dim": 4096,
+    "ffn_dim": 13824,
+    "freq_dim": 256,
+    "cross_attn_norm": True,
+    "qk_norm": "rms_norm_across_heads",
+}
+
+_FLUX2_CFG = {
+    "_class_name": "Flux2Transformer2DModel",
+    "num_layers": 8,
+    "num_single_layers": 48,
+    "num_attention_heads": 48,
+    "attention_head_dim": 128,
+    "in_channels": 128,
+    "patch_size": 1,
+    "joint_attention_dim": 15360,
+    "axes_dims_rope": [32, 32, 32, 32],
+}
+
+
+def test_wan_geometry_from_real_config(tmp_path):
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "wan", _WAN_CFG))
+    assert g is not None
+    assert (g.family, g.model_class) == ("wan", "WanTransformer3DModel")
+    assert g.hidden == 5120  # 40 heads x 128
+    assert g.num_double_layers == 40
+    # patch_size is (t, h, w); the spatial patch is 2, NOT the leading 1.
+    assert (g.patch, g.patch_t) == (2, 1)
+    # ffn_dim must win over the 4*hidden fallback (which would be 20480).
+    assert g.intermediate == 13824
+    assert g.context_dim == 4096  # text_dim, not hidden
+    assert (g.vae_spatial, g.vae_temporal) == (8, 4)
+
+
+def test_wan_latent_frames_causal_vae(tmp_path):
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "wan", _WAN_CFG))
+    # Causal VAE: first frame is its own latent, then groups of 4.
+    assert df._latent_frames(g, 81) == 21
+    assert df._latent_frames(g, 1) == 1
+    assert df._latent_frames(g, 4) == 1
+    assert df._latent_frames(g, 5) == 2
+    # Degenerate input must not produce a zero/negative divisor.
+    assert df._latent_frames(g, 0) == 1
+
+
+def test_image_family_has_single_latent_frame(tmp_path):
+    cfg = {"_class_name": "FluxTransformer2DModel", "num_layers": 2, "num_attention_heads": 8, "attention_head_dim": 64}
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux", cfg))
+    assert g.vae_temporal == 1
+    assert df._latent_frames(g, 81) == 1
+
+
+def test_wan_video_tokens_match_observed_trace_shape(tmp_path):
+    """720p x 81 frames must give 75600 tokens.
+
+    This is the number the attention operands carry in a real Wan2.2 trace
+    ((1, 75600, 5, 128) under Ulysses-8), so it pins the whole token model.
+    """
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "wan", _WAN_CFG))
+    assert df._video_tokens(g, 720, 1280, 81) == 75600  # 21 * 45 * 80
+
+    fwd = df.forward_flops(g, 720, 1280, 81)
+    assert fwd["image_tokens"] == 75600
+    assert fwd["latent_frames"] == 21
+
+
+def test_wan_flops_grow_superlinearly_with_frames(tmp_path):
+    """Attention is quadratic in tokens, so doubling frames costs >2x."""
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "wan", _WAN_CFG))
+    small = df.forward_flops(g, 720, 1280, 81)["forward_flops"]
+    large = df.forward_flops(g, 720, 1280, 161)["forward_flops"]
+    ratio = large / small
+    assert 2.0 < ratio < 4.0
+
+
+def test_wan_keeps_text_out_of_self_attention(tmp_path):
+    """Wan cross-attends to text; it must not concatenate it into self-attn.
+
+    Growing the text length only adds a linear cross-attention term, so the
+    total must rise far less than the quadratic jump a concatenated context
+    would produce.
+    """
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "wan", _WAN_CFG))
+    ffn_pt = df._ffn_per_token(g)
+    base = df._wan_layer(g, 10_000, 512, ffn_pt)
+    more_text = df._wan_layer(g, 10_000, 1024, ffn_pt)
+    assert more_text > base
+    assert more_text < 1.10 * base
+
+
+def test_wan_estimate_threads_num_frames(tmp_path):
+    d = _write_denoiser(tmp_path / "wan", _WAN_CFG)
+    est = df.estimate_image_flops(d, height=720, width=1280, num_frames=81, num_steps=8)
+    assert est is not None
+    assert est["image_tokens"] == 75600
+    assert est["num_frames"] == 81
+    assert est["latent_frames"] == 21
+    assert est["num_steps"] == 8
+    assert est["cfg_batch"] == 2  # WanPipeline uses CFG
+    assert est["total_flops"] == pytest.approx(est["per_step_flops"] * 8)
+
+    # Family default is used when num_frames is omitted.
+    assert df.estimate_image_flops(d, height=720, width=1280)["num_frames"] == 81
+    # More frames must cost more.
+    fewer = df.estimate_image_flops(d, height=720, width=1280, num_frames=41, num_steps=8)
+    assert fewer["total_flops"] < est["total_flops"]
+
+
+def test_num_frames_ignored_by_image_families(tmp_path):
+    cfg = {"_class_name": "FluxTransformer2DModel", "num_layers": 2, "num_attention_heads": 8, "attention_head_dim": 64}
+    d = _write_denoiser(tmp_path / "flux", cfg)
+    a = df.estimate_image_flops(d, num_frames=1)
+    b = df.estimate_image_flops(d, num_frames=97)
+    assert a["total_flops"] == b["total_flops"]
+    # Video-only keys stay absent for image models.
+    assert "num_frames" not in a and "latent_frames" not in a
+
+
+def test_flux2_geometry_and_defaults(tmp_path):
+    g = df.resolve_geometry(_write_denoiser(tmp_path / "flux2", _FLUX2_CFG))
+    assert g is not None
+    assert (g.family, g.model_class) == ("flux", "Flux2Transformer2DModel")
+    assert g.hidden == 6144  # 48 heads x 128
+    assert (g.num_double_layers, g.num_single_layers) == (8, 48)
+    # patch_size=1 in the config, but FLUX packs 2x2.
+    assert g.patch == 2
+    assert g.context_dim == 15360
+    # FLUX.2-dev is guidance-distilled: one forward per step.
+    assert (g.default_cfg_batch, g.default_steps) == (1, 50)
+
+    est = df.estimate_image_flops(_write_denoiser(tmp_path / "flux2b", _FLUX2_CFG))
+    assert est["image_tokens"] == 4096  # 1024/8/2 squared
+    assert est["layers"] == 56
+
+
+def test_wan_analytic_ceiling_and_fmt(tmp_path):
+    d = _write_denoiser(tmp_path / "wan", _WAN_CFG)
+    est = df.analytic_ceiling(
+        d, gpu_type="mi355x", precision="bf16", height=720, width=1280, num_frames=81, num_steps=8
+    )
+    assert est is not None
+    assert est["ideal_ms"] > 0
+    line = df._fmt(est)
+    assert "TFLOP/clip" in line
+    assert "f=81(21lat)" in line
+
+
+def test_main_frames_flag(tmp_path, monkeypatch, capsys):
+    d = _write_denoiser(tmp_path / "wan", _WAN_CFG)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["diffusion_flops", "--model-dir", str(d), "--height", "720", "--width", "1280", "--frames", "81", "--json"],
+    )
+    assert df.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["image_tokens"] == 75600
+    assert out["latent_frames"] == 21
