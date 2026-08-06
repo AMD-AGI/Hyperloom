@@ -1900,6 +1900,13 @@ def _resolve_forge_shapes(
     ``precision`` scopes the traced shapes to the dtype the tuner will actually
     tune (a trace carries every GEMM dtype the model runs, e.g. FP8 projections
     alongside BF16 router heads). Empty means "no dtype scoping".
+
+    When scoping is requested the candidate extraction runs first, because it is
+    the only source whose dtype can be checked: a pre-rendered shapes artifact is
+    a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
+    recorded for another dtype would otherwise be handed to the tuner ahead of
+    correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
+    and for when the trace yields nothing for this precision.
     """
     if require_fresh_profile and not _profile_shapes_are_fresh(state):
         log.info(
@@ -1932,32 +1939,56 @@ def _resolve_forge_shapes(
             shapes_file = cand_file.parent / "shapes.json"
             candidates.append(str(shapes_file))
 
+    # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
+    # traces can describe a backend that is no longer active.
+    def _extracted() -> str:
+        return _extract_gemm_shapes_from_candidates(
+            str(last_trace.get("candidates_path") or ""),
+            session_dir,
+            precision=precision,
+        )
+
+    if _canonical_dtype(precision):
+        scoped = _extracted()
+        if scoped:
+            return scoped
+
     for candidate in candidates:
         p = Path(candidate)
         if p.is_file() and _is_forge_compatible_shapes_json(p):
             return str(p)
 
-    # Final fallback: extract the GEMM shapes observed by the latest TraceLens
-    # analysis. Older traces can describe a backend that is no longer active.
-    extracted = _extract_gemm_shapes_from_candidates(
-        str(last_trace.get("candidates_path") or ""),
-        session_dir,
-        precision=precision,
-    )
-    if extracted:
-        return extracted
-
-    return ""
+    return _extracted()
 
 
-def _dtype_token_for_precision(precision: str) -> str:
-    """Map a tuning precision onto the dtype token TraceLens renders in shapes.
+# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
+_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
 
-    Returns "" when the precision does not scope to a single traced dtype, which
-    the caller treats as "keep every dtype" (the historical behaviour).
+
+def _canonical_dtype(raw: str) -> str:
+    """Fold a precision name or traced dtype token onto one canonical family.
+
+    Both sides of the comparison spell the same dtype many ways: a tuning
+    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
+    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
+    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
+    raw strings drops shapes that do belong to the tuned precision, so both are
+    folded onto a family first.
+
+    Returns "" for anything unrecognised, which callers treat as "do not scope".
     """
-    normalized = str(precision or "").strip().lower()
-    return {"fp8": "fp8", "bf16": "bf16", "fp16": "fp16"}.get(normalized, "")
+    token = str(raw or "").strip().lower().removeprefix("torch.")
+    if not token:
+        return ""
+    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
+        return "fp4"
+    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
+        return "fp8"
+    if token.startswith(("bf16", "bfloat16")) or token == "b16":
+        return "bf16"
+    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
+        return "fp16"
+    return ""
 
 
 def _extract_gemm_shapes_from_candidates(
@@ -1997,15 +2028,17 @@ def _extract_gemm_shapes_from_candidates(
     # a leading dtype/name does not defeat it.
     dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
     # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
-    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_]*)")
-    wanted_dtype = _dtype_token_for_precision(precision)
+    # Dots are allowed so a fully-qualified spelling ("torch.float8_e4m3fn") is
+    # captured whole rather than truncated at "torch".
+    dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
+    wanted_dtype = _canonical_dtype(precision)
 
     def _dtype_matches(a_text: str) -> bool:
-        """Whether the A tensor's traced dtype is the one being tuned."""
+        """Whether the A tensor's traced dtype is the family being tuned."""
         if not wanted_dtype:
             return True
         found = dtype_pattern.search(a_text)
-        return bool(found) and found.group(1).lower() == wanted_dtype
+        return bool(found) and _canonical_dtype(found.group(1)) == wanted_dtype
 
     def _mnk(a_text: str, b_text: str) -> tuple[int, int, int] | None:
         """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
@@ -2028,14 +2061,17 @@ def _extract_gemm_shapes_from_candidates(
     # ``weight`` is the observed call count: decode GEMMs are invoked far more
     # often than prefill ones, so ordering by it puts the throughput-dominant
     # shapes first and they still get tuned when the tuner runs out of budget.
-    weighted: list[tuple[int, tuple[int, int, int]]] = []
-    seen: set[tuple[int, int, int]] = set()
+    # The same (M,N,K) can be reported by several kernels; keep the largest
+    # count, otherwise a rare first sighting would outrank the hot one.
+    weights: dict[tuple[int, int, int], int] = {}
+    order: dict[tuple[int, int, int], int] = {}
 
     def _record(key: tuple[int, int, int] | None, weight: int) -> None:
-        if key is None or key in seen:
+        if key is None:
             return
-        seen.add(key)
-        weighted.append((weight, key))
+        if key not in order:
+            order[key] = len(order)
+        weights[key] = max(weights.get(key, 0), weight)
 
     for kernel in hot_kernels:
         name = str(kernel.get("name", ""))
@@ -2046,10 +2082,11 @@ def _extract_gemm_shapes_from_candidates(
             continue
         entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
 
-        # Legacy format: one entry carries every tensor, "<br>"-joined.
+        # Legacy format: one entry carries every tensor, "<br>"-joined. The tag
+        # is spelled several ways across TraceLens versions (<br>, <br/>, <BR/>).
         matched_joined = False
         for entry in entries:
-            parts = [p.strip() for p in str(entry["shape"]).split("<br>") if p.strip()]
+            parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
             if len(parts) < 2:
                 continue
             matched_joined = True
@@ -2061,13 +2098,12 @@ def _extract_gemm_shapes_from_candidates(
         weight = max(int(e.get("call_num") or 0) for e in entries[:2])
         _record(_mnk(str(entries[0]["shape"]), str(entries[1]["shape"])), weight)
 
-    if not weighted:
+    if not weights:
         return ""
 
     # Most-called first; ties keep discovery order so output stays deterministic.
-    order = {key: i for i, (_, key) in enumerate(weighted)}
-    weighted.sort(key=lambda item: (-item[0], order[item[1]]))
-    shapes = [{"M": M, "N": N, "K": K} for _, (M, N, K) in weighted]
+    ranked = sorted(weights, key=lambda key: (-weights[key], order[key]))
+    shapes = [{"M": M, "N": N, "K": K} for M, N, K in ranked]
 
     out_path = cand_file.parent / "traced_gemm_shapes.json"
     try:
