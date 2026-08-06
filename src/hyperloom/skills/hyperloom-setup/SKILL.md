@@ -99,7 +99,7 @@ value.
    - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
-   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
+   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5)` / `Custom`.
 4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a

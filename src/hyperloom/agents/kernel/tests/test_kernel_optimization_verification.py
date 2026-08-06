@@ -86,7 +86,12 @@ def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
     assert notes["user_specified_backends"] is False
 
 
-def _attempt(report: Path | None = None, artifact: Path | None = None):
+def _attempt(
+    report: Path | None = None,
+    artifact: Path | None = None,
+    *,
+    backend: str = "generic",
+):
     paths = {}
     if report is not None:
         paths["report"] = str(report)
@@ -102,7 +107,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
     return {
         "status": "completed",
         "attempt_id": "a1",
-        "backend": "forge",
+        "backend": backend,
         "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
@@ -322,12 +327,16 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
 def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
-    attempt = _attempt(report)
+    attempt = _attempt(report, backend="forge")
     attempt.update(
         {
             "pristine_baseline_ms": 1.0,
             "search_start_ms": 0.8,
-            "best_ms": 0.8,
+            "best_ms": 1.2,
+            "mean_case_speedup": 1.25,
+            "search_start_mean_case_speedup": 1.25,
+            "total_improved": True,
+            "incremental_improved": False,
             "improved": True,
             "improved_during_search": False,
         }
@@ -340,8 +349,48 @@ def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     )
 
     assert verification["micro_speedup"] == 1.25
-    assert verification["micro_speedup_source"] == "forge_pristine_result"
+    assert verification["micro_speedup_source"] == "forge_mean_case_result"
     assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_forge_rejects_ambiguous_report_without_structured_score(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.30x\n",
+        encoding="utf-8",
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [_attempt(report, backend="forge")],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 1.0
+    assert verification["micro_speedup_source"] == "default_unmeasured"
+    assert ko.make_proposal(verification)["decision"] == "PARTIAL"
+
+
+def test_non_forge_preserves_structured_timing_fallback(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
+    attempt = _attempt(report, backend="generic")
+    attempt.update(
+        {
+            "pristine_baseline_ms": 2.0,
+            "best_ms": 1.0,
+            "improved": True,
+        }
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 2.0
+    assert verification["micro_speedup_source"] == "structured_timing_result"
 
 
 def test_report_correctness_passes_with_reference_language(tmp_path):
@@ -437,6 +486,22 @@ def test_speedup_just_above_gate_keeps(tmp_path):
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_speedup_at_gate_boundary_keeps(tmp_path):
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(
+            correctness_passed=True,
+            micro_speedup=1.10,
+            e2e_gain_pct=0.5,
+            accuracy_passed=True,
+        ),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 

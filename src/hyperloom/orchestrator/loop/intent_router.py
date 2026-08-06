@@ -40,7 +40,7 @@ from ..policy.gate import (
 )
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
-from ..kernel.request_handlers import get_handler
+from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -523,12 +523,11 @@ class IntentRouter:
         )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
-        """Route a REQUEST intent to its target agent (Plan A: → kernel).
+        """Route a REQUEST intent to its programmatic handler.
 
-        Applies the kernel-request execution-order gate, records the request on
-        the bus for the target reactor / replay, and auto-rejects requests whose
-        target agent is not in the role registry (e.g. ``--no-kernel``) so the
-        requester never hangs.
+        Applies the execution-order gate, records the request on the bus, and
+        dispatches to the registered handler or auto-rejects with a RESPONSE so
+        the requester never hangs.
 
         Args:
             source (str): The agent issuing the request.
@@ -553,8 +552,216 @@ class IntentRouter:
         )
         await self.bus.append_and_seq(request_msg)
 
-        # Safety net: auto-reject when the target agent was removed (e.g. --no-kernel).
-        if target_agent not in self.role_registry:
+        if target_agent == "kernel_agent":
+            if not bool(getattr(self.shared_state, "kernel_enabled", True)):
+                await self.bus.append_and_seq(
+                    Message.new(
+                        target_agent,
+                        source,
+                        "response",
+                        {
+                            "in_reply_to": request_msg.msg_id,
+                            "kind": f"{kind}_done",
+                            "status": "failed",
+                            "result": {
+                                "status": "failed",
+                                "error_class": "agent_disabled",
+                                "error": "kernel_agent is disabled for this session (--no-kernel)",
+                            },
+                            "source": "coordinator_auto_reject",
+                        },
+                        in_reply_to=request_msg.msg_id,
+                        priority=1,
+                    )
+                )
+                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                return
+            handler = get_handler(kind)
+            if handler is None:
+                await self.bus.append_and_seq(
+                    Message.new(
+                        target_agent,
+                        source,
+                        "response",
+                        {
+                            "in_reply_to": request_msg.msg_id,
+                            "kind": f"{kind}_done",
+                            "status": "failed",
+                            "result": {
+                                "status": "failed",
+                                "error_class": "unknown_kernel_kind",
+                                "error": f"no programmatic handler for kind={kind!r}",
+                                "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
+                            },
+                            "source": "coordinator_auto_reject",
+                        },
+                        in_reply_to=request_msg.msg_id,
+                        priority=1,
+                    )
+                )
+                await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
+                return
+            params = intent.payload.get("params") or {}
+            merged_payload = {**intent.payload, **params}
+            # Inject candidates_path from last_trace_analyze when omitted; orchestration value wins.
+            if (
+                kind == "run_optimization"
+                and self.shared_state.last_trace_analyze
+                and not merged_payload.get("candidates_path")
+            ):
+                cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
+                if cached_candidates_path:
+                    merged_payload["candidates_path"] = cached_candidates_path
+            # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
+            cache_hit_source = None
+            cached_result = self._cached_kernel_request(kind, merged_payload)
+            if cached_result is not None:
+                result = cached_result
+                cache_hit_source = "shared_state_cache"
+                # A cache hit never runs the handler; emit a single END
+                # (detail=cache_hit) so the lifecycle log records the step.
+                self._emit_lifecycle(
+                    step=kind,
+                    status="END",
+                    artifacts=_lifecycle_paths(result),
+                    detail="cache_hit",
+                )
+            else:
+                rejected = (
+                    self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
+                )
+                if rejected is not None:
+                    result = {
+                        "status": "skipped",
+                        "decision": "REVERT",
+                        "error_class": "kernel_patch_rejected",
+                        "error": "same kernel patch already exhausted E2E attempts",
+                        "kernel_id": rejected.get("kernel_id"),
+                        "patch_path": rejected.get("patch_path"),
+                        "target_file": rejected.get("target_file"),
+                        "extra_server_args": rejected.get("extra_server_args", ""),
+                        "attempt_count": rejected.get("attempt_count"),
+                        "best_gain_pct": rejected.get("best_gain_pct"),
+                        "reason": rejected.get("reason"),
+                    }
+                    cache_hit_source = "shared_state_kernel_rejection"
+                    # A short-circuited integrate never runs the handler;
+                    # emit a lone END recording the rejection.
+                    self._emit_lifecycle(
+                        step=kind,
+                        status="END",
+                        artifacts=_lifecycle_paths(result),
+                        detail="rejected",
+                    )
+                else:
+                    # Inject base_tput from current_best.tput when an integrate request omits it; operator value wins.
+                    if kind == "integrate" and not merged_payload.get("base_tput"):
+                        cb_tput = (self.shared_state.current_best or {}).get("tput")
+                        if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                            merged_payload["base_tput"] = float(cb_tput)
+
+                    # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
+                    handler_kwargs: dict[str, Any] = {
+                        "session_dir": self.session_dir,
+                    }
+                    if kind == "run_optimization":
+                        handler_kwargs["record_partial"] = self._record_kernel_opt_partial
+                    # Bracket the programmatic kernel step with START / END
+                    # lifecycle events. ``kind`` is the machine step name;
+                    # the human label is resolved from LIFECYCLE_STEP_LABELS.
+                    _lc_t0 = time.monotonic()
+                    self._emit_lifecycle(
+                        step=kind,
+                        status="START",
+                        artifacts=_lifecycle_paths(merged_payload),
+                    )
+                    try:
+                        result = await handler(
+                            merged_payload,
+                            **handler_kwargs,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception(
+                            "kernel_request_handler[%s] crashed for source=%s",
+                            kind,
+                            source,
+                        )
+                        result = {
+                            "status": "failed",
+                            "error_class": "handler_exception",
+                            "error": repr(exc),
+                        }
+                    # A block-FP8 GEMM run may have executed an inline
+                    # Roofline whose refreshed profile fields only live in
+                    # state.json. Merge them before the terminal lifecycle
+                    # event persists the live state over them.
+                    if kind == "run_gemm_tuning":
+                        self._sync_profile_state_after_gemm_roofline(result)
+                    _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
+                    _lc_detail = " ".join(
+                        str(p)
+                        for p in (
+                            result.get("decision"),
+                            result.get("status"),
+                            f"kernel={result.get('kernel_id')}" if result.get("kernel_id") else "",
+                        )
+                        if p
+                    )
+                    self._emit_lifecycle(
+                        step=kind,
+                        status=_lc_status,
+                        artifacts=_lifecycle_paths(result),
+                        detail=_lc_detail,
+                        duration_s=time.monotonic() - _lc_t0,
+                    )
+            await self.bus.append_and_seq(
+                Message.new(
+                    "kernel_agent",
+                    source,
+                    "response",
+                    {
+                        "in_reply_to": request_msg.msg_id,
+                        "kind": f"{kind}_done",
+                        "status": result.get("status", "ok"),
+                        "result": result,
+                        "source": cache_hit_source or "programmatic_handler",
+                    },
+                    in_reply_to=request_msg.msg_id,
+                    priority=1,
+                )
+            )
+            # Cache trace_analyze output (successful runs only).
+            if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
+                self.shared_state.record_trace_analyze(merged_payload, result)
+                self.shared_state.save(self.session_dir)
+            # Mirror kernel-opt outcomes into SharedState.
+            if kind == "run_optimization":
+                # Batch mode already streamed each sub-result; re-recording would double-count.
+                if not bool(isinstance(result, dict) and result.get("batch_mode")):
+                    self.shared_state.record_kernel_opt(result)
+                self.shared_state.save(self.session_dir)
+                # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
+                await self._auto_enqueue_pending_integrations()
+            if kind == "run_gemm_tuning":
+                await self._handle_gemm_tuning_result(result)
+            if kind == "integrate":
+                if result.get("status") != "skipped":
+                    self.shared_state.record_kernel_integrate_result(result)
+                decision = str(result.get("decision", "")).upper()
+                if decision == "KEEP":
+                    if isinstance(result, dict) and not result.get("gap_canonical_id"):
+                        payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
+                        if payload_gap:
+                            result["gap_canonical_id"] = payload_gap
+                    await self._record_integrate_keep(result)
+                self.shared_state.save(self.session_dir)
+            # Advance the kernel cursor past this request seq.
+            await self.cursors.advance(
+                target_agent,
+                seq=request_msg.seq,
+                msg_id=request_msg.msg_id,
+            )
+        else:
             await self.bus.append_and_seq(
                 Message.new(
                     target_agent,
@@ -566,8 +773,8 @@ class IntentRouter:
                         "status": "failed",
                         "result": {
                             "status": "failed",
-                            "error_class": "agent_disabled",
-                            "error": f"{target_agent} agent is disabled for this session",
+                            "error_class": "unknown_target_agent",
+                            "error": f"no handler registered for target_agent={target_agent!r}",
                         },
                         "source": "coordinator_auto_reject",
                     },
@@ -575,172 +782,7 @@ class IntentRouter:
                     priority=1,
                 )
             )
-            return
-
-        # Programmatic shortcut: run a registered kernel handler inline + emit RESPONSE without burning an LLM turn.
-        if target_agent == "kernel_agent":
-            handler = get_handler(kind)
-            if handler is not None:
-                params = intent.payload.get("params") or {}
-                merged_payload = {**intent.payload, **params}
-                # Force batch dispatch for run_optimization: inject candidates_path from last_trace_analyze. LLM value wins.
-                if (
-                    kind == "run_optimization"
-                    and self.shared_state.last_trace_analyze
-                    and not merged_payload.get("candidates_path")
-                ):
-                    cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
-                    if cached_candidates_path:
-                        merged_payload["candidates_path"] = cached_candidates_path
-                # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
-                cache_hit_source = None
-                cached_result = self._cached_kernel_request(kind, merged_payload)
-                if cached_result is not None:
-                    result = cached_result
-                    cache_hit_source = "shared_state_cache"
-                    # A cache hit never runs the handler; emit a single END
-                    # (detail=cache_hit) so the lifecycle log records the step.
-                    self._emit_lifecycle(
-                        step=kind,
-                        status="END",
-                        artifacts=_lifecycle_paths(result),
-                        detail="cache_hit",
-                    )
-                else:
-                    rejected = (
-                        self.shared_state.find_rejected_kernel_patch(merged_payload) if kind == "integrate" else None
-                    )
-                    if rejected is not None:
-                        result = {
-                            "status": "skipped",
-                            "decision": "REVERT",
-                            "error_class": "kernel_patch_rejected",
-                            "error": "same kernel patch already exhausted E2E attempts",
-                            "kernel_id": rejected.get("kernel_id"),
-                            "patch_path": rejected.get("patch_path"),
-                            "target_file": rejected.get("target_file"),
-                            "extra_server_args": rejected.get("extra_server_args", ""),
-                            "attempt_count": rejected.get("attempt_count"),
-                            "best_gain_pct": rejected.get("best_gain_pct"),
-                            "reason": rejected.get("reason"),
-                        }
-                        cache_hit_source = "shared_state_kernel_rejection"
-                        # A short-circuited integrate never runs the handler;
-                        # emit a lone END recording the rejection.
-                        self._emit_lifecycle(
-                            step=kind,
-                            status="END",
-                            artifacts=_lifecycle_paths(result),
-                            detail="rejected",
-                        )
-                    else:
-                        # Inject base_tput from current_best.tput when an integrate request omits it; operator value wins.
-                        if kind == "integrate" and not merged_payload.get("base_tput"):
-                            cb_tput = (self.shared_state.current_best or {}).get("tput")
-                            if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                                merged_payload["base_tput"] = float(cb_tput)
-
-                        # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
-                        handler_kwargs: dict[str, Any] = {
-                            "session_dir": self.session_dir,
-                        }
-                        if kind == "run_optimization":
-                            handler_kwargs["record_partial"] = self._record_kernel_opt_partial
-                        # Bracket the programmatic kernel step with START / END
-                        # lifecycle events. ``kind`` is the machine step name;
-                        # the human label is resolved from LIFECYCLE_STEP_LABELS.
-                        _lc_t0 = time.monotonic()
-                        self._emit_lifecycle(
-                            step=kind,
-                            status="START",
-                            artifacts=_lifecycle_paths(merged_payload),
-                        )
-                        try:
-                            result = await handler(
-                                merged_payload,
-                                **handler_kwargs,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            log.exception(
-                                "kernel_request_handler[%s] crashed for source=%s",
-                                kind,
-                                source,
-                            )
-                            result = {
-                                "status": "failed",
-                                "error_class": "handler_exception",
-                                "error": repr(exc),
-                            }
-                        # A block-FP8 GEMM run may have executed an inline
-                        # Roofline whose refreshed profile fields only live in
-                        # state.json. Merge them before the terminal lifecycle
-                        # event persists the live state over them.
-                        if kind == "run_gemm_tuning":
-                            self._sync_profile_state_after_gemm_roofline(result)
-                        _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
-                        _lc_detail = " ".join(
-                            str(p)
-                            for p in (
-                                result.get("decision"),
-                                result.get("status"),
-                                f"kernel={result.get('kernel_id')}" if result.get("kernel_id") else "",
-                            )
-                            if p
-                        )
-                        self._emit_lifecycle(
-                            step=kind,
-                            status=_lc_status,
-                            artifacts=_lifecycle_paths(result),
-                            detail=_lc_detail,
-                            duration_s=time.monotonic() - _lc_t0,
-                        )
-                await self.bus.append_and_seq(
-                    Message.new(
-                        "kernel_agent",
-                        source,
-                        "response",
-                        {
-                            "in_reply_to": request_msg.msg_id,
-                            "kind": f"{kind}_done",
-                            "status": result.get("status", "ok"),
-                            "result": result,
-                            "source": cache_hit_source or "programmatic_handler",
-                        },
-                        in_reply_to=request_msg.msg_id,
-                        priority=1,
-                    )
-                )
-                # Cache trace_analyze output (successful runs only).
-                if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
-                    self.shared_state.record_trace_analyze(merged_payload, result)
-                    self.shared_state.save(self.session_dir)
-                # Mirror kernel-opt outcomes into SharedState.
-                if kind == "run_optimization":
-                    # Batch mode already streamed each sub-result; re-recording would double-count.
-                    if not bool(isinstance(result, dict) and result.get("batch_mode")):
-                        self.shared_state.record_kernel_opt(result)
-                    self.shared_state.save(self.session_dir)
-                    # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
-                    await self._auto_enqueue_pending_integrations()
-                if kind == "run_gemm_tuning":
-                    await self._handle_gemm_tuning_result(result)
-                if kind == "integrate":
-                    if result.get("status") != "skipped":
-                        self.shared_state.record_kernel_integrate_result(result)
-                    decision = str(result.get("decision", "")).upper()
-                    if decision == "KEEP":
-                        if isinstance(result, dict) and not result.get("gap_canonical_id"):
-                            payload_gap = str(merged_payload.get("gap_canonical_id") or "").strip()
-                            if payload_gap:
-                                result["gap_canonical_id"] = payload_gap
-                        await self._record_integrate_keep(result)
-                    self.shared_state.save(self.session_dir)
-                # Advance the kernel cursor past this request seq.
-                await self.cursors.advance(
-                    target_agent,
-                    seq=request_msg.seq,
-                    msg_id=request_msg.msg_id,
-                )
+            await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.

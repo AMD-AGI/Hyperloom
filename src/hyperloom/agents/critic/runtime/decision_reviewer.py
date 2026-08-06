@@ -318,6 +318,9 @@ class JudgeBundle:
         kind (str): The request kind being prepared.
         session_id (str): The owning A2A session id.
         decision_id (str | None): The decision id when reviewing a decision.
+        phase (str): Coordinator pipeline phase this review belongs to, taken
+            from ``request.context.phase``; ``""`` when the caller does not
+            track phases.
         merged_context (dict[str, Any]): Context after session-memory merge.
         missing_context (list[str]): Mergeable context keys still missing.
         required_context (list[str]): Critical keys that block KB reads.
@@ -338,6 +341,7 @@ class JudgeBundle:
     kind: str
     session_id: str
     decision_id: str | None
+    phase: str = ""
     merged_context: dict[str, Any] = field(default_factory=dict)
     missing_context: list[str] = field(default_factory=list)
     required_context: list[str] = field(default_factory=list)
@@ -366,6 +370,7 @@ class JudgeBundle:
             "kind": self.kind,
             "session_id": self.session_id,
             "decision_id": self.decision_id,
+            "phase": self.phase,
             "merged_context": dict(self.merged_context),
             "missing_context": list(self.missing_context),
             "required_context": list(self.required_context),
@@ -566,6 +571,7 @@ class DecisionReviewer:
             kind=req.kind,
             session_id=req.session_id,
             decision_id=req.decision_id,
+            phase=str(req.context.get("phase") or "").strip().upper(),
         )
         self._populate_inbox(req)
         merge = self.session_memory.merge_context(req.session_id, req.context)

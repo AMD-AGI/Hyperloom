@@ -377,8 +377,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs the Anthropic side resolved (directly, from a single
-# gateway, or from a retired DEEPSEEK_* config) plus a key.
+# a usable setup needs at least one self-consistent provider side. A
+# dual-protocol gateway such as DeepSeek configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -417,7 +417,8 @@ normalize_legacy_deepseek_env() {
   [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
   [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
   if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    # One credential in two spellings: fill as a unit.
+    # One credential in two spellings: fill as a unit so a legacy key never
+    # joins an explicitly configured Anthropic one.
     if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
       export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
     fi
@@ -430,37 +431,50 @@ normalize_legacy_deepseek_env() {
   warn "DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*"
 }
 
+# Reject one provider's base URL paired with only the other provider's key.
+preflight_reject_cross_provider() {
+  local a_key a_endpoint conflict=""
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  a_endpoint="${ANTHROPIC_BASE_URL:-}"
+  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
+    conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
+  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
+    conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
+  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+    conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
+  fi
+  [ -z "$conflict" ] && return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "conflicting LLM credentials: ${conflict}; continuing because --check-only / --dry-run is active."
+    return 0
+  fi
+  cat >&2 <<EOF
+[inference-optimizer ERROR] Conflicting LLM credentials: ${conflict}.
+
+Hyperloom never borrows one provider's key or endpoint for the other. Give each
+side its own base URL and key, or drop the other provider's key.
+EOF
+  return 1
+}
+
 preflight_validate_credentials() {
   preflight_load_dotenv
   normalize_legacy_deepseek_env
   local missing=()
-  local has_url=0 has_key=0
-  # Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY +
-  # OPENAI_BASE_URL are configured. Mirror the CLI's _resolve_llm_endpoints():
-  # the Anthropic base is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK
-  # re-appends it) and the gateway key doubles as the Anthropic key, so the
-  # chained kernel-agent installer sees a complete provider pair. Explicit
-  # values always win.
-  if [ -n "${SAFE_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
-    if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-      local _gw_url="${OPENAI_BASE_URL%/}"
-      export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
-      log "derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
-    fi
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      export ANTHROPIC_API_KEY="$SAFE_API_KEY"
-    fi
-  fi
-  # Anthropic-side only. A single gateway still qualifies: the SAFE_API_KEY +
-  # OPENAI_BASE_URL block above has already derived the Anthropic side from it.
-  [ -n "${ANTHROPIC_BASE_URL:-}" ] && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL, or SAFE_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or SAFE_API_KEY")
-  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
-    log "credentials preflight: usable LLM base URL + key present"
+  local has_anthropic=0 has_openai=0
+  # Each side needs its own base URL and key; an unset side is fine.
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
+    has_anthropic=1
+  { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
+  preflight_reject_cross_provider || return 1
+  if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
+    log "credentials preflight: at least one self-consistent provider side present"
     return 0
   fi
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"

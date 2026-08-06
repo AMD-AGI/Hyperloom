@@ -68,7 +68,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "kernel_agent", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -2240,7 +2240,7 @@ benchmark:
     EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
     SGLANG_USE_TRITON: "1"
     ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
-    SAFE_API_KEY: "should-not-leak"
+    OPENAI_API_KEY: "should-not-leak"
 """,
         encoding="utf-8",
     )
@@ -2289,7 +2289,7 @@ benchmark:
     assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
     assert enriched["env_vars"]["TP"] == "8"
     assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
-    assert "SAFE_API_KEY" not in enriched["env_vars"]
+    assert "OPENAI_API_KEY" not in enriched["env_vars"]
     assert enriched["runtime_args"]["framework"] == "sglang"
     assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
     assert enriched["runtime_args"]["workload"] == {
@@ -3145,25 +3145,60 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_request_unknown_kind_routes_to_llm(session_dir):
-    """REQUEST with no handler is mirrored to the kernel inbox (LLM responder path), no auto-RESPONSE."""
+async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
+    """REQUEST with no registered handler emits an auto-reject RESPONSE and advances the kernel cursor."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
+        c.shared_state.kernel_enabled = True
         await c._handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
                 payload={
                     "target_agent": "kernel_agent",
-                    "kind": "invent_brand_new_kind",  # NOT in registry
+                    "kind": "invent_brand_new_kind",
                 },
             ),
         )
         req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
-        assert req_msgs, "request must be mirrored even when no handler"
-        # No auto-response should have been emitted.
-        resp_msgs = await c.bus.tail(topic="response")
-        assert not resp_msgs
+        assert req_msgs, "request must be recorded on bus"
+        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert resp_msgs, "auto-reject RESPONSE must be emitted"
+        r = resp_msgs[0]
+        assert r.from_agent == "kernel_agent"
+        assert r.payload["status"] == "failed"
+        assert r.payload["result"]["error_class"] == "unknown_kernel_kind"
+        assert r.payload["source"] == "coordinator_auto_reject"
+        assert "valid_kinds" in r.payload["result"]
+        cur = await c.cursors.load("kernel_agent")
+        assert cur.last_processed_seq == req_msgs[0].seq
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
+    """REQUEST to kernel_agent when kernel_enabled=False emits agent_disabled RESPONSE."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.kernel_enabled = False
+        await c._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={
+                    "target_agent": "kernel_agent",
+                    "kind": "trace_analyze",
+                    "params": {"trace_input": "/tmp/t.json.gz"},
+                },
+            ),
+        )
+        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert resp_msgs, "auto-reject RESPONSE must be emitted"
+        r = resp_msgs[0]
+        assert r.payload["status"] == "failed"
+        assert r.payload["result"]["error_class"] == "agent_disabled"
+        assert r.payload["source"] == "coordinator_auto_reject"
     finally:
         await c.stop()
 

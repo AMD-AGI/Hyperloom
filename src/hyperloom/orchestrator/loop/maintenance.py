@@ -282,6 +282,8 @@ class MaintenanceCollaborator:
             # Reset so the next turn re-seeds from the compacted memory.
             self._coord._orchestration_seed_memory = _orch_mem.render_memory_for_seed(record)
             self._reset_orchestration_conversation()
+            # The level that decided this compaction; the reset clears it.
+            level_at_trigger = int(tracker.context_tokens_now)
             tracker.reset(
                 tick=tick,
                 minute_mark=now_min,
@@ -296,7 +298,7 @@ class MaintenanceCollaborator:
                     "seq": seq,
                     "checkpoint_count": record.get("checkpoint_count", 0),
                     "phase_changed": bool(phase_changed),
-                    "context_tokens": int(tracker.context_tokens_now),
+                    "context_tokens": level_at_trigger,
                 },
             )
             return True

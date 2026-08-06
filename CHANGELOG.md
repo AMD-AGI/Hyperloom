@@ -5,6 +5,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Enablement dispatch evidence reaches the specialist again**: the Coordinator
+  computes the source lines near the offending site — and, on a weight-init
+  failure, the checkpoint's per-layer weight inventory — plus a ranked list of
+  bridging PR refs, but since the mandate stopped being passed as free-text
+  `notes` none of it was delivered: the mandate was re-rendered downstream from
+  a bare request, so the agent was told to find a bridge while the candidates
+  already discovered for it were withheld. Both now travel as structured
+  `enablement_source_context` / `enablement_candidate_refs` params and are
+  folded into the §1b mandate at the point of use.
+
+- **An LLM outage during forge-fusion no longer disables fusion for the rest of the
+  session.** forge-fusion reports `verdict: llm_unavailable` (manifest schema v2)
+  when discovery never reached the model, which is a fact about the gateway and not
+  about the kernel. The wrapper's `_normalize_manifest` had no case for it, so it
+  fell through to the generic no-KEEP shape — `status: complete`,
+  `micro_decision: no_improvement`, `decision: REVERT`. That was wrong twice over.
+  It recorded an outage as an optimization result, and because
+  `_fusion_required_before_kernel_opt` skips fusion once `last_fusion.status` is
+  `ok`/`complete`/`kept`, a single gateway blip marked fusion "done" and the model
+  was never fusion-optimized again in that session.
+
+  It is now shaped like the existing subprocess-timeout result — `status: failed`,
+  `micro_decision: failed`, `kept: false`, `error_class: llm_unavailable`, with the
+  manifest's error kind, attempt count and message carried through — which is how
+  Hyperloom already says "infrastructure failed, this is retryable". A real
+  `no_opportunity` (the model was asked and found nothing) is unchanged and still
+  suppresses a pointless re-run. The verdict is matched tolerantly and only honoured
+  when the manifest reports no KEEP, so it can never discard a validated fusion.
+
+### Removed
+
+- **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
+  removed from the role registry. All kernel work was already handled by
+  programmatic Python handlers in `orchestrator/kernel/request_handlers.py`; the
+  LLM role was a no-op heartbeat responder. The following CLI flags and env vars
+  are removed:
+  - `--kernel-prompt` — overriding the kernel system prompt is no longer meaningful.
+  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
+  - `INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS` — no kernel LLM backend.
+  - `INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL` — no kernel LLM backend.
+  
+  `--no-kernel` continues to work: it sets `shared_state.kernel_enabled=False`,
+  which causes the Coordinator's request router to auto-reject kernel REQUESTs
+  with `agent_disabled`.
+
+  The Slurm launcher's `HL_KERNEL_BACKEND` (`codex|claude`) selected the retired
+  LLM backend and is removed with it. Use `KERNEL_OPT_BACKEND_ORDER`
+  (`geak|forge`) to steer the kernel-opt rewrite ladder; the launcher forwards it
+  into the container and every carrier defaults it to `geak`.
+
+  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
+  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  programmatic dispatch flow and artifact layout. Operator sections from the
+  original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
+  Rules) are not carried over; refer to the individual reference docs for those.
+
 ## [v1.0.0a3] - 2026-08-05
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

@@ -142,24 +142,17 @@ _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",
     re.MULTILINE,
 )
-_REQUEST_RE = re.compile(
-    r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",
-    re.MULTILINE,
-)
-_KIND_RE = re.compile(r"['\"]kind['\"]\s*:\s*['\"]([\w-]+)['\"]")
 
 
 class MockRowScanBackend:
     """Row-scanning reactor mock: one intent per matched inbox row, else heartbeat.
 
-    Generalises the always-approve Critic and auto-respond Kernel mocks, which
-    share the same shape: scan the rendered inbox in ``prompt`` for rows matching
-    ``row_regex`` and emit one intent (built by ``intent_builder``) per
-    not-yet-seen row — keyed by ``dedup_key`` (msg_id by default) so reactor
-    fan-out re-renders don't double-emit. When no row matches, emit a single
-    heartbeat ``send_message`` so the reactor loop always sees signal of life.
-    Use :func:`auto_approve_critic` / :func:`auto_respond_kernel` to build the
-    concrete role mocks. Implements :class:`Backend`.
+    Generalises the always-approve Critic mock: scan the rendered inbox in
+    ``prompt`` for rows matching ``row_regex`` and emit one intent (built by
+    ``intent_builder``) per not-yet-seen row — keyed by ``dedup_key`` (msg_id
+    by default) so reactor fan-out re-renders don't double-emit. When no row
+    matches, emit a single heartbeat ``send_message`` so the reactor loop
+    always sees signal of life. Implements :class:`Backend`.
     """
 
     def __init__(
@@ -267,48 +260,10 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
     )
 
 
-def auto_respond_kernel(name: str = "kernel-mock") -> MockRowScanBackend:
-    """Build the auto-respond mock Kernel backend.
-
-    Emits one ``response{status="ok"}`` per visible request row (echoing the
-    request ``kind`` as ``<kind>_done``), or a heartbeat when none are present.
-
-    Args:
-        name (str): Human-readable backend name used in logs and metadata.
-
-    Returns:
-        MockRowScanBackend: A backend configured to auto-respond to requests.
-    """
-
-    def _respond(match: re.Match[str]) -> Intent:
-        msg_id = match.group(2)
-        raw_payload = match.group(4)
-        kind_match = _KIND_RE.search(raw_payload)
-        kind = kind_match.group(1) if kind_match else "unknown"
-        return Intent(
-            type=IntentType.RESPONSE,
-            payload={
-                "in_reply_to": msg_id,
-                "kind": f"{kind}_done",
-                "status": "ok",
-                "result": {"source": "mock", "chosen": ["mock_kernel_1"]},
-            },
-        )
-
-    return MockRowScanBackend(
-        name=name,
-        row_regex=_REQUEST_RE,
-        intent_builder=_respond,
-        heartbeat_body="ok (mock kernel)",
-        raw_text="(mock kernel)",
-    )
-
-
 __all__ = [
     "MockBackend",
     "MockRowScanBackend",
     "MockTurn",
     "ScriptedPlan",
     "auto_approve_critic",
-    "auto_respond_kernel",
 ]

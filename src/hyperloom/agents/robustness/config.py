@@ -5,7 +5,7 @@
 
 Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``), the
 robustness-server endpoint (``ROBUSTNESS_SERVER_URL``) and the LLM endpoint /
-credentials (``OPENAI_BASE_URL`` / ``SAFE_API_KEY``, plus Anthropic and
+credentials (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``, plus Anthropic and
 DeepSeek variants) fall back to probing well-known paths and endpoints when
 unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE``,
 ``ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS`` and ``ROBUSTNESS_NODES`` are env-only
@@ -91,7 +91,7 @@ class Config:
     agent_stall_timeout_s: float = 300.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
-    llm_model: str = "claude-opus-4-8"
+    llm_model: str = "claude-opus-5"
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_provider: str = "openai"
@@ -259,6 +259,10 @@ class Config:
     finalize_reports_subdir: str = "reports"
     finalize_max_findings_in_report: int = 20
     finalize_max_tasks_per_action: int = 50
+
+    # -- phase budget / conversation progress signals --
+    phase_budget_warn_used_pct: float = 90.0
+    conversation_progress_enabled: bool = True
 
     # -- cross-tick state persistence --
     # Subprocess-per-tick transport needs disk-backed state for any
@@ -430,11 +434,7 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     openai_key = env.get("OPENAI_API_KEY", "").strip()
     if openai_key:
         return openai_base or "https://api.openai.com/v1", openai_key, "openai"
-    gateway_key = (
-        env.get("SAFE_API_KEY", "").strip()
-        or env.get("LLM_API_KEY", "").strip()
-        or env.get("LLM_GATEWAY_KEY", "").strip()
-    )
+    gateway_key = env.get("LLM_API_KEY", "").strip() or env.get("LLM_GATEWAY_KEY", "").strip()
     if gateway_key and openai_base:
         return openai_base, gateway_key, "openai"
 
@@ -456,12 +456,8 @@ def _discover_llm_model(provider: str) -> str:
     if explicit:
         return explicit
     if provider == "openai":
-        return env.get("OPENAI_MODEL", "").strip() or env.get("CODEX_MODEL", "").strip() or "gpt-5.5"
-    return (
-        env.get("ANTHROPIC_MODEL", "").strip()
-        or env.get("CLAUDE_MODEL", "").strip()
-        or "claude-sonnet-4-5-20250929"
-    )
+        return env.get("OPENAI_MODEL", "").strip() or env.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
+    return env.get("ANTHROPIC_MODEL", "").strip() or env.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
 
 
 _WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (

@@ -17,7 +17,7 @@ side_effects:
   - reads_trace
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 25
 lease_ttl_sec: 1800
 description: "From the trace, infer kernel bottlenecks and propose fusion / tiling / dispatch candidates for kernel_opt."

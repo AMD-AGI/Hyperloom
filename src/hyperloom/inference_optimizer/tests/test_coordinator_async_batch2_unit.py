@@ -46,7 +46,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 
@@ -611,6 +611,7 @@ async def test_reactor_pass_records_context_tokens(coord: Coordinator) -> None:
                         "input_tokens": 10,
                         "cache_read_input_tokens": 20,
                         "cache_creation_input_tokens": 30,
+                        "context_tokens_peak": 45,
                     },
                 )
             ]
@@ -620,7 +621,32 @@ async def test_reactor_pass_records_context_tokens(coord: Coordinator) -> None:
     backend.conversational = True  # type: ignore[attr-defined]
     coord.backends["orchestration"] = backend
     await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 60
+    assert coord._checkpoint_tracker.context_tokens_now == 45
+
+
+@pytest.mark.asyncio
+async def test_reactor_pass_ignores_call_cumulative_token_counters(coord: Coordinator) -> None:
+    backend = MockBackend(
+        ScriptedPlan(
+            turns=[
+                MockTurn(
+                    intents=[_heartbeat()],
+                    raw_text="ok",
+                    metadata={
+                        "input_tokens": 6,
+                        "cache_read_input_tokens": 75_448,
+                        "cache_creation_input_tokens": 154_099,
+                    },
+                )
+            ]
+        ),
+        name="orchestration",
+    )
+    backend.conversational = True  # type: ignore[attr-defined]
+    coord.backends["orchestration"] = backend
+    await coord._reactor_pass("orchestration")
+    assert coord._checkpoint_tracker.context_tokens_now == 0
+    assert coord._checkpoint_tracker.chars_since_last > 0
 
 
 @pytest.mark.asyncio
@@ -2081,6 +2107,9 @@ class _FakeLocalRich:
 class _FakeRecipeKBRich:
     def __init__(self) -> None:
         self.local = _FakeLocalRich()
+
+    def get_authoritative_recipe(self, *, canonical_id):
+        return self.local.get_recipe(canonical_id=canonical_id)
 
 
 @pytest.mark.asyncio

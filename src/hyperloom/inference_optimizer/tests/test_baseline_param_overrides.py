@@ -647,7 +647,6 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_p
 
 
 def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatch):
-    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -679,7 +678,6 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
     # benchmark_script so the cold-start double-run is not eligible and the
     # single-round path runs directly in output_dir.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
-    assert "SAFE_API_KEY" not in captured["env"]
     assert "OPENAI_API_KEY" not in captured["env"]
 
 

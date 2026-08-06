@@ -137,6 +137,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
+        "explore_elapsed_accum_s",
         # Cyclic phase-machine state; locked so an LLM update_state cannot forge
         # macro-cycle / convergence / per-cycle budget state.
         "macro_cycle",

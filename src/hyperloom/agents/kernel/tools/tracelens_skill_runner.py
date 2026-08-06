@@ -864,7 +864,7 @@ async def run_tracelens_skill(
         capture_folder (Path | None): Graph-capture folder for inference runs.
         budget_minutes (float): Soft time budget for the run (informational).
         model (str | None): Optional model override. Defaults to
-            ``claude-opus-4-8`` on the Claude SDK path, or ``$CODEX_MODEL`` /
+            ``claude-opus-5`` on the Claude SDK path, or ``$CODEX_MODEL`` /
             :data:`DEFAULT_CODEX_MODEL` on the OpenAI tool-runner path.
         sdk_query_factory (Callable[..., Any] | None): Optional injected query
             factory (used by tests); imported from the SDK when ``None``.
@@ -934,7 +934,7 @@ async def run_tracelens_skill(
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
     }
-    resolved_model = resolved_model or "claude-opus-4-8"
+    resolved_model = resolved_model or "claude-opus-5"
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)

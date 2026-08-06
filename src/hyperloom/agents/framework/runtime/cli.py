@@ -117,7 +117,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                     "author_via_specialist",
                 ],
                 "patch_sources": ["diff_text", "patches_path", "primus_cortex"],
-                "llm": "opt-in via request.use_llm; needs SAFE_API_KEY + OPENAI_BASE_URL; best-effort, evidence-gated",
+                "llm": "opt-in via request.use_llm; needs OPENAI_API_KEY + OPENAI_BASE_URL; best-effort, evidence-gated",
             },
         },
         "-",
@@ -811,7 +811,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     kb_syn_p.add_argument(
         "--model",
-        default="claude-opus-4-7",
+        default="claude-opus-5",
         help="LLM model identifier (only used with --with-llm)",
     )
     kb_syn_p.add_argument("--out", default="-", help="Output path (default stdout)")

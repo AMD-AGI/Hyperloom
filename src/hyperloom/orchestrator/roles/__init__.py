@@ -26,7 +26,6 @@ from .mock_backend import (
     MockTurn,
     ScriptedPlan,
     auto_approve_critic,
-    auto_respond_kernel,
 )
 from .robustness_agent import RobustnessAgentBackend
 from .robustness_mock import MockRobustnessBackend
@@ -59,7 +58,6 @@ __all__ = [
     "RuntimeCaller",
     "ScriptedPlan",
     "auto_approve_critic",
-    "auto_respond_kernel",
     "build_context_tools_server",
     "build_emit_intent_server",
     "validate_emit_intent_input",

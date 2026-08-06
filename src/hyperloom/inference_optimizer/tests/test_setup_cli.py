@@ -75,7 +75,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "stale-openai-key")
-    monkeypatch.setenv("SAFE_API_KEY", "stale-safe-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "stale-deepseek-key")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "stale-gateway-key")
     monkeypatch.setenv("CLAUDE_MODEL", "stale-claude-model")
@@ -98,7 +97,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
         "ANTHROPIC_CUSTOM_HEADERS",
         "OPENAI_BASE_URL",
         "OPENAI_API_KEY",
-        "SAFE_API_KEY",
         "DEEPSEEK_API_KEY",
         "LLM_GATEWAY_KEY",
         "CLAUDE_MODEL",
@@ -181,8 +179,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=stale-openai-key",
                 "OPENAI_CUSTOM_HEADERS=stale-header: stale",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -195,10 +193,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 f"DOTENV={dotenv}",
-                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
-                "SAFE_API_KEY_ARG=",
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
@@ -211,13 +207,11 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=ambient-openai-key",
                 "OPENAI_CUSTOM_HEADERS='ambient-header: stale'",
-                "SAFE_API_KEY=ambient-safe-key",
                 "LLM_GATEWAY_KEY=ambient-gateway-key",
                 "resolve_credentials",
                 f"printf 'OPENAI_BASE_URL=%s\n' \"${{OPENAI_BASE_URL-}}\" > {tmp_path / 'resolved-env.txt'}",
                 f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
                 f"printf 'OPENAI_CUSTOM_HEADERS=%s\n' \"${{OPENAI_CUSTOM_HEADERS-}}\" >> {tmp_path / 'resolved-env.txt'}",
-                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
                 f"printf 'LLM_GATEWAY_KEY=%s\n' \"${{LLM_GATEWAY_KEY-}}\" >> {tmp_path / 'resolved-env.txt'}",
             ]
         )
@@ -233,11 +227,11 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     assert "OPENAI_BASE_URL=" not in text
     assert "OPENAI_API_KEY=" not in text
     assert "OPENAI_CUSTOM_HEADERS=" not in text
-    assert "SAFE_API_KEY=" not in text
     assert "LLM_GATEWAY_KEY=" not in text
+    assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "resolved-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
-        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nSAFE_API_KEY=\nLLM_GATEWAY_KEY=\n"
+        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nLLM_GATEWAY_KEY=\n"
     )
 
 
@@ -257,8 +251,8 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
                 "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
                 "OPENAI_BASE_URL=https://gateway.example/v1",
                 "OPENAI_API_KEY=stale-openai-key",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -277,7 +271,6 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
                 "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
                 "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
                 f"DOTENV={dotenv}",
-                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
                 "log() { :; }",
@@ -485,8 +478,12 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
-        start = script_text.index("preflight_validate_credentials() {")
-        end = script_text.index("\npreflight_validate_credentials", start)
+        # Start at the cross-provider check so the extracted slice is the whole
+        # credential preflight, including the rejection helper it calls.
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
         runner = tmp_path / f"{name}-dual-protocol-preflight.sh"
         runner.write_text(
             "\n".join(
@@ -513,6 +510,97 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
         )
 
         subprocess.run(["bash", str(runner)], check=True)
+
+
+def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
+    """Both installers reject a mispaired config at install time."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-cross-provider.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    # OpenAI-side gateway URL paired with only an Anthropic key.
+                    "OPENAI_BASE_URL=https://gw.example.com/v1",
+                    "ANTHROPIC_API_KEY=sk-ant-real",
+                    "log() { :; }",
+                    "warn() { echo \"$*\" >&2; }",
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+        assert proc.returncode != 0, f"{name}: mispaired credentials were accepted"
+        assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
+def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI
+    preflight and the other two installers."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "cross-provider-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { echo \"$*\" >&2; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                # OpenAI-side gateway URL paired with only an Anthropic key.
+                "OPENAI_BASE_URL=https://gw.example.com/v1",
+                "ANTHROPIC_API_KEY=sk-ant-real",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode != 0, "mispaired credentials were accepted"
+    assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
@@ -772,15 +860,19 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
 
     # The gateway credentials may be *read* in memory -- the single-gateway
     # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
-    # OPENAI_BASE_URL + SAFE_API_KEY, mirroring the CLI's
+    # OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
     # _resolve_llm_endpoints(). What must never happen is persisting them:
     # neither exported into kernel-agent.env.sh nor written back to .env.
-    assert "export SAFE_API_KEY" not in write_text
-    assert "upsert_dotenv_var SAFE_API_KEY" not in write_text
-    # ... and the generated env file scrubs any stale copy left by an older run.
+    assert "export OPENAI_API_KEY" not in write_text
+    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
+    # The legacy gateway key is never read, exported or persisted -- but a stale
+    # value left in a migrating .env is still scrubbed.
+    assert "export SAFE_API_KEY" not in script_text
+    assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
-    assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
-    assert "remove_dotenv_var OPENAI_API_KEY" in write_text
+    # ... and it does not touch the OpenAI side, which it never resolves.
+    assert "remove_dotenv_var OPENAI_BASE_URL" not in write_text
+    assert "remove_dotenv_var OPENAI_API_KEY" not in write_text
     # Retired provider variables are scrubbed on every re-install.
     assert "remove_dotenv_var DEEPSEEK_API_KEY" in write_text
     assert "remove_dotenv_var DEEPSEEK_BASE_URL" in write_text
@@ -923,8 +1015,8 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "HYPERLOOM_RUN_MODE=baremetal",
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=stale-openai-key",
-                "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -948,10 +1040,8 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "_ANTHROPIC_KEY_VAL='<PLEASE_FILL_IN>'",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
-                "GEAK_API_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "GEAK_BASE_URL_VAL=",
                 "HYPERLOOM_KERNEL_AGENT_ROOT=",
                 "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
@@ -987,11 +1077,12 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
     assert "export OPENAI_BASE_URL=" not in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
-    assert "export SAFE_API_KEY=" not in kernel_text
-    assert "OPENAI_BASE_URL=" not in dotenv_text
-    assert "OPENAI_API_KEY=" not in dotenv_text
-    assert "SAFE_API_KEY=" not in dotenv_text
+    # The OpenAI side is not resolved by this installer, so its .env entries stay.
+    assert "OPENAI_BASE_URL=https://api.anthropic.com" in dotenv_text
+    assert "OPENAI_API_KEY=stale-openai-key" in dotenv_text
+    # Gateway aliases it does own are still purged.
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
+    assert "SAFE_API_KEY=" not in dotenv_text
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
@@ -1038,10 +1129,8 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "_ANTHROPIC_KEY_VAL=anthropic-real-key",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
-                "GEAK_API_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "GEAK_BASE_URL_VAL=",
                 "HYPERLOOM_KERNEL_AGENT_ROOT=",
                 "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
@@ -1128,10 +1217,8 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "_ANTHROPIC_KEY_VAL=",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
-                "GEAK_API_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "GEAK_BASE_URL_VAL=",
                 "HYPERLOOM_KERNEL_AGENT_ROOT=",
                 "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",

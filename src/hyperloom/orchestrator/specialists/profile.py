@@ -21,7 +21,10 @@ call to single-domain patch-authoring behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .domains import SpecialistDomain
 
 
 # scope
@@ -199,25 +202,15 @@ def holds_serving_slot(params: dict[str, Any] | None) -> bool:
     return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 
-def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfile:
-    """Read ``scope`` / ``mode`` / ``bench`` / ``lane`` from dispatch params.
+def resolve_specialist_profile(
+    params: dict[str, Any] | None,
+    domain: "SpecialistDomain | None" = None,
+) -> SpecialistProfile:
+    """Resolve scope/mode/bench/lane from dispatch params, falling back to safe defaults.
 
-    Unknown / missing values fall back to the legacy-compatible defaults so the
-    resolver never raises; PolicyGate is the place that *rejects* malformed
-    dispatches, this helper only normalises for the runtime.
-
-    When ``scope`` is absent/unknown it is *inferred* from the presence of a
-    domain/tag anchor: anchored dispatches resolve to ``domain``/``domains``
-    (legacy patch/GPU default preserved), while a truly bare dispatch resolves
-    to ``freeform`` → ``research`` → ``cpu`` (safe & cheap first).
-
-    Args:
-        params: The dispatch params carrying ``scope`` / ``mode`` / ``bench`` /
-            ``lane``, or ``None``.
-
-    Returns:
-        The resolved :class:`SpecialistProfile` with legacy-compatible
-        fallbacks applied.
+    ``params["readonly"]`` or ``domain.readonly=True`` forces ``mode=research``.
+    Absent ``scope`` is inferred from the domain/tag anchor; bare dispatches
+    resolve to ``freeform → research → cpu``.
     """
     p = params or {}
 
@@ -227,17 +220,18 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:
-        # Freeform recon defaults to read-only research; else patch-authoring.
         mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
 
+    domain_readonly = bool(getattr(domain, "readonly", False)) if domain is not None else False
+    if _coerce_bool(p.get("readonly"), False) or domain_readonly:
+        mode = MODE_RESEARCH
+
     bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
-    # bench only has meaning when the worker can write a patch.
     if mode != MODE_PATCH:
         bench = False
 
     lane = str(p.get("lane") or "").strip().lower()
     if lane not in LANE_VALUES:
-        # CPU lane for read-only research; GPU lane when the worker authors patches.
         lane = LANE_GPU if mode == MODE_PATCH else LANE_CPU
 
     return SpecialistProfile(scope=scope, mode=mode, bench=bench, lane=lane)
