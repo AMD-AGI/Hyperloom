@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -2439,6 +2440,26 @@ def run_attempt(
             else None
         ),
         "best_ms": result.get("best_ms") if isinstance(result, dict) else None,
+        "mean_case_speedup": (
+            result.get("mean_case_speedup")
+            if isinstance(result, dict)
+            else None
+        ),
+        "search_start_mean_case_speedup": (
+            result.get("search_start_mean_case_speedup")
+            if isinstance(result, dict)
+            else None
+        ),
+        "total_improved": (
+            bool(result.get("total_improved"))
+            if isinstance(result, dict)
+            else False
+        ),
+        "incremental_improved": (
+            bool(result.get("incremental_improved"))
+            if isinstance(result, dict)
+            else False
+        ),
         "improved": bool(result.get("improved")) if isinstance(result, dict) else False,
         "improved_during_search": (
             bool(result.get("improved_during_search"))
@@ -3233,21 +3254,20 @@ def build_verification(
         bp = a.get("backend_paths") or {}
         report = bp.get("partial_report") or bp.get("report") or ""
         sp = None
-        try:
-            pristine_ms = float(a.get("pristine_baseline_ms"))
-            result_best_ms = float(a.get("best_ms"))
-            if (
-                a.get("improved") is True
-                and pristine_ms > 0
-                and result_best_ms > 0
-                and result_best_ms < pristine_ms
-            ):
-                sp = pristine_ms / result_best_ms
-        except (TypeError, ValueError):
-            # Missing or invalid structured timings fall back to report parsing below.
-            pass
-        speedup_source = "forge_pristine_result" if sp is not None else "report_scan"
-        if sp is None:
+        is_forge = a.get("backend") == "forge"
+        if is_forge:
+            try:
+                candidate_speedup = float(a.get("mean_case_speedup"))
+                if (
+                    a.get("total_improved") is True
+                    and math.isfinite(candidate_speedup)
+                    and candidate_speedup > 1.0
+                ):
+                    sp = candidate_speedup
+            except (TypeError, ValueError):
+                sp = None
+        speedup_source = "forge_mean_case_result" if sp is not None else "report_scan"
+        if sp is None and not is_forge:
             sp = _extract_speedup_from_report(report)
         if sp is not None:
             measured = True
