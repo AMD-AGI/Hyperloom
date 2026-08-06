@@ -485,6 +485,30 @@ def find_rejected_kernel_patch(
     return None
 
 
+def _stamp_integration_validation(
+    state,
+    *,
+    kernel_id: str,
+    task_key: str,
+    integration_status: str,
+    validation_tier: str,
+) -> None:
+    """Settle an artifact's outstanding integration verdict in the ledgers."""
+    entries = []
+    if task_key:
+        entries.append((state.kernel_opt_task_attempts or {}).get(task_key))
+    if kernel_id:
+        entries.append((state.kernel_opt_attempts or {}).get(kernel_id))
+    for attempt in entries:
+        if not isinstance(attempt, dict):
+            continue
+        attempt["integration_status"] = "integrated"
+        if integration_status:
+            attempt["last_integration_validation_status"] = integration_status
+        if validation_tier:
+            attempt["validation_tier"] = validation_tier
+
+
 def record_kernel_integrate_result(
     state,
     result: dict[str, Any],
@@ -592,6 +616,8 @@ def record_kernel_integrate_result(
         "accuracy": result.get("accuracy"),
         "accuracy_pass": result.get("accuracy_pass"),
         "decision_reason": result.get("decision_reason"),
+        "artifact_kind": str(result.get("artifact_kind") or ""),
+        "validation_tier": str(result.get("validation_tier") or ""),
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
@@ -654,15 +680,41 @@ def record_kernel_integrate_result(
                 target_file=target_file,
                 extra_server_args=extra_args,
                 result=result,
-                validation_tier="integrate_e2e" if _dec == "KEEP" else "",
+                validation_tier=(
+                    str(result.get("validation_tier") or "integrate_e2e")
+                    if _dec == "KEEP"
+                    else ""
+                ),
             )
     except Exception:  # noqa: BLE001
         pass
 
     if result.get("decision") == "KEEP":
+        validation_tier = str(result.get("validation_tier") or "")
+        integration_status = str(result.get("integration_validation_status") or "")
         if isinstance(pending_record, dict):
             pending_record["status"] = "integrated"
             pending_record["integrated_at"] = _now_iso()
+            if integration_status:
+                pending_record["integration_validation_status"] = integration_status
+            if validation_tier:
+                pending_record["validation_tier"] = validation_tier
+        if integration_status or validation_tier:
+            _stamp_integration_validation(
+                state,
+                kernel_id=kernel_id,
+                task_key=str(
+                    (
+                        pending_record.get("task_key")
+                        if isinstance(pending_record, dict)
+                        else ""
+                    )
+                    or task_group_key
+                    or ""
+                ),
+                integration_status=integration_status,
+                validation_tier=validation_tier,
+            )
         return entry
 
     # Integration fault: never measured fairly. Retry on its own budget instead

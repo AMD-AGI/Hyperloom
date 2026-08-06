@@ -555,6 +555,69 @@ def test_a_plain_keep_queues_without_applyback_provenance():
     assert record["framework_applyback"] == {}
 
 
+def test_serving_accuracy_settles_the_pending_applyback_verdict():
+    state = SharedState()
+    _record_applyback_keep(state)
+    pending = state.pending_kernel_integration_records()[0]
+
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k007",
+            "integration_id": pending["integration_id"],
+            "task_group_key": "tg-fused-gemm",
+            "patch_path": "/artifacts/forge.patch",
+            "target_file": "/repo/fused_gemm.py",
+            "gain_pct": 4.2,
+            "accuracy_pass": True,
+            "artifact_kind": "framework_applyback",
+            "integration_validation_status": "passed",
+            "validation_tier": "integrate_e2e_accuracy",
+        }
+    )
+
+    record = state.pending_kernel_integrations[pending["integration_id"]]
+    assert record["status"] == "integrated"
+    assert record["integration_validation_status"] == "passed"
+    assert record["validation_tier"] == "integrate_e2e_accuracy"
+
+    attempt = state.kernel_opt_attempts["k007"]
+    assert attempt["integration_status"] == "integrated"
+    assert attempt["last_integration_validation_status"] == "passed"
+    assert attempt["validation_tier"] == "integrate_e2e_accuracy"
+
+
+def test_a_plain_integrated_keep_records_no_applyback_verdict():
+    state = SharedState()
+    _record_applyback_keep(
+        state,
+        correctness_source="report_scan",
+        integration_validation_status="",
+        framework_applyback={},
+    )
+    pending = state.pending_kernel_integration_records()[0]
+
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "kernel_id": "k007",
+            "integration_id": pending["integration_id"],
+            "task_group_key": "tg-fused-gemm",
+            "patch_path": "/artifacts/forge.patch",
+            "target_file": "/repo/fused_gemm.py",
+            "gain_pct": 4.2,
+            "accuracy_pass": True,
+        }
+    )
+
+    record = state.pending_kernel_integrations[pending["integration_id"]]
+    assert record["status"] == "integrated"
+    assert record["integration_validation_status"] == ""
+    assert "validation_tier" not in record
+
+
 def test_bare_kernel_id_integrate_resolves_the_pending_applyback(tmp_path):
     """Orchestration may send only a kernel_id; the queue supplies the rest."""
     from hyperloom.orchestrator.kernel.request_handlers import (
