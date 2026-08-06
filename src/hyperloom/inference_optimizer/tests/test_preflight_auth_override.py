@@ -324,6 +324,7 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
 
     def _stale_kernel_env_loader():
         monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
+        monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "old-gateway-key")
         monkeypatch.setenv("LLM_API_BASE", "https://llm.example.invalid/Unified/v1")
 
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
@@ -334,6 +335,9 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
     assert "OPENAI_BASE_URL" not in cli.os.environ
     assert "_".join(("OPENAI", "API", "KEY")) not in cli.os.environ
+    # Defense-in-depth: a stray legacy gateway key from the installer env is
+    # stripped too, so it never reaches child processes.
+    assert "_".join(("SAFE", "API", "KEY")) not in cli.os.environ
     assert cli.os.environ["LLM_API_BASE"] == "https://api.anthropic.com"
 
 

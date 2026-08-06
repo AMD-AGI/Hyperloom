@@ -126,6 +126,10 @@ _SECRET_ENV_NAMES: tuple[str, ...] = (
     "HYPERLOOM_PR_CI_GH_TOKEN",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
+    # Retained for defense-in-depth: SAFE_API_KEY is no longer consumed, but a
+    # stray legacy ``SAFE_API_KEY=ak-...`` must still be redacted from logs
+    # (the ak- value shape is not matched by _TOKEN_VALUE_RES).
+    "SAFE_API_KEY",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<key>\b(?:"

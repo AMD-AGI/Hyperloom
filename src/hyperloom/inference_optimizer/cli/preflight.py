@@ -48,6 +48,10 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
+    # Retained for defense-in-depth: SAFE_API_KEY is no longer consumed, but a
+    # stray legacy value injected by the installer env fallback must still be
+    # stripped in an Anthropic-only deploy so it never leaks to child processes.
+    "SAFE_API_KEY",
 )
 
 
