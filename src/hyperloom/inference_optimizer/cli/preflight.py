@@ -34,6 +34,7 @@ from .credentials import (
 from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
+    find_latest_per_session_dir,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
 )
@@ -683,7 +684,34 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
-def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
+def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
+    """Effective ``--no-eval`` for this launch, flag or persisted.
+
+    Preflight runs before the ``--resume`` block reads ``state.json``, so a
+    resume that inherits the flag instead of re-passing it must be read here.
+
+    Args:
+        args (argparse.Namespace): The parsed ``optimize`` args.
+
+    Returns:
+        bool: ``True`` when no accuracy eval will run in this session.
+    """
+    if bool(getattr(args, "no_eval", False)):
+        return True
+    if not bool(getattr(args, "resume", False)):
+        return False
+    raw = str(getattr(args, "resume_from", "") or "").strip()
+    resumed = Path(raw).expanduser() if raw else find_latest_per_session_dir()
+    if resumed is None:
+        return False
+    try:
+        state = json.loads((resumed / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(state.get("eval_disabled"))
+
+
+def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled: bool = False) -> None:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
 
     ``install.sh`` defers ``lm_eval`` to InferenceX's ``benchmark_lib.sh`` runtime
@@ -692,7 +720,7 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     never installed, the eval subprocess dies with ``No module named lm_eval``,
     and every ``RUN_EVAL=true`` baseline aborts with ``baseline_accuracy_failed``.
     Ensure it here (preflight runs for all paths) with the benchmark interpreter.
-    Skipped when RUN_EVAL is explicitly disabled (default is enabled).
+    Skipped under ``--no-eval`` or an explicitly disabled RUN_EVAL.
 
     Multi-node only. Single-node reaches lm_eval through ``run_eval`` ->
     InferenceX ``benchmark_lib.sh::run_lm_eval``, which installs the harness on
@@ -710,6 +738,7 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
     Args:
         python_exe (str): The interpreter that will run ``python -m lm_eval``.
         pip_extra (list[str]): Extra ``pip install`` arguments.
+        eval_disabled (bool): ``--no-eval``; skip the ensure entirely.
 
     Raises:
         subprocess.CalledProcessError: If the install fails. Preflight aborts
@@ -721,6 +750,8 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str]) -> None:
 
     if not is_multi_node():
         return  # single-node: InferenceX installs lm_eval itself, see above
+    if eval_disabled:
+        return  # --no-eval: no eval anywhere, so the harness is never loaded
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
         return  # accuracy gate disabled; lm_eval not required
@@ -1390,7 +1421,7 @@ def _preflight(
     # ``python -m lm_eval`` directly, with no InferenceX runtime shim to install
     # the harness, so every RUN_EVAL=true baseline there would otherwise abort
     # with baseline_accuracy_failed.
-    _ensure_lm_eval_dep(benchmark_python, pip_extra)
+    _ensure_lm_eval_dep(benchmark_python, pip_extra, eval_disabled=_resolved_eval_disabled(args))
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the
