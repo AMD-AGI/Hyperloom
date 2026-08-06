@@ -243,6 +243,12 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
+    # Retired keys are snapshotted too: the legacy normalization below runs
+    # AFTER this sourcing, so without them a stale .env DEEPSEEK_API_KEY would
+    # win over a shell export and break this block's own "env wins" contract.
+    _snap_deepseek_key="${DEEPSEEK_API_KEY-}"
+    _snap_deepseek_url="${DEEPSEEK_BASE_URL-}"
+    _snap_deepseek_model="${DEEPSEEK_MODEL-}"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_prot_${_v}=\"\${${_v}-}\""
     done
@@ -253,6 +259,9 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
     [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
+    [ -n "$_snap_deepseek_key" ] && export DEEPSEEK_API_KEY="$_snap_deepseek_key"
+    [ -n "$_snap_deepseek_url" ] && export DEEPSEEK_BASE_URL="$_snap_deepseek_url"
+    [ -n "$_snap_deepseek_model" ] && export DEEPSEEK_MODEL="$_snap_deepseek_model"
     for _v in $_DOTENV_PROTECTED_VARS; do
       eval "_snap_val=\"\${_snap_prot_${_v}-}\""
       if [ -n "${_snap_val}" ]; then
@@ -266,39 +275,64 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token
+    unset _snap_deepseek_key _snap_deepseek_url _snap_deepseek_model
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-# Set to 1 when the Anthropic and OpenAI sides are two protocols of ONE gateway,
-# so the OpenAI side survives the otherwise Anthropic-only env/.env write.
-DUAL_PROTOCOL_GATEWAY=0
 # Retired DEEPSEEK_* config (process env or a not-yet-migrated .env). DeepSeek is
 # a dual-protocol gateway, not a third provider: /anthropic speaks the Anthropic
-# API and /v1 speaks OpenAI chat-completions, both with the same key. Mirrors
-# hyperloom.common.llm_config.deepseek_compat_env. Explicit values always win.
+# API and /v1 speaks OpenAI chat-completions, both with the same key. Endpoint
+# and model derivation matches hyperloom.common.llm_config.deepseek_compat_env.
+# Explicit values always win.
 if [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
   _ds_base="${DEEPSEEK_BASE_URL:-}"
   _ds_base="${_ds_base%/}"
-  case "$_ds_base" in
+  # Case-insensitive match (AMD spells it /Anthropic); ${_ds_base%/*} drops the
+  # final segment whatever its casing.
+  _ds_lower="$(printf '%s' "$_ds_base" | tr '[:upper:]' '[:lower:]')"
+  case "$_ds_lower" in
     "")           _ds_anthropic="https://api.deepseek.com/anthropic"; _ds_openai="https://api.deepseek.com/v1" ;;
-    */anthropic)  _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base%/anthropic}/v1" ;;
-    */v1)         _ds_anthropic="${_ds_base%/v1}/anthropic"; _ds_openai="$_ds_base" ;;
+    */anthropic)  _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base%/*}/v1" ;;
+    */v1)         _ds_anthropic="${_ds_base%/*}/anthropic"; _ds_openai="$_ds_base" ;;
+    https://api.deepseek.com|http://api.deepseek.com)
+                  _ds_anthropic="${_ds_base}/anthropic"; _ds_openai="${_ds_base}/v1" ;;
     *)            _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base}/v1" ;;
   esac
   _ds_model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
   [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$_ds_anthropic"
   [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$_ds_openai"
   if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    [ -n "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
+    # One credential in two spellings: fill as a unit so a legacy key never
+    # joins an explicitly configured Anthropic one.
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+      export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
+    fi
     [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
   fi
   [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$_ds_model"
   [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$_ds_model"
   [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$_ds_model"
   unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
-  unset _ds_base _ds_anthropic _ds_openai _ds_model
-  DUAL_PROTOCOL_GATEWAY=1
+  unset _ds_base _ds_lower _ds_anthropic _ds_openai _ds_model
   echo "[kernel-agent] DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*" >&2
+fi
+# A gateway serving both protocols has the SAME host but a DIFFERENT path on
+# each side. Derived from the resolved URLs, so a hand-written two-sided config
+# counts too; an identical URL on both sides is a stale copy, not a protocol.
+#
+# Deliberately evaluated BEFORE the single-gateway block below: that block
+# derives ANTHROPIC_BASE_URL *from* OPENAI_BASE_URL, which would then look like
+# a two-sided gateway and start persisting the gateway credentials that this
+# installer has always kept out of the kernel-agent env.
+_url_authority() {
+  local _rest="${1#*://}"
+  printf '%s' "${_rest%%/*}"
+}
+DUAL_PROTOCOL_GATEWAY=0
+if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ] \
+   && [ "${ANTHROPIC_BASE_URL}" != "${OPENAI_BASE_URL}" ] \
+   && [ "$(_url_authority "${ANTHROPIC_BASE_URL}")" = "$(_url_authority "${OPENAI_BASE_URL}")" ]; then
+  DUAL_PROTOCOL_GATEWAY=1
 fi
 # Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY + OPENAI_BASE_URL
 # are configured. Mirror the CLI's _resolve_llm_endpoints(): the Anthropic base
@@ -466,10 +500,14 @@ verify_die() {
 preflight_validate_credentials() {
   local missing=()
   local has_url=0 has_key=0
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${OPENAI_BASE_URL:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${SAFE_API_KEY:-}" ]; } && has_key=1
+  # Anthropic-side only: the kernel-agent drives Claude Code and write_env_file
+  # exports just that side, so an OpenAI-only config must not pass the gate.
+  # A single gateway still qualifies -- the SAFE_API_KEY + OPENAI_BASE_URL block
+  # above has already derived the Anthropic side from it.
+  [ -n "${ANTHROPIC_BASE_URL:-}" ] && has_url=1
+  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
   [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL, or SAFE_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, or SAFE_API_KEY")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0

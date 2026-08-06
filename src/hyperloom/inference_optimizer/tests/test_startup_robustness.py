@@ -234,6 +234,27 @@ def test_resolve_llm_endpoints_dual_protocol_gateway_keeps_both_sides(clean_cred
     assert openai_url == "https://deepseek.example/v1"
 
 
+def test_resolve_llm_endpoints_deepseek_anthropic_only_derives_v1(clean_creds_env):
+    """Deriving the OpenAI side for DeepSeek must not use AMD's /Unified/v1.
+
+    An operator who configures only the Anthropic side would otherwise get an
+    OPENAI_BASE_URL that 404s on every chat-completions call.
+    """
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "deepseek-fake-token")
+    anthropic_url, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert anthropic_url == "https://api.deepseek.com/anthropic"
+    assert openai_url == "https://api.deepseek.com/v1"
+
+
+def test_resolve_llm_endpoints_non_deepseek_gateway_keeps_amd_convention(clean_creds_env):
+    """The AMD split-gateway derivation is untouched for other hosts."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/api/Anthropic")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "fake-token")
+    _, openai_url = cli_credentials._resolve_llm_endpoints()
+    assert openai_url == "https://llm.example.invalid/api/Unified/v1"
+
+
 def test_resolve_llm_endpoints_both_official_keys_no_urls(clean_creds_env):
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")

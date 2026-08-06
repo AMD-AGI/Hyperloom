@@ -377,8 +377,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs an Anthropic-side or OpenAI-side endpoint plus a key. A
-# dual-protocol gateway such as DeepSeek configures both sides on one host.
+# a usable setup needs the Anthropic side resolved (directly, from a single
+# gateway, or from a retired DEEPSEEK_* config) plus a key.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -392,8 +392,47 @@ preflight_load_dotenv() {
   fi
 }
 
+# Translate a retired DEEPSEEK_* configuration into the standard variables.
+# DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
+# the Anthropic API and /v1 speaks OpenAI chat-completions, both with the same
+# key. Endpoint and model derivation matches
+# hyperloom.common.llm_config.deepseek_compat_env.
+normalize_legacy_deepseek_env() {
+  [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
+  local base lowered anthropic_url openai_url model
+  base="${DEEPSEEK_BASE_URL:-}"
+  base="${base%/}"
+  # Case-insensitive match (AMD spells it /Anthropic); ${base%/*} drops the
+  # final segment whatever its casing.
+  lowered="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
+    "")           anthropic_url="https://api.deepseek.com/anthropic"; openai_url="https://api.deepseek.com/v1" ;;
+    */anthropic)  anthropic_url="$base"; openai_url="${base%/*}/v1" ;;
+    */v1)         anthropic_url="${base%/*}/anthropic"; openai_url="$base" ;;
+    https://api.deepseek.com|http://api.deepseek.com)
+                  anthropic_url="${base}/anthropic"; openai_url="${base}/v1" ;;
+    *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
+  esac
+  model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
+  [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
+  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    # One credential in two spellings: fill as a unit.
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+      export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
+    fi
+    [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+  fi
+  [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
+  [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$model"
+  unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
+  warn "DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*"
+}
+
 preflight_validate_credentials() {
   preflight_load_dotenv
+  normalize_legacy_deepseek_env
   local missing=()
   local has_url=0 has_key=0
   # Single-gateway (AMD / LiteLLM-style) setup: only SAFE_API_KEY +
@@ -412,10 +451,12 @@ preflight_validate_credentials() {
       export ANTHROPIC_API_KEY="$SAFE_API_KEY"
     fi
   fi
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${OPENAI_BASE_URL:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${SAFE_API_KEY:-}" ]; } && has_key=1
+  # Anthropic-side only. A single gateway still qualifies: the SAFE_API_KEY +
+  # OPENAI_BASE_URL block above has already derived the Anthropic side from it.
+  [ -n "${ANTHROPIC_BASE_URL:-}" ] && has_url=1
+  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
   [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL, or SAFE_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, or SAFE_API_KEY")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0

@@ -146,6 +146,60 @@ def test_deepseek_compat_env_derives_the_sibling_endpoint(legacy_url, anthropic_
     assert updates["OPENAI_BASE_URL"] == openai_url
 
 
+def test_deepseek_compat_env_bare_known_host_gets_both_segments():
+    """``https://api.deepseek.com`` is the documented OpenAI base, not a root."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "t", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"})
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+def test_deepseek_compat_env_keeps_anthropic_key_pair_atomic():
+    """A leftover legacy key must not authenticate beside an explicit one.
+
+    ANTHROPIC_API_KEY is sent as x-api-key and ANTHROPIC_AUTH_TOKEN as a bearer
+    token; filling only the missing one would put two different secrets on the
+    same request, and gateways generally prefer the bearer token.
+    """
+    api_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    auth_token_var = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+
+    updates = deepseek_compat_env({api_key_var: "sk-explicit", _LEGACY_KEY: "sk-legacy"})
+    assert api_key_var not in updates
+    assert auth_token_var not in updates
+
+    updates = deepseek_compat_env({auth_token_var: "sk-explicit", _LEGACY_KEY: "sk-legacy"})
+    assert api_key_var not in updates
+    assert auth_token_var not in updates
+
+
+def test_claude_sdk_env_options_does_not_mix_legacy_and_explicit_keys():
+    """End-to-end guard for the same hazard through the Claude SDK options."""
+    api_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    auth_token_var = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+    child_env = claude_sdk_env_options(
+        env={
+            api_key_var: "sk-explicit",
+            "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
+            _LEGACY_KEY: "sk-legacy",
+        }
+    )["env"]
+    assert child_env[api_key_var] == "sk-explicit"
+    assert child_env[auth_token_var] == "sk-explicit"
+
+
+@pytest.mark.parametrize(
+    "anthropic_url",
+    ["https://api.deepseek.com/anthropic", "https://api.deepseek.com/Anthropic"],
+)
+def test_derive_openai_base_url_uses_v1_for_dual_protocol_hosts(anthropic_url):
+    """DeepSeek has no /Unified route, so the AMD convention would 404 there."""
+    assert derive_openai_base_url(anthropic_url) == "https://api.deepseek.com/v1"
+
+
+def test_derive_openai_base_url_keeps_amd_convention_for_other_hosts():
+    assert derive_openai_base_url("https://amd.example/api/Anthropic") == "https://amd.example/api/Unified/v1"
+
+
 def test_deepseek_compat_env_never_overrides_explicit_values():
     updates = deepseek_compat_env(
         {
