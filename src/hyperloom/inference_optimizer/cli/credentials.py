@@ -28,11 +28,16 @@ _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
 # probe is the gate. Allowlisted ids also get the _CLAUDE_FALLBACK_MODEL ladder
 # on a catalog miss (custom ids fail outright).
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
+_CLAUDE_PREFERRED_MODEL = "claude-opus-5"
 
 _CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
 
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
+_CLAUDE_ALLOWED_MODELS = (
+    _CLAUDE_PREFERRED_MODEL,
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    _CLAUDE_FALLBACK_MODEL,
+)
 
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.

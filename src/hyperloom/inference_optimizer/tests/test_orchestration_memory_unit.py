@@ -201,6 +201,9 @@ def test_tracker_reset():
 
 
 def test_context_window_known_and_unknown(monkeypatch):
+    assert context_window_for_model("claude-opus-5") == 200_000
+    # The gateway spells it "Claude-Opus-5"; folding must resolve it too.
+    assert context_window_for_model("Claude-Opus-5") == 200_000
     assert context_window_for_model("claude-opus-4-8") == 200_000
     monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 123_456)
     monkeypatch.setitem(om.MODEL_CONTEXT_WINDOWS, "unit-known-window", 234_567)
