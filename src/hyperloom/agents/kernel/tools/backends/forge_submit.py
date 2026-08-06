@@ -1864,9 +1864,8 @@ def _write_report(
     ``mean_case_speedup > 1``. Raw aggregate timings are diagnostic and may
     regress because they are not the optimization objective.
 
-    ``integration_validation`` adds a second marker for artifacts whose
-    correctness so far is reference-only, so ``[correctness]`` keeps meaning the
-    micro gate while the report still states that integration is unproven.
+    ``integration_validation`` adds a second marker, so ``[correctness]`` keeps
+    meaning the micro gate while the report still states integration is unproven.
     """
     lines = ["# Forge optimization report", ""]
     if improved and mean_case_speedup and mean_case_speedup > 1.0:
@@ -3324,6 +3323,18 @@ def _run_loop_via_cli(
     )
 
 
+def _write_changed_files_index(output_dir: Path, changed_files: list[str]) -> None:
+    """Record the exported bundle's file list beside the artifacts."""
+    if not changed_files:
+        return
+    try:
+        (output_dir / "optimized_versions" / "changed_files.txt").write_text(
+            "\n".join(changed_files) + "\n"
+        )
+    except OSError:
+        log.warning("forge export: could not write the changed-files index")
+
+
 class RewriteRunOutcome(NamedTuple):
     """Result and failure evidence from one forge-rewrite-by-flydsl subprocess."""
 
@@ -3542,7 +3553,7 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
 
 def _run_rewrite_attempt(
     *,
-    route: object,
+    route: "_flydsl_rewrite.RewriteDecision",
     workspace: str,
     base_commit: str,
     source_file: str,
@@ -3587,9 +3598,8 @@ def _run_rewrite_attempt(
         timeout_s=timeout_s,
         deadline_unix=deadline_unix,
     )
-    # This route has no schema-1 recovery channel to fall back on: the producer
-    # is never given an experiment id, so it writes no forge-loop checkpoint,
-    # and an interim or working-tree state is never a published apply-back.
+    # The producer is never given an experiment id, so it writes no forge-loop
+    # checkpoint: a published apply-back is the only evidence this route takes.
     applyback = _validated_rewrite_applyback_result(
         outcome.result,
         workspace=workspace,
@@ -3620,13 +3630,7 @@ def _run_rewrite_attempt(
         output_dir,
         best_commit=applyback["best_commit"],
     )
-    if changed_files:
-        try:
-            (output_dir / "optimized_versions" / "changed_files.txt").write_text(
-                "\n".join(changed_files) + "\n"
-            )
-        except OSError:
-            pass
+    _write_changed_files_index(output_dir, changed_files)
     baseline_ms = applyback["baseline_ms"]
     best_ms = applyback["best_ms"]
     # The rewrite oracle reports one aggregate timing per implementation, so
@@ -3955,11 +3959,8 @@ def submit(
         gpu_target = _resolve_gpu_target(candidate)
         rewrite_driver_contract = build_rewrite_driver_contract(candidate)
 
-        # Decide the producer route before any driver exists. Rewriting the
-        # kernel to FlyDSL and consuming a framework apply-back is a different
-        # producer contract with its own dual-mode driver, so it is taken only
-        # on an explicit opt-in with a matching candidate and producer; every
-        # other verdict keeps the attempt on the generic forge-loop.
+        # Decided before any driver exists, because the rewrite route brings its
+        # own dual-mode driver rather than the generic harness.
         rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
             candidate=candidate,
             source_type=source_type,
@@ -4150,9 +4151,8 @@ def submit(
                 _FORGE_MIN_BUDGET_SEC / 3600.0,
                 timeout_s / 60.0,
             )
-        # The rewrite route consumes a framework apply-back instead of a
-        # forge-loop best, so it runs its own producer command and validator and
-        # leaves the generic recovery channels below completely untouched.
+        # Returns before the generic recovery channels below, which are
+        # schema-1 forge-loop semantics an apply-back must never take.
         if rewrite_route.eligible:
             rewrite_result, producer_temporary_paths = _run_rewrite_attempt(
                 route=rewrite_route,
@@ -4300,11 +4300,7 @@ def submit(
             output_dir,
             best_commit=best_commit,
         )
-        if changed_files:
-            try:
-                (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
-            except OSError:
-                pass
+        _write_changed_files_index(output_dir, changed_files)
         _write_report(
             output_dir,
             baseline_ms,

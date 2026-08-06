@@ -3445,9 +3445,8 @@ def build_verification(
     applyback = dict((best or {}).get("flydsl_applyback") or {})
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
-    # A validated framework apply-back already proved reference correctness
-    # against the source kernel, so it answers the micro gate directly instead
-    # of being re-derived from report prose.
+    # Read ahead of the report scan: the validated manifest is stronger evidence
+    # than prose, and would otherwise be overwritten by it.
     if correctness_signal is None and applyback.get("reference_correctness_passed") is True:
         correctness_signal = True
         correctness_source = "forge_rewrite_reference"

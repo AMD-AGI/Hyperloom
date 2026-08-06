@@ -2115,7 +2115,6 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     "capability_ok",
     "",
     ("aiter", "sglang", "vllm"),
-    (1,),
 )
 
 
@@ -2318,7 +2317,7 @@ def test_rewrite_route_rejects_multi_node_before_the_apply_stage(tmp_path, monke
 def test_rewrite_route_rejects_a_framework_the_producer_cannot_apply_back(tmp_path, monkeypatch):
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
     probe = _RecordingProbe(
-        _flydsl_rewrite.RewriteCapabilities(True, "capability_ok", "", ("aiter",), (1,))
+        _flydsl_rewrite.RewriteCapabilities(True, "capability_ok", "", ("aiter",))
     )
 
     decision = _flydsl_rewrite.evaluate_rewrite_route(

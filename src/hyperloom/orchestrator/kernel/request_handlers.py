@@ -1426,9 +1426,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             "identity_route",
             str(pending_record.get("identity_route") or ""),
         )
-        # The artifact's own validation provenance travels with it, so the
-        # serving verdict can tell a reference-only apply-back from an artifact
-        # that was already correctness-proven in place.
+        # Provenance travels with the artifact so the serving verdict can tell a
+        # reference-only apply-back from one already proven in place.
         resolved.setdefault(
             "artifact_kind",
             str(pending_record.get("artifact_kind") or ""),
@@ -6489,9 +6488,8 @@ async def integrate_handler(
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
     # Placed ahead of the optional source-import / paired-A/B passes so a patch
     # that loses accuracy short-circuits before they run.
-    # An apply-back reaching integrate carries only reference correctness, so
-    # this run is the sole end-to-end evidence it will ever get and the gate
-    # cannot be opted out of or degraded away.
+    # An apply-back carries only reference correctness, so this run is the sole
+    # end-to-end evidence it will ever get.
     applyback_pending = (
         str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
         and str(payload.get("integration_validation_status") or "") == "pending"
@@ -6518,9 +6516,8 @@ async def integrate_handler(
     source_import_evidence: dict[str, bool | None] = {}
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        # A multi-file patch is only attributable when every file it wrote was
-        # loaded, so grade the whole write set and fall back to the single
-        # target only when the bundle did not declare one.
+        # Grade the whole write set; the single target is the fallback for a
+        # patch whose bundle declared none.
         _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
         if not _written:
             _written = [str(payload.get("target_file") or payload.get("source_file") or "")]

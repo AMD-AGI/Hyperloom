@@ -177,7 +177,6 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
             "capability_ok",
             "",
             ("aiter", "sglang", "vllm"),
-            (1,),
         ),
     )
 
