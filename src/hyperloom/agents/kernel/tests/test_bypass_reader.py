@@ -620,3 +620,90 @@ def test_steady_state_with_zero_annotations_falls_back(tmp_path):
     assert out["aggregation_scope"] == "full_trace"
     assert out.get("steady_window_status")
     assert len(out["kernels"]) == 2
+
+
+# ---- device-stream duration sanity ---------------------------------------
+def _stream_trace(path: Path, events: list[dict]) -> Path:
+    path.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
+    return path
+
+
+def _gpu(name: str, ts: float, dur: float, pid: int = 1, tid: int = 1) -> dict:
+    return {"cat": "kernel", "ph": "X", "name": name, "ts": ts, "dur": dur, "pid": pid, "tid": tid, "args": {}}
+
+
+def test_stream_overlap_absent_on_consistent_trace(tmp_path):
+    """Durations that fit between their neighbours must not be flagged."""
+    tf = _write_trace(tmp_path / "ok.trace.json")
+    out = reader.analyze_trace(tf, top_k=0)
+    assert "stream_overlap" not in (out.get("timeline") or {})
+
+
+def test_stream_overlap_detects_impossible_duration(tmp_path):
+    """An event overrunning its successor on a serial stream is corrupt.
+
+    The corrupt event also extends the stream's span, so a sum-vs-span ratio
+    would read ~1.0 here; the pairwise check still catches it.
+    """
+    events = [
+        _gpu("k_a", 1000, 100),
+        _gpu("corrupt_kernel", 1100, 20_000),  # ends 21100, next starts 1200
+        _gpu("k_b", 1200, 100),
+        _gpu("k_c", 1300, 100),
+    ]
+    tf = _stream_trace(tmp_path / "bad.trace.json", events)
+    out = reader.analyze_trace(tf, top_k=0)
+    so = (out.get("timeline") or {}).get("stream_overlap")
+    assert so, "corrupt duration should be reported"
+    assert (so["pid"], so["tid"]) == (1, 1)
+    assert so["worst_event"] == "corrupt_kernel"
+    assert so["overlapping_events"] == 1
+    # Overruns k_b's start (1200) by 19900us.
+    assert so["worst_event_excess_ms"] == 19.9
+
+    # A naive sum-vs-span ratio would have looked innocent.
+    total_dur = sum(e["dur"] for e in events)
+    span = max(e["ts"] + e["dur"] for e in events) - min(e["ts"] for e in events)
+    assert total_dur / span < 1.02
+
+
+def test_stream_overlap_not_triggered_by_concurrent_streams(tmp_path):
+    """Two genuinely concurrent streams must not be mistaken for corruption.
+
+    Pooling every device event would make the summed duration twice the wall
+    span here, which is exactly the false positive the per-stream check avoids.
+    """
+    events = []
+    for i in range(5):
+        events.append(_gpu(f"s1_{i}", 1000 + i * 100, 100, pid=1, tid=1))
+        events.append(_gpu(f"s2_{i}", 1000 + i * 100, 100, pid=1, tid=2))
+    tf = _stream_trace(tmp_path / "concurrent.trace.json", events)
+    out = reader.analyze_trace(tf, top_k=0)
+    assert "stream_overlap" not in (out.get("timeline") or {})
+
+
+def test_stream_overlap_reports_worst_stream():
+    mild = [(0.0, 300.0, "mild"), (200.0, 400.0, "b"), (1000.0, 1000.0, "c")]
+    severe = [(0.0, 900.0, "severe"), (100.0, 200.0, "b"), (1000.0, 1000.0, "c")]
+    worst = reader._stream_overlap_health({(1, 1): list(mild), (1, 2): list(severe)})
+    assert worst["tid"] == 2
+    assert worst["worst_event"] == "severe"
+
+
+def test_stream_overlap_ignores_rounding_and_short_streams():
+    # Sub-microsecond overrun is timestamp rounding, not corruption.
+    tiny = [(0.0, 100.5, "a"), (100.0, 200.0, "b"), (1000.0, 1000.0, "c")]
+    assert reader._stream_overlap_health({(1, 1): tiny}) == {}
+    # Real but immaterial overlap stays below the reporting share.
+    small = [(0.0, 110.0, "a"), (100.0, 200.0, "b"), (100_000.0, 100_000.0, "c")]
+    assert reader._stream_overlap_health({(1, 1): small}) == {}
+    # Degenerate inputs must not divide by zero.
+    assert reader._stream_overlap_health({(1, 1): [(0.0, 10.0, "only")]}) == {}
+    assert reader._stream_overlap_health({(1, 1): [(5.0, 5.0, "a"), (5.0, 5.0, "b")]}) == {}
+    assert reader._stream_overlap_health({}) == {}
+
+
+def test_stream_overlap_final_event_is_not_detectable():
+    """Documented limitation: nothing follows the last event to contradict it."""
+    evs = [(0.0, 100.0, "a"), (100.0, 99_999.0, "corrupt_last")]
+    assert reader._stream_overlap_health({(1, 1): evs}) == {}
