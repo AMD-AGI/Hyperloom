@@ -58,7 +58,6 @@ from .bootstrap import (
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 
 from .credentials import (
-    _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
     _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
@@ -839,9 +838,60 @@ def _validate_and_resolve_claude_model(
     raise SystemExit(2)
 
 
+def _resolve_models_for_run(
+    args: argparse.Namespace,
+    resolved_urls: tuple[str, str] | None,
+    *,
+    claude_follows_codex: bool | None = None,
+    codex_follows_claude: bool | None = None,
+) -> None:
+    """Resolve both model ids against the gateway before any session work.
+
+    Order matters in the single-provider deploys. When the Codex model also
+    becomes the orchestration model, its ladder has to run *first*: otherwise
+    the Claude gate sees an id derived from a Codex default the gateway may not
+    serve, and aborts on a model the operator never chose.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI namespace; both ``claude_model``
+            and ``codex_model`` may be rewritten.
+        resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
+            from preflight.
+        claude_follows_codex (bool | None): Whether the orchestration model is
+            derived from ``codex_model`` (OpenAI-only deploy). Callers pass the
+            value captured before ``_preflight`` filled in missing endpoints;
+            ``None`` re-derives it from the environment.
+        codex_follows_claude (bool | None): The Anthropic-only mirror image.
+
+    Raises:
+        SystemExit: With code 2 when the Claude gate rejects the model.
+    """
+    if claude_follows_codex is None:
+        claude_follows_codex = _claude_model_should_follow_codex()
+    if codex_follows_claude is None:
+        codex_follows_claude = _codex_model_should_follow_claude()
+
+    if claude_follows_codex:
+        # codex_model is about to become the orchestration model, so it needs
+        # the ladder whatever the critic backend is.
+        _smoke_test_codex_model(args, resolved_urls, required=True)
+        args.claude_model = args.codex_model
+
+    # Hard-gate the Claude model (mutates args.claude_model on fallback; sys.exit(2) on failure).
+    _validate_and_resolve_claude_model(args, resolved_urls)
+
+    if codex_follows_claude:
+        args.codex_model = args.claude_model
+    elif not claude_follows_codex:
+        # Codex smoke probes the OpenAI side independently (split entrypoints).
+        _smoke_test_codex_model(args, resolved_urls)
+
+
 def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
+    *,
+    required: bool = False,
 ) -> None:
     """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts.
 
@@ -861,13 +911,15 @@ def _smoke_test_codex_model(
             mutated to a fallback.
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
+        required (bool): Check even when no critic-agent will run. Set on the
+            OpenAI-only path, where ``codex_model`` also drives orchestration
+            and so matters regardless of the critic backend.
     """
-    if _codex_model_should_follow_claude():
-        return
-    critic_uses_codex = args.critic_backend == "agent"
-    needs_codex = critic_uses_codex
-    if not needs_codex:
-        return
+    if not required:
+        if _codex_model_should_follow_claude():
+            return
+        if args.critic_backend != "agent":
+            return
 
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
@@ -1430,14 +1482,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     resolved_urls = _preflight(args)
 
-    # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
-    if claude_follows_codex:
-        args.claude_model = args.codex_model
-    _validate_and_resolve_claude_model(args, resolved_urls)
-    if codex_follows_claude:
-        args.codex_model = args.claude_model
-    # Codex smoke probes the OpenAI side independently (split entrypoints).
-    _smoke_test_codex_model(args, resolved_urls)
+    _resolve_models_for_run(
+        args,
+        resolved_urls,
+        claude_follows_codex=claude_follows_codex,
+        codex_follows_claude=codex_follows_claude,
+    )
 
     # `--resume-from <path>` implies `--resume` (operator convenience).
     if args.resume_from and not args.resume:

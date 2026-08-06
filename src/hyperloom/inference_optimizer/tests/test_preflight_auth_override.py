@@ -1414,6 +1414,45 @@ def test_smoke_test_codex_model_leaves_custom_ids_alone(monkeypatch, capsys):
     assert "gpt-5.6-sol" in out
 
 
+def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkeypatch, capsys):
+    """OpenAI-only: CODEX_MODEL also drives orchestration, so its ladder must run first.
+
+    Otherwise ``args.claude_model`` is derived from a codex id the gateway does
+    not serve, and the Claude gate hard-aborts on a model the operator never
+    chose -- with the Codex ladder never getting a turn.
+    """
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    # A gateway that has not picked up the new default yet.
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+
+    assert cli._claude_model_should_follow_codex() is True
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
+    cli._resolve_models_for_run(args, None)
+
+    assert args.codex_model == "gpt-5.5"
+    assert args.claude_model == "gpt-5.5"
+
+
+def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
+    """The ladder cannot be gated on the critic here: codex_model drives orchestration."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
+
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
+    cli._resolve_models_for_run(args, None)
+
+    assert args.codex_model == "gpt-5.4"
+    assert args.claude_model == "gpt-5.4"
+
+
 def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     """OpenAI-side catalog unreachable → WARN-only (does not block startup)."""
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)
