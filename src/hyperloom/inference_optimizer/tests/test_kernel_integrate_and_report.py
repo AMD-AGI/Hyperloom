@@ -869,7 +869,67 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
     assert res["patch_path"] == str(patch_file)
     assert res["target_file"] == str(target)
     assert res["apply_result"]["status"] == "ok"
+    assert res["finalize_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'optimized'\n"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_accepts_runtime_jit_deferred_apply(
+    session_dir,
+    tmp_path,
+):
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    apply_result = {
+        "status": "ok",
+        "manifest_path": str(manifest),
+        "target_file": str(target),
+        "rebuild": {
+            "status": "deferred",
+            "mode": "runtime_jit",
+        },
+    }
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k006",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+    }
+    with (
+        patch.object(
+            krh,
+            "_maybe_apply_kernel_patch",
+            return_value=apply_result,
+        ),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=_fake_run,
+        ),
+    ):
+        result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["status"] == "ok"
+    assert result["decision"] == "KEEP"
+    assert result["apply_result"]["rebuild"] == {
+        "status": "deferred",
+        "mode": "runtime_jit",
+    }
 
 
 @pytest.mark.asyncio
