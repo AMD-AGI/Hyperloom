@@ -2129,7 +2129,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _backend_kind("orchestration") == "Claude"
         else f"{_backend_kind('orchestration')}({args.codex_model})"
     )
-    kernel_str = "DISABLED" if no_kernel else _backend_kind("kernel_agent")
+    kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
         critic_str = "mock"
     elif _backend_kind("critic") == "Claude":

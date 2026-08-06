@@ -523,12 +523,11 @@ class IntentRouter:
         )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
-        """Route a REQUEST intent to its target agent (Plan A: → kernel).
+        """Route a REQUEST intent to its programmatic handler.
 
-        Applies the kernel-request execution-order gate, records the request on
-        the bus for the target reactor / replay, and auto-rejects requests whose
-        target agent is not in the role registry (e.g. ``--no-kernel``) so the
-        requester never hangs.
+        Applies the execution-order gate, records the request on the bus, and
+        dispatches to the registered handler or auto-rejects with a RESPONSE so
+        the requester never hangs.
 
         Args:
             source (str): The agent issuing the request.
@@ -553,7 +552,6 @@ class IntentRouter:
         )
         await self.bus.append_and_seq(request_msg)
 
-        # All kernel requests are served by registered programmatic handlers.
         if target_agent == "kernel_agent":
             if not bool(getattr(self.shared_state, "kernel_enabled", True)):
                 await self.bus.append_and_seq(
@@ -763,6 +761,28 @@ class IntentRouter:
                 seq=request_msg.seq,
                 msg_id=request_msg.msg_id,
             )
+        else:
+            await self.bus.append_and_seq(
+                Message.new(
+                    target_agent,
+                    source,
+                    "response",
+                    {
+                        "in_reply_to": request_msg.msg_id,
+                        "kind": f"{kind}_done",
+                        "status": "failed",
+                        "result": {
+                            "status": "failed",
+                            "error_class": "unknown_target_agent",
+                            "error": f"no handler registered for target_agent={target_agent!r}",
+                        },
+                        "source": "coordinator_auto_reject",
+                    },
+                    in_reply_to=request_msg.msg_id,
+                    priority=1,
+                )
+            )
+            await self.cursors.advance(target_agent, seq=request_msg.seq, msg_id=request_msg.msg_id)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
         """Route a RESPONSE intent back to the original requester.

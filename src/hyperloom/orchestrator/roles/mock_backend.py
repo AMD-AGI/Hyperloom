@@ -142,24 +142,17 @@ _PROPOSAL_RE = re.compile(
     r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$",
     re.MULTILINE,
 )
-_REQUEST_RE = re.compile(
-    r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=request\s+payload=(.*)$",
-    re.MULTILINE,
-)
-_KIND_RE = re.compile(r"['\"]kind['\"]\s*:\s*['\"]([\w-]+)['\"]")
 
 
 class MockRowScanBackend:
     """Row-scanning reactor mock: one intent per matched inbox row, else heartbeat.
 
-    Generalises the always-approve Critic and auto-respond Kernel mocks, which
-    share the same shape: scan the rendered inbox in ``prompt`` for rows matching
-    ``row_regex`` and emit one intent (built by ``intent_builder``) per
-    not-yet-seen row — keyed by ``dedup_key`` (msg_id by default) so reactor
-    fan-out re-renders don't double-emit. When no row matches, emit a single
-    heartbeat ``send_message`` so the reactor loop always sees signal of life.
-    Use :func:`auto_approve_critic` / :func:`auto_respond_kernel` to build the
-    concrete role mocks. Implements :class:`Backend`.
+    Generalises the always-approve Critic mock: scan the rendered inbox in
+    ``prompt`` for rows matching ``row_regex`` and emit one intent (built by
+    ``intent_builder``) per not-yet-seen row — keyed by ``dedup_key`` (msg_id
+    by default) so reactor fan-out re-renders don't double-emit. When no row
+    matches, emit a single heartbeat ``send_message`` so the reactor loop
+    always sees signal of life. Implements :class:`Backend`.
     """
 
     def __init__(
