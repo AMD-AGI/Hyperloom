@@ -1856,12 +1856,17 @@ def _write_report(
     mean_case_speedup: float | None = None,
     search_start_ms: float | None = None,
     improved_during_search: bool = False,
+    integration_validation: str = "",
 ) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
     Only claims a KEEP-worthy result when Forge reports a validated
     ``mean_case_speedup > 1``. Raw aggregate timings are diagnostic and may
     regress because they are not the optimization objective.
+
+    ``integration_validation`` adds a second marker for artifacts whose
+    correctness so far is reference-only, so ``[correctness]`` keeps meaning the
+    micro gate while the report still states that integration is unproven.
     """
     lines = ["# Forge optimization report", ""]
     if improved and mean_case_speedup and mean_case_speedup > 1.0:
@@ -1890,6 +1895,8 @@ def _write_report(
                 f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
                 f"selected_ms={best_ms:.4f}"
             )
+    if integration_validation:
+        lines.append(f"[integration_validation] {integration_validation}")
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
     return report
@@ -2003,8 +2010,9 @@ def _export_best_artifacts(
                     exc,
                 )
 
-    # Full multi-file patch (excludes pre-existing dirty).
-    patch_cmd = ["git", "-C", workspace, "diff", base_commit]
+    # Full multi-file patch (excludes pre-existing dirty). --binary keeps the
+    # patch appliable when a change touches a non-text artifact.
+    patch_cmd = ["git", "-C", workspace, "diff", "--binary", base_commit]
     if best_commit:
         patch_cmd.append(best_commit)
     patch = _run(patch_cmd, timeout=60)
@@ -3632,6 +3640,7 @@ def _run_rewrite_attempt(
         mean_case_speedup=micro_speedup,
         search_start_ms=baseline_ms,
         improved_during_search=True,
+        integration_validation=applyback["integration_validation_status"],
     )
     msg = (
         f"forge rewrite done (cli): baseline={baseline_ms} best={best_ms} "
