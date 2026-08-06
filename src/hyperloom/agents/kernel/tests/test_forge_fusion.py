@@ -307,6 +307,92 @@ def test_an_llm_outage_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path
     assert result["status"] not in ("ok", "complete", "kept")
 
 
+def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
+    """A KEEP outranks the outage verdict, however the manifest ends up shaped.
+
+    forge-fusion only overrides the verdict when discovery raised -- and then it has
+    no recipes, so no loop and no validation -- but that invariant lives in another
+    repository and nothing here can enforce it. Being wrong would throw away a
+    measured patch, so the guard is local.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "schema_version": 2,
+        "verdict": "llm_unavailable",
+        "fusion_loop": {"kept": True, "best": {"kernel_speedup": 1.2}},
+        "validation": {"kept": True, "kernel_speedup": 1.2},
+        "artifacts": {"patch": "diff --git a/foo.py", "changes": [{"path": "foo.py"}]},
+        "fusion": {"source_file": str(output_dir / "foo.py")},
+        "error": {"kind": "api_error", "attempts": 2, "message": "flaky"},
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=3)
+
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["requires_e2e_validation"] is True
+    assert result["patch"] == "diff --git a/foo.py"
+    assert "error_class" not in result
+
+
+def test_an_llm_outage_verdict_is_matched_tolerantly(tmp_path):
+    """Matching must not fail open: a stray space would fall back to the
+    no_improvement mapping, i.e. straight back into the bug this prevents."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps({"schema_version": 2, "verdict": " LLM_Unavailable "}),
+        encoding="utf-8",
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=3)
+
+    assert result["error_class"] == "llm_unavailable"
+    assert result["status"] == "failed"
+
+
+def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
+    """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit
+    that still carries a valid manifest.
+
+    The wrapper mirrors the child's exit code, and the handler prefers the sentinel
+    over ``rc``; this pins that contract so a later "just trust rc" simplification
+    cannot silently degrade the outage into a generic handler failure.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps({
+            "schema_version": 2,
+            "verdict": "llm_unavailable",
+            "error": {"kind": "api_error", "attempts": 5, "message": "gateway 400 x5"},
+        }),
+        encoding="utf-8",
+    )
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    class Proc:
+        returncode = 3  # forge_fusion.cli.EXIT_LLM_UNAVAILABLE
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    assert rc == 3, "the child's exit code is mirrored, not swallowed"
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert result["error_class"] == "llm_unavailable"
+    assert result["kept"] is False
+    # The on-disk fallback has to agree with the sentinel.
+    assert json.loads((output_dir / "result.json").read_text(encoding="utf-8")) == result
+
+
 def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
     """A run that DID reach the model and found nothing is unchanged: it is a real
     conclusion, and re-running it in the same session would buy nothing."""

@@ -266,7 +266,11 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         result["error"] = f"fusion_manifest.json parse error: {exc!r}"
         return result
 
-    if str(m.get("verdict") or "") == LLM_UNAVAILABLE_VERDICT:
+    loop = m.get("fusion_loop") or {}
+    val = m.get("validation") or {}
+    kept = bool(loop.get("kept") or val.get("kept"))
+
+    if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
         # forge-fusion never reached the model, so this run holds no opinion about the
         # kernel. The default no-KEEP shape below would report it as
         # ``complete``/``no_improvement``, which is wrong twice over: it records an
@@ -275,6 +279,13 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         # blip would skip fusion for the whole remaining session and the model would
         # never be fusion-optimized at all. The timeout shape below is the established
         # way to say "infrastructure failed, this is retryable".
+        #
+        # Guarded on ``not kept`` so this can never discard a validated fusion. That
+        # combination should be impossible -- forge-fusion only overrides the verdict
+        # when discovery raised, in which case it proposed no recipes and the loop
+        # never ran -- but that invariant lives in another repo and nothing here can
+        # enforce it, while the cost of being wrong is throwing away a measured patch.
+        #
         # ``result`` still carries its failed/REVERT/not-kept defaults from above, so
         # only the outage's identity has to be added.
         detail = m.get("error") if isinstance(m.get("error"), dict) else {}
@@ -289,10 +300,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         })
         return result
 
-    loop = m.get("fusion_loop") or {}
-    val = m.get("validation") or {}
     best = loop.get("best") or {}
-    kept = bool(loop.get("kept") or val.get("kept"))
     speedup = best.get("kernel_speedup") or val.get("kernel_speedup")
     best_flags = str(loop.get("best_env_flag") or "").split()
     artifacts = m.get("artifacts") or {}
