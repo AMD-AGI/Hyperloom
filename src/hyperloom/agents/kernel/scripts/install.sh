@@ -274,22 +274,10 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-# Single-gateway (OpenAI-compatible / LiteLLM-style) setup: only OPENAI_API_KEY +
-# OPENAI_BASE_URL are configured. Mirror the CLI's _resolve_llm_endpoints(): the
-# Anthropic base is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK
-# re-appends it) and the same key doubles as the Anthropic key. Explicit values
-# always win.
-if [ -n "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
-  if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-    _gw_url="${OPENAI_BASE_URL%/}"
-    export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
-    unset _gw_url
-    echo "[kernel-agent] derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
-  fi
-  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-    export ANTHROPIC_API_KEY="$OPENAI_API_KEY"
-  fi
-fi
+# No cross-provider derivation: the Anthropic side is configured by the operator
+# (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY) or left unset, which disables the
+# Claude-side features. Deriving it from OPENAI_* would point Claude at the
+# OpenAI host and reuse an OpenAI-specific key there.
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -456,15 +444,18 @@ verify_die() {
 # does not actually install.
 preflight_validate_credentials() {
   local missing=()
-  local has_url=0 has_key=0
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or OPENAI_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or OPENAI_API_KEY")
-  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
-    log "credentials preflight: usable LLM base URL + key present"
+  local has_anthropic=0 has_openai=0
+  # No cross-provider derivation: each side must carry its own base URL and its
+  # own key. A side left unset disables the features that speak its protocol.
+  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+    has_anthropic=1
+  { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
+  if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
+    log "credentials preflight: at least one self-consistent provider side present"
     return 0
   fi
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"

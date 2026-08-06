@@ -82,8 +82,8 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
         "DISABLE_AUTOUPDATER",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/api/v1/llm-proxy/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "safe-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api/v1/llm-proxy")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-token")
     # IS_SANDBOX is only set when running as root (SWSPLAT-42390): simulate root
     # so the sandbox default is exercised.
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
@@ -91,8 +91,8 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
     forge_fusion._inject_author_gateway_env()
 
     assert os.environ["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/v1/llm-proxy"
-    assert os.environ["ANTHROPIC_API_KEY"] == "safe-token"
-    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "safe-token"
+    assert os.environ["ANTHROPIC_API_KEY"] == "anthropic-token"
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "anthropic-token"
     assert os.environ["IS_SANDBOX"] == "1"
     assert os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert os.environ["DISABLE_AUTOUPDATER"] == "1"

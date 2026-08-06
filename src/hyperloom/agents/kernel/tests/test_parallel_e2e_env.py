@@ -24,13 +24,16 @@ def _write_env(tmp_path: Path, **vars: str) -> Path:
     return p
 
 
-def test_single_gateway_all_aliases_from_openai_key(tmp_path):
-    """Single gateway: every key alias is OPENAI_API_KEY."""
+def test_openai_only_leaves_anthropic_aliases_unset(tmp_path):
+    """OpenAI side only: its own aliases are filled and the Anthropic side stays
+    unset, so the OpenAI key is never forwarded as an Anthropic credential."""
     env = per.load_env_file(_write_env(tmp_path, OPENAI_API_KEY="ak-gateway", OPENAI_BASE_URL="https://gw/v1"))
-    for alias in ("OPENAI_API_KEY", "GEAK_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for alias in ("OPENAI_API_KEY", "GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY"):
         assert env[alias] == "ak-gateway", alias
-    for alias in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_API_BASE"):
+    for alias in ("OPENAI_BASE_URL", "GEAK_BASE_URL", "LLM_API_BASE"):
         assert env[alias] == "https://gw/v1", alias
+    for alias in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        assert alias not in env, alias
     assert "_".join(("legacy backend", "API", "KEY")) not in env
     assert "_".join(("legacy backend", "BASE", "URL")) not in env
 

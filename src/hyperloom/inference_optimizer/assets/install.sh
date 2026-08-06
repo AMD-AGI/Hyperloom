@@ -395,31 +395,20 @@ preflight_load_dotenv() {
 preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
-  local has_url=0 has_key=0
-  # Single-gateway (AMD / LiteLLM-style) setup: only OPENAI_API_KEY +
-  # OPENAI_BASE_URL are configured. Mirror the CLI's _resolve_llm_endpoints():
-  # the Anthropic base is OPENAI_BASE_URL with a trailing /v1 stripped (the SDK
-  # re-appends it) and the gateway key doubles as the Anthropic key, so the
-  # chained kernel-agent installer sees a complete provider pair. Explicit
-  # values always win.
-  if [ -n "${OPENAI_API_KEY:-}" ] && [ -n "${OPENAI_BASE_URL:-}" ]; then
-    if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-      local _gw_url="${OPENAI_BASE_URL%/}"
-      export ANTHROPIC_BASE_URL="${_gw_url%/v1}"
-      log "derived ANTHROPIC_BASE_URL from OPENAI_BASE_URL (single gateway)"
-    fi
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      export ANTHROPIC_API_KEY="$OPENAI_API_KEY"
-    fi
-  fi
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or OPENAI_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or OPENAI_API_KEY")
-  if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
-    log "credentials preflight: usable LLM base URL + key present"
+  local has_anthropic=0 has_openai=0
+  # No cross-provider derivation: each side must be self-consistent on its own
+  # (its own base URL and its own key). A side left unset is fine -- it just
+  # disables the features that speak its protocol. Deriving one side from the
+  # other would send a provider-specific key to a foreign host.
+  { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
+    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
+    has_anthropic=1
+  { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
+  if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
+    log "credentials preflight: at least one self-consistent provider side present"
     return 0
   fi
+  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
   local env_file_status
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"

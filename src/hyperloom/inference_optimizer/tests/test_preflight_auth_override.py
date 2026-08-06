@@ -165,7 +165,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         "OPENAI_BASE_URL",
         "https://gateway.example/api/v1/llm-proxy/v1",
     )
-    # ANTHROPIC_BASE_URL unset -> re-derived from OPENAI_BASE_URL.
+    # ANTHROPIC_BASE_URL unset -> the Anthropic side stays disabled, never derived.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     # Derived aliases start unset so the provider key fills them.
     for name in (
@@ -189,11 +189,9 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
 
     resolved = cli_preflight._preflight()
 
-    assert resolved == (
-        "https://gateway.example/api/v1/llm-proxy",
-        "https://gateway.example/api/v1/llm-proxy/v1",
-    )
-    assert cli.os.environ["ANTHROPIC_BASE_URL"] == resolved[0]
+    # OpenAI side only: the Anthropic endpoint is left unset rather than derived.
+    assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
+    assert "ANTHROPIC_BASE_URL" not in cli.os.environ
     assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
     # The provider key fills its own name plus the internal GEAK / LLM aliases.
     for name in (
@@ -212,10 +210,11 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert "_".join(("legacy backend", "API", "KEY")) not in cli.os.environ
     assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
-    # Claude CLI primary key falls back to the OpenAI-side key for a single gateway.
+    # With no Anthropic side there is nothing to write for Claude, and the
+    # OpenAI key is never promoted into ~/.claude/config.json.
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
-    assert '"primaryApiKey": "new-gateway-key"' in config_text
-    assert '"customApiUrl": "https://gateway.example/api/v1/llm-proxy"' in config_text
+    assert "new-gateway-key" not in config_text
+    assert "gateway.example" not in config_text
 
 
 def test_preflight_keeps_explicit_provider_keys(
@@ -1439,7 +1438,9 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
 def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
     monkeypatch, tmp_path, clean_url_env, stub_install_steps
 ):
-    """Single Anthropic-compatible gateways may populate OPENAI_BASE_URL during preflight; model-follow intent is preflight-time."""
+    """An Anthropic-only deploy stays Anthropic-only across preflight: the OpenAI
+    side is never populated from the Anthropic gateway, so Codex keeps following
+    the Claude model."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
@@ -1463,10 +1464,10 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
     if codex_follows_before:
         args.codex_model = args.claude_model
 
-    # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
-    # the single Anthropic-compatible gateway.
-    assert resolved == ("https://llm.example.invalid/anthropic", "https://llm.example.invalid/Unified/v1")
-    assert cli._codex_model_should_follow_claude() is False
+    # The OpenAI/Codex side is left unset; nothing is derived from the Anthropic
+    # gateway, so the Codex path stays disabled and follows the Claude model.
+    assert resolved == ("https://llm.example.invalid/anthropic", "")
+    assert cli._codex_model_should_follow_claude() is True
     assert args.codex_model == "claude-sonnet-5"
 
 

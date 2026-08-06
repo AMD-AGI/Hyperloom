@@ -131,32 +131,18 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
+    # OpenAI-side credentials only: an Anthropic key or an Anthropic base URL
+    # would authenticate this OpenAI-protocol client against a foreign provider.
     api_key = (
         (source.get(api_key_env) or "").strip()
         or (source.get("OPENAI_API_KEY") or "").strip()
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
         or (source.get("LLM_GATEWAY_KEY") or "").strip()
     )
     if not api_key:
-        key_names = " / ".join(
-            dict.fromkeys(
-                [
-                    api_key_env,
-                    "OPENAI_API_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "LLM_GATEWAY_KEY",
-                ]
-            )
-        )
+        key_names = " / ".join(dict.fromkeys([api_key_env, "OPENAI_API_KEY", "LLM_GATEWAY_KEY"]))
         raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
 
-    base_url = (
-        (source.get(base_url_env) or "").strip()
-        or (source.get("OPENAI_BASE_URL") or "").strip()
-        or derive_openai_base_url(source.get("ANTHROPIC_BASE_URL"))
-    )
+    base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
     base_url = base_url or None
 
     # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS; gateway headers are operator-supplied.
@@ -194,12 +180,12 @@ def claude_sdk_env_options(
     if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
         source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
 
+    # Anthropic-side credentials only: the OpenAI key must never become the
+    # child process's ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN.
     fallback_key = (
         source.get("ANTHROPIC_AUTH_TOKEN")
         or source.get("ANTHROPIC_API_KEY")
         or source.get("DEEPSEEK_API_KEY")
-        or source.get("OPENAI_API_KEY")
-        or source.get("LLM_GATEWAY_KEY")
         or ""
     )
     if fallback_key:

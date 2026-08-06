@@ -443,34 +443,23 @@ def safe_runtime_env() -> dict:
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # GEAK speaks the OpenAI protocol, so it takes the OpenAI-side key; a split
-    # deploy falls back to the Anthropic-side key.
-    openai_key = (
-        env.get("OPENAI_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("ANTHROPIC_API_KEY")
-    )
+    # Each provider side is forwarded from its own credentials only: borrowing
+    # across sides would hand one provider's key to the other's host. GEAK
+    # speaks the OpenAI protocol, so its aliases come from the OpenAI side.
+    openai_key = env.get("OPENAI_API_KEY")
     if openai_key:
-        env.setdefault("OPENAI_API_KEY", openai_key)
         env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
-    anthropic_key = (
-        env.get("ANTHROPIC_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("OPENAI_API_KEY")
-    )
+    anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
         env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
-    # OPENAI_BASE_URL primary; fall back to ANTHROPIC_BASE_URL.
-    base_url = env.get("OPENAI_BASE_URL") or env.get("ANTHROPIC_BASE_URL")
-    if base_url:
-        env.setdefault("ANTHROPIC_BASE_URL", base_url)
-        env.setdefault("OPENAI_BASE_URL", base_url)
-        env.setdefault("GEAK_BASE_URL", base_url)
-        env.setdefault("LLM_API_BASE", base_url)
+    openai_url = env.get("OPENAI_BASE_URL")
+    if openai_url:
+        env.setdefault("GEAK_BASE_URL", openai_url)
+        env.setdefault("LLM_API_BASE", openai_url)
     if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:
         env["AMD_LLM_API_KEY"] = env["AMD_API_KEY"]
     return {"env_vars": env}

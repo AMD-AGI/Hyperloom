@@ -53,33 +53,22 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
-    # GEAK takes the OpenAI-side key; a split deploy falls back to the
-    # Anthropic-side key.
-    openai_key = (
-        env.get("OPENAI_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("ANTHROPIC_API_KEY")
-        or env.get("AMD_API_KEY")
-    )
+    # Each provider side derives its aliases from its own credentials only:
+    # borrowing across sides would send one provider's key to the other's host.
+    # GEAK speaks the OpenAI protocol, so its aliases come from the OpenAI side.
+    openai_key = env.get("OPENAI_API_KEY") or env.get("AMD_API_KEY")
     if openai_key:
-        env.setdefault("OPENAI_API_KEY", openai_key)
         env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
-    anthropic_key = (
-        env.get("ANTHROPIC_API_KEY")
-        or env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("OPENAI_API_KEY")
-    )
+    anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
         env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
-    base_url = env.get("OPENAI_BASE_URL") or env.get("ANTHROPIC_BASE_URL")
-    if base_url:
-        env.setdefault("OPENAI_BASE_URL", base_url)
-        env.setdefault("ANTHROPIC_BASE_URL", base_url)
-        env.setdefault("GEAK_BASE_URL", base_url)
-        env.setdefault("LLM_API_BASE", base_url)
+    openai_url = env.get("OPENAI_BASE_URL")
+    if openai_url:
+        env.setdefault("GEAK_BASE_URL", openai_url)
+        env.setdefault("LLM_API_BASE", openai_url)
     return env
 
 

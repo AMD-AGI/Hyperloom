@@ -42,19 +42,19 @@ DEFAULT_TIMEOUT_SEC = 7200
 
 
 def _inject_author_gateway_env() -> None:
-    """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
+    """Seed the ``claude`` author subprocess's auth from the Anthropic-side env.
 
-    forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
-    via ``ANTHROPIC_*``. Hyperloom's session env carries ``OPENAI_BASE_URL`` /
-    ``OPENAI_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
-    ``ANTHROPIC_*`` equivalents here. Only fills what is absent; explicit operator
-    values always win.
+    forge-fusion's ``author`` stage drives the ``claude`` CLI, which
+    authenticates via ``ANTHROPIC_*``. Only the Anthropic side is used: the
+    OpenAI base URL and key are never borrowed, since that would point the
+    Claude CLI at a foreign host or hand it a foreign key. With no
+    Anthropic-side credentials the author stage is left unconfigured and fails
+    with the CLI's own auth error rather than silently talking to the OpenAI
+    gateway.
     """
-    openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
-        # Strip trailing /v1 (claude appends its own).
-        os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
-    token = str(os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    token = str(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or ""
+    ).strip()
     if token:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)

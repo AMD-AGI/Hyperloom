@@ -1318,14 +1318,13 @@ def _preflight(
             if prev != want:
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: prefer the explicit Anthropic-side key so a
-        # split-entrypoint deploy auths Claude with its own key; the OpenAI-side
-        # key (same value under a single gateway) is the fallback.
+        # Claude CLI primary key: Anthropic-side credentials only. The OpenAI key
+        # is never borrowed here -- writing it into ~/.claude/config.json would
+        # authenticate Claude against the Anthropic host with a foreign key.
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or os.environ.get("OPENAI_API_KEY", "")
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
