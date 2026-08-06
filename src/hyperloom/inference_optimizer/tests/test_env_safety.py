@@ -114,6 +114,7 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
         "LLM_GATEWAY_KEY": "gateway-secret",
         "LLM_PROXY_API_KEY": "proxy-secret",
         "OPENAI_API_KEY": "openai-secret",
+        "SAFE_API_KEY": "safe-secret",
         "HF_TOKEN": "model-download-token",
         "PATH": "/bin",
         "RUN_EVAL": "true",
