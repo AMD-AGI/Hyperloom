@@ -207,6 +207,51 @@ def test_parse_tool_stdout_no_json_returns_tail() -> None:
     assert "raw_stdout_tail" in out
 
 
+_PRETTY_TOOL_STDOUT = """\
+[claude-sdk] Now Step 1: generating the performance report.
+[claude-sdk] Perf report completed successfully.
+TraceLens SDK orchestrator produced 43 hot kernels
+{
+  "hot_kernels": [
+    {
+      "kernel_id": "k043",
+      "name": "aten::_flash_attention_forward"
+    }
+  ],
+  "status": "ok",
+  "trace_report_path": "/s/tracelens/analysis.md"
+}
+[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/x.so
+"""
+
+
+def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
+    """The shape a tool with a lot to say actually emits.
+
+    A tool that indents its result spans many lines, so the whole-text parse
+    fails on the surrounding progress chatter and the per-line scan never sees a
+    complete object. ``tracelens_analysis`` returned a megabyte of hot-kernel
+    analysis exactly like this — the first time it ever succeeded — and every
+    field of it was dropped.
+    """
+    out = krh._parse_tool_stdout(_PRETTY_TOOL_STDOUT)
+
+    assert out["status"] == "ok"
+    assert out["trace_report_path"] == "/s/tracelens/analysis.md"
+    assert out["hot_kernels"][0]["name"] == "aten::_flash_attention_forward"
+
+
+def test_shape_tool_result_will_not_call_unreadable_output_a_success() -> None:
+    """Inferring ``ok`` from rc==0 made a tool whose output could not be read
+    indistinguishable from one that worked, so the caller recorded an empty
+    analysis over a real one and reported the leg as succeeded."""
+    out = krh._shape_tool_result(0, "progress chatter, no json at all", "")
+
+    assert out["status"] == "failed"
+    assert out["error_class"] == "tool_output_unparseable"
+    assert "raw_stdout_tail" in out
+
+
 def test_shape_tool_result_uses_parsed_json() -> None:
     out = krh._shape_tool_result(0, '{"status": "ok", "kernel_id": "k1"}', "")
     assert out["status"] == "ok" and out["kernel_id"] == "k1"
