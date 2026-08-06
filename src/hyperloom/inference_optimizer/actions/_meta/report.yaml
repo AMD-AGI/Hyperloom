@@ -18,7 +18,7 @@ allowed_tools:
 side_effects:
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 10
 lease_ttl_sec: 300
 description: "Write final.md / final.json under reports/. Coordinator auto-flushes deterministic report at the deadline (invariant); LLM may propose earlier on stop_reason or low remaining."

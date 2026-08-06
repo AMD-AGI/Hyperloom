@@ -57,7 +57,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|

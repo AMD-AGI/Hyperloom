@@ -69,7 +69,7 @@ It asks for these values with a fixed option order:
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
 2. Model:
-   - `Use default (claude-opus-4-8)`
+   - `Use default (claude-opus-5)`
    - `Custom`
 3. Secrets:
    - Setup writes placeholders in `.env`.

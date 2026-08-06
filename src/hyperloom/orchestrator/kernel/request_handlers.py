@@ -3765,7 +3765,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-5").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 

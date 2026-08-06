@@ -207,7 +207,7 @@ class LlmRcaEngine:
 
     base_url: str
     api_key: str
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-5"
     timeout_s: float = 8.0
     max_chars: int = 1500
     throttle: RcaThrottle | None = None

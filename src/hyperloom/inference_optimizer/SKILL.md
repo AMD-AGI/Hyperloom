@@ -572,7 +572,8 @@ auto-`pip install` the SDKs / `ray` / `Magpie` /
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
-{`claude-opus-4-8` preferred, `claude-opus-4-7`, `claude-opus-4-6` fallback}
+{`claude-opus-5` preferred, `claude-opus-4-8`, `claude-opus-4-7`,
+`claude-opus-4-6` fallback}
 binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
 the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
@@ -1201,7 +1202,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|

@@ -1346,7 +1346,7 @@ def _preflight(
                 os.environ.get("CLAUDE_MODEL", "").strip()
                 or os.environ.get("DEEPSEEK_MODEL", "").strip()
                 or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
-                or "claude-opus-4-8"
+                or "claude-opus-5"
             )
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")

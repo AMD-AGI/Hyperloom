@@ -23,15 +23,33 @@ _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# AMD Claude allowlist. Enforced as a hard gate only under
+# AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
+# this tuple and takes the first id the gateway actually serves, so the order
+# is the fallback ladder. Enforced as a hard gate only under
 # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
-# probe is the gate. Allowlisted ids also get the _CLAUDE_FALLBACK_MODEL ladder
-# on a catalog miss (custom ids fail outright).
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
+# probe is the gate, and custom ids outside this tuple fail outright rather
+# than degrade.
+_CLAUDE_PREFERRED_MODEL = "claude-opus-5"
 
-_CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
+_CLAUDE_ALLOWED_MODELS = (
+    _CLAUDE_PREFERRED_MODEL,
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+)
 
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
+# Codex-side counterpart, also ordered best-first. This is a fallback ladder
+# only, never a gate: the Codex smoke test stays WARN-only, so an id outside
+# this tuple is left untouched and merely reported. It exists because the
+# default Codex model is as new as the default Claude one, and without a ladder
+# a gateway that lags behind would only fail on the first Codex turn.
+_CODEX_PREFERRED_MODEL = "gpt-5.6-sol"
+
+_CODEX_FALLBACK_MODELS = (
+    _CODEX_PREFERRED_MODEL,
+    "gpt-5.5",
+    "gpt-5.4",
+)
 
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.
