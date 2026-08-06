@@ -180,6 +180,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_API_KEY=stale-openai-key",
                 "OPENAI_CUSTOM_HEADERS=stale-header: stale",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -227,6 +228,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     assert "OPENAI_API_KEY=" not in text
     assert "OPENAI_CUSTOM_HEADERS=" not in text
     assert "LLM_GATEWAY_KEY=" not in text
+    assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "resolved-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
         "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nLLM_GATEWAY_KEY=\n"
@@ -251,6 +253,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "ANTHROPIC_API_KEY=stale-anthropic-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -299,6 +302,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
     assert "OPENAI_API_KEY=" not in text
     assert "ANTHROPIC_BASE_URL=" not in text
     assert "ANTHROPIC_API_KEY=" not in text
+    assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "deepseek-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
         "OPENAI_BASE_URL=\n"
@@ -614,8 +618,11 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     # neither exported into kernel-agent.env.sh nor written back to .env.
     assert "export OPENAI_API_KEY" not in write_text
     assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
-    # ... and the installer no longer references SAFE_API_KEY anywhere.
-    assert "SAFE_API_KEY" not in script_text
+    # The legacy gateway key is never read, exported or persisted -- but a stale
+    # value left in a migrating .env is still scrubbed.
+    assert "export SAFE_API_KEY" not in script_text
+    assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
+    assert "remove_dotenv_var SAFE_API_KEY" in write_text
     assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
     assert "remove_dotenv_var OPENAI_API_KEY" in write_text
 
@@ -758,6 +765,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=stale-openai-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
+                "SAFE_API_KEY=stale-safe-key",
             ]
         )
         + "\n",
@@ -823,6 +831,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "OPENAI_BASE_URL=" not in dotenv_text
     assert "OPENAI_API_KEY=" not in dotenv_text
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
+    assert "SAFE_API_KEY=" not in dotenv_text
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):

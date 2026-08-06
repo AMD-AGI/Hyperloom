@@ -1179,6 +1179,9 @@ write_env_file() {
     remove_dotenv_var DEEPSEEK_API_KEY
   fi
   remove_dotenv_var ANTHROPIC_AUTH_TOKEN
+  # Legacy gateway key: never read anymore, but purge a stale value so it does
+  # not linger on disk in a migrating .env.
+  remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
   [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"

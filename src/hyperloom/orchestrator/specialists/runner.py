@@ -140,7 +140,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
+    # ak-/pk- cover gateway-issued keys; kept in sync with the value shapes
+    # env_safety.redact_secret_values() masks.
+    re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),

@@ -46,6 +46,17 @@ def test_safe_redact_headers():
     assert "redactable-header-value" not in out
 
 
+def test_safe_redact_bare_gateway_token_shapes():
+    """Gateway keys are ak-/pk- shaped, so a bare token must be masked even when
+    it appears without its env-var name."""
+    line = "curl --header x ak-abc123def456 and pk-lf-98765 and sk-zyx987"
+    out = sr._safe_redact(line)
+    assert "ak-abc123def456" not in out
+    assert "pk-lf-98765" not in out
+    assert "sk-zyx987" not in out
+    assert out.count("[REDACTED]") == 3
+
+
 def test_extra_focus_tags(monkeypatch):
     monkeypatch.setattr(sr, "normalize_dispatch_tags", lambda params: ["anchor", "extra1", "extra2", ""])
     domain = SimpleNamespace(kb_anchor="anchor")
