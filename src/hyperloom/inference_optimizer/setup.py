@@ -25,13 +25,14 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _INSTALL_BAREMETAL_SH = _ASSETS_DIR / "install_baremetal.sh"
 _PACKAGE_SKILL = Path(__file__).resolve().parent / "SKILL.md"
 
+# ``DEEPSEEK_`` is retired as a provider but still scrubbed so an ambient legacy
+# export cannot override the .env the operator just confirmed.
 _AMBIENT_LLM_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "DEEPSEEK_")
 _AMBIENT_LLM_ENV_KEYS = {
     "SAFE_API_KEY",
     "LLM_GATEWAY_KEY",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
-    "DEEPSEEK_MODEL",
     "GEAK_CLAUDE_MODEL",
 }
 _AMBIENT_RUNTIME_ENV_KEYS = {

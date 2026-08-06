@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
@@ -507,13 +508,13 @@ def test_preflight_anthropic_only_sets_geak_v4_claude_model(
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "claude-opus-4-6"
 
 
-def test_preflight_deepseek_only_sets_geak_v4_claude_model(
+def test_preflight_migrates_retired_deepseek_env_to_both_sides(
     monkeypatch,
     tmp_path,
     clean_url_env,
     stub_install_steps,
 ):
-    """GEAKv4 can use DeepSeek through the Anthropic-compatible Claude workflow."""
+    """A retired DEEPSEEK_* config resolves to both protocol sides plus its model."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
@@ -529,10 +530,11 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
     cli._preflight()
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert cli.os.environ["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-v4-pro"
 
 
-def test_preflight_deepseek_only_exports_claude_cli_auth_aliases(
+def test_preflight_retired_deepseek_env_exports_claude_cli_auth_aliases(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -1382,45 +1384,43 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     assert cli._codex_model_should_follow_claude() is True
 
 
-def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
-    """DeepSeek's Anthropic-compatible endpoint follows the Claude-side model."""
+def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monkeypatch):
+    """An empty CODEX_MODEL is filled by the shim, not left to the GPT default."""
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
-    resolved = cli_credentials._resolve_llm_endpoints()
-    for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
-        if value:
-            monkeypatch.setenv(key, value)
-        else:
-            monkeypatch.delenv(key, raising=False)
+    for key, value in deepseek_compat_env().items():
+        monkeypatch.setenv(key, value)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
-    assert resolved == ("https://api.deepseek.com/anthropic", "")
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
-    assert cli._codex_model_should_follow_claude() is True
+    # Both protocol sides now resolve, so Codex no longer has to follow Claude.
+    assert cli._codex_model_should_follow_claude() is False
 
 
-def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
-    """A key-only DeepSeek config must not inherit the Claude Opus default."""
+def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch):
+    """A key-only legacy config must not inherit the Claude Opus / GPT defaults."""
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("CODEX_MODEL", raising=False)
 
-    resolved = cli_credentials._resolve_llm_endpoints()
-    for key, value in (("ANTHROPIC_BASE_URL", resolved[0]), ("OPENAI_BASE_URL", resolved[1])):
-        if value:
-            monkeypatch.setenv(key, value)
-        else:
-            monkeypatch.delenv(key, raising=False)
+    updates = deepseek_compat_env()
+    for key, value in updates.items():
+        monkeypatch.setenv(key, value)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
     assert args.claude_model == "deepseek-v4-pro"
     assert args.codex_model == "deepseek-v4-pro"
 

@@ -40,8 +40,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
@@ -49,9 +47,83 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "LLM_GATEWAY_KEY",
 )
 
-DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+# Retired provider-specific variables. DeepSeek is a dual-protocol gateway, not
+# a third provider, so it is expressed with the standard Anthropic + OpenAI
+# variables; these are read only by ``deepseek_compat_env`` to migrate an
+# existing configuration.
+LEGACY_DEEPSEEK_ENV_KEYS: tuple[str, ...] = (
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL",
+)
+
+_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+_DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com/v1"
+_DEEPSEEK_MODEL = "deepseek-v4-pro"
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _deepseek_endpoint_pair(legacy_base_url: str) -> tuple[str, str]:
+    """Return ``(anthropic_base_url, openai_base_url)`` for a legacy DeepSeek URL.
+
+    ``DEEPSEEK_BASE_URL`` historically named the Anthropic-compatible side, but
+    parts of the runtime also fed it to an OpenAI client. Derive the sibling
+    endpoint from whichever side the value points at so both protocols resolve
+    to a route that exists.
+    """
+    base = legacy_base_url.strip().rstrip("/")
+    if not base:
+        return _DEEPSEEK_ANTHROPIC_BASE_URL, _DEEPSEEK_OPENAI_BASE_URL
+    lowered = base.lower()
+    if lowered.endswith("/anthropic"):
+        return base, f"{base[: -len('/anthropic')]}/v1"
+    if lowered.endswith("/v1"):
+        return f"{base[: -len('/v1')]}/anthropic", base
+    return base, f"{base}/v1"
+
+
+def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Translate a legacy ``DEEPSEEK_*`` configuration into the standard variables.
+
+    DeepSeek serves both protocols from one gateway: ``/anthropic`` speaks the
+    Anthropic API and ``/v1`` speaks OpenAI chat-completions, both authenticated
+    with the same key. Expressing it as a third provider forced every caller to
+    special-case it, so the runtime now only knows the Anthropic and OpenAI
+    sides and this function is the single place that understands the retired
+    variables.
+
+    Only keys absent from ``env`` are returned, so an explicit operator value
+    always wins and repeated application is a no-op.
+
+    Args:
+        env: Environment mapping to read; defaults to ``os.environ``.
+
+    Returns:
+        The ``ANTHROPIC_*`` / ``OPENAI_*`` / model updates to apply, or an empty
+        mapping when no legacy DeepSeek variable is set.
+    """
+    source = env if env is not None else os.environ
+    api_key = (source.get("DEEPSEEK_API_KEY") or "").strip()
+    legacy_url = (source.get("DEEPSEEK_BASE_URL") or "").strip()
+    if not api_key and not legacy_url:
+        return {}
+
+    anthropic_url, openai_url = _deepseek_endpoint_pair(legacy_url)
+    model = (source.get("DEEPSEEK_MODEL") or "").strip() or _DEEPSEEK_MODEL
+    candidates: dict[str, str] = {
+        "ANTHROPIC_BASE_URL": anthropic_url,
+        "OPENAI_BASE_URL": openai_url,
+        "CLAUDE_MODEL": model,
+        "CODEX_MODEL": model,
+        # GEAKv4 drives Claude Code with its own model variable; without this it
+        # would fall back to an AMD Claude id the DeepSeek gateway cannot serve.
+        "GEAK_CLAUDE_MODEL": model,
+    }
+    if api_key:
+        candidates["ANTHROPIC_API_KEY"] = api_key
+        candidates["ANTHROPIC_AUTH_TOKEN"] = api_key
+        candidates["OPENAI_API_KEY"] = api_key
+    return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
 
 
 def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
@@ -191,16 +263,15 @@ def claude_sdk_env_options(
     developer-machine configuration cannot override the run contract.
     """
     source = dict(env if env is not None else os.environ)
+    # Callers that never reach CLI preflight (library-mode backends) may still
+    # carry a legacy DeepSeek configuration; normalize before probing signals.
+    source.update(deepseek_compat_env(source))
     if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
         return {}
-
-    if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
-        source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
 
     fallback_key = (
         source.get("ANTHROPIC_AUTH_TOKEN")
         or source.get("ANTHROPIC_API_KEY")
-        or source.get("DEEPSEEK_API_KEY")
         or source.get("OPENAI_API_KEY")
         or source.get("SAFE_API_KEY")
         or source.get("LLM_GATEWAY_KEY")
@@ -241,12 +312,12 @@ def apply_reasoning_effort(
 
 __all__ = [
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
-    "DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL",
-    "DEFAULT_DEEPSEEK_MODEL",
+    "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
     "apply_reasoning_effort",
     "claude_sdk_env_options",
+    "deepseek_compat_env",
     "derive_openai_base_url",
     "openai_client_kwargs",
     "parse_custom_headers",

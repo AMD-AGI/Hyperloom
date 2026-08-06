@@ -632,12 +632,7 @@ class ClaudeBackend:
         self._active_turn_diagnostic = None
 
     def _gateway_endpoint_identifier(self) -> str | None:
-        raw = (
-            os.environ.get("ANTHROPIC_BASE_URL")
-            or os.environ.get("DEEPSEEK_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL")
-            or ""
-        ).strip()
+        raw = (os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip()
         if not raw:
             return None
         parts = urlsplit(raw)

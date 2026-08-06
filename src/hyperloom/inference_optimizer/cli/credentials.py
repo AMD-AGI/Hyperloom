@@ -22,7 +22,6 @@ log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
 # AMD Claude allowlist. Enforced as a hard gate only under
 # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
@@ -205,26 +204,11 @@ def _is_official_openai_url(value: str | None) -> bool:
     return urlparse(str(value).strip()).hostname == "api.openai.com"
 
 
-def _is_deepseek_anthropic_url(value: str | None) -> bool:
-    if not value:
-        return False
-    from urllib.parse import urlparse
-
-    parts = urlparse(str(value).strip())
-    return parts.hostname == "api.deepseek.com" and parts.path.rstrip("/") == "/anthropic"
-
-
 def _has_explicit_anthropic_key() -> bool:
     safe_key = os.environ.get("SAFE_API_KEY", "")
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     return bool((api_key and api_key != safe_key) or (auth_token and auth_token != safe_key))
-
-
-def _has_explicit_deepseek_key() -> bool:
-    safe_key = os.environ.get("SAFE_API_KEY", "")
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    return bool(deepseek_key and deepseek_key != safe_key)
 
 
 def _has_explicit_openai_key() -> bool:
@@ -263,14 +247,11 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
-    deepseek_url = os.environ.get("DEEPSEEK_BASE_URL", "").strip()
     anthropic_explicit = bool(anthropic_url)
     openai_explicit = bool(openai_url)
 
     if not anthropic_url and _has_explicit_anthropic_key():
         anthropic_url = _OFFICIAL_ANTHROPIC_BASE_URL
-    if not anthropic_url and _has_explicit_deepseek_key():
-        anthropic_url = deepseek_url or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
     if not openai_url and _has_explicit_openai_key():
         openai_url = _OFFICIAL_OPENAI_BASE_URL
 
@@ -280,13 +261,7 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
     if openai_url and not anthropic_url and openai_explicit and not _is_official_openai_url(openai_url):
         # Single OpenAI-style gateway: derive the Anthropic base from it.
         return _derive_anthropic_base_url(openai_url), openai_url
-    if (
-        anthropic_url
-        and not openai_url
-        and anthropic_explicit
-        and not _is_official_anthropic_url(anthropic_url)
-        and not _is_deepseek_anthropic_url(anthropic_url)
-    ):
+    if anthropic_url and not openai_url and anthropic_explicit and not _is_official_anthropic_url(anthropic_url):
         # Anthropic-compatible gateway: the OpenAI/Codex side reuses the same
         # gateway with a different chat-completions path. Derive it so
         # OPENAI_BASE_URL isn't left without ``/v1`` (which 404s).
@@ -354,7 +329,6 @@ def _validate_credentials() -> None:
         or os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("DEEPSEEK_API_KEY")
     )
     has_usable_endpoint = bool(
         (
@@ -362,7 +336,6 @@ def _validate_credentials() -> None:
             and (
                 os.environ.get("ANTHROPIC_API_KEY")
                 or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("DEEPSEEK_API_KEY")
                 or os.environ.get("SAFE_API_KEY")
             )
         )
@@ -375,7 +348,7 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
+        missing.append("an API key (SAFE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)")
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
@@ -393,9 +366,10 @@ def _validate_credentials() -> None:
         "       export ANTHROPIC_BASE_URL=https://api.anthropic.com  ANTHROPIC_API_KEY=sk-ant-xxx\n"
         "       export OPENAI_BASE_URL=https://api.openai.com/v1      OPENAI_API_KEY=sk-xxx\n"
         "     Official provider keys may omit the matching *_BASE_URL.\n"
-        "  3. DeepSeek Anthropic-compatible endpoint:\n"
-        "       export DEEPSEEK_API_KEY=sk-xxx\n"
-        "       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
+        "  3. A dual-protocol gateway such as DeepSeek is case 2 with both\n"
+        "     sides pointed at the same host:\n"
+        "       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic  ANTHROPIC_API_KEY=sk-xxx\n"
+        "       export OPENAI_BASE_URL=https://api.deepseek.com/v1            OPENAI_API_KEY=sk-xxx",
         file=sys.stderr,
     )
     sys.exit(2)
