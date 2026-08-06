@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover the --no-explore CLI flag + resume write-back semantics."""
+"""Cover the --no-explore / --no-eval CLI flags + their resume write-back semantics."""
 
 from __future__ import annotations
 
@@ -143,3 +143,13 @@ def test_resume_writeback_no_op_when_state_and_flag_both_enabled():
     assert _apply_resume_writeback(state, args) == ""
     assert state.explore_enabled is True
     assert args.no_explore is False
+
+
+# Anchored-accuracy cutoff: a resume may retroactively honour --no-eval only
+# while no accuracy has been anchored, since every KEEP so far was graded on it.
+@pytest.mark.parametrize(
+    "baseline_accuracy,expected",
+    [(0.0, True), (-1.0, True), (0.0001, False), (0.9, False)],
+)
+def test_resume_can_disable_eval(baseline_accuracy: float, expected: bool) -> None:
+    assert cli._resume_can_disable_eval(baseline_accuracy) is expected

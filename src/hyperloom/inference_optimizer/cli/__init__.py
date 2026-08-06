@@ -1110,6 +1110,22 @@ def _resume_can_disable_explore(cur_phase: str) -> bool:
     return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
 
 
+def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
+    """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session.
+
+    The cutoff is the anchored accuracy rather than a phase: the baseline runs
+    inside PRELUDE, so the phase alone cannot say whether a reference exists.
+    Once it does, every KEEP so far was graded against it.
+
+    Args:
+        baseline_accuracy (float): The persisted ``state.baseline_accuracy``.
+
+    Returns:
+        bool: ``True`` while no accuracy is anchored yet.
+    """
+    return float(baseline_accuracy or 0.0) <= 0.0
+
+
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -1608,6 +1624,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"  explore phase         : WARN --no-explore ignored; "
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
+                )
+        # Same persistence contract for the eval toggle.
+        if state.eval_disabled:
+            args.no_eval = True
+            print("  accuracy eval         : DISABLED (persisted from original run)")
+        elif bool(getattr(args, "no_eval", False)):
+            anchored = float(state.baseline_accuracy or 0.0)
+            if _resume_can_disable_eval(anchored):
+                state.eval_disabled = True
+                state.save(session_dir)
+                print("  accuracy eval         : DISABLING for resume (--no-eval + no anchored accuracy)")
+            else:
+                print(
+                    f"  accuracy eval         : WARN --no-eval ignored; "
+                    f"session already anchored accuracy={anchored:.4f} "
+                    f"(cannot retroactively ungrade prior KEEPs)"
                 )
 
         # CRITICAL: clear leftover stop_reason or Orchestration heartbeats forever thinking work is done.
