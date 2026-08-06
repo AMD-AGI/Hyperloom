@@ -24,20 +24,24 @@ _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# AMD Claude allowlist. Enforced as a hard gate only under
+# AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
+# this tuple and takes the first id the gateway actually serves, so the order
+# is the fallback ladder. Enforced as a hard gate only under
 # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
-# probe is the gate. Allowlisted ids also get the _CLAUDE_FALLBACK_MODEL ladder
-# on a catalog miss (custom ids fail outright).
+# probe is the gate, and custom ids outside this tuple fail outright rather
+# than degrade.
 _CLAUDE_PREFERRED_MODEL = "claude-opus-5"
-
-_CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
 
 _CLAUDE_ALLOWED_MODELS = (
     _CLAUDE_PREFERRED_MODEL,
     "claude-opus-4-8",
     "claude-opus-4-7",
-    _CLAUDE_FALLBACK_MODEL,
+    "claude-opus-4-6",
 )
+
+# First rung below the preferred model. Only used for operator-facing messages;
+# the live ladder is _CLAUDE_ALLOWED_MODELS order.
+_CLAUDE_FALLBACK_MODEL = _CLAUDE_ALLOWED_MODELS[1]
 
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.

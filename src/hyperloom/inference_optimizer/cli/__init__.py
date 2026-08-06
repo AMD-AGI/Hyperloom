@@ -665,7 +665,9 @@ def _validate_and_resolve_claude_model(
 ) -> set[str] | None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``.
 
-    Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
+    Probes the gateway catalog (retries); on a miss it walks
+    ``_CLAUDE_ALLOWED_MODELS`` in order and falls back to the first id the
+    gateway serves with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test). The AMD
     ``_CLAUDE_ALLOWED_MODELS`` allowlist is enforced only when the operator sets
     ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL`` to 0/false/no/off (and is
@@ -815,10 +817,18 @@ def _validate_and_resolve_claude_model(
         )
         sys.exit(2)
 
-    if _CLAUDE_FALLBACK_MODEL in catalog_ids:
-        print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {_CLAUDE_FALLBACK_MODEL!r}")
-        args.claude_model = _CLAUDE_FALLBACK_MODEL
-        return catalog_ids
+    # Walk the allowlist in order so it acts as a real preference ladder: a
+    # gateway that carries opus-4-8 but not the newer default must land on 4-8,
+    # not skip two generations down to the last entry.
+    # Allowlist ids are already in the probe's normalized form, so a plain
+    # membership test is enough here.
+    for candidate in _CLAUDE_ALLOWED_MODELS:
+        if candidate == chosen:
+            continue
+        if candidate in catalog_ids:
+            print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {candidate!r}")
+            args.claude_model = candidate
+            return catalog_ids
 
     print(
         f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "

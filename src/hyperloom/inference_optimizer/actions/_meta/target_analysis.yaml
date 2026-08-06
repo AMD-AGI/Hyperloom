@@ -14,7 +14,7 @@ side_effects:
   - reads_model_files
   - writes_state
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 10
 lease_ttl_sec: 60
 description: "Runs first in PRELUDE, before baseline; always writes target_analysis/target_baseline.json. With --compare-against-gpu set, fetches InferenceX reference; otherwise writes a 'no_target_gpu_configured' marker. Advisory only."

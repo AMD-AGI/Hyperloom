@@ -19,7 +19,7 @@ side_effects:
   - reads_server
   - writes_results
 preferred_backend: claude
-preferred_model: claude-opus-4-7
+preferred_model: claude-opus-5
 max_turns: 25
 lease_ttl_sec: 4200
 description: "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; reproducing ≥ --warm-replay-min-reproduce-pct of the historical gain pushes the warm config onto optimization_stack."

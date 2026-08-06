@@ -211,11 +211,13 @@ optimization. Model names must exist in your key's catalog:
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
 | GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
+| Codex / external | `CODEX_MODEL` | for example `gpt-5.6-sol` | Use a gpt/codex-family model. |
 
-- Do *not* use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
-  the gateway returns `Invalid model name` (which can surface misleadingly as
-  `401 missing subscription key`).
+- Do *not* append effort/thinking suffixes (for example
+  `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`
+  (which can surface misleadingly as `401 missing subscription key`). Ids the
+  catalog lists verbatim are fine even when they look suffixed — `gpt-5.6-sol`
+  is a deployment name, not a variant of a bare `gpt-5.6`.
 - To restore the stricter AMD Claude allowlist instead of catalog validation,
   set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 - These variables are set in `proxy.env` and are on the docker `-e` allowlist in

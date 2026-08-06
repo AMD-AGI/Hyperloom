@@ -68,7 +68,7 @@ DOMAIN_KEYWORDS: dict[str, list[str]] = {
 
 _PRIORITY_FILES = ["empirical_kb.md", "shared_pitfalls.md"]
 
-_DEFAULT_MODEL = "claude-opus-4-7"
+_DEFAULT_MODEL = "claude-opus-5"
 
 
 @dataclass
