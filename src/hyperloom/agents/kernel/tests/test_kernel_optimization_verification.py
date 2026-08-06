@@ -2272,3 +2272,140 @@ def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "REVERT"
     assert proposal["reasons"] == ["compile failed"]
+
+
+def _applyback(**overrides):
+    payload = {
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "validation_scope": "reference",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 48.5,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "best_commit": "a" * 40,
+        "commit_ref": "refs/hyperloom/applyback/attempt-1",
+        "builder_symbol": "build_fused_gemm_module",
+        "changed_files": ["flydsl_kernel.py", "kernel.py"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _applyback_attempt(tmp_path, *, report_text="", **overrides):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(report_text or "[correctness] pass\n[integration_validation] pending\n")
+    artifact = tmp_path / "optimized.py"
+    artifact.write_text(
+        "import torch\n\n\ndef flydsl_kernel(x):\n    return x + 1\n",
+        encoding="utf-8",
+    )
+    attempt = _attempt(report, artifact, backend="forge")
+    attempt["mean_case_speedup"] = 2.0
+    attempt["flydsl_applyback"] = _applyback(**overrides)
+    return attempt
+
+
+def test_reference_verified_applyback_answers_the_micro_correctness_gate(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_passed"] is True
+    assert verification["correctness_source"] == "forge_rewrite_reference"
+    assert verification["integration_validation_status"] == "pending"
+
+
+def test_applyback_reference_outranks_the_report_scan(tmp_path):
+    """The validated manifest is the authority; report prose cannot override it."""
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path, report_text="correctness failed\n")],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_source"] == "forge_rewrite_reference"
+    assert verification["correctness_passed"] is True
+
+
+def test_cli_correctness_override_still_outranks_the_applyback(tmp_path):
+    verification = ko.build_verification(
+        _args(
+            source_file=str(tmp_path / "kernel.py"),
+            micro_speedup=1.6,
+            correctness_passed=False,
+        ),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    assert verification["correctness_source"] == "cli_override"
+    assert verification["correctness_passed"] is False
+
+
+def test_verification_propagates_the_applyback_provenance(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    evidence = verification["framework_applyback"]
+    assert evidence["artifact_kind"] == "framework_applyback"
+    assert evidence["artifact_schema_version"] == 2
+    assert evidence["validation_scope"] == "reference"
+    assert evidence["reference_correctness_passed"] is True
+    assert evidence["reference_snr_db"] == 48.5
+    assert evidence["integration_validation_required"] is True
+    assert evidence["integration_validation_status"] == "pending"
+    assert evidence["commit"] == "a" * 40
+    assert evidence["commit_ref"] == "refs/hyperloom/applyback/attempt-1"
+    assert evidence["builder_symbol"] == "build_fused_gemm_module"
+    assert evidence["changed_files"] == ["flydsl_kernel.py", "kernel.py"]
+
+
+def test_verification_without_an_applyback_carries_no_evidence(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[correctness] pass\n")
+
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_attempt(report, backend="geak")],
+        benchmark_available=True,
+    )
+
+    assert verification["framework_applyback"] == {}
+    assert verification["integration_validation_status"] == ""
+    assert verification["correctness_source"] == "report_scan"
+
+
+def test_pending_integration_keeps_the_micro_proposal_and_names_the_deferral(tmp_path):
+    """A pending framework verdict must not block the patch from reaching E2E."""
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.6),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    proposal = ko.make_proposal(verification)
+
+    assert proposal["decision"] == "KEEP"
+    assert proposal["reasons"] == [
+        "framework apply-back reference-verified; framework E2E/accuracy "
+        "deferred to integrate"
+    ]
+
+
+def test_pending_integration_does_not_rescue_a_below_threshold_speedup(tmp_path):
+    verification = ko.build_verification(
+        _args(source_file=str(tmp_path / "kernel.py"), micro_speedup=1.02),
+        [_applyback_attempt(tmp_path)],
+        benchmark_available=True,
+    )
+
+    proposal = ko.make_proposal(verification)
+
+    assert proposal["decision"] == "NEEDS_REVIEW"
+    assert any("below KEEP threshold" in reason for reason in proposal["reasons"])
