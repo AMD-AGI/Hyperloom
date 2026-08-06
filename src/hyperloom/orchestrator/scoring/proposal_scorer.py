@@ -307,7 +307,29 @@ class ProposalScorer:
         try:
             text_parts, usage = await asyncio.wait_for(_read_stream(), timeout=self.call_timeout_s)
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
+            error = RuntimeError(f"timed out after {self.call_timeout_s:.0f}s")
+            self._trace_scorer_llm_failure(
+                model,
+                error,
+                latency_ms=int((time.perf_counter() - _t0) * 1000),
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
+            )
+            raise error from exc
+        except Exception as exc:
+            # Anything else out of the stream (transport, proxy 5xx, malformed
+            # chunk) is still a model call that produced nothing usable.
+            # Cancellation is a BaseException and deliberately not caught.
+            self._trace_scorer_llm_failure(
+                model,
+                exc,
+                latency_ms=int((time.perf_counter() - _t0) * 1000),
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
+            )
+            raise
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         # Record this model's token spend before parsing (best-effort).
         self._trace_scorer_llm_call(
@@ -383,6 +405,53 @@ class ProposalScorer:
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
                 "full-trace: proposal_scorer llm_call append failed for model=%s",
+                model,
+                exc_info=True,
+            )
+
+    def _trace_scorer_llm_failure(
+        self,
+        model: str,
+        error: BaseException,
+        *,
+        latency_ms: int | None = None,
+        task_id: str | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> None:
+        """Append one ``status="error"`` row for a scoring call that never returned.
+
+        Recorded here rather than at the caller because the per-model context
+        (model slug, task/tick/phase) is only known inside this coroutine — by
+        the time :func:`asyncio.gather` has folded the exception into the
+        ``errors`` map, which model failed is all that survives.
+
+        Args:
+            model: The model slug whose call failed.
+            error: The exception that ended the call.
+            latency_ms: Time spent before failing, when measured.
+            task_id: The specialist round this scoring spend is attributed to.
+            tick: Timeline tick threaded from the coordinator dispatch point.
+            phase: Optimization phase threaded from the coordinator dispatch point.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component="proposal_scorer",
+                role="proposal_scorer",
+                error=error,
+                model=str(model),
+                task_id=task_id,
+                tick=tick,
+                phase=phase,
+                latency_ms=latency_ms,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break scoring
+            log.debug(
+                "full-trace: proposal_scorer llm_call failure append failed for model=%s",
                 model,
                 exc_info=True,
             )

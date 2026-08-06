@@ -36,7 +36,14 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from .agent_role import DEFAULT_CODEX_MODEL
-from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env, safe_int
+from .base import (
+    BackendError,
+    BackendTurnResult,
+    LLMCallFailed,
+    build_chat_messages,
+    parse_call_timeout_env,
+    safe_int,
+)
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -288,11 +295,11 @@ class CodexBackend:
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
-            raise BackendError(
+            raise LLMCallFailed(
                 f"Codex API call timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"Codex API call failed: {exc!r}") from exc
+            raise LLMCallFailed(f"Codex API call failed: {exc!r}") from exc
 
         choice = resp.choices[0]
         text = choice.message.content or ""
@@ -342,11 +349,11 @@ class CodexBackend:
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
-            raise BackendError(
+            raise LLMCallFailed(
                 f"Codex Responses API call timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"Codex Responses API call failed: {exc!r}") from exc
+            raise LLMCallFailed(f"Codex Responses API call failed: {exc!r}") from exc
 
         text, citations = _extract_responses_output(resp)
         finish = _field(resp, "status")

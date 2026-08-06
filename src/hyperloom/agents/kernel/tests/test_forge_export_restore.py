@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import subprocess
 import sys
 import tempfile
-import logging
 from pathlib import Path
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
@@ -174,6 +175,124 @@ def test_export_from_best_commit_ignores_unvalidated_worktree(tmp_path):
     assert exported.read_text() == "KERNEL_VALIDATED_BEST\n"
     assert "KERNEL_VALIDATED_BEST" in patch
     assert "KERNEL_UNVALIDATED_TIMEOUT_CANDIDATE" not in patch
+
+
+def test_canonical_forge_artifacts_resolve_from_campaign_root(tmp_path):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    files = bundle / "files"
+    files.mkdir(parents=True)
+    (bundle / "forge.patch").write_text("diff --git a/a.py b/a.py\n")
+    (files / "a.py").write_text("VALUE = 2\n")
+    manifest = {
+        "schema_version": 1,
+        "artifact_dir": "best/iter_003",
+        "patch_path": "best/iter_003/forge.patch",
+        "changed_files": ["a.py"],
+    }
+    (campaign / "best" / "manifest.json").write_text(
+        json.dumps(manifest)
+    )
+
+    normalized = forge_submit._canonical_forge_artifacts(
+        str(workspace),
+        manifest,
+    )
+
+    assert normalized["best_manifest"] == str(
+        campaign / "best" / "manifest.json"
+    )
+    assert normalized["canonical_patch_path"] == str(
+        bundle / "forge.patch"
+    )
+    assert normalized["canonical_files_root"] == str(files)
+    assert normalized["changed_files"] == ["a.py"]
+
+
+def test_canonical_forge_artifacts_reject_path_escape(tmp_path, caplog):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments" / "best"
+    campaign.mkdir(parents=True)
+    (campaign / "manifest.json").write_text("{}")
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "../outside",
+                "patch_path": "../outside.patch",
+                "changed_files": ["../escape.py"],
+            },
+        )
+        == {}
+    )
+    assert "changed file path escapes" in caplog.text
+
+
+def test_canonical_forge_artifacts_logs_missing_files_root(tmp_path, caplog):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    bundle.mkdir(parents=True)
+    (bundle / "forge.patch").write_text(
+        "diff --git a/a.py b/a.py\n",
+        encoding="utf-8",
+    )
+    (campaign / "best" / "manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "best/iter_003",
+                "patch_path": "best/iter_003/forge.patch",
+                "changed_files": ["a.py"],
+            },
+        )
+        == {}
+    )
+    assert "expected files directory does not exist" in caplog.text
+    assert str(bundle / "files") in caplog.text
+
+
+def test_canonical_forge_artifacts_rejects_files_symlink_escape(
+    tmp_path,
+    caplog,
+):
+    workspace = tmp_path / "worktree"
+    campaign = workspace / "forge_experiments"
+    bundle = campaign / "best" / "iter_003"
+    bundle.mkdir(parents=True)
+    (bundle / "forge.patch").write_text(
+        "diff --git a/a.py b/a.py\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-files"
+    outside.mkdir()
+    (outside / "a.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (bundle / "files").symlink_to(outside, target_is_directory=True)
+    (campaign / "best" / "manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    assert (
+        forge_submit._canonical_forge_artifacts(
+            str(workspace),
+            {
+                "artifact_dir": "best/iter_003",
+                "patch_path": "best/iter_003/forge.patch",
+                "changed_files": ["a.py"],
+            },
+        )
+        == {}
+    )
+    assert "files directory resolves outside" in caplog.text
+    assert str(outside) in caplog.text
 
 
 def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path):

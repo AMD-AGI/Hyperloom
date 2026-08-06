@@ -27,7 +27,7 @@ from hyperloom.common import io as _common_io
 from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
-from ..roles.base import BackendError
+from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
@@ -720,6 +720,52 @@ class SpecialistRunner:
                 exc_info=True,
             )
 
+    def _trace_specialist_llm_failure(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        error: BaseException,
+        latency_ms: int | None = None,
+        tick: int | None = None,
+        phase: str | None = None,
+    ) -> None:
+        """Append one ``status="error"`` row for a specialist turn that never returned.
+
+        The turn loop swallows a failed ``backend.run`` and breaks, so nothing
+        propagates to the Coordinator; without a row written here the failed
+        turn is invisible to the ledger and to Langfuse.
+
+        Args:
+            task_id: The specialist task id.
+            turn: The turn index that failed.
+            error: The exception that ended the turn.
+            latency_ms: Time spent before failing, when measured.
+            tick: Timeline tick for this turn, when known.
+            phase: Optimization phase for this turn, when known.
+        """
+        if self.session_dir is None:
+            return
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component="specialist",
+                task_id=task_id,
+                turn=turn,
+                error=error,
+                latency_ms=latency_ms,
+                tick=tick,
+                phase=phase,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the run
+            log.debug(
+                "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
+                task_id,
+                turn,
+                exc_info=True,
+            )
+
     def _record_specialist_intel(
         self,
         *,
@@ -886,6 +932,16 @@ class SpecialistRunner:
                         "error": str(exc),
                     },
                 )
+                if isinstance(exc, LLMCallFailed):
+                    _tick, _phase = self._ctx_tick_phase(ctx)
+                    self._trace_specialist_llm_failure(
+                        task_id=ctx.task.task_id,
+                        turn=turn_idx,
+                        error=exc,
+                        latency_ms=int((time.perf_counter() - _t0) * 1000),
+                        tick=_tick,
+                        phase=_phase,
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 — defensive
                 backend_error = f"backend_unexpected:{exc!r}"

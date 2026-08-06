@@ -54,7 +54,7 @@ from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ..actions.registry import ActionRegistry
 from ..roles.agent_role import AgentRole, default_role_registry
-from ..roles.base import Backend, BackendError, BackendTurnResult
+from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
 from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
@@ -1727,9 +1727,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        # No-op for backends without the hook.
+        # No-op for backends without the hook. Presence of the hook is also what
+        # tells the failure path below to stay out of the way: such a backend
+        # records its own row, with the review model and its own latency, and a
+        # second row from here would count one provider failure twice.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
-        if callable(_set_trace_ctx):
+        backend_self_traces = callable(_set_trace_ctx)
+        if backend_self_traces:
             try:
                 _set_trace_ctx(
                     tick=int(self.shared_state.tick or 0),
@@ -1756,6 +1760,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 outcome="backend_error",
                 error=exc,
             )
+            if isinstance(exc, LLMCallFailed) and not backend_self_traces:
+                self._trace_reactor_llm_failure(
+                    agent_name,
+                    exc,
+                    latency_ms=int((time.perf_counter() - _t0) * 1000),
+                )
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1960,6 +1970,51 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
+                agent_name,
+                exc_info=True,
+            )
+
+    def _trace_reactor_llm_failure(
+        self,
+        agent_name: str,
+        error: LLMCallFailed,
+        *,
+        latency_ms: int | None = None,
+    ) -> None:
+        """Append one ``status="error"`` ``llm_calls.jsonl`` row for a failed turn.
+
+        The success path (:meth:`_trace_reactor_llm_call`) can only run once a
+        ``BackendTurnResult`` exists, so without this the ledger — and therefore
+        Langfuse — has no trace of a turn whose model call never returned. The
+        row carries no token counters; it exists to make the failure countable.
+
+        Only :class:`LLMCallFailed` reaches here, and only from a backend that
+        does not trace itself. A plain ``BackendError`` can come from a
+        deterministic local fault (unreadable ``emit.json``, missing
+        ``--review`` path, absent SDK) that never touched the provider, and
+        recording those would make the Langfuse error rate meaningless; a
+        self-tracing backend (the critic) has already written a richer row of
+        its own, so writing here too would double-count one failure.
+
+        Args:
+            agent_name: The reactor role; doubles as trace component and role.
+            error: The model-call failure that ended the turn.
+            latency_ms: Time spent before failing, when measured.
+        """
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component=agent_name,
+                role=agent_name,
+                error=error,
+                tick=int(self.shared_state.tick or 0),
+                phase=(self.shared_state.phase or "") or None,
+                latency_ms=latency_ms,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
+            log.debug(
+                "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,
                 exc_info=True,
             )

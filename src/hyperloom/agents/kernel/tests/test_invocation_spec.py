@@ -243,6 +243,7 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "kernel_sources": [str(implementation)],
         "kernel_kind": "triton",
         "device_kernel_names": ["unified_attention_kernel"],
+        "runtime_backend": "ROCM_ATTN",
         "task_group": {
             "operator_identity": {
                 "operation": "vllm :: unified_attention_with_output"
@@ -259,7 +260,9 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "sources": [str(wrapper), str(implementation)],
         "kernel_kind": "triton",
         "symbols": ["unified_attention_kernel"],
+        "runtime_backend": "ROCM_ATTN",
     }
+    assert spec["execution"]["runtime_backend"] == "ROCM_ATTN"
     assert spec["edit_target"]["kernel_sources"] == [str(implementation)]
 
 
