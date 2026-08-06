@@ -213,7 +213,8 @@ def _section_phase_semantics(
     lines.extend(
         [
             "",
-            "roofline, profile, replay_warm_recipe and framework are never",
+            "roofline, profile, replay_warm_recipe, conc_sweep and",
+            "framework_agent are never",
             "in the sets above: the Coordinator auto-manages them and PolicyGate",
             "denies any attempt to propose them. Denial of any action lands in",
             "your inbox as a `policy_denied` event.",

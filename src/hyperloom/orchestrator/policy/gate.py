@@ -1233,7 +1233,7 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework / "
+                    "roofline / profile / replay_warm_recipe / framework_agent / "
                     "conc_sweep are driven by the Coordinator (PRELUDE "
                     "bootstrap, +10% watermark refresh, warm-recipe replay, "
                     "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "
