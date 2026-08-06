@@ -1666,15 +1666,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             manifest=manifest,
             resume=True,
         )
-        # KnowledgePlane facade (PR Monitor MCP); None when --degraded-pr.
-        knowledge_plane = (
-            None
-            if not getattr(args, "pr_monitor_enabled", True)
-            else _bootstrap_knowledge_plane(
-                args,
-                recipe_kb_client=recipe_kb_client,
-                session_dir=session_dir,
-            )
+        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+        knowledge_plane = _bootstrap_knowledge_plane(
+            args,
+            recipe_kb_client=recipe_kb_client,
+            session_dir=session_dir,
         )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
@@ -1855,15 +1851,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             manifest=manifest,
             resume=False,
         )
-        # KnowledgePlane facade for specialists (PR Monitor MCP); None when --degraded-pr.
-        knowledge_plane = (
-            None
-            if not getattr(args, "pr_monitor_enabled", True)
-            else _bootstrap_knowledge_plane(
-                args,
-                recipe_kb_client=recipe_kb_client,
-                session_dir=session_dir,
-            )
+        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+        knowledge_plane = _bootstrap_knowledge_plane(
+            args,
+            recipe_kb_client=recipe_kb_client,
+            session_dir=session_dir,
         )
 
     from ..multi_node.state_paths import bind_state_file_to_session

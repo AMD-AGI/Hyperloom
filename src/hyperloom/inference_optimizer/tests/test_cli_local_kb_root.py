@@ -28,6 +28,8 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "USER_DATA_PATH",
         "GBRAIN_BASE_URL",
         "GBRAIN_TOKEN",
+        "KNOWLEDGE_LOCAL_ROOT",
+        "KNOWLEDGE_STORE_MODE",
         "RECIPE_KB_MIRROR_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -68,18 +70,18 @@ def test_resolve_local_kb_root_falls_back_to_user_data_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Tier 3: ``$USER_DATA_PATH/kb`` when neither flag nor HYPERLOOM_LOCAL_KB_ROOT is set."""
+    """Shared default: ``$USER_DATA_PATH/knowledge``."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     args = _ns()
-    assert _resolve_local_kb_root(args) == tmp_path / "kb"
+    assert _resolve_local_kb_root(args) == tmp_path / "knowledge"
 
 
 def test_resolve_local_kb_root_uses_workspace_default(
     env_clean: None,
 ) -> None:
-    """Tier 4: the ``/workspace/hyperloom/kb`` last resort when no override is in scope."""
+    """Shared fallback: the user's Hyperloom cache."""
     args = _ns()
-    assert _resolve_local_kb_root(args) == Path("/workspace/hyperloom/kb")
+    assert _resolve_local_kb_root(args).as_posix().endswith("/.cache/hyperloom/knowledge")
 
 
 def test_resolve_local_kb_root_flag_beats_env(
@@ -124,8 +126,7 @@ def test_build_dispatcher_no_remote_when_degraded_kb(
         local_kb_root=str(tmp_path),
         degraded_kb=True,
     )
-    kb = _build_recipe_kb_dispatcher(args)
-    assert kb.remote is None
+    assert _build_recipe_kb_dispatcher(args) is None
 
 
 def test_build_dispatcher_no_remote_when_gbrain_unconfigured(
@@ -138,22 +139,31 @@ def test_build_dispatcher_no_remote_when_gbrain_unconfigured(
     assert kb.remote is None
 
 
-def test_build_dispatcher_wires_gbrain_remote(
+def test_build_dispatcher_wires_gbrain_remote_store(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An enabled gbrain remote becomes the dispatcher's read-side ``remote``."""
+    """Remote mode uses one direct GBrain store and no local fallback."""
 
-    class _Remote:
-        enabled = True
+    class _Store:
+        backend_name = "gbrain"
 
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
+    from hyperloom.orchestrator.knowledge.recipe_kb import GbrainRecipeStore
 
-    monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("GBRAIN_BASE_URL", "https://gbrain.test")
+    monkeypatch.setenv("GBRAIN_TOKEN", "token")
+    monkeypatch.setattr(
+        GbrainRecipeStore,
+        "from_credentials",
+        classmethod(lambda cls, **kwargs: _Store()),
+    )
     args = _ns(local_kb_root=str(tmp_path))
     kb = _build_recipe_kb_dispatcher(args)
-    assert isinstance(kb.remote, _Remote)
+    assert isinstance(kb.local, _Store)
+    assert kb.remote is None
+    assert kb.mode == "remote"
 
 
 def test_build_dispatcher_idempotent(

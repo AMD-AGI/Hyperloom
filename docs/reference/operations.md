@@ -141,7 +141,7 @@ Back up the following artifacts from each session.
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Session manifest + state                | `$SESSION_DIR/manifest.json`,<br>`$SESSION_DIR/state.json`        | Until the session ends; not normally needed afterwards.                                                  |
 | `session_breakdown.json` (downstream contract) | `$SESSION_DIR/`<br>`session_breakdown.json`                | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.                 |
-| Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT`<br>`:-$USER_DATA_PATH/kb}`            | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                    |
+| Local knowledge root                    | `${KNOWLEDGE_LOCAL_ROOT:-$USER_DATA_PATH/knowledge}` (otherwise `~/.cache/hyperloom/knowledge`) | Permanent. Backup before cleanup of `USER_DATA_PATH`. |
 | Robustness findings                     | `$SESSION_DIR/agents/`<br>`robustness/findings/`<br>`<session_id>.jsonl` | 30 days minimum; longer if your incident process needs it.                                        |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.          |
 | Per-attempt artifacts (full)            | `$SESSION_DIR/kernel-agent/`<br>`runs/<session_id>/`<br>`{logs,results,verification}/` | 7–14 days. Cold-archive only if you need full reproducibility.                    |
@@ -154,7 +154,8 @@ Use the following cron jobs to automate session backup and cleanup.
 # Daily: ship session_breakdown.json + KB to S3
 find "$USER_DATA_PATH" -name session_breakdown.json -mtime -1 \
   -exec aws s3 cp {} s3://my-bucket/hyperloom/sessions/ \;
-aws s3 sync "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" s3://my-bucket/hyperloom/kb/
+KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+aws s3 sync "$KB_ROOT" s3://my-bucket/hyperloom/knowledge/
 
 # Weekly: prune session dirs older than 14 days
 find "$USER_DATA_PATH" -mindepth 2 -maxdepth 2 -type d -name '20??????T??????Z' -mtime +14 -exec rm -rf {} \;
@@ -252,8 +253,8 @@ breakdown artifact.
 
 1. Move the selected local KB root aside before starting a new run:
    ```bash
-   mv "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}" \
-      "${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   mv "$KB_ROOT" "$KB_ROOT.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
    ```
 2. Restart the optimizer with the same `--local-kb-root` (or env default). The
    local store is recreated lazily on first write.
@@ -287,7 +288,7 @@ Before going to production with self-hosted Hyperloom, ensure:
   = 1–8 GPUs depending on workload TP).
 - `USER_DATA_PATH` PV ≥ 200 GB per active session, ideally local
   NVMe.
-- `HYPERLOOM_LOCAL_KB_ROOT` (or `$USER_DATA_PATH/kb`) on persistent
+- `KNOWLEDGE_LOCAL_ROOT` (or the default `$USER_DATA_PATH/knowledge`) on persistent
   storage with daily backup.
 - `SAFE_API_KEY` rotation runbook (key is long-lived; rotation
   requires only re-export + `install.sh` re-run).
