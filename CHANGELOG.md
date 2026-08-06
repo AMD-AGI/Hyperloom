@@ -38,9 +38,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (`geak|forge`) to steer the kernel-opt rewrite ladder; the launcher forwards it
   into the container and every carrier defaults it to `geak`.
 
-  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been replaced
-  by `docs/conceptual/kernel-execution-path.md`, which documents the real
-  programmatic dispatch flow.
+  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
+  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  programmatic dispatch flow and artifact layout. Operator sections from the
+  original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
+  Rules) are not carried over; refer to the individual reference docs for those.
 
 ## [v1.0.0a3] - 2026-08-05
 Current packaged version (`pyproject.toml`). See

@@ -142,6 +142,23 @@ runs/<session_id>/
 Cross-task GEAK artifacts keyed by `kernel_id` live at
 `$USER_DATA_PATH/kernel-agent-workspace/<kernel_id>/`.
 
+### Per-attempt stdout file naming
+
+`run_attempt` in `kernel_optimization.py` writes one file per attempt under
+`runs/<session_id>/optimized/`:
+
+| Mode | Filename | Contents |
+|---|---|---|
+| Real backend run | `<attempt_id>_stdout.log` | Raw subprocess stdout (GEAK conversation log) |
+| `--dry-run` | `<attempt_id>_optimized<source_suffix>` (e.g. `.cu`) | Synthetic placeholder for smoke tests |
+
+**Backward compatibility**: prior to 2026-05 the real-backend file shared the
+`<attempt_id>_optimized<suffix>` name and contained subprocess stdout. That caused
+`_source_text_looks_complete` to false-positive match generic English in transcript
+lines and promote the log to `artifact_source = source_file`. The breakdown
+collector uses `glob("<attempt_id>*")` so it discovers both naming schemes
+transparently.
+
 ## Multi-node mode
 
 When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
