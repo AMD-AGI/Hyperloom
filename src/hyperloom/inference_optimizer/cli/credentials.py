@@ -39,10 +39,6 @@ _CLAUDE_ALLOWED_MODELS = (
     "claude-opus-4-6",
 )
 
-# First rung below the preferred model. Only used for operator-facing messages;
-# the live ladder is _CLAUDE_ALLOWED_MODELS order.
-_CLAUDE_FALLBACK_MODEL = _CLAUDE_ALLOWED_MODELS[1]
-
 # Codex-side counterpart, also ordered best-first. This is a fallback ladder
 # only, never a gate: the Codex smoke test stays WARN-only, so an id outside
 # this tuple is left untouched and merely reported. It exists because the
