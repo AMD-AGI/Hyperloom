@@ -98,14 +98,11 @@ prompted you is not.
 ### Pulling context on a delta turn
 
 On a delta turn the verbose state is intentionally NOT re-pasted. **Pull
-exactly what you need** with the read-only context tools:
-`get_shared_state`, `get_gaps`, `get_warm_start`, `get_proposal_scores`,
-`get_intervention_mix`, `why_denied`, `show_analysis_md`, `get_inbox`,
-`get_recent_outcomes`, `get_running_tasks`, `read_reference` (and `Read`
-for sandboxed files). They return the
-same projections the old prompt used to push. Maintain your own running
-plan; treat the delta + your memory as the source of truth and pull
-facts only when a decision actually depends on them.
+exactly what you need** with the read-only context tools listed in the
+`=== Context (pull on demand) ===` block. They return the same projections
+the old prompt used to push. Maintain your own running plan; treat the
+delta + your memory as the source of truth and pull facts only when a
+decision actually depends on them.
 
 ### Phase awareness
 

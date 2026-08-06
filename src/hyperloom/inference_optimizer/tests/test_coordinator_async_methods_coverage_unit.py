@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
@@ -738,6 +739,18 @@ async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinat
     coord.shared_state.cumulative_gain = 5.0
     await coord._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == 0.0
+
+
+@pytest.mark.asyncio
+async def test_delta_banner_names_every_registered_context_tool(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
+    coord._orchestration_seeded = True
+    text = await coord._compose_prompt("orchestration")
+    banner_start = text.find("=== Context (pull on demand) ===")
+    assert banner_start != -1, "DELTA banner missing"
+    banner = text[banner_start:]
+    for tool in CONTEXT_TOOL_NAMES:
+        assert tool in banner, f"{tool!r} not in DELTA banner"
 
 
 @pytest.mark.asyncio

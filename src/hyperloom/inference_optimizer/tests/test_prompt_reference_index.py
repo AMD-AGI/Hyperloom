@@ -36,6 +36,7 @@ def registry() -> ActionRegistry:
 @pytest.fixture
 def file_reader(refs_dir):
     """ContextProvider wired to the real references directory."""
+
     def _read(name: str) -> str:
         candidate = (refs_dir / name).with_suffix(".md").resolve()
         if candidate.parent != refs_dir.resolve():
@@ -67,9 +68,7 @@ def test_all_reference_files_appear_in_unscoped_index(refs_dir):
     """Every reference doc must be reachable from the unscoped index."""
     index_lines = _section_reference_index(references_dir=refs_dir, phase="")
     for path in refs_dir.glob("*.md"):
-        assert path.stem in "\n".join(index_lines), (
-            f"{path.name} not found in the unscoped reference index"
-        )
+        assert path.stem in "\n".join(index_lines), f"{path.name} not found in the unscoped reference index"
 
 
 def test_index_entries_resolve_to_real_files(refs_dir):
@@ -79,9 +78,7 @@ def test_index_entries_resolve_to_real_files(refs_dir):
         if not line.startswith("- **"):
             continue
         stem = line.split("**")[1]
-        assert (refs_dir / f"{stem}.md").exists(), (
-            f"index entry {stem!r} points at a missing file"
-        )
+        assert (refs_dir / f"{stem}.md").exists(), f"index entry {stem!r} points at a missing file"
 
 
 def test_empty_refs_dir_produces_no_section(tmp_path):
@@ -102,13 +99,9 @@ def test_specialist_rescue_only_in_explore_and_framework(refs_dir):
     for phase in _ps.PHASE_NAMES:
         index = "\n".join(_section_reference_index(references_dir=refs_dir, phase=phase))
         if phase in ("EXPLORE", "FRAMEWORK_AGENT"):
-            assert "specialist_rescue" in index, (
-                f"specialist_rescue missing from index in {phase}"
-            )
+            assert "specialist_rescue" in index, f"specialist_rescue missing from index in {phase}"
         else:
-            assert "specialist_rescue" not in index, (
-                f"specialist_rescue leaked into index in {phase}"
-            )
+            assert "specialist_rescue" not in index, f"specialist_rescue leaked into index in {phase}"
 
 
 def test_failure_recovery_present_in_every_phase(refs_dir):
@@ -117,9 +110,7 @@ def test_failure_recovery_present_in_every_phase(refs_dir):
         pytest.skip("failure_recovery.md not present")
     for phase in _ps.PHASE_NAMES:
         index = "\n".join(_section_reference_index(references_dir=refs_dir, phase=phase))
-        assert "failure_recovery" in index, (
-            f"failure_recovery missing from index in {phase}"
-        )
+        assert "failure_recovery" in index, f"failure_recovery missing from index in {phase}"
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +134,7 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
             phase=phase,
             references_dir=refs_dir,
         )
-        assert "## 8. ON-DEMAND REFERENCE INDEX" in text, (
-            f"reference index missing from {phase} prompt"
-        )
+        assert "## 8. ON-DEMAND REFERENCE INDEX" in text, f"reference index missing from {phase} prompt"
 
 
 # ---------------------------------------------------------------------------

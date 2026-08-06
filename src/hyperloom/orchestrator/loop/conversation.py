@@ -604,17 +604,17 @@ class ConversationCollaborator:
 
         # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
         if agent_name == "orchestration" and not push_full:
+            from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES
+
+            tool_list = ", ".join(CONTEXT_TOOL_NAMES)
             sections.append("=== Context (pull on demand) ===")
             sections.append(
                 "This is a continuation of our ongoing conversation; the "
                 "full session state was NOT re-pasted. The Phase, Mission "
                 "progress, Time budget, and new inbox events above are the "
                 "delta since your last turn. Pull anything else you need "
-                "with the read-only context tools: get_shared_state, "
-                "get_gaps, get_warm_start, get_proposal_scores, "
-                "get_intervention_mix, why_denied, show_analysis_md, "
-                "get_inbox, get_recent_outcomes, get_running_tasks, "
-                "read_reference. Reason "
+                f"with the read-only context tools: {tool_list} "
+                "(and `Read` for sandboxed files). Reason "
                 "from your own running plan; do not re-derive it from scratch."
             )
 
