@@ -398,6 +398,17 @@ class ClaudeBackend:
             raise error from exc
         except BaseException as exc:
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
+            # Once retries are exhausted, anything the SDK stream raised is a
+            # provider call that produced nothing usable — including the gateway
+            # 400s (``litellm.BadRequestError: AnthropicException``) this
+            # telemetry exists to count. Marking it here matches what Codex
+            # already does for its own API errors, and keeps the failure out of
+            # the Coordinator's "unexpected crash" path. ``NoIntentEmitted`` is
+            # raised below, outside this block, so a call that succeeded with
+            # unusable output stays distinct. Cancellation is a BaseException
+            # and is re-raised untouched.
+            if isinstance(exc, Exception) and not isinstance(exc, LLMCallFailed):
+                raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
             raise
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)

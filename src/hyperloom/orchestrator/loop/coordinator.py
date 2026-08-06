@@ -1727,9 +1727,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
-        # No-op for backends without the hook.
+        # No-op for backends without the hook. Presence of the hook is also what
+        # tells the failure path below to stay out of the way: such a backend
+        # records its own row, with the review model and its own latency, and a
+        # second row from here would count one provider failure twice.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
-        if callable(_set_trace_ctx):
+        backend_self_traces = callable(_set_trace_ctx)
+        if backend_self_traces:
             try:
                 _set_trace_ctx(
                     tick=int(self.shared_state.tick or 0),
@@ -1756,7 +1760,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 outcome="backend_error",
                 error=exc,
             )
-            if isinstance(exc, LLMCallFailed):
+            if isinstance(exc, LLMCallFailed) and not backend_self_traces:
                 self._trace_reactor_llm_failure(
                     agent_name,
                     exc,
@@ -1984,10 +1988,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         Langfuse — has no trace of a turn whose model call never returned. The
         row carries no token counters; it exists to make the failure countable.
 
-        Only :class:`LLMCallFailed` reaches here. A plain ``BackendError`` can
-        come from a deterministic local fault (unreadable ``emit.json``, missing
+        Only :class:`LLMCallFailed` reaches here, and only from a backend that
+        does not trace itself. A plain ``BackendError`` can come from a
+        deterministic local fault (unreadable ``emit.json``, missing
         ``--review`` path, absent SDK) that never touched the provider, and
-        recording those would make the Langfuse error rate meaningless.
+        recording those would make the Langfuse error rate meaningless; a
+        self-tracing backend (the critic) has already written a richer row of
+        its own, so writing here too would double-count one failure.
 
         Args:
             agent_name: The reactor role; doubles as trace component and role.

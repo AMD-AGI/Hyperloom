@@ -253,6 +253,69 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
         await c.stop()
 
 
+class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
+    """A self-tracing backend (critic-shaped): writes its own row, then raises.
+
+    Having ``set_trace_context`` is the contract that marks a backend as owning
+    its trace rows, so the Coordinator must not add one of its own.
+    """
+
+    def __init__(self, name: str, session_dir: Path) -> None:
+        super().__init__(name)
+        self._session_dir = session_dir
+        self.trace_ctx_calls = 0
+
+    def set_trace_context(self, *, tick: int | None = None, phase: str | None = None) -> None:
+        self.trace_ctx_calls += 1
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+        from hyperloom.orchestrator.trace.llm_trace import LLMCallRecord, append_llm_call
+
+        self.calls += 1
+        error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+        append_llm_call(
+            session_dir=self._session_dir,
+            record=LLMCallRecord.for_failure(
+                session_id=self._session_dir.name,
+                component="critic",
+                role="critic",
+                error=error,
+                model="claude-opus-4-7",
+            ),
+        )
+        raise error
+
+
+@pytest.mark.asyncio
+async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
+    """One provider failure must produce one row, not one per writer.
+
+    The critic writes its own error row (carrying the review model) and then
+    raises; if the Coordinator also wrote one, Langfuse would count a single
+    critic failure twice, with disagreeing model/latency on the two rows.
+    """
+    backends = _build_backends({})
+    backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == backends["critic"].calls
+        # The surviving row is the backend's richer one (real review model).
+        assert {r["model"] for r in rows} == {"claude-opus-4-7"}
+        assert {r["component"] for r in rows} == {"critic"}
+    finally:
+        await c.stop()
+
+
 class _AlwaysCrashingBackend(Backend):
     """Backend that raises an unexpected exception from ``run``."""
 
