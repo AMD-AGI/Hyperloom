@@ -3371,13 +3371,13 @@ class FrameworkPhase(PhaseHandler):
         return True
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
-        """Enqueue a single ``framework`` task for ``candidate``.
+        """Enqueue a single ``framework_agent`` task for ``candidate``.
 
         Builds the task params (candidate, batch id, baseline throughput,
-        framework) and creates an idempotent ``framework`` task holding the
-        server / workspace / benchmark lanes. On enqueue failure, records an
-        ``enqueue_failed`` progress row so the pump skips the candidate next
-        tick instead of spinning.
+        framework) and creates an idempotent ``framework_agent`` task whose
+        lanes and lease TTL come from the action registry. On enqueue failure,
+        records an ``enqueue_failed`` progress row so the pump skips the
+        candidate next tick instead of spinning.
 
         Args:
             candidate (dict[str, Any]): The discovered PR candidate to apply
@@ -3398,16 +3398,14 @@ class FrameworkPhase(PhaseHandler):
         }
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
+        lanes, ttl = self._registry_lanes_ttl("framework_agent")
         try:
             await self.tasks.create_or_return_existing(
                 kind="framework_agent",
                 params=params,
                 idempotency_key=idem,
-                requires_lanes=[
-                    "server_lifecycle",
-                    "workspace_mutation",
-                    "benchmark_lane",
-                ],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
             log.info(
                 "FRAMEWORK: enqueued candidate=%s batch=%s",

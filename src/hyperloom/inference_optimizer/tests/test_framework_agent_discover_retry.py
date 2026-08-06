@@ -19,8 +19,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+
+_ACTION_REGISTRY = ActionRegistry().load()
 
 
 class _StateStub:
@@ -61,10 +66,14 @@ class _CoordinatorStub:
     # Reverse-lookup called on every repo; here it resolves to the session
     # framework, so nothing is tagged (same-framework path).
     _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
+    # Real lane/TTL resolution, so the enqueue tests exercise the production
+    # registry lookup instead of a stub that silently yields no lanes.
+    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub()
+        self.action_registry = _ACTION_REGISTRY
         self.framework_agent_discover_timeout_sec = 0.0
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
@@ -286,6 +295,28 @@ def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
     asyncio.run(_call_enqueue(stub, cand))
 
     assert stub.shared_state.framework_agent_phase_progress == []
+
+
+def test_enqueue_sources_lanes_and_lease_ttl_from_the_action_registry(tmp_path: Path):
+    """Regression: the pump enqueue must inherit ``framework_agent`` lanes and lease TTL from the registry.
+
+    Hardcoding the lanes and omitting ``lease_ttl_sec`` left the task row at 0,
+    which the dispatcher turned into a 60s lane lease for a 12-minute action and
+    which also made the watchdog skip reclamation of orphaned tasks.
+    """
+    stub = _CoordinatorStub(tmp_path)
+    stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
+    meta = _ACTION_REGISTRY.get("framework_agent")
+    assert meta is not None
+
+    asyncio.run(_call_enqueue(stub, {"candidate_id": "pr-ttl", "batch_id": "b1"}))
+
+    kwargs = stub.tasks.calls[-1]  # type: ignore[attr-defined]
+    assert kwargs["kind"] == "framework_agent"
+    assert kwargs["lease_ttl_sec"] == meta.lease_ttl_sec
+    assert kwargs["lease_ttl_sec"] > 0
+    assert kwargs["requires_lanes"] == list(meta.requires_lanes)
+    assert kwargs["requires_lanes"]
 
 
 # Gap 4 — phase_history summary row when the pump gives up on discover.
