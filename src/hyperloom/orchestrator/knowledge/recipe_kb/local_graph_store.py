@@ -102,6 +102,8 @@ class LocalGraphStore:
         self._transaction_path = self.root / ".edge-transaction.json"
         self._thread_lock = _thread_lock_for(self.root)
         self._ensure_layout()
+        with self._locked():
+            pass
 
     def call(self, tool: str, arguments: Mapping[str, Any] | None = None) -> Any:
         """Dispatch the compatibility surface expected by ``KGClient``.
@@ -130,8 +132,8 @@ class LocalGraphStore:
             path.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
-        """Hold this root's thread and cross-process exclusive locks."""
+    def _locked(self, *, exclusive: bool = True) -> Iterator[None]:
+        """Hold the root lock, sharing it for stable read-only operations."""
 
         with self._thread_lock:
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -140,8 +142,15 @@ class LocalGraphStore:
                 fd = os.open(self._lock_path, flags, 0o600)
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise LocalGraphStoreError("local graph lock target is not a regular file")
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                self._recover_transaction_unlocked()
+                fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                if exclusive:
+                    self._recover_transaction_unlocked()
+                elif self._transaction_path.exists():
+                    # Upgrade only when an interrupted writer left a journal.
+                    # Releasing SH before EX avoids a flock upgrade deadlock.
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    self._recover_transaction_unlocked()
                 yield
             except LocalGraphStoreError:
                 raise
@@ -287,28 +296,37 @@ class LocalGraphStore:
     def _page_exists_unlocked(self, slug: str) -> bool:
         return self._page_path(slug).is_file()
 
-    def _all_pages_unlocked(self) -> list[tuple[str, str]]:
-        pages: list[tuple[str, str]] = []
+    def _all_page_slugs_unlocked(self) -> list[str]:
+        """List sorted page slugs without reading page bodies."""
+
+        slugs: list[str] = []
         for path in self.pages_root.rglob("*.md"):
             if path.is_symlink() or not path.is_file():
                 continue
             relative = path.relative_to(self.pages_root).as_posix()
             slug = relative[:-3]
             _validated_slug(slug)
-            pages.append((slug, path.read_text(encoding="utf-8")))
-        pages.sort(key=lambda row: row[0])
+            slugs.append(slug)
+        slugs.sort()
+        return slugs
+
+    def _all_pages_unlocked(self) -> list[tuple[str, str]]:
+        pages = [
+            (slug, self._page_path(slug).read_text(encoding="utf-8"))
+            for slug in self._all_page_slugs_unlocked()
+        ]
         return pages
 
     def _list_pages(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
         limit = max(0, int(args.get("limit", 100)))
         offset = max(0, int(args.get("offset", 0)))
-        with self._locked():
-            rows = self._all_pages_unlocked()[offset : offset + limit]
-        return [{"slug": slug} for slug, _ in rows]
+        with self._locked(exclusive=False):
+            slugs = self._all_page_slugs_unlocked()[offset : offset + limit]
+        return [{"slug": slug} for slug in slugs]
 
     def _get_page(self, args: Mapping[str, Any]) -> dict[str, Any]:
         slug = _validated_slug(args.get("slug"))
-        with self._locked():
+        with self._locked(exclusive=False):
             path = self._page_path(slug)
             if not path.is_file() or path.is_symlink():
                 return {"error": "page_not_found", "slug": slug}
@@ -361,14 +379,14 @@ class LocalGraphStore:
     def _get_links(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
         slug = _validated_slug(args.get("slug"))
         link_type = str(args.get("link_type") or "").strip()
-        with self._locked():
+        with self._locked(exclusive=False):
             edges = self._read_edges_unlocked("outbound", slug)
         return [edge for edge in edges if not link_type or edge.get("link_type") == link_type]
 
     def _get_backlinks(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
         slug = _validated_slug(args.get("slug"))
         link_type = str(args.get("link_type") or "").strip()
-        with self._locked():
+        with self._locked(exclusive=False):
             edges = self._read_edges_unlocked("inbound", slug)
         return [edge for edge in edges if not link_type or edge.get("link_type") == link_type]
 
@@ -379,7 +397,7 @@ class LocalGraphStore:
         if direction not in {"out", "in", "both"}:
             raise ValueError("traverse_graph direction must be 'out', 'in', or 'both'")
         link_type = str(args.get("link_type") or "").strip()
-        with self._locked():
+        with self._locked(exclusive=False):
             frontier = {start}
             visited = {start}
             seen_edges: set[tuple[str, str, str]] = set()
@@ -415,7 +433,7 @@ class LocalGraphStore:
     def _search(self, args: Mapping[str, Any]) -> list[dict[str, Any]]:
         query = str(args.get("query") or "").casefold()
         limit = max(0, int(args.get("limit", 100)))
-        with self._locked():
+        with self._locked(exclusive=False):
             matches = [
                 {"slug": slug, "body": content}
                 for slug, content in self._all_pages_unlocked()

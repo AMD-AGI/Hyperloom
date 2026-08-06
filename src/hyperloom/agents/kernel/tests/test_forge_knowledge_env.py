@@ -12,6 +12,13 @@ sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_config_cache() -> None:
+    forge_submit._reset_knowledge_config_cache()
+    yield
+    forge_submit._reset_knowledge_config_cache()
+
+
 def _avoid_unrelated_fellow_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     import _llm_stability_env
 
@@ -57,8 +64,9 @@ def test_remote_child_env_forwards_credentials_and_overrides_derived_flag(
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "true"
 
 
-def test_remote_child_env_missing_credentials_fails(
+def test_remote_child_env_missing_credentials_degrades_once(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _avoid_unrelated_fellow_setup(monkeypatch)
     env = {
@@ -66,8 +74,35 @@ def test_remote_child_env_missing_credentials_fails(
         "KNOWLEDGE_LOCAL_ROOT": "/unused",
         "GBRAIN_BASE_URL": "https://gbrain.test",
     }
-    with pytest.raises(ValueError, match="GBRAIN_TOKEN"):
+    with caplog.at_level("WARNING"):
         forge_submit._apply_fellow_env(env)
+        forge_submit._apply_fellow_env(env)
+    assert env["KNOWLEDGE_STORE_MODE"] == "local"
+    assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
+    assert "GBRAIN_BASE_URL" not in env
+    assert "GBRAIN_TOKEN" not in env
+    assert caplog.text.count("Forge knowledge configuration is invalid") == 1
+
+
+def test_malformed_mode_hot_path_is_cached_without_mutating_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _avoid_unrelated_fellow_setup(monkeypatch)
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "malformed")
+    monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
+    process_mode = dict(forge_submit.os.environ)
+    first = {"KNOWLEDGE_STORE_MODE": "malformed", "GBRAIN_TOKEN": "child-secret"}
+    second = dict(first)
+
+    with caplog.at_level("WARNING"):
+        forge_submit._apply_fellow_env(first)
+        forge_submit._apply_fellow_env(second)
+
+    assert first["KNOWLEDGE_STORE_MODE"] == second["KNOWLEDGE_STORE_MODE"] == "local"
+    assert "GBRAIN_TOKEN" not in first and "GBRAIN_TOKEN" not in second
+    assert dict(forge_submit.os.environ) == process_mode
+    assert caplog.text.count("Forge knowledge configuration is invalid") == 1
 
 
 def test_unset_mode_defaults_local_and_uses_user_data_path(

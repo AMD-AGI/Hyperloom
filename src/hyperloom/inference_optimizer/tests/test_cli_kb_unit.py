@@ -81,14 +81,12 @@ def test_dispatcher_gbrain_enabled(tmp_path, monkeypatch) -> None:
     assert kb.mode == "remote"
 
 
-def test_dispatcher_gbrain_inline_mirror_is_deprecated(tmp_path, monkeypatch) -> None:
+def test_obsolete_mirror_mode_is_ignored_with_warning(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.setenv("RECIPE_KB_MIRROR_MODE", "inline")
-    from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_ingest as gi
 
     with pytest.warns(DeprecationWarning, match="RECIPE_KB_MIRROR_MODE"):
         kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    assert not isinstance(kb, gi.GbrainMirroringRecipeKB)
     assert kb.mode == "local"
 
 
@@ -150,7 +148,6 @@ def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
 
 def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
     calls = []
     monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: calls.append(k))
     kb = cli_kb._bootstrap_recipe_kb(
@@ -165,7 +162,6 @@ def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
 
 def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
-    monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
 
     def _boom(*a, **k):
         raise RuntimeError("t0 down")

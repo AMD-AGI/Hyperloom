@@ -35,6 +35,7 @@ warm-start that would otherwise succeed from the local store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -76,8 +77,19 @@ def _entity(value: Any) -> str:
     Returns:
         Lowercased slug (spaces/slashes to underscores), or ``""``.
     """
-    s = str(value or "").strip().replace(" ", "_").replace("/", "_")
-    return s.lower()
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    slug = re.sub(r"[^a-z0-9._+-]+", "_", raw)
+    if not slug or not any(character.isalnum() for character in slug):
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return f"entity_{digest}"
+    if not slug[0].isalnum():
+        slug = f"entity_{slug}"
+    if len(slug) > 128:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        slug = f"{slug[:115]}-{digest}"
+    return slug
 
 
 def _as_set(value: Any) -> set[str]:
@@ -1343,7 +1355,11 @@ def get_kg_client() -> KGClient | None:
     """
     global _CACHED_CLIENT, _CLIENT_RESOLVED
     if not _CLIENT_RESOLVED:
-        _CACHED_CLIENT = build_kg_client_from_env()
+        try:
+            _CACHED_CLIENT = build_kg_client_from_env()
+        except Exception as exc:  # noqa: BLE001 - KG enhancement is optional
+            _CACHED_CLIENT = None
+            log.warning("knowledge graph is unavailable for this process: %s", exc)
         _CLIENT_RESOLVED = True
     return _CACHED_CLIENT
 

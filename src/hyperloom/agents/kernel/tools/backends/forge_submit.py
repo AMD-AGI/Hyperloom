@@ -23,6 +23,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +43,51 @@ if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
 
 log = logging.getLogger(__name__)
+
+_KNOWLEDGE_CONFIG_CACHE = None
+_KNOWLEDGE_CONFIG_RESOLVED = False
+_KNOWLEDGE_CONFIG_LOCK = threading.Lock()
+
+
+def _reset_knowledge_config_cache() -> None:
+    """Clear Forge's prevalidated knowledge configuration (tests only)."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    _KNOWLEDGE_CONFIG_CACHE = None
+    _KNOWLEDGE_CONFIG_RESOLVED = False
+
+
+def _knowledge_config_for_forge(env: dict | None = None):
+    """Resolve knowledge configuration once and degrade invalid input locally."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    if _KNOWLEDGE_CONFIG_RESOLVED:
+        return _KNOWLEDGE_CONFIG_CACHE
+
+    with _KNOWLEDGE_CONFIG_LOCK:
+        if _KNOWLEDGE_CONFIG_RESOLVED:
+            return _KNOWLEDGE_CONFIG_CACHE
+
+        from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
+        source = dict(os.environ if env is None else env)
+        try:
+            config = KnowledgeConfig.from_env(source)
+        except Exception as exc:  # noqa: BLE001 - submit hot paths must remain available
+            log.warning(
+                "Forge knowledge configuration is invalid (%s); disabling remote "
+                "knowledge for this process. Validate KNOWLEDGE_STORE_MODE and "
+                "GBRAIN credentials during startup.",
+                exc,
+            )
+            fallback = dict(source)
+            fallback["KNOWLEDGE_STORE_MODE"] = "local"
+            fallback.pop("GBRAIN_BASE_URL", None)
+            fallback.pop("GBRAIN_TOKEN", None)
+            config = KnowledgeConfig.from_env(fallback)
+        _KNOWLEDGE_CONFIG_CACHE = config
+        _KNOWLEDGE_CONFIG_RESOLVED = True
+        return config
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
@@ -2039,12 +2085,13 @@ def _apply_fellow_env(env: dict) -> None:
     apply_llm_stability_env(env)
     # Shared KnowledgePlane contract. KernelForge remains responsible for its
     # own local knowledge implementation and remote kernel-experience behavior.
-    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
         KernelExperienceBridge,
     )
 
-    KernelExperienceBridge(KnowledgeConfig.from_env(env)).configure_child_env(env)
+    # The process-level configuration was validated at startup/first use and is
+    # cached. A malformed child mapping therefore cannot fail every submission.
+    KernelExperienceBridge(_knowledge_config_for_forge(env)).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported.
@@ -3074,12 +3121,11 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
-    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
         KernelExperienceBridge,
     )
 
-    knowledge_bridge = KernelExperienceBridge(KnowledgeConfig.from_env())
+    knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
     candidate = candidate or {}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

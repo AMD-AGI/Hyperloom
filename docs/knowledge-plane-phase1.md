@@ -18,12 +18,38 @@ Unknown modes fail configuration. Remote mode fails before use if either
 credential is missing. `--degraded-kb` remains a complete Recipe KB opt-out; it
 does not select local mode.
 
-`RECIPE_KB_MIRROR_MODE` is deprecated and ignored by this plane. Local mode is
-local-only. Remote mode reads and writes GBrain directly; neither mode performs
-an inline mirror or external ingest.
+This is a breaking mode cutover. Deployments that previously relied on ambient
+`GBRAIN_BASE_URL` / `GBRAIN_TOKEN` for remote-first Recipe reads must now set
+`KNOWLEDGE_STORE_MODE=remote`. The default/local mode ignores those credentials
+and remains local-only. `RECIPE_KB_MIRROR_MODE` is obsolete; remove it from
+launchers, ConfigMaps, and secrets rather than using it to select behavior.
+
+Local mode is local-only. Remote mode reads and writes GBrain directly; neither
+mode performs an inline mirror or external ingest.
 
 The older `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` inputs remain a
 deprecated compatibility path when `KNOWLEDGE_LOCAL_ROOT` is absent.
+
+## One-time local Recipe migration
+
+The default local root is always `$USER_DATA_PATH/knowledge`, or
+`~/.cache/hyperloom/knowledge` when `USER_DATA_PATH` is unset. It never
+permanently falls back to the old `$USER_DATA_PATH/kb` or
+`/workspace/hyperloom/kb` roots.
+
+On local Recipe KB startup only, when `KNOWLEDGE_LOCAL_ROOT`,
+`--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` are all unset, Hyperloom checks
+the corresponding legacy root. If the new destination has neither Recipe data
+nor the durable migration marker, complete Recipe directories (live
+`recipe.json`, history, attempts, and safe metadata) are copied into the new
+root. Lock and temporary files are excluded. Existing graph or KernelForge
+data in the new root is retained. Existing destination Recipes or a completed
+marker make the operation a no-op; explicit legacy roots continue in place and
+are not migrated.
+
+Migration failure while legacy Recipes exist aborts startup with a clear error
+instead of silently cold-starting. Stop old writers and back up the legacy root
+before upgrading; see [Upgrade Hyperloom version](reference/upgrade.md).
 
 ## Recipe backend behavior
 

@@ -915,11 +915,9 @@ class GbrainRemoteRecipeClient:
         }
         # Fast path: recipe slugs are the canonical id with ':' as path
         # separators, so exact reads skip the full corpus scan.
-        direct = self._get_page_recipe(_slug_for_canonical(canonical_id))
-        if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
-            if version is None or int(direct.get(C.F_VERSION) or 1) == int(version):
-                return direct
-            return None
+        direct = self.get_recipe_exact(canonical_id=canonical_id, version=version)
+        if direct is not None:
+            return direct
         if framework_version != C.DEFAULT_FRAMEWORK_VERSION_SLUG:
             # Older sessions lacking framework_version were mirrored under
             # unknown_version; fall back there before a corpus scan.
@@ -945,6 +943,31 @@ class GbrainRemoteRecipeClient:
                 return direct
         rows = self.search(label_match=label_match, limit=1)
         return rows[0] if rows else None
+
+    def get_recipe_exact(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch only the canonical GBrain slug, never search or scan."""
+
+        if not self.enabled:
+            return None
+        if not canonical_id:
+            raise ValueError("get_recipe_exact requires a non-empty canonical_id")
+        try:
+            from .canonical_id import cid_to_path_components
+
+            cid_to_path_components(canonical_id)
+        except Exception:  # noqa: BLE001 - malformed id is an exact miss
+            return None
+        direct = self._get_page_recipe(_slug_for_canonical(canonical_id))
+        if direct is None or direct.get(C.F_CANONICAL_ID) != canonical_id:
+            return None
+        if version is not None and int(direct.get(C.F_VERSION) or 1) != int(version):
+            return None
+        return direct
 
     def search(
         self,

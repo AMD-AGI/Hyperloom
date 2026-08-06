@@ -619,7 +619,43 @@ class RecipeKB:
         )
         return result
 
-    # Reads — remote-first, local fallback
+    # Reads — selected-store authority and regular warm-start reads
+    def get_authoritative_recipe(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the selected store's exact canonical row without broad fallback.
+
+        Remote mode delegates to ``get_recipe_exact`` so a miss or degraded
+        backend never starts GBrain search/list pagination. Local and legacy
+        stores use their naturally exact ``get_recipe`` implementation.
+        """
+
+        exact_reader = getattr(self.local, "get_recipe_exact", None)
+        try:
+            if callable(exact_reader):
+                row = exact_reader(canonical_id=canonical_id, version=version)
+            else:
+                row = self.local.get_recipe(canonical_id=canonical_id, version=version)
+        except Exception as exc:  # noqa: BLE001 - authority reads are degradation-safe
+            log.warning(
+                "recipe_kb: exact authority read failed for %s (%s)",
+                canonical_id,
+                exc,
+            )
+            row = None
+        self._emit_audit(
+            self._read_audit_event(
+                method="get_authoritative_recipe",
+                resolution=f"{self.mode}_authority",
+                row=row,
+                canonical_id=canonical_id,
+            )
+        )
+        return row
+
     def get_recipe(
         self,
         *,

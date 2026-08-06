@@ -452,7 +452,8 @@ class LocalRecipeStore:
                 "prs_tested": _normalise_prs(prs_tested),
                 "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
-                "last_profiled": last_profiled,
+                "last_profiled": last_profiled
+                or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
                 "stack_fingerprint": dict(stack_fingerprint or {}),
                 "sessions": _normalise_sessions(sessions),
                 "authority": authority,

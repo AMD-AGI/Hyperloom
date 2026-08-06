@@ -1083,11 +1083,12 @@ def run_t0_anchor(
     if _fw_version:
         shared_state.framework_version = _fw_version
 
-    # Read-modify-write the local store so the stamp doesn't clobber fields.
+    # Read-modify-write the selected store's exact authority row so the stamp
+    # does not clobber fields or trigger a broad remote warm-start scan.
     try:
-        live = kb.local.get_recipe(canonical_id=cid) or {}
+        live = kb.get_authoritative_recipe(canonical_id=cid) or {}
     except Exception as exc:  # noqa: BLE001 — defensive
-        log.info("T0 anchor local get_recipe non-fatal failure: %s", exc)
+        log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
         live = {}
 
     # Merge prior extras; new values win.

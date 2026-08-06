@@ -19,10 +19,20 @@ class KnowledgeStoreMode(str, Enum):
     REMOTE = "remote"
 
 
+def _expanded(value: str) -> str:
+    """Expand a user-home prefix without changing relative-path semantics."""
+
+    return str(Path(value).expanduser())
+
+
 def _default_local_root(env: Mapping[str, str]) -> str:
+    compatibility_root = str(env.get("HYPERLOOM_LOCAL_KB_ROOT") or "").strip()
+    if compatibility_root:
+        return _expanded(compatibility_root)
+
     user_data_path = str(env.get("USER_DATA_PATH") or "")
     if user_data_path:
-        return str(Path(user_data_path) / "knowledge")
+        return str(Path(user_data_path).expanduser() / "knowledge")
     return str(Path("~/.cache/hyperloom/knowledge").expanduser())
 
 
@@ -49,7 +59,11 @@ class KnowledgeConfig:
             ) from exc
 
         explicit_root = source.get("KNOWLEDGE_LOCAL_ROOT")
-        local_root = str(explicit_root) if explicit_root not in (None, "") else _default_local_root(source)
+        local_root = (
+            _expanded(str(explicit_root).strip())
+            if explicit_root not in (None, "")
+            else _default_local_root(source)
+        )
         base_url = str(source.get("GBRAIN_BASE_URL") or "").strip()
         token = str(source.get("GBRAIN_TOKEN") or "").strip()
         if mode is KnowledgeStoreMode.REMOTE:

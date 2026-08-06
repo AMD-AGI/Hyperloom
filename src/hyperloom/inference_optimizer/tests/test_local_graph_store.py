@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import KGClient
+from hyperloom.orchestrator.knowledge.recipe_kb.kg_client import KGClient, _entity
 from hyperloom.orchestrator.knowledge.recipe_kb.local_graph_store import (
     LocalGraphStore,
     LocalGraphStoreError,
@@ -53,6 +53,23 @@ def test_page_roundtrip_and_durable_layout(tmp_path: Path) -> None:
     assert store.call("list_pages", {"limit": 10}) == [{"slug": "family/entity"}]
     assert (root / "pages" / "family" / "entity.md").read_text(encoding="utf-8") == content
     assert (root / ".lock").is_file()
+
+
+def test_list_pages_is_bounded_slug_only_and_never_reads_bodies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalGraphStore(tmp_path / "kg")
+    for slug in ("c", "a", "b"):
+        _put(store, slug)
+
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *_args, **_kwargs: pytest.fail("list_pages must not read page bodies"),
+    )
+
+    assert store.call("list_pages", {"offset": 1, "limit": 1}) == [{"slug": "b"}]
 
 
 def test_edges_have_consistent_outbound_and_inbound_indexes(tmp_path: Path) -> None:
@@ -106,6 +123,14 @@ def test_unsafe_slugs_are_rejected(tmp_path: Path, slug: str) -> None:
     store = LocalGraphStore(tmp_path / "kg")
     with pytest.raises(ValueError, match="unsafe graph slug"):
         store.call("get_page", {"slug": slug})
+
+
+@pytest.mark.parametrize("raw", ("=", "/", ":", "a=b", "a:b", "-leading"))
+def test_kg_entities_normalize_to_local_graph_slugs(tmp_path: Path, raw: str) -> None:
+    slug = _entity(raw)
+    store = LocalGraphStore(tmp_path / "kg")
+    _put(store, slug)
+    assert store.call("get_page", {"slug": slug})["slug"] == slug
 
 
 def test_persists_across_instances(tmp_path: Path) -> None:
@@ -260,6 +285,33 @@ def test_get_kg_client_singleton_and_reset(tmp_path: Path, monkeypatch: pytest.M
     assert first is second
     kgmod.reset_kg_client()
     assert kgmod.get_kg_client() is not first
+    kgmod.reset_kg_client()
+
+
+def test_get_kg_client_caches_build_failure_and_logs_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from hyperloom.orchestrator.knowledge.recipe_kb import kg_client as kgmod
+
+    calls = 0
+
+    def fail_build() -> None:
+        nonlocal calls
+        calls += 1
+        raise ValueError("bad KG configuration")
+
+    kgmod.reset_kg_client()
+    monkeypatch.setattr(kgmod, "build_kg_client_from_env", fail_build)
+    with caplog.at_level("WARNING"):
+        assert kgmod.get_kg_client() is None
+        assert kgmod.get_kg_client() is None
+    assert calls == 1
+    assert caplog.text.count("knowledge graph is unavailable") == 1
+
+    kgmod.reset_kg_client()
+    assert kgmod.get_kg_client() is None
+    assert calls == 2
     kgmod.reset_kg_client()
 
 

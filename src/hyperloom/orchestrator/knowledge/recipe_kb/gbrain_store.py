@@ -197,6 +197,17 @@ class GbrainRecipeStore:
         row = self.client.get_recipe(canonical_id=canonical_id, version=version)
         return self._arbor(row)
 
+    def get_recipe_exact(
+        self,
+        *,
+        canonical_id: str,
+        version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Read only the stable canonical slug without fallback search."""
+
+        row = self.client.get_recipe_exact(canonical_id=canonical_id, version=version)
+        return self._arbor(row)
+
     def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         return [self._arbor(row) for row in self.client.search(**kwargs) if row]
 
@@ -304,7 +315,7 @@ class GbrainRecipeStore:
                     _normalise_lessons(latest.get("lessons")),
                     _normalise_lessons(lessons),
                 ),
-                "last_profiled": last_profiled,
+                "last_profiled": last_profiled or str(latest.get("last_profiled") or ""),
                 "stack_fingerprint": _merge_nonempty_mapping(
                     dict(latest.get("stack_fingerprint") or {}),
                     dict(stack_fingerprint or {}),

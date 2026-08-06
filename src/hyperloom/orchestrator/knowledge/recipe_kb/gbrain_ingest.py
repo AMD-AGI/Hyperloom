@@ -1,20 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Mirror local recipe snapshots into gbrain (the read-side cache).
+"""Encode Hyperloom Recipe rows as canonical GBrain Markdown pages.
 
-``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
-(:class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`) serves them
-back to a future session's warm-start. This module is the bulk ingest that
-lifts the authoritative local store into gbrain.
+Remote mode uses this module as a page codec before ``put_page``. It does not
+implement local-to-remote mirroring: local and remote are exclusive knowledge
+store modes.
 
-Mirror gate (default permissive):
-
-* Any recipe with a ``canonical_id`` is mirrored, including bare seed-only
-  anchors (empty ``best_config``). Set ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1``
-  to restore the stricter gate (``best_config`` OR reusable prior signal).
-* Idempotent: each recipe maps to a stable ``type: recipe`` page keyed by its
-  canonical id, so re-running overwrites in place.
+Any recipe with a ``canonical_id`` is encoded, including bare seed-only
+anchors. Each recipe maps to a stable ``type: recipe`` page keyed by its
+canonical id, so a direct remote write replaces the same page.
 
 The emitted page shape: ``type: recipe`` + ``tags:
 kind:/model:/gpu:/framework_name:`` + flat ``attrs``
@@ -25,14 +20,10 @@ best_config_args / best_config_envs / best_throughput).
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
+import shlex
 from typing import Any, Mapping
-
-from .gbrain_remote_client import _GbrainMcp
-
-log = logging.getLogger(__name__)
 
 # A scalar safe to emit bare (unquoted) in YAML: letter-leading, otherwise
 # alnum/._- only. Anything reinterpretable (digit-leading versions, tokens with
@@ -56,6 +47,193 @@ _TAG_CLEAN = str.maketrans({" ": "-", "\t": "-", "/": "-"})
 _DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 _RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
 _EXTRA_SERVER_ARGS_KEY = "extra_server_args"
+_PATH_KEY_RE = re.compile(
+    r"(?:^|[_-])(?:path|dir|directory|workspace|local_root|session_root)(?:$|[_-])",
+    re.IGNORECASE,
+)
+_WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_DROP_VALUE = object()
+_CORE_RECIPE_KEYS = frozenset(
+    {
+        "canonical_id",
+        "version",
+        "created_at",
+        "updated_at",
+        "model",
+        "hardware",
+        "framework",
+        "framework_name",
+        "framework_version",
+        "precision",
+        "model_type",
+        "architectures",
+        "best_config",
+        "best_throughput",
+        "validated_gain_pct",
+        "what_worked",
+        "what_failed",
+        "remaining_gaps",
+        "prs_tested",
+        "pitfalls",
+        "lessons",
+        "last_profiled",
+        "stack_fingerprint",
+        "sessions",
+        "authority",
+        "confidence",
+    }
+)
+
+
+def _is_secret_key(value: str) -> bool:
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
+    parts = [part for part in re.split(r"[^a-z0-9]+", snake_case.lower()) if part]
+    normalized = "".join(parts)
+    return "token" in parts or any(
+        marker in normalized
+        for marker in (
+            "authorization",
+            "password",
+            "passwd",
+            "secret",
+            "apikey",
+            "privatekey",
+            "accesskey",
+            "sshkey",
+        )
+    )
+
+
+def _is_secret_option(value: str) -> bool:
+    """Identify credential CLI flags without treating token knobs as secrets."""
+
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
+    parts = [part for part in re.split(r"[^a-z0-9]+", snake_case.lower()) if part]
+    normalized = "".join(parts)
+    if any(
+        marker in normalized
+        for marker in (
+            "authorization",
+            "password",
+            "passwd",
+            "secret",
+            "apikey",
+            "privatekey",
+            "accesskey",
+            "sshkey",
+        )
+    ):
+        return True
+    if not parts or "token" not in parts:
+        return False
+    return len(parts) == 1 or parts[-1] == "token" or bool(
+        {"api", "auth", "bearer", "access", "refresh", "hf", "gbrain"} & set(parts)
+    )
+
+
+def _is_absolute_path_text(value: str) -> bool:
+    text = value.strip()
+    return text.startswith(("/", "file://")) or bool(_WINDOWS_ABSOLUTE_RE.match(text))
+
+
+def _sanitize_server_args(value: str, *, drop_paths: bool) -> str:
+    """Remove secret options and, for non-replay metadata, local paths."""
+
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        tokens = value.split()
+    safe: list[str] = []
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        option, separator, operand = token.partition("=")
+        normalized_option = option.lstrip("-")
+        if _is_secret_option(normalized_option):
+            skip_value = not separator
+            continue
+        if drop_paths and _is_absolute_path_text(token):
+            if safe and safe[-1].startswith("-") and "=" not in safe[-1]:
+                safe.pop()
+            continue
+        if drop_paths and separator and _is_absolute_path_text(operand):
+            continue
+        safe.append(token)
+    return shlex.join(safe)
+
+
+def _sanitize_gbrain_value(
+    value: Any,
+    *,
+    key: str = "",
+    drop_paths: bool = False,
+) -> Any:
+    """Recursively remove secrets and host-local paths from shared payloads."""
+
+    if _is_secret_key(key):
+        return _DROP_VALUE
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for nested_key, nested_value in value.items():
+            name = str(nested_key)
+            cleaned = _sanitize_gbrain_value(
+                nested_value,
+                key=name,
+                drop_paths=drop_paths,
+            )
+            if cleaned is not _DROP_VALUE:
+                sanitized[name] = cleaned
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        sanitized_items = [
+            cleaned
+            for item in value
+            if (
+                cleaned := _sanitize_gbrain_value(
+                    item,
+                    key=key,
+                    drop_paths=drop_paths,
+                )
+            )
+            is not _DROP_VALUE
+        ]
+        return sanitized_items
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if isinstance(value, str):
+        if key == _EXTRA_SERVER_ARGS_KEY:
+            return _sanitize_server_args(value, drop_paths=drop_paths)
+        if drop_paths and _is_absolute_path_text(value):
+            return _DROP_VALUE
+        if drop_paths and _PATH_KEY_RE.search(key) and ("/" in value or "\\" in value):
+            return _DROP_VALUE
+    return value
+
+
+def _sanitize_recipe_for_gbrain(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a shareable Recipe copy with replay-safe metadata only."""
+
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in recipe.items():
+        key = str(raw_key)
+        # Unknown top-level keys are splatted ``extras``. Provenance and
+        # evidence refs are metadata too; strip host-local paths there. Core
+        # replay fields retain path-valued knobs/artifacts but still lose any
+        # nested secret-bearing keys.
+        drop_paths = key not in _CORE_RECIPE_KEYS or key in {
+            "provenance",
+            "evidence_refs",
+        }
+        cleaned = _sanitize_gbrain_value(
+            raw_value,
+            key=key,
+            drop_paths=drop_paths,
+        )
+        if cleaned is not _DROP_VALUE:
+            sanitized[key] = cleaned
+    return sanitized
 
 
 def _tag_value(value: Any) -> str:
@@ -204,55 +382,25 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     return args, envs
 
 
-def _has_shareable_signal(recipe: Mapping[str, Any]) -> bool:
-    """Return True when a seed-only recipe carries reusable prior signal.
-
-    Args:
-        recipe: The recipe dict to inspect.
-
-    Returns:
-        ``True`` when the recipe has a positive-throughput session, any
-        negative-knowledge list, or architecture/model-class hints.
-    """
-    for s in recipe.get("sessions") or []:
-        if not isinstance(s, Mapping):
-            continue
-        try:
-            tput = float(s.get("throughput_after") or 0.0)
-        except (TypeError, ValueError):
-            tput = 0.0
-        if tput > 0.0 or s.get("actions_taken"):
-            return True
-    for field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons"):
-        if recipe.get(field):
-            return True
-    if recipe.get("architectures") or recipe.get("model_class"):
-        return True
-    return False
-
-
 def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     """Map a v2 recipe dict to a (slug, content) gbrain better-landing page.
 
-    Returns ``None`` only when the recipe has no ``canonical_id``. By default
-    even pure seed-only anchors are mirrored; set
-    ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1`` for the stricter gate (best_config OR
-    reusable prior).
+    Returns ``None`` only when the recipe has no ``canonical_id``. Bare anchors
+    are encoded so direct remote mode preserves the same seed semantics as
+    local mode.
 
     Args:
         recipe: The v2 recipe dict to convert.
 
     Returns:
         A ``(slug, content)`` page tuple, or ``None`` when the recipe lacks a
-        canonical id (or fails the strict mirror gate).
+        canonical id.
     """
+    recipe = _sanitize_recipe_for_gbrain(recipe)
     best_config = recipe.get("best_config") if isinstance(recipe.get("best_config"), Mapping) else {}
     canonical = str(recipe.get("canonical_id") or "").strip()
     if not canonical:
         return None
-    if str(os.environ.get("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", "")).strip().lower() in ("1", "true", "yes"):
-        if not best_config and not _has_shareable_signal(recipe):
-            return None
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
@@ -329,105 +477,4 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     return slug, content
 
 
-def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
-    """Best-effort mirror of ONE recipe dict into gbrain (read cache).
-
-    Returns True when a page was written, False when skipped (no
-    ``canonical_id``, strict-gate rejection, no mcp) or on a transport
-    error. Never raises — the local write is authoritative and a gbrain
-    hiccup must not affect it.
-
-    Args:
-        recipe: The recipe dict to mirror.
-        mcp: The gbrain MCP client, or ``None`` to skip mirroring.
-
-    Returns:
-        ``True`` when a page was written, ``False`` when skipped or on error.
-    """
-    if mcp is None:
-        return False
-    page = recipe_to_page(recipe)
-    if page is None:
-        return False
-    slug, content = page
-    try:
-        mcp.call("put_page", {"slug": slug, "content": content})
-        return True
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        log.warning("gbrain mirror put_page failed for %s: %r", slug, exc)
-        return False
-
-
-def build_mirror_mcp_from_env() -> _GbrainMcp | None:
-    """Build a write-side gbrain MCP client from env (background timeout).
-
-    Returns:
-        A configured :class:`_GbrainMcp`, or ``None`` when ``GBRAIN_BASE_URL``
-        / ``GBRAIN_TOKEN`` are not set.
-    """
-    base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
-    token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
-    if not base_url or not token:
-        return None
-    from hyperloom.inference_optimizer import recipe_snapshot_constants as C
-
-    return _GbrainMcp(base_url, token, C.DEFAULT_HTTP_TIMEOUT_SEC)
-
-
-class GbrainMirroringRecipeKB:
-    """Wrap a :class:`recipe_kb.RecipeKB` so a local ``put_recipe`` also
-    mirrors the recipe into gbrain (the read cache), best-effort.
-
-    Preserves the local-first contract: the local write is authoritative and
-    runs first; the gbrain mirror is a post-write side-effect that never blocks
-    or fails the local result. Every other call delegates to the wrapped
-    dispatcher unchanged.
-    """
-
-    def __init__(self, inner: Any, mcp: _GbrainMcp | None) -> None:
-        """Wrap an inner dispatcher with a gbrain mirroring side-effect.
-
-        Args:
-            inner: The wrapped recipe dispatcher to delegate to.
-            mcp: Optional gbrain MCP client used for mirroring writes.
-        """
-        self._inner = inner
-        self._mcp = mcp
-
-    def put_recipe(self, **kwargs: Any) -> Any:
-        """Write a recipe locally, then best-effort mirror it to gbrain.
-
-        The local write is authoritative; mirroring failures are logged
-        and swallowed so they never block the local result.
-
-        Args:
-            **kwargs: Recipe fields forwarded to the inner dispatcher.
-
-        Returns:
-            The result of the wrapped ``put_recipe`` call.
-        """
-        result = self._inner.put_recipe(**kwargs)
-        try:
-            mirror_recipe(kwargs, self._mcp)
-        except Exception as exc:  # noqa: BLE001 - never break the local write
-            log.warning("gbrain mirror skipped: %r", exc)
-        return result
-
-    def __getattr__(self, name: str) -> Any:
-        """Delegate all other attribute access to the wrapped dispatcher.
-
-        Args:
-            name: Attribute name to resolve on the inner dispatcher.
-
-        Returns:
-            The corresponding attribute from the wrapped dispatcher.
-        """
-        return getattr(self._inner, name)
-
-
-__all__ = [
-    "recipe_to_page",
-    "mirror_recipe",
-    "build_mirror_mcp_from_env",
-    "GbrainMirroringRecipeKB",
-]
+__all__ = ["recipe_to_page"]
