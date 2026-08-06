@@ -168,7 +168,6 @@ def build_client_from_env() -> Any | None:
         key = (
             os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("CLAUDE_API_KEY")
-            or os.environ.get("PRIMUS_SAFE_API_KEY")
         )
         if not (base and key):
             log.warning(

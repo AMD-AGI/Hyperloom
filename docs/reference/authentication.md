@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Authoritative reference for Hyperloom credentials and environment configuration. Covers single-gateway and split-entrypoint LLM setup, SAFE_API_KEY, path variables, and hosted mode."
-        "keywords": "Hyperloom, authentication, credentials, SAFE_API_KEY, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, environment variables, LLM gateway, ROCm, AMD GPU, API key, configuration"
+        "description": "Authoritative reference for Hyperloom credentials and environment configuration. Covers single-gateway and split-entrypoint LLM setup, OPENAI_API_KEY, path variables, and hosted mode."
+        "keywords": "Hyperloom, authentication, credentials, OPENAI_API_KEY, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, environment variables, LLM gateway, ROCm, AMD GPU, API key, configuration"
 ---
 # Hyperloom authentication and credentials
 
@@ -15,21 +15,25 @@ page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most two classes of configuration:
 
-- **LLM gateway credentials**: At least one upstream base URL and one API
-   key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
-   network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
-   Anthropic/OpenAI entrypoints and third-party gateways are also supported.
+- **LLM gateway credentials**: At least one provider side, configured with both
+   its base URL and its own key (see
+   [LLM gateway credentials](#llm-gateway-credentials)).
 - **Path / workspace layout**: Run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
    (writable artifact root; default `/workspace/hyperloom`); setup writes the
    runtime env files and updates `.env`.
 
-In the single-gateway setup, GEAK keys and Anthropic / OpenAI
-aliases are derived from `SAFE_API_KEY` and
-`OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
-the inference optimizer CLI preflight. You normally do not set those
-aliases by hand. Split-gateway and GEAK gateway endpoint overrides are the
-exceptions (see below).
+Hyperloom never borrows one provider's key or endpoint for the other. A side is
+configured by `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, or by
+`OPENAI_BASE_URL` + `OPENAI_API_KEY`, or both. A side you leave unset simply
+disables the features that speak its protocol; a half-configured side fails
+preflight rather than being silently completed from the other provider.
+
+The only values still filled for you are the internal LLM aliases
+(`LLM_API_KEY`, `AMD_LLM_API_KEY`, `LLM_API_BASE`), which the inference optimizer
+CLI preflight copies from the OpenAI side. You do not set those by hand.
+`GEAK_API_KEY` / `GEAK_BASE_URL` are never filled from either side: GEAK runs on
+the Anthropic side, so set them only to point GEAK at something else.
 
 ---
 
@@ -54,60 +58,79 @@ shell-exported value (if any) is kept.
 
 If neither source supplies a usable LLM endpoint (at least one of
 `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` and at least one of
-`SAFE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
-`ANTHROPIC_AUTH_TOKEN`), the CLI fails fast at startup with a message
+`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` /
+`DEEPSEEK_API_KEY`), the CLI fails fast at startup with a message
 naming the missing pieces.
+
+Preflight also rejects a *mispaired* configuration: a base URL whose only key
+belongs to the other provider, or a key whose only endpoint would come from the
+other provider. Hyperloom would otherwise send that key to a foreign host. Give
+each side its own `*_BASE_URL` and key, or drop the foreign key.
 
 ---
 
 ## LLM gateway credentials
 
-Two deployment shapes are supported. Pick one; do not mix the blocks
-unless you intend a split entrypoint.
+A provider side is configured by **both** its base URL and its own key. Exactly
+three shapes are accepted; anything else fails preflight.
 
-### Single gateway (default — AMD / LiteLLM-style)
+| Shape | Set | Effect |
+|-------|-----|--------|
+| OpenAI side only | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | Codex runs; Claude and GEAK are disabled |
+| Anthropic side only | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` | Claude and GEAK run; Codex (OpenAI-protocol) is disabled |
+| Both sides | all four, each side self-consistent | Everything runs |
 
-One OpenAI-compatible endpoint serves both Claude and GPT models
-(LiteLLM gateway, AMD primus-safe, or any self-hosted `/v1` proxy).
+One gateway serving both providers is the third shape: point both base URLs at
+it and set both keys, even when the key value is the same.
 
-| Variable           | Issuer                              | Where to obtain                                                                                       | Format              |
-|--------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------|
-| `SAFE_API_KEY`     | Your LiteLLM gateway                | Your gateway's LLM Gateway page                                                                       | `ak-...`            |
-| `OPENAI_BASE_URL`  | Your LiteLLM gateway                | `https://<your-gateway-host>/api/v1/llm-proxy/v1` (adjust to your gateway)                            | URL ending in `/v1` |
+| Variable             | Issuer                | Where to obtain                                                             | Format              |
+|----------------------|-----------------------|-----------------------------------------------------------------------------|---------------------|
+| `OPENAI_BASE_URL`    | Your LiteLLM gateway  | `https://<your-gateway-host>/api/v1/llm-proxy/v1` (adjust to your gateway)  | URL ending in `/v1` |
+| `OPENAI_API_KEY`     | Your LiteLLM gateway  | Your gateway's LLM Gateway page                                             | `ak-...`            |
+| `ANTHROPIC_BASE_URL` | Your gateway / Anthropic | Same gateway without the trailing `/v1`, or `https://api.anthropic.com`  | URL                 |
+| `ANTHROPIC_API_KEY`  | Your gateway / Anthropic | Your gateway's page, or the Anthropic console                            | `ak-...` / `sk-ant-...` |
 
-`SAFE_API_KEY` is the single AMD credential used by all downstream
-tooling:
+Downstream tooling reads the side it belongs to:
 
-* GEAK and kernel tools inherit the resolved gateway credential from preflight.
-* Orchestration LLM → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (auto-aliased).
-* Robustness-agent uses it for the optional LLM RCA engine.
-* Critic-agent uses it for KB summary / synthesis calls.
+* GEAK runs Claude Code, so it uses the Anthropic-side base URL + key plus
+  `GEAK_CLAUDE_MODEL`. An OpenAI-only deployment cannot start it.
+* Kernel tools inherit the OpenAI-side credential from preflight
+  (`LLM_API_KEY` / `AMD_LLM_API_KEY`).
+* Orchestration Claude uses the Anthropic-side base URL + key, including the
+  generated `~/.claude/config.json` primary key.
+* Robustness-agent uses the OpenAI side for the optional LLM RCA engine.
+* Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
-You *never* need to copy `SAFE_API_KEY` into separate
-provider-specific slots in `.env`.
-If those variables are unset, install and preflight fill them from
-`SAFE_API_KEY` at process-launch time. An explicitly set provider key is
-never overwritten by `SAFE_API_KEY`.
+You *never* need to copy a key into the internal LLM slots in `.env`;
+preflight fills those from the OpenAI-side key. Preflight does **not** cross-fill
+the per-provider primary keys (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+`ANTHROPIC_AUTH_TOKEN`), and an explicitly set provider key is never overwritten.
 
 The recommended setup, run once per shell:
 
 ```bash
 cd "$REPO_ROOT"
 cp .env.template .env
-# Edit .env and set SAFE_API_KEY=ak-...
+# Edit .env: set the base URL + key for each side you want enabled.
 ```
 
 For one-off use without writing to disk:
 
 ```bash
-export SAFE_API_KEY=ak-your-safe-apikey
+# One gateway serving both providers: configure both sides against it.
 export OPENAI_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy/v1
+export OPENAI_API_KEY=ak-your-gateway-apikey
+export ANTHROPIC_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy
+export ANTHROPIC_API_KEY=ak-your-gateway-apikey
 ```
+
+Dropping the two `ANTHROPIC_*` lines is also valid — it just disables the
+Claude-side features.
 
 ### Split entrypoints (native Anthropic + OpenAI)
 
 Use when Claude and GPT live on different upstream vendors or gateways.
-Set each side explicitly; `SAFE_API_KEY` is optional.
+Set each side explicitly.
 
 | Variable              | Side      | Example                         |
 |-----------------------|-----------|---------------------------------|
@@ -116,10 +139,11 @@ Set each side explicitly; `SAFE_API_KEY` is optional.
 | `OPENAI_BASE_URL`     | Codex/GPT | `https://api.openai.com/v1`     |
 | `OPENAI_API_KEY`      | Codex/GPT | `sk-...`                        |
 
-Preflight resolves `(anthropic_base_url, openai_base_url)` independently:
-when both are set, each is kept as-is. Claude CLI auth uses
-`ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) in preference to any
-shared key. GEAK inherits the OpenAI-side URL and key.
+Preflight resolves `(anthropic_base_url, openai_base_url)` independently: each
+side is its own explicit base URL, or the official SDK endpoint implied by that
+side's own key, or empty. Claude CLI auth uses `ANTHROPIC_API_KEY` (or
+`ANTHROPIC_AUTH_TOKEN`); GEAK uses the same Anthropic-side URL and key. Neither
+side is ever completed from the other.
 
 To pin models in split mode:
 
@@ -130,7 +154,7 @@ export CODEX_MODEL=model-id-on-the-openai-side
 
 ### Non-AMD / self-hosted gateway
 
-Point `OPENAI_BASE_URL` and `SAFE_API_KEY` (or the split keys above) at
+Point `OPENAI_BASE_URL` and `OPENAI_API_KEY` (or the split keys above) at
 your own LiteLLM-compatible gateway (Vultr, TensorWave, on-prem, etc.) and
 pin models your gateway actually serves:
 
@@ -212,8 +236,9 @@ At preflight, the inference optimizer CLI:
 - Writes `~/.claude/config.json`: `customApiUrl` is set to the resolved
   Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
   (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
-  `SAFE_API_KEY`).
-- Fills the provider credentials needed by child processes.
+  `OPENAI_API_KEY`).
+- Fills the internal LLM aliases from the OpenAI-side key for child processes;
+  the per-provider primary keys and the GEAK aliases are not filled.
 
 **401 recovery:**
 
@@ -232,9 +257,9 @@ GEAK uses the generated runtime configuration directly.
 
 When you launch through the hosted Hyperloom UI,
 you do not need to set any of the variables above by hand. The
-sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
-populates the path env from sandbox defaults, and runs install/preflight
-so downstream tools inherit the gateway URL and aliases.
+sandbox initializer binds your LLM Gateway key as `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY`, populates the path env from sandbox defaults, and runs
+install/preflight so downstream tools inherit the gateway URL and aliases.
 
 ---
 
@@ -247,20 +272,22 @@ These questions cover common credential configuration scenarios.
 No. Exporting credentials in your shell is sufficient. `.env` is a
 convenience for persistence between shells.
 
-**Q: I exported `SAFE_API_KEY` but `.env` has a different value. Which wins?**
+**Q: I exported `OPENAI_API_KEY` but `.env` has a different value. Which wins?**
 
 The exported (shell) value wins. `.env` only fills missing keys.
 
-**Q: Can I run without `SAFE_API_KEY`?**
+**Q: Can I use separate provider keys instead of one shared gateway key?**
 
 Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
-(and the matching base URLs) instead. See
+(and the matching base URLs) for each side. See
 [Split entrypoints](#split-entrypoints-native-anthropic--openai).
 
 **Q: Where do provider-specific API keys come from?**
 
-In single-gateway mode they are derived from `SAFE_API_KEY` by
-`install.sh` and preflight. In split mode each side uses its own key.
+From each side's own variable: the OpenAI side reads `OPENAI_API_KEY`, the
+Anthropic side reads `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`). Neither is
+derived from the other. One gateway serving both protocols still needs both set,
+even when the value is identical.
 
 **Q: My organization rotates the LLM gateway key weekly. How?**
 

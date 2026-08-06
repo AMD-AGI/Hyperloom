@@ -3,7 +3,8 @@
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL + SAFE_API_KEY, ROCR_VISIBLE_DEVICES,
+Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
+OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
 CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
 """
 
@@ -725,7 +726,6 @@ def _validate_and_resolve_claude_model(
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
         catalog_ids = _probe_llm_catalog(base_url=override_url, api_key=api_key)
@@ -740,13 +740,9 @@ def _validate_and_resolve_claude_model(
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
         )
-        openai_key = (
-            os.environ.get("OPENAI_API_KEY", "")
-            or os.environ.get("SAFE_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        )
+        # OpenAI-side key only.
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side. Fall back to the
         # OpenAI side only for a single-gateway deploy where both sides resolve
         # to the same endpoint.
@@ -858,11 +854,8 @@ def _smoke_test_codex_model(
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     if not openai_url and resolved_urls is not None:
         openai_url = resolved_urls[1]
-    openai_key = (
-        os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("SAFE_API_KEY", "")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    )
+    # OpenAI-side key only.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
     if catalog_ids is None:
         # WARN-only path: don't block startup just because the OpenAI catalog

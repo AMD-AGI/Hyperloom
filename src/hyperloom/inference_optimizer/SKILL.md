@@ -307,7 +307,7 @@ Both are idempotent; do not replicate them inside chat.
 
 ### Credentials
 
-The common single-gateway setup uses `SAFE_API_KEY` and `OPENAI_BASE_URL`.
+The common single-gateway setup uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
 Split-gateway deployments may provide provider-specific `ANTHROPIC_*` /
 `OPENAI_*` credentials instead. Shell-exported values win; `$REPO_ROOT/.env`
 is loaded only to fill missing values by `install.sh` and the CLI preflight.
@@ -566,7 +566,7 @@ submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
-aliases from `SAFE_API_KEY`, derive/override `ANTHROPIC_BASE_URL`,
+aliases (LLM) from `OPENAI_API_KEY`,
 auto-`pip install` the SDKs / `ray` / `Magpie` /
 `InferenceX`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
@@ -585,11 +585,11 @@ for the kernel dispatch and artifact layout.
 ### Recovery
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
-the gateway rejected the request. Check that `OPENAI_BASE_URL` / `SAFE_API_KEY`
+the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
 are set in `.env` (or the calling shell) and that the gateway is reachable:
 
 ```bash
-curl -sS -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" | head
+curl -sS -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" | head
 ```
 
 If `_preflight()` itself fails, run install in `--check-only` mode to see
@@ -1206,7 +1206,7 @@ only when you intentionally want the strict AMD Claude allowlist
 | Symptom | Fix |
 |---|---|
 | `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
-| `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
+| `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
 
 ### Critic-agent runtime errors
 
