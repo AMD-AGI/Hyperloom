@@ -3,7 +3,7 @@
 source /opt/Hyperloom/.env
 
 #check if the llm gateway api is set up correctly
-response=$(echo curl -s -H \"Authorization: Bearer  ${OPENAI_API_KEY}\" ${OPENAI_BASE_URL}/models | bash)
+response=$(curl -s -H "Authorization: Bearer ${OPENAI_API_KEY}" "${OPENAI_BASE_URL}/models")
 
 #check if the response is a valid json
 if ! echo "$response" | jq . > /dev/null 2>&1; then
