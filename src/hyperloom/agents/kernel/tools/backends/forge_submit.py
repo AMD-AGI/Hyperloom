@@ -2524,8 +2524,6 @@ def _canonical_forge_artifacts(
 
 def _mean_case_result_fields(
     payload: dict,
-    *,
-    default_search_start: float = 1.0,
 ) -> dict | None:
     """Normalize authoritative per-case scoring fields from Forge output."""
     try:
@@ -2535,10 +2533,7 @@ def _mean_case_result_fields(
     if not math.isfinite(mean_case_speedup) or mean_case_speedup <= 1.0:
         return None
     try:
-        search_start = float(
-            payload.get("search_start_mean_case_speedup")
-            or default_search_start
-        )
+        search_start = float(payload.get("search_start_mean_case_speedup"))
     except (TypeError, ValueError):
         return None
     if not math.isfinite(search_start) or search_start <= 0.0:
@@ -2762,10 +2757,7 @@ def _validated_warm_start_result(
     )
     if ancestor.returncode != 0:
         return None
-    score_fields = _mean_case_result_fields(
-        result,
-        default_search_start=result.get("mean_case_speedup") or 1.0,
-    )
+    score_fields = _mean_case_result_fields(result)
     if score_fields is None:
         return None
     try:
@@ -2988,13 +2980,13 @@ def _run_loop_via_cli(
         search_start_ms = parsed.get("search_start_ms", baseline_ms)
         try:
             parsed_speedup = float(parsed.get("mean_case_speedup"))
-            if math.isfinite(parsed_speedup) and parsed_speedup > 0.0:
+            if math.isfinite(parsed_speedup) and parsed_speedup > 1.0:
                 mean_case_speedup = parsed_speedup
         except (TypeError, ValueError):
             mean_case_speedup = None
         try:
             parsed_search_start = float(
-                parsed.get("search_start_mean_case_speedup") or 1.0
+                parsed.get("search_start_mean_case_speedup")
             )
             if math.isfinite(parsed_search_start) and parsed_search_start > 0.0:
                 search_start_mean_case_speedup = parsed_search_start

@@ -353,6 +353,45 @@ def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
+def test_forge_falls_back_to_report_when_structured_score_is_missing(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.30x\n",
+        encoding="utf-8",
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [_attempt(report, backend="forge")],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 1.30
+    assert verification["micro_speedup_source"] == "report_scan"
+
+
+def test_non_forge_preserves_structured_timing_fallback(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
+    attempt = _attempt(report, backend="generic")
+    attempt.update(
+        {
+            "pristine_baseline_ms": 2.0,
+            "best_ms": 1.0,
+            "improved": True,
+        }
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 2.0
+    assert verification["micro_speedup_source"] == "structured_timing_result"
+
+
 def test_report_correctness_passes_with_reference_language(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
@@ -446,6 +485,22 @@ def test_speedup_just_above_gate_keeps(tmp_path):
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_speedup_at_gate_boundary_keeps(tmp_path):
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(
+            correctness_passed=True,
+            micro_speedup=1.10,
+            e2e_gain_pct=0.5,
+            accuracy_passed=True,
+        ),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 

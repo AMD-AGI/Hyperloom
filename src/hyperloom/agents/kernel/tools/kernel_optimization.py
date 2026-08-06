@@ -3255,6 +3255,7 @@ def build_verification(
         report = bp.get("partial_report") or bp.get("report") or ""
         sp = None
         is_forge = a.get("backend") == "forge"
+        speedup_source = "report_scan"
         if is_forge:
             try:
                 candidate_speedup = float(a.get("mean_case_speedup"))
@@ -3266,9 +3267,26 @@ def build_verification(
                     sp = candidate_speedup
             except (TypeError, ValueError):
                 sp = None
-        speedup_source = "forge_mean_case_result" if sp is not None else "report_scan"
-        if sp is None and not is_forge:
+            if sp is not None:
+                speedup_source = "forge_mean_case_result"
+        else:
+            try:
+                pristine_ms = float(a.get("pristine_baseline_ms"))
+                result_best_ms = float(a.get("best_ms"))
+                if (
+                    a.get("improved") is True
+                    and math.isfinite(pristine_ms)
+                    and math.isfinite(result_best_ms)
+                    and pristine_ms > 0
+                    and 0 < result_best_ms < pristine_ms
+                ):
+                    sp = pristine_ms / result_best_ms
+                    speedup_source = "structured_timing_result"
+            except (TypeError, ValueError):
+                sp = None
+        if sp is None:
             sp = _extract_speedup_from_report(report)
+            speedup_source = "report_scan"
         if sp is not None:
             measured = True
             if sp > best_speedup:
