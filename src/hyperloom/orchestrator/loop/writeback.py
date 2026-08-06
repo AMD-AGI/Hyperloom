@@ -268,6 +268,13 @@ class WritebackCollaborator:
             str(result.get("extra_server_args") or "")
             or (str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else "")
         ).strip()
+        # An integrate carries no env delta of its own except a forge-GEMM tuning
+        # KEEP, so inherit the stack's env layer and let that delta win. Dropping
+        # it published a current_best whose args and envs came from different
+        # configs, which every dispatch site then seeded from.
+        extra_envs = dict((cb.get("extra_envs") or {}) if isinstance(cb, dict) else {})
+        if isinstance(result.get("extra_envs"), dict):
+            extra_envs.update({str(k): str(v) for k, v in result["extra_envs"].items()})
         apply_result = result.get("apply_result") or {}
         backup_manifest = apply_result.get("manifest_path") if isinstance(apply_result, dict) else None
         if not backup_manifest and isinstance(apply_result, dict):
@@ -331,6 +338,7 @@ class WritebackCollaborator:
             "integration_id": result.get("integration_id"),
             "kernel_id": result.get("kernel_id"),
             "extra_server_args": extra_args,
+            "extra_envs": extra_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": result.get("ttft_mean_ms"),
             "e2el_mean_ms": result.get("e2el_mean_ms"),
@@ -455,55 +463,55 @@ class WritebackCollaborator:
         run's fingerprint never matches the measured one.
         """
         state = self.shared_state
-        was_validation_pending = bool(getattr(state, "enablement_validation_pending", False))
+        was_validation_pending = bool(state.enablement.validation_pending)
         incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
         measured_incoming = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None
-        stored_kind = str(getattr(state, "enablement_baseline_eval_kind", "") or "")
+        stored_kind = str(state.enablement.baseline_eval_kind or "")
         preserve_measured_trigger = (
             incoming_kind == EVAL_KIND_ACCURACY_UNAVAILABLE
             and not measured_incoming
             and bool(stored_kind)
             and stored_kind != EVAL_KIND_ACCURACY_UNAVAILABLE
         )
-        state.enablement_origin = "eval"
-        state.enablement_pending = True
+        state.enablement.origin = "eval"
+        state.enablement.pending = True
         # A failed revalidation reopens the authoring loop and counts as a
         # no-progress round so the enablement_stalled cap can still terminate.
         if was_validation_pending:
-            state.enablement_validation_pending = False
-            state.enablement_stall_streak = int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
-            if state.enablement_stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+            state.enablement.validation_pending = False
+            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
+            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
-            state.enablement_accuracy_floor = float(floor)
+            state.enablement.accuracy_floor = float(floor)
         if preserve_measured_trigger:
             log.info(
                 "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
                 "an eval-less baseline reported accuracy_unavailable and must not "
                 "overwrite it",
                 stored_kind,
-                getattr(state, "enablement_observed_accuracy", None),
-                getattr(state, "enablement_observed_task", ""),
+                state.enablement.observed_accuracy,
+                state.enablement.observed_task,
             )
             return
         cfg = result_payload.get("materialized_config")
         if isinstance(cfg, str) and cfg:
-            state.enablement_probe_config_path = cfg
+            state.enablement.probe_config_path = cfg
         fp = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
         if isinstance(fp, str) and fp:
-            state.enablement_eval_contract_fingerprint = fp
+            state.enablement.eval_contract_fingerprint = fp
         if isinstance(incoming_kind, str) and incoming_kind:
-            state.enablement_baseline_eval_kind = incoming_kind
+            state.enablement.baseline_eval_kind = incoming_kind
         observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
         if observed is not None:
-            state.enablement_observed_accuracy = float(observed)
-        state.enablement_observed_task = str(result_payload.get("accuracy_task") or "")
-        state.enablement_observed_metric = str(result_payload.get("accuracy_metric") or "")
+            state.enablement.observed_accuracy = float(observed)
+        state.enablement.observed_task = str(result_payload.get("accuracy_task") or "")
+        state.enablement.observed_metric = str(result_payload.get("accuracy_metric") or "")
         evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
         if evidence:
-            state.enablement_baseline_eval_evidence = evidence[:4000]
-            state.enablement_launch_log = evidence
+            state.enablement.baseline_eval_evidence = evidence[:4000]
+            state.enablement.launch_log = evidence
 
     async def _handle_unpromotable_result(
         self,
@@ -646,34 +654,34 @@ class WritebackCollaborator:
             eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
             # Revalidation task failed for any reason (boot/OOM/timeout/eval): clear
             # pending state, preserve the frozen trigger identity, increment stall.
-            reval_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+            reval_tid = str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "").strip()
             is_revalidation = bool(
                 (task.params or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
-            if is_revalidation and bool(getattr(self.shared_state, "enablement_validation_pending", False)):
-                self.shared_state.enablement_validation_pending = False
-                self.shared_state.enablement_revalidation_task_id = ""
-                self.shared_state.enablement_stall_streak = (
-                    int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+            if is_revalidation and bool(getattr(self.shared_state.enablement, "validation_pending", False)):
+                self.shared_state.enablement.validation_pending = False
+                self.shared_state.enablement.revalidation_task_id = ""
+                self.shared_state.enablement.stall_streak = (
+                    int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
                 )
                 try:
                     from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
                 except ImportError:
                     _max_stall = 5
-                if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
                     self.shared_state.set_stop_reason("enablement_stalled")
                 else:
-                    self.shared_state.enablement_dispatched = False
+                    self.shared_state.enablement.inflight_task_id = ""
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
-                    self.shared_state.enablement_launch_log = launch_log
+                    self.shared_state.enablement.launch_log = launch_log
                 log.warning(
                     "enablement revalidation task %s failed (error_class=%s); "
                     "stall_streak=%d rearm=%s",
                     task.task_id,
                     err_class,
-                    self.shared_state.enablement_stall_streak,
+                    self.shared_state.enablement.stall_streak,
                     not bool(self.shared_state.stop_reason),
                 )
                 any_changed = True
@@ -722,7 +730,7 @@ class WritebackCollaborator:
             if err_class != "fast_exit_arg_error":
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
-                    self.shared_state.enablement_launch_log = launch_log
+                    self.shared_state.enablement.launch_log = launch_log
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -2035,6 +2043,10 @@ class WritebackCollaborator:
     ) -> bool:
         """Lift a winner only when it improves the current throughput anchor.
 
+        The stack append is skipped when the winner is already applied, keyed by
+        ``(action, variant_name)`` or by ``fingerprint``, so a rerun of an
+        already-stacked config cannot double-apply it.
+
         Args:
             task_kind: The action kind that produced the winner (stamped on the
                 stack entry / current_best).
@@ -2095,7 +2107,17 @@ class WritebackCollaborator:
                 if isinstance(e, dict)
             }
             key = (task_kind, str(variant_name or ""))
-            if key not in existing:
+            # A rerun under a new name must not re-apply an already-stacked config.
+            candidate_fp = str(bv.get("fingerprint") or "")
+            already_stacked = key in existing or (
+                bool(candidate_fp)
+                and any(
+                    candidate_fp == str(e.get("fingerprint") or "")
+                    for e in self.shared_state.optimization_stack
+                    if isinstance(e, dict)
+                )
+            )
+            if not already_stacked:
                 source_phase = str(
                     (bv.get("source_phase") if isinstance(bv, dict) else "")
                     or (
@@ -2363,7 +2385,7 @@ class WritebackCollaborator:
         audit_extras: dict[str, Any] = {}
         tput = result.get("output_throughput")
         warmup_anchor = result.get("warmup_round_tput")
-        tracked_tid = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        tracked_tid = str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "").strip()
         promoting_tid = str(getattr(task, "task_id", "") or "").strip() if task is not None else ""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         is_revalidation = bool(
@@ -2383,22 +2405,9 @@ class WritebackCollaborator:
         )
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
-                # Baseline's conclusion contract is the hot measure round; the
-                # discarded cold round is kept only as an audit field so gain math
-                # never mixes cold-before with hot-after.
-                if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0:
-                    self.shared_state.baseline_tput = float(tput)
-                    self.shared_state.baseline_cold_tput = float(warmup_anchor)
-                    self.shared_state.baseline_hot_tput = float(tput)
-                    log.info(
-                        "baseline anchor: using hot measure tput %.1f as "
-                        "baseline_tput (discarded cold warmup %.1f kept as "
-                        "baseline_cold_tput)",
-                        float(tput),
-                        float(warmup_anchor),
-                    )
-                else:
-                    self.shared_state.baseline_tput = float(tput)
+                # The anchor is the hot measure round; the cold warmup round is
+                # discarded so gain math never mixes cold-before with hot-after.
+                self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
                     "baseline anchor: keeping %.1f; re-baseline measured %.1f "
@@ -2410,16 +2419,16 @@ class WritebackCollaborator:
             self.shared_state.baseline_failure_streak = 0
             self.shared_state.baseline_arg_error_streak = 0
             # A genuine baseline may revalidate an eval-origin enablement.
-            if bool(getattr(self.shared_state, "enablement_validation_pending", False)):
+            if bool(getattr(self.shared_state.enablement, "validation_pending", False)):
                 if is_revalidation:
                     acc = result.get("accuracy")
-                    floor = float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0)
+                    floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     if accuracy_meets_floor(acc, floor):
-                        self.shared_state.enablement_succeeded = True
-                        self.shared_state.enablement_validation_pending = False
-                        self.shared_state.enablement_revalidation_task_id = ""
-                        self.shared_state.enablement_origin = ""
-                        self.shared_state.enablement_pending = False
+                        self.shared_state.enablement.succeeded = True
+                        self.shared_state.enablement.validation_pending = False
+                        self.shared_state.enablement.revalidation_task_id = ""
+                        self.shared_state.enablement.origin = ""
+                        self.shared_state.enablement.pending = False
                     else:
                         # Sub-floor accuracy on the tracked revalidation: rearm the
                         # specialist loop without clearing the frozen trigger identity.
@@ -2428,10 +2437,10 @@ class WritebackCollaborator:
                             acc if isinstance(acc, (int, float)) else float("nan"),
                             floor,
                         )
-                        self.shared_state.enablement_validation_pending = False
-                        self.shared_state.enablement_revalidation_task_id = ""
-                        self.shared_state.enablement_stall_streak = (
-                            int(getattr(self.shared_state, "enablement_stall_streak", 0) or 0) + 1
+                        self.shared_state.enablement.validation_pending = False
+                        self.shared_state.enablement.revalidation_task_id = ""
+                        self.shared_state.enablement.stall_streak = (
+                            int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
                         )
                         _max_stall = getattr(self, "_ENABLEMENT_MAX_STALL", None)
                         if _max_stall is None:
@@ -2439,10 +2448,10 @@ class WritebackCollaborator:
                                 from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
                             except ImportError:
                                 _max_stall = 5
-                        if self.shared_state.enablement_stall_streak >= _max_stall and not self.shared_state.stop_reason:
+                        if self.shared_state.enablement.stall_streak >= _max_stall and not self.shared_state.stop_reason:
                             self.shared_state.set_stop_reason("enablement_stalled")
                         else:
-                            self.shared_state.enablement_dispatched = False
+                            self.shared_state.enablement.inflight_task_id = ""
                 else:
                     # An unrelated baseline promoted while revalidation is pending.
                     # Only anchor tput; do not consume or clear the pending state.
@@ -2452,11 +2461,11 @@ class WritebackCollaborator:
                         promoting_tid,
                         tracked_tid,
                     )
-                    self.shared_state.enablement_origin = ""
-                    self.shared_state.enablement_pending = False
+                    self.shared_state.enablement.origin = ""
+                    self.shared_state.enablement.pending = False
             else:
-                self.shared_state.enablement_origin = ""
-                self.shared_state.enablement_pending = False
+                self.shared_state.enablement.origin = ""
+                self.shared_state.enablement.pending = False
             changed = True
         # Accuracy / config / wall-clock describe the anchor run, so they only
         # move when the anchor itself moves; otherwise the recorded reference
@@ -2532,8 +2541,8 @@ class WritebackCollaborator:
             "fingerprint": _baseline_params_fingerprint(task_params),
             # Record revalidation context for history.
             "is_revalidation": bool(task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON),
-            "enablement_succeeded": bool(getattr(self.shared_state, "enablement_succeeded", False)),
-            "enablement_accuracy_floor": float(getattr(self.shared_state, "enablement_accuracy_floor", 0.0) or 0.0),
+            "enablement_succeeded": bool(getattr(self.shared_state.enablement, "succeeded", False)),
+            "enablement_accuracy_floor": float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0),
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
@@ -2631,7 +2640,7 @@ class WritebackCollaborator:
     async def _enablement_revalidation_task_ids(self) -> set[str]:
         """Return queued enablement-revalidation baseline task IDs."""
         spared: set[str] = set()
-        tracked = str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "").strip()
+        tracked = str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "").strip()
         if tracked:
             spared.add(tracked)
         try:
@@ -4088,7 +4097,7 @@ class WritebackCollaborator:
             except Exception:  # noqa: BLE001 — sweep is best-effort
                 log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
 
-        state.enablement_last_build_failure = {
+        state.enablement.last_build_failure = {
             "failure_class": "timeout",
             "failure_summary": "targeted build interrupted by coordinator restart",
         }
@@ -4115,9 +4124,9 @@ class WritebackCollaborator:
         revalidation cannot be enqueued (tracked_tid is still the old row).
         """
         state = self.shared_state
-        if not bool(getattr(state, "enablement_validation_pending", False)):
+        if not bool(state.enablement.validation_pending):
             return
-        tracked_tid = str(getattr(state, "enablement_revalidation_task_id", "") or "").strip()
+        tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if not tracked_tid:
             return
         try:
@@ -4129,12 +4138,12 @@ class WritebackCollaborator:
             except TaskNotFound:
                 is_terminal = True
             if is_terminal:
-                state.enablement_validation_pending = False
-                state.enablement_revalidation_task_id = ""
-                state.enablement_stall_streak = (
-                    int(getattr(state, "enablement_stall_streak", 0) or 0) + 1
+                state.enablement.validation_pending = False
+                state.enablement.revalidation_task_id = ""
+                state.enablement.stall_streak = (
+                    int(state.enablement.stall_streak or 0) + 1
                 )
-                state.enablement_dispatched = False
+                state.enablement.inflight_task_id = ""
                 report["fixes"].append(
                     {"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid}
                 )

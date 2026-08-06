@@ -936,26 +936,19 @@ class ConversationCollaborator:
                 )
             else:
                 lines.append(f"  dominant_direction={direction} ({pct:.1f}%)")
-        lines.append(
-            f"  macro_cycle={cycle}; KEEP'd variants stay de-duped permanently, "
-            "but prior sub-threshold variants whose measured gain now meets the "
-            "decayed KEEP bar are unblocked for re-test."
-        )
+        lines.append(f"  macro_cycle={cycle}")
         lines.append("Advisory only: pick the domain/tag yourself; this nudges focus, it does not gate dispatch.")
         return "\n".join(lines)
 
     def _acceptance_threshold_advisory_block(self) -> str:
-        """Render the current decaying acceptance bar + re-testable prior variants.
+        """Render the decaying acceptance bar and prior measured gains as evidence.
 
-        Active only in cyclic mode after at least one macro-cycle (when the bar
-        has decayed below the first-cycle default). Surfaces the current KEEP /
-        stack-stable thresholds and lists prior sub-threshold variants whose
-        measured gain now meets the decayed bar (unblocked for re-test) plus a
-        few still below it (reference only). Advisory; never gates dispatch.
+        Active only in cyclic mode after at least one macro-cycle. Shows the
+        current KEEP threshold and lists prior measured results above and below
+        it for decision context; the results never gate re-submission.
 
         Returns:
-            The rendered acceptance-threshold advisory text, or ``""`` when not
-            applicable (first cycle, before any threshold decay).
+            The rendered advisory text, or ``""`` when not applicable.
         """
         state = self.shared_state
         keep = self._decaying_keep_threshold_pct()
@@ -965,7 +958,6 @@ class ConversationCollaborator:
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        unlockable = {"REVERT", "KEEP_UNSTABLE", "no_promote"}
         search = getattr(state, "explore_search", None) or {}
         entries: list[dict[str, Any]] = []
         if isinstance(search, dict):
@@ -975,31 +967,28 @@ class ConversationCollaborator:
             rejected = search.get("rejected") or []
             if isinstance(rejected, list):
                 entries.extend(v for v in rejected if isinstance(v, dict))
-        now_unblocked: list[tuple[str, float]] = []
-        still_blocked: list[tuple[str, float]] = []
+        above_bar: list[tuple[str, float]] = []
+        below_bar: list[tuple[str, float]] = []
         for e in entries:
-            if str(e.get("outcome") or "") not in unlockable:
-                continue
             try:
                 g = float(e.get("gain_pct"))
             except (TypeError, ValueError):
                 continue
             name = str(e.get("name") or e.get("fingerprint") or "")[:48]
-            (now_unblocked if g >= keep else still_blocked).append((name, g))
+            (above_bar if g >= keep else below_bar).append((name, g))
         lines: list[str] = [
             f"Current acceptance bar (macro_cycle={cycle}): KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
-            "KEEP'd variants stay de-duped permanently; prior sub-threshold "
-            "variants are de-duped only while below the current KEEP bar.",
+            "Historical results are evidence only — any fingerprint may be re-proposed.",
         ]
-        if now_unblocked:
-            now_unblocked.sort(key=lambda p: p[1], reverse=True)
-            lines.append("Re-testable now (prior gain now clears the bar; re-propose if still relevant):")
-            for name, g in now_unblocked[:8]:
+        if above_bar:
+            above_bar.sort(key=lambda p: p[1], reverse=True)
+            lines.append("Prior results above the bar (consider re-proposing if conditions changed):")
+            for name, g in above_bar[:8]:
                 lines.append(f"  {name}: prior gain {g:+.2f}% >= {keep:.2f}%")
-        if still_blocked:
-            still_blocked.sort(key=lambda p: p[1], reverse=True)
-            lines.append("Still below the bar (reference only, not re-tested):")
-            for name, g in still_blocked[:5]:
+        if below_bar:
+            below_bar.sort(key=lambda p: p[1], reverse=True)
+            lines.append("Prior results below the bar (reference):")
+            for name, g in below_bar[:5]:
                 lines.append(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%")
         return "\n".join(lines)
 

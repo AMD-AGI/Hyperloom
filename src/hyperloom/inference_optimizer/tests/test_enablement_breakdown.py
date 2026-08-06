@@ -208,11 +208,9 @@ def test_collect_enablement_boot_origin_round_surfaced():
         _state(
             enablement_mode="launch",
             enablement_attempts=1,
-            enablement_dispatched=True,
-            enablement_succeeded=True,
             enablement_inflight_task_id="spec-1",
+            enablement_succeeded=True,
             enablement_last_specialist_task_id="spec-1",
-            enablement_dispatch_tick=7,
             enablement_launch_log="EngineCore failed to start.\nTraceback (most recent call last):",
             enablement_stack_actions=[],
             enablement_attempt_runtimes=[],
@@ -223,11 +221,11 @@ def test_collect_enablement_boot_origin_round_surfaced():
     assert out
     assert out["mode"] == "launch"
     assert out["engaged"] is True
+    assert out["dispatched"] is True
     assert out["origin"] == "boot"
     assert out["attempts"] == 1
     assert out["succeeded"] is True
     assert out["last_specialist_task_id"] == "spec-1"
-    assert out["dispatch_tick"] == 7
     assert "EngineCore failed to start." in out["launch_log_excerpt"]
 
 

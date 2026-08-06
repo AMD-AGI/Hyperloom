@@ -27,6 +27,7 @@ from hyperloom.orchestrator.framework.stack_actions import (
     FrameworkRuntime,
     ProvisionResult,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
 def _ctx(task_id: str = "t-1"):
@@ -252,9 +253,9 @@ def test_kept_stack_action_survives_rearm(monkeypatch):
     monkeypatch.setattr(state, "save", lambda *a, **k: None, raising=False)
     Coordinator._maybe_rearm_enablement(coord, res)
 
-    assert state.enablement_kept_stack_action == action_state
-    assert state.enablement_active_runtime == runtime_state
-    assert runtime_state in state.enablement_attempt_runtimes
+    assert state.enablement.kept_stack_action == action_state
+    assert state.enablement.active_runtime == runtime_state
+    assert runtime_state in state.enablement.attempt_runtimes
 
 
 def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
@@ -269,9 +270,13 @@ def test_rearm_reactivation_threads_kept_action_into_next_params(monkeypatch):
         framework="vllm",
         model_name="deepseek-v4",
         gpu_type="mi355x",
-        enablement_kept_patches=[],
-        enablement_setup_commands=[],
-        enablement_kept_stack_action=kept,
+        enablement=EnablementRound(
+            kept_patches=[],
+            setup_commands=[],
+            kept_stack_action=kept,
+            localization_manifest=[],
+            last_build_failure={},
+        ),
     )
     fake = types.SimpleNamespace(shared_state=state)
     fake._discover_enablement_candidate_refs = types.MethodType(

@@ -20,7 +20,7 @@ flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-develope
 """
 
 # Keep in sync with pyproject.toml [project].version.
-version_number = "1.0.0a2"
+version_number = "1.0.0a3"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {

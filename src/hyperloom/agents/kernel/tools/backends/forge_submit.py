@@ -2343,6 +2343,132 @@ def _read_forge_best_result(workspace: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _path_within(root: Path, relative: str) -> Path | None:
+    """Resolve a manifest-relative path without allowing root escape."""
+    if not relative:
+        return None
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    root = root.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _canonical_forge_artifacts(
+    workspace: str,
+    published: dict | None,
+) -> dict[str, object]:
+    """Normalize KernelForge's immutable best bundle for downstream deploy.
+
+    KernelForge schema-v1 paths are relative to the campaign root
+    (``<workspace>/forge_experiments``), not to ``best/manifest.json``.
+    Preserve changed paths as repo-relative POSIX paths and expose absolute
+    artifact locations only after containment validation.
+    """
+    if not isinstance(published, dict):
+        log.warning(
+            "canonical Forge bundle unavailable: published manifest payload "
+            "is missing or invalid; compatibility artifact fallback may be used"
+        )
+        return {}
+    campaign_root = (Path(workspace) / "forge_experiments").resolve()
+    manifest_path = campaign_root / "best" / "manifest.json"
+    artifact_relative = str(published.get("artifact_dir") or "")
+    artifact_dir = _path_within(
+        campaign_root,
+        artifact_relative,
+    )
+    patch_relative = str(published.get("patch_path") or "")
+    patch_path = _path_within(
+        campaign_root,
+        patch_relative,
+    )
+    changed_files: list[str] = []
+    for raw in published.get("changed_files") or []:
+        rel = Path(str(raw))
+        if rel.is_absolute() or ".." in rel.parts:
+            log.warning(
+                "canonical Forge bundle unavailable: changed file path escapes "
+                "the campaign root (%s); compatibility artifact fallback may "
+                "be used",
+                raw,
+            )
+            return {}
+        changed_files.append(rel.as_posix())
+    if not manifest_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: best manifest does not exist "
+            "at %s; compatibility artifact fallback may be used",
+            manifest_path,
+        )
+        return {}
+    if artifact_dir is None:
+        log.warning(
+            "canonical Forge bundle unavailable: artifact_dir %r is not a "
+            "safe campaign-relative path under %s; compatibility artifact "
+            "fallback may be used",
+            artifact_relative,
+            campaign_root,
+        )
+        return {}
+    if patch_path is None or not patch_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: patch_path %r did not resolve "
+            "to a file under %s; compatibility artifact fallback may be used",
+            patch_relative,
+            campaign_root,
+        )
+        return {}
+    files_root = artifact_dir / "files"
+    if not files_root.is_dir():
+        log.warning(
+            "canonical Forge bundle unavailable: expected files directory does "
+            "not exist at %s (artifact_dir=%s); compatibility artifact fallback "
+            "may be used",
+            files_root,
+            artifact_dir,
+        )
+        return {}
+    try:
+        resolved_files_root = files_root.resolve(strict=True)
+    except OSError as error:
+        log.warning(
+            "canonical Forge bundle unavailable: files directory could not be "
+            "resolved at %s (%s); compatibility artifact fallback may be used",
+            files_root,
+            error,
+        )
+        return {}
+    if not _path_is_within(resolved_files_root, campaign_root):
+        log.warning(
+            "canonical Forge bundle unavailable: files directory resolves "
+            "outside the campaign root (%s -> %s, root=%s); compatibility "
+            "artifact fallback may be used",
+            files_root,
+            resolved_files_root,
+            campaign_root,
+        )
+        return {}
+    if not changed_files:
+        log.warning(
+            "canonical Forge bundle unavailable: manifest changed_files is "
+            "empty; compatibility artifact fallback may be used"
+        )
+        return {}
+    return {
+        "best_manifest": str(manifest_path),
+        "canonical_patch_path": str(patch_path),
+        "canonical_files_root": str(resolved_files_root),
+        "changed_files": changed_files,
+        "forge_workspace": str(Path(workspace).resolve()),
+    }
+
+
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -3272,8 +3398,9 @@ def submit(
         #      --experiments-dir and only as fresh as the last KEEP callback.
         #   3. the final-result sidecar / stdout sentinel -- only produced on a
         #      graceful return, and never sufficient on its own after a kill.
+        raw_published = _read_forge_best_result(workspace)
         published = _validated_forge_best_result(
-            _read_forge_best_result(workspace),
+            raw_published,
             workspace=workspace,
             base_commit=base_commit,
         )
@@ -3412,6 +3539,15 @@ def submit(
         res["best_ms"] = best_ms
         res["improved"] = improved
         res["improved_during_search"] = improved_during_search
+        canonical_artifacts = _canonical_forge_artifacts(
+            workspace,
+            raw_published if published is not None else None,
+        )
+        if canonical_artifacts:
+            res.update(canonical_artifacts)
+            res["artifacts"] = [
+                str(canonical_artifacts["canonical_patch_path"])
+            ]
         if loop_outcome.structured_result is not None:
             res["forge_result"] = loop_outcome.structured_result
             kb_experience = loop_outcome.structured_result.get("kb_experience")

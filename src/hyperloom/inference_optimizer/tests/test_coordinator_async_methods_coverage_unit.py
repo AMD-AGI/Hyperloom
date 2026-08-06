@@ -63,8 +63,6 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
         },
     )
     assert coord.shared_state.baseline_tput == 1000.0
-    assert coord.shared_state.baseline_cold_tput == 900.0
-    assert coord.shared_state.baseline_hot_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
     assert coord.shared_state.baseline_arg_error_streak == 0
     assert coord.shared_state.current_best["action"] == "baseline"
@@ -425,7 +423,7 @@ async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinat
     """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
     coord.shared_state.phase = "PRELUDE"
     coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement_succeeded = False
+    coord.shared_state.enablement.succeeded = False
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -438,7 +436,7 @@ async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinato
     """skip_to_close is honored once a baseline exists (guard no longer active)."""
     coord.shared_state.phase = "EXPLORE"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement_succeeded = True
+    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
