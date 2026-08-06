@@ -70,10 +70,12 @@ def test_run_eval_enabled_env_and_yaml(monkeypatch):
     assert bypass_runner._run_eval_enabled({"RUN_EVAL": "true"}) is True
     assert bypass_runner._run_eval_enabled({"RUN_EVAL": "0"}) is False
 
+    # The materialized YAML wins; the ambient env only fills an absent key.
     monkeypatch.setenv("RUN_EVAL", "yes")
-    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "false"}) is True
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "false"}) is False
+    assert bypass_runner._run_eval_enabled({}) is True
     monkeypatch.setenv("RUN_EVAL", "off")
-    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "true"}) is False
+    assert bypass_runner._run_eval_enabled({"RUN_EVAL": "true"}) is True
 
 
 def test_server_reusable_classifies_boot_reuse_and_foreign(monkeypatch, tmp_path):
