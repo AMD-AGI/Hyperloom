@@ -45,6 +45,12 @@ _ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
 # ample room to resolve first.
 _ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
 
+# Specialist attempts a local-exploration candidate gets before the phase moves
+# on. A candidate that keeps failing to author is not worth the wall clock, but
+# one interrupted run — a process restart reclaims an in-flight specialist as
+# failed — must not retire it.
+_LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
+
 
 def _derive_gpu_arch(gpu_type: str) -> str:
     """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
@@ -2660,14 +2666,12 @@ class FrameworkPhase(PhaseHandler):
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("FRAMEWORK local-explore: warm specialist params failed", exc_info=True)
-        idem = f"framework_agent_local_explore:{cand_id}"
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
-        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
-            kind="specialist",
-            params=params,
-            idempotency_key=idem,
-            requires_lanes=lanes,
-            allowed_tools=[
+        create_kwargs: dict[str, Any] = {
+            "kind": "specialist",
+            "params": params,
+            "requires_lanes": lanes,
+            "allowed_tools": [
                 "Read",
                 "Grep",
                 "Glob",
@@ -2677,9 +2681,40 @@ class FrameworkPhase(PhaseHandler):
                 "WebSearch",
                 "WebFetch",
             ],
-            side_effects=["writes_results", "writes_patches"],
-            lease_ttl_sec=ttl,
-        )
+            "side_effects": ["writes_results", "writes_patches"],
+            "lease_ttl_sec": ttl,
+        }
+        # The registry de-duplicates by key and hands back whatever row it finds,
+        # so a candidate whose specialist failed keeps resolving to that failure:
+        # the phase re-selects the candidate every tick, logs a dispatch, and
+        # nothing runs. A specialist that was mid-flight when the process died is
+        # reclaimed as failed, so one interrupted run retires a candidate for
+        # good. Retries take a fresh key, which is what this registry documents.
+        base_idem = f"framework_agent_local_explore:{cand_id}{self._cycle_idem_suffix()}"
+        spec_task = None
+        _spec_existing = False
+        for attempt in range(_LOCAL_EXPLORE_MAX_ATTEMPTS):
+            idem = base_idem if attempt == 0 else f"{base_idem}:r{attempt}"
+            spec_task, _spec_existing = await self.tasks.create_or_return_existing(
+                idempotency_key=idem,
+                **create_kwargs,
+            )
+            if not (_spec_existing and str(getattr(spec_task, "state", "") or "") == "failed"):
+                break
+            log.info(
+                "FRAMEWORK local-explore: %s already failed under %s; retrying candidate %s",
+                getattr(spec_task, "task_id", "?"),
+                idem,
+                cand_id,
+            )
+        else:
+            log.warning(
+                "FRAMEWORK local-explore: candidate %s exhausted %d specialist "
+                "attempt(s); leaving it to the phase to select another",
+                cand_id,
+                _LOCAL_EXPLORE_MAX_ATTEMPTS,
+            )
+            return ""
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:

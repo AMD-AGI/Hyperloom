@@ -338,6 +338,10 @@ class _DispatchStub:
         # candidate row.
         self._framework_candidate_key = FrameworkPhase._framework_candidate_key
 
+    def _cycle_idem_suffix(self) -> str:
+        """Macro-cycle 0, as the Coordinator would report it."""
+        return ""
+
     def _render_framework_memory_for_prompt(self, _memory) -> str:  # noqa: ANN001
         """Suppress the working-memory block; not under test here."""
         return ""
