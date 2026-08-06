@@ -3,9 +3,11 @@
 
 """Knowledge-base selector + contributor for framework-agent.
 
-``KB_ROOT`` is resolved at call time via ``_resolve_kb_root()`` (under
-``${FRAMEWORK_AGENT_KB_DIR}``, with a test fallback) so tests can monkeypatch
-the environment. :func:`synthesize_findings` distils :class:`Finding` records
+The KB splits in two. :func:`packaged_kb_root` is read-only seed data shipped
+in the wheel; :func:`mutable_kb_root` is the per-deployment partition this
+session reads and writes, and is the single owner of that path for both this
+module and the orchestrator's ``kb_writeback``. Both resolve at call time so
+tests can monkeypatch the environment. :func:`synthesize_findings` distils :class:`Finding` records
 into a markdown blob for ``contribute_to_kb``; the default path is pure-Python
 (zero deps), ``with_llm=True`` lazy-imports ``claude_agent_sdk``. Per-domain
 priority order is ``empirical_kb.md`` -> ``shared_pitfalls.md`` -> rest.
@@ -25,6 +27,16 @@ from .models import Finding
 
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
 _FRAMEWORK_OPTIMIZATION_ROOT: str = "framework_optimization"
+
+#: The supported override for the mutable KB root. Both this module and
+#: ``kb_writeback`` honour it, and it is the only KB variable the dotenv
+#: allowlist in ``common/env_safety`` lets through preflight.
+KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
+
+#: Workspace root when ``USER_DATA_PATH`` is unset. Mirrors
+#: ``session.paths.DEFAULT_SESSION_DIR``, which this package cannot import:
+#: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
+_DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
 
 
 def path_for_framework(framework: str) -> Path:
@@ -80,20 +92,43 @@ class KBFile:
     content: str
 
 
+def packaged_kb_root() -> Path:
+    """Root of the read-only KB shipped inside the wheel.
+
+    Holds seed data seeded at build time, currently just the cross-framework
+    module map. Nothing writes here: an installed package may sit on a
+    read-only filesystem, and an upgrade would overwrite whatever was added.
+
+    Returns:
+        The packaged KB root path.
+    """
+    return Path(__file__).resolve().parent / "kb"
+
+
+def mutable_kb_root() -> Path:
+    """Root of the KB partition this session reads and writes.
+
+    The single owner of that path. Both the ``fa`` reader and the
+    orchestrator's ``kb_writeback`` resolve through here, so a deployment that
+    moves the KB moves both halves at once; resolving it independently on each
+    side is what left written lessons unreadable by the next session.
+
+    Resolved per call rather than at import, because the environment is not
+    fully settled when this module is first imported.
+
+    Returns:
+        ``$INFERENCE_OPTIMIZER_FA_KB_PATH`` when set, else ``<workspace>/kb``
+        where the workspace is ``$USER_DATA_PATH`` or the pod-local default.
+    """
+    override = os.environ.get(KB_ROOT_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    workspace = os.environ.get("USER_DATA_PATH", "").strip() or _DEFAULT_WORKSPACE_ROOT
+    return Path(workspace).expanduser() / "kb"
+
+
 def _resolve_kb_root() -> Path:
     """Resolve the active KB root each call (so tests can monkeypatch env).
-
-    Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) IO's
-    ``INFERENCE_OPTIMIZER_FA_KB_PATH`` compatibility override;
-    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``<hyperloom package>/kb``.
-
-    Nothing in the orchestrator install exports any of those three variables,
-    and the packaged KB actually lives at ``<hyperloom package>/agents/
-    framework/kb``, so an orchestrator run reaches step (4) and resolves to a
-    directory that does not exist. Reads therefore come back empty and writes
-    land outside the tree the writer uses, which is why cross-session PR
-    memory does not survive. Resolving that means giving the mutable ledger a
-    single owner shared with ``kb_writeback``, not adding another step here.
 
     Returns:
         The resolved KB root path.
@@ -101,13 +136,10 @@ def _resolve_kb_root() -> Path:
     explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    io_override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
-    if io_override:
-        return Path(io_override).expanduser()
     root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
     if root:
         return Path(root).expanduser() / "kb"
-    return Path(__file__).resolve().parents[2] / "kb"
+    return mutable_kb_root()
 
 
 def list_domains() -> list[str]:

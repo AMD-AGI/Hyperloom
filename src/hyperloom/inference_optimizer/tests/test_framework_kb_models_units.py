@@ -50,6 +50,42 @@ def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path) -> None:
     assert read_pr_ledger(kb_root=tmp_path / "nope") == []
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({}, id="workspace-default"),
+        pytest.param({"USER_DATA_PATH": "/tmp/hl-user-data"}, id="user-data-path"),
+        pytest.param({"INFERENCE_OPTIMIZER_FA_KB_PATH": "/tmp/hl-explicit-kb"}, id="explicit-override"),
+    ],
+)
+def test_lessons_writer_and_reader_resolve_the_same_file(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+) -> None:
+    """The PR ledger must be one file, whatever the deployment sets.
+
+    The writer and the reader used to resolve the root independently, so an
+    orchestrator run appended lessons under the workspace while ``fa`` read a
+    packaged path that does not exist. Nothing raised: the ledger just came
+    back empty, and every session re-proposed PRs it had already tried.
+    """
+    from hyperloom.agents.framework import kb as fa_kb
+    from hyperloom.orchestrator.knowledge import kb_writeback
+
+    for name in ("USER_DATA_PATH", "INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_KB_DIR", "FRAMEWORK_AGENT_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    writer = kb_writeback._default_kb_root() / kb_writeback.LESSONS_FILE
+    reader = fa_kb.path_for_framework("") / kb_writeback.LESSONS_FILE
+
+    assert writer == reader
+    # The packaged seed is a different, read-only tree and must not be the
+    # place a live session writes to.
+    assert fa_kb.packaged_kb_root() not in writer.parents
+
+
 def test_iter_message_text_handles_all_shapes() -> None:
     assert list(_iter_message_text("hello")) == ["hello"]
     assert list(_iter_message_text(SimpleNamespace(text="t"))) == ["t"]

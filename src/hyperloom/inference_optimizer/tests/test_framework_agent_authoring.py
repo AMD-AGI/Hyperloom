@@ -865,9 +865,7 @@ def test_pump_audit_skip_records_terminal_row_no_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """already_equivalent audit -> skip: no Critic, no tasks, terminal row + KB."""
-    import hyperloom.orchestrator.knowledge.kb_writeback as kb_writeback
-
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "kb" / "framework_optimization")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "kb"))
 
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
