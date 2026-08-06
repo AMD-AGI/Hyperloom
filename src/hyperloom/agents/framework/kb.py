@@ -85,9 +85,15 @@ def _resolve_kb_root() -> Path:
 
     Order: (1) ``FRAMEWORK_AGENT_KB_DIR``; (2) IO's
     ``INFERENCE_OPTIMIZER_FA_KB_PATH`` compatibility override;
-    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``<hyperloom package>/kb``, a
-    last-resort path that does not exist in the tree or in an install --
-    installs always set ``FRAMEWORK_AGENT_ROOT``, so step (3) wins.
+    (3) ``${FRAMEWORK_AGENT_ROOT}/kb``; (4) ``<hyperloom package>/kb``.
+
+    Nothing in the orchestrator install exports any of those three variables,
+    and the packaged KB actually lives at ``<hyperloom package>/agents/
+    framework/kb``, so an orchestrator run reaches step (4) and resolves to a
+    directory that does not exist. Reads therefore come back empty and writes
+    land outside the tree the writer uses, which is why cross-session PR
+    memory does not survive. Resolving that means giving the mutable ledger a
+    single owner shared with ``kb_writeback``, not adding another step here.
 
     Returns:
         The resolved KB root path.
