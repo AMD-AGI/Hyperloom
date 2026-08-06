@@ -148,7 +148,7 @@ def build_report(
         }
         # Scriptable extras are carried verbatim so downstream gates can branch;
         # only emitted when present to keep the serving schema unchanged. The
-        # WorldPlay diagnostic fields (bench_summary/bench_config/frames_per_run/
+        # Scriptable diagnostic fields (bench_summary/bench_config/frames_per_run/
         # precision_locked) are relayed too so the fps breakdown + config reach
         # benchmark_report.json for inspection.
         for key in (

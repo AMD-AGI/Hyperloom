@@ -561,7 +561,7 @@ def test_non_lever_variants_are_ignored():
     from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions
 
     seeds = [{"name": "fwlever_hl_a", "framework_lever": "HL_A", "framework_lever_source": "additive"}]
-    outcomes = [{"variant_name": "worldplay_hw_queues_2", "outcome": "KEEP", "metrics": {"gain_pct": 3.0}}]
+    outcomes = [{"variant_name": "myfw_hw_queues_2", "outcome": "KEEP", "metrics": {"gain_pct": 3.0}}]
     assert _framework_lever_attributions(outcomes, seeds) == []
 
 
@@ -944,7 +944,7 @@ async def test_an_env_gated_patch_without_a_manifest_is_rejected(tmp_path, monke
     """A gate the manifest does not declare disables every guarantee, silently.
 
     Observed on a live session: the specialist delivered four patches, each gating
-    its rewrite on ``os.environ.get("WORLDPLAY_...")``, and no ``framework_switches``
+    its rewrite on ``os.environ.get("MYFW_...")``, and no ``framework_switches``
     key at all. With an empty manifest the whole scheme quietly stands down --
     nothing is turned on for the measurement, no parity leg runs, no lever is
     registered -- and the patch is benched as an ordinary diff. That run then

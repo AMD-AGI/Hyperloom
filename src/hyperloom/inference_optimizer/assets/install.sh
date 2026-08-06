@@ -1466,7 +1466,7 @@ ensure_langfuse_when_enabled() {
 # --- 4d. Per-framework runtime deps (manifest-driven) ---
 #
 # Scriptable frameworks execute the model author's own code (HY-World-2.0 for
-# worldmirror), which imports packages no ROCm serving image ships. A framework
+# an operator's own), which imports packages no ROCm serving image ships. A framework
 # declares what it needs in assets/framework_deps/<framework>.txt, so onboarding
 # the next one is a data file rather than new code, and a framework with no
 # manifest (sglang / vllm / atom) is a no-op.

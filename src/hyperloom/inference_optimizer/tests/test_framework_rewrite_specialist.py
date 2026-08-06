@@ -72,7 +72,7 @@ def test_domain_description_separates_it_from_the_serving_domain():
 # --------------------------------------------------------------------------
 
 
-def _focus_text(framework: str = "worldplay") -> str:
+def _focus_text(framework: str = "custom") -> str:
     """Render the domain focus block as one string.
 
     Args:
@@ -151,7 +151,7 @@ def test_prompt_requires_a_fallback_path():
 
 def test_prompt_names_the_active_framework():
     """The block is framework-aware so the specialist knows what it is reading."""
-    assert "worldmirror" in _focus_text("worldmirror")
+    assert "custom" in _focus_text("custom")
 
 
 def test_prompt_names_no_specific_function():
@@ -166,7 +166,7 @@ def test_prompt_names_no_specific_function():
         "all_gather_object",
         "_prepare_apply_fns",
         "sequence_parallel_attention",
-        "WORLDPLAY_",
+        "MYFW_",
         "hyvideo",
     ):
         assert leaked_answer not in text
@@ -229,7 +229,7 @@ class _Phase:
         self._render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt.__get__(self)
 
 
-@pytest.mark.parametrize("framework", ["worldplay", "worldmirror", "xdit", "hunyuan_image3"])
+@pytest.mark.parametrize("framework", ["custom", "custom", "xdit", "hunyuan_image3"])
 def test_scriptable_frameworks_route_to_the_rewrite_domain(framework):
     """A server-less iterative pipeline gets the rewrite domain."""
     assert _Phase(framework)._authoring_specialist_domain() == DOMAIN_KEY
@@ -278,7 +278,7 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
     path = tmp_path / ev.EVIDENCE_FILENAME
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    text = _Phase("worldplay", str(path))._render_rewrite_evidence_for_prompt()
+    text = _Phase("custom", str(path))._render_rewrite_evidence_for_prompt()
     assert "HOST-SIDE REWRITE EVIDENCE" in text
     assert ev.CATEGORY_HOST_ROUND_TRIP in text
     assert "comm.py:60:exchange" in text
@@ -286,14 +286,14 @@ def test_evidence_block_renders_from_the_recorded_path(tmp_path):
 
 def test_evidence_block_is_empty_without_a_recorded_path():
     """The arm can run before any profile has landed; that is not an error."""
-    assert _Phase("worldplay")._render_rewrite_evidence_for_prompt() == ""
+    assert _Phase("custom")._render_rewrite_evidence_for_prompt() == ""
 
 
 def test_evidence_block_tolerates_an_unreadable_path(tmp_path):
     """A stale or corrupt path degrades to no block rather than wedging the pump."""
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
-    assert _Phase("worldplay", str(broken))._render_rewrite_evidence_for_prompt() == ""
+    assert _Phase("custom", str(broken))._render_rewrite_evidence_for_prompt() == ""
 
 
 # --------------------------------------------------------------------------
@@ -391,7 +391,7 @@ def test_scriptable_dispatch_demands_a_switch_manifest(tmp_path):
     Making the manifest optional would leave the whole attribution and
     composition mechanism dependent on an LLM choosing to opt into it.
     """
-    params = _dispatch(tmp_path, "worldplay")
+    params = _dispatch(tmp_path, "custom")
     assert params["domain"] == DOMAIN_KEY
     notes = params["notes"]
     assert "framework_switches" in notes
@@ -401,7 +401,7 @@ def test_scriptable_dispatch_demands_a_switch_manifest(tmp_path):
 
 def test_scriptable_dispatch_drops_the_serving_hot_path_language(tmp_path):
     """A pipeline with no scheduler must not be pointed at scheduling."""
-    notes = _dispatch(tmp_path, "worldplay")["notes"]
+    notes = _dispatch(tmp_path, "custom")["notes"]
     assert "KV-cache / scheduling" not in notes
     assert "iterative loop" in notes
 
@@ -445,14 +445,14 @@ def test_scriptable_dispatch_inlines_the_measured_evidence(tmp_path):
     )
     path = tmp_path / ev.EVIDENCE_FILENAME
     path.write_text(json.dumps(document), encoding="utf-8")
-    notes = _dispatch(tmp_path, "worldplay", str(path))["notes"]
+    notes = _dispatch(tmp_path, "custom", str(path))["notes"]
     assert "HOST-SIDE REWRITE EVIDENCE" in notes
     assert "attn.py:12:unpad" in notes
 
 
 def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
     """No evidence yet still yields an actionable instruction, not silence."""
-    notes = _dispatch(tmp_path, "worldplay")["notes"]
+    notes = _dispatch(tmp_path, "custom")["notes"]
     assert "No host-side rewrite evidence has been collected yet" in notes
     assert "can change across iterations" in notes
 
@@ -462,42 +462,6 @@ def test_scriptable_dispatch_without_evidence_says_how_to_look(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_materialization_publishes_the_checkout_to_the_orchestrator_env(tmp_path, monkeypatch):
-    """The resolved checkout must reach PolicyGate, not only the benchmark process.
-
-    Writing it into the materialized YAML reaches the benchmark subprocess, but
-    PolicyGate runs in the orchestrator, and it is the orchestrator's environment
-    that ``resolve_source_file_allowlist`` reads. Without this the source root is
-    missing and every authored patch against the framework's own code is rejected
-    on a session that otherwise looks correctly configured.
-    """
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
-        _apply_worldplay_runtime_defaults,
-    )
-
-    checkout = tmp_path / "HY-WorldPlay"
-    (checkout / "hyvideo").mkdir(parents=True)
-    for var in ("WORLDPLAY_REPO_PATH", "WORLDPLAY_DIR", "WORLDPLAY_REPO"):
-        monkeypatch.delenv(var, raising=False)
-
-    bench = {"framework": "worldplay"}
-    envs = {"WORLDPLAY_REPO_PATH": str(checkout)}
-    _apply_worldplay_runtime_defaults(
-        bench,
-        envs,
-        gpu_type="mi355x",
-        explicit_benchmark_script=False,
-    )
-
-    import os
-
-    assert os.environ["WORLDPLAY_REPO_PATH"] == str(checkout)
-    assert os.environ["WORLDPLAY_DIR"] == str(checkout)
-
-    from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
-
-    assert any("HY-WorldPlay" in root for root in resolve_source_file_allowlist())
-
 
 def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
     """An explicitly exported checkout wins; Hyperloom only fills a gap."""
@@ -505,15 +469,15 @@ def test_publishing_never_overrides_an_operator_value(monkeypatch, tmp_path):
         _publish_scriptable_repo_root,
     )
 
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", "/operator/checkout")
-    monkeypatch.delenv("WORLDPLAY_DIR", raising=False)
-    _publish_scriptable_repo_root("worldplay", str(tmp_path / "cache" / "HY-WorldPlay"))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", "/operator/checkout")
+    monkeypatch.delenv("CUSTOM_DIR", raising=False)
+    _publish_scriptable_repo_root("custom", str(tmp_path / "cache" / "my-framework"))
 
     import os
 
-    assert os.environ["WORLDPLAY_REPO_PATH"] == "/operator/checkout"
+    assert os.environ["CUSTOM_REPO_PATH"] == "/operator/checkout"
     # The unset alias is still filled, so the two agree.
-    assert os.environ["WORLDPLAY_DIR"].endswith("HY-WorldPlay")
+    assert os.environ["CUSTOM_DIR"].endswith("my-framework")
 
 
 def test_publishing_ignores_blank_input(monkeypatch):
@@ -524,10 +488,10 @@ def test_publishing_ignores_blank_input(monkeypatch):
 
     import os
 
-    monkeypatch.delenv("WORLDPLAY_REPO_PATH", raising=False)
-    _publish_scriptable_repo_root("worldplay", "   ")
+    monkeypatch.delenv("CUSTOM_REPO_PATH", raising=False)
+    _publish_scriptable_repo_root("custom", "   ")
     _publish_scriptable_repo_root("", "/some/path")
-    assert "WORLDPLAY_REPO_PATH" not in os.environ
+    assert "CUSTOM_REPO_PATH" not in os.environ
 
 
 def test_frameworks_reference_documents_the_rewrite_path():

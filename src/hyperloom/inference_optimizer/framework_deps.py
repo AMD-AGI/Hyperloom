@@ -4,7 +4,7 @@
 """Per-framework runtime dependency installation.
 
 Scriptable frameworks execute the model author's own code, which imports
-packages no serving image ships (HY-World-2.0 for worldmirror). A framework
+packages no serving image ships. A framework
 declares what it needs in ``assets/framework_deps/<framework>.txt``; nothing
 here is per-framework, so onboarding the next one is a data file rather than
 new code. A framework with no manifest is a no-op.

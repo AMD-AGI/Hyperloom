@@ -193,12 +193,6 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
-    "assets/benchmark_scripts/*.sh",
-    "assets/benchmark_scripts/*.py",
-    # Per-framework runtime dependency manifests, read at launch by
-    # assets/install.sh. Unshipped they leave a wheel install unable to bring up
-    # the framework it was asked for.
-    "assets/framework_deps/*.txt",
     # Host-side evidence probe, injected into the benchmark process via a
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
