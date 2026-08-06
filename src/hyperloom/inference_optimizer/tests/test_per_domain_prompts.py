@@ -1086,7 +1086,7 @@ def test_research_lane_capacity_is_core_state_field():
 
 
 # --------------------------------------------------------------------------- #
-# Stage-1 guard: read-only domains never grant patch authoring
+# Read-only specialists never receive the patch-authoring contract
 # --------------------------------------------------------------------------- #
 READONLY_DOMAIN_KEYS = (
     "research_scout_specialist",
@@ -1138,6 +1138,24 @@ def test_readonly_dispatch_states_the_read_only_boundary():
     )
     assert "Read-only dispatch:" in system
     assert "MUST NOT author" in system
+
+
+def test_cross_domain_research_dispatch_drops_patch_deliverable():
+    """Mode outranks scope: a read-only `domains` dispatch must not be promised
+    the coupled cross-domain patch."""
+    _, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-domains-ro",
+            domain=get_domain("pr_intel_specialist"),
+            max_turns=4,
+            scope="domains",
+            mode="research",
+            gap_canonical_id="gap.domains.test",
+            workspace_path="/ws/domains-ro",
+        )
+    )
+    assert "- deliverable: findings and up to 6 ranked config variants (read-only; no patch)" in user
+    assert "coupled patch" not in user
 
 
 def test_freeform_research_dispatch_drops_patch_deliverable():
