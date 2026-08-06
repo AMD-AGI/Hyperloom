@@ -2082,6 +2082,9 @@ class _FakeRecipeKBRich:
     def __init__(self) -> None:
         self.local = _FakeLocalRich()
 
+    def get_authoritative_recipe(self, *, canonical_id):
+        return self.local.get_recipe(canonical_id=canonical_id)
+
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_merges_existing_row(coord: Coordinator, monkeypatch) -> None:

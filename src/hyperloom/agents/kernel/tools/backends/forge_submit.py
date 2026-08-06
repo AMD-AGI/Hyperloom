@@ -23,6 +23,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +43,51 @@ if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
 
 log = logging.getLogger(__name__)
+
+_KNOWLEDGE_CONFIG_CACHE = None
+_KNOWLEDGE_CONFIG_RESOLVED = False
+_KNOWLEDGE_CONFIG_LOCK = threading.Lock()
+
+
+def _reset_knowledge_config_cache() -> None:
+    """Clear Forge's prevalidated knowledge configuration (tests only)."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    _KNOWLEDGE_CONFIG_CACHE = None
+    _KNOWLEDGE_CONFIG_RESOLVED = False
+
+
+def _knowledge_config_for_forge(env: dict | None = None):
+    """Resolve knowledge configuration once and degrade invalid input locally."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    if _KNOWLEDGE_CONFIG_RESOLVED:
+        return _KNOWLEDGE_CONFIG_CACHE
+
+    with _KNOWLEDGE_CONFIG_LOCK:
+        if _KNOWLEDGE_CONFIG_RESOLVED:
+            return _KNOWLEDGE_CONFIG_CACHE
+
+        from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
+        source = dict(os.environ if env is None else env)
+        try:
+            config = KnowledgeConfig.from_env(source)
+        except Exception as exc:  # noqa: BLE001 - submit hot paths must remain available
+            log.warning(
+                "Forge knowledge configuration is invalid (%s); disabling remote "
+                "knowledge for this process. Validate KNOWLEDGE_STORE_MODE and "
+                "GBRAIN credentials during startup.",
+                exc,
+            )
+            fallback = dict(source)
+            fallback["KNOWLEDGE_STORE_MODE"] = "local"
+            fallback.pop("GBRAIN_BASE_URL", None)
+            fallback.pop("GBRAIN_TOKEN", None)
+            config = KnowledgeConfig.from_env(fallback)
+        _KNOWLEDGE_CONFIG_CACHE = config
+        _KNOWLEDGE_CONFIG_RESOLVED = True
+        return config
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
@@ -2037,26 +2083,15 @@ def _apply_fellow_env(env: dict) -> None:
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
-    # Forward gbrain credentials so the Forge loop's program.md generator can
-    # inject cross-KB kernel knowledge. setdefault keeps operator overrides
-    # authoritative.
-    _gbrain_url = env.get("GBRAIN_BASE_URL", "").strip()
-    _gbrain_token = env.get("GBRAIN_TOKEN", "").strip()
-    if _gbrain_url and _gbrain_token:
-        env.setdefault("KERNELFORGE_GBRAIN_ENABLED", "true")
-        env.setdefault("GBRAIN_BASE_URL", _gbrain_url)
-        env.setdefault("GBRAIN_TOKEN", _gbrain_token)
-    else:
-        # Surface when the gbrain kernel KB is disabled (either GBRAIN_BASE_URL
-        # or GBRAIN_TOKEN absent) so operators can tell forge ran without
-        # cross-KB kernel knowledge.
-        import sys as _sys
+    # Shared KnowledgePlane contract. KernelForge remains responsible for its
+    # own local knowledge implementation and remote kernel-experience behavior.
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
 
-        _sys.stderr.write(
-            "[forge_submit] gbrain KB disabled (forge runs without cross-KB "
-            f"knowledge): GBRAIN_BASE_URL={'set' if _gbrain_url else 'MISSING'} "
-            f"GBRAIN_TOKEN={'set' if _gbrain_token else 'MISSING'}\n"
-        )
+    # The process-level configuration was validated at startup/first use and is
+    # cached. A malformed child mapping therefore cannot fail every submission.
+    KernelExperienceBridge(_knowledge_config_for_forge(env)).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported.
@@ -3086,6 +3121,11 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
+
+    knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
     candidate = candidate or {}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3505,15 +3545,13 @@ def submit(
             search_start_ms=search_start_ms,
             improved_during_search=improved_during_search,
         )
-        gbrain_active = bool(
-            os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
-        )
+        knowledge_status = knowledge_bridge.status
         msg = (
             f"forge done (cli): pristine_baseline={baseline_ms} "
             f"search_start={search_start_ms} best={best_ms} "
             f"improved={improved} improved_during_search={improved_during_search} "
             f"fellow={fellow} gpu={gpu_target} "
-            f"gbrain={'on' if gbrain_active else 'off'} "
+            f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )
         # Surface the run's LLM token spend + key-step timeline from the CLI
@@ -3561,6 +3599,18 @@ def submit(
             kb_experience = loop_outcome.structured_result.get("kb_experience")
             if isinstance(kb_experience, dict):
                 res["kb_experience"] = kb_experience
+        kernel_experience = knowledge_bridge.collect_result(loop_outcome.structured_result)
+        res["kernel_experience"] = kernel_experience
+        res["knowledge_audit"] = [
+            {
+                "op": "kernel_experience_passthrough",
+                "mode": knowledge_status.mode,
+                "backend": knowledge_status.backend,
+                "resolution": "collected" if kernel_experience["result_present"] else "not_reported",
+                "success": True,
+                "provenance": kernel_experience["provenance"],
+            }
+        ]
         res["logical_operator"] = logical_operator
         res["source_framework"] = source_framework
         res["implementation_sources"] = implementation_sources

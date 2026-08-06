@@ -559,8 +559,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
         self.role_registry = role_registry or default_role_registry()
-        # Recipe-snapshot KB dispatcher; ``None`` makes fact-write hooks no-ops.
-        self.recipe_kb: RecipeKB | None = recipe_kb
+        # KnowledgePlane owns RecipeKB. Keep the explicit parameter as a
+        # compatibility injection path for library callers during Phase 1.
+        plane_recipe_kb = getattr(knowledge_plane, "recipe_kb", None)
+        self.recipe_kb: RecipeKB | None = plane_recipe_kb if plane_recipe_kb is not None else recipe_kb
         # Per-session optimization journal; lazy-instantiated on first use.
         self._journal: Journal | None = None
         # Warm-recipe replay controls (PRELUDE auto-apply of KB best_config).
