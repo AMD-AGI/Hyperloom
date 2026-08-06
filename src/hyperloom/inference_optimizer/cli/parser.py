@@ -651,7 +651,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
-    # Retired flags accepted so existing launchers that pass them do not exit 2.
     for _retired in ("--kernel-codex", "--kernel-claude", "--kernel-prompt"):
         opt.add_argument(_retired, action="store_true", default=False, help=argparse.SUPPRESS)
     opt.add_argument(

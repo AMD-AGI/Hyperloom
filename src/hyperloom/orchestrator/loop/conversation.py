@@ -9,6 +9,7 @@ import time
 from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
+from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES as _CONTEXT_TOOL_NAMES
 from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
@@ -604,9 +605,7 @@ class ConversationCollaborator:
 
         # Conversational DELTA turn: tell the agent verbose state was not re-pushed + how to pull it.
         if agent_name == "orchestration" and not push_full:
-            from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES
-
-            tool_list = ", ".join(CONTEXT_TOOL_NAMES)
+            tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
             sections.append("=== Context (pull on demand) ===")
             sections.append(
                 "This is a continuation of our ongoing conversation; the "
