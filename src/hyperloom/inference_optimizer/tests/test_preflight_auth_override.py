@@ -186,10 +186,9 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
     assert "ANTHROPIC_BASE_URL" not in cli.os.environ
     assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
-    # The OpenAI key fills its own name plus the internal GEAK / LLM aliases.
+    # The OpenAI key fills its own name plus the internal LLM aliases.
     for name in (
         "_".join(("OPENAI", "API", "KEY")),
-        "_".join(("GEAK", "API", "KEY")),
         "_".join(("LLM", "API", "KEY")),
         "_".join(("AMD_LLM", "API", "KEY")),
     ):
@@ -197,8 +196,10 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     # The Anthropic-side keys are never cross-filled from the OpenAI key.
     assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
-    for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
-        assert cli.os.environ[name] == resolved[1]
+    assert cli.os.environ["LLM_API_BASE"] == resolved[1]
+    # GEAK runs on the Anthropic side, so its aliases are never derived here.
+    assert "_".join(("GEAK", "API", "KEY")) not in cli.os.environ
+    assert "GEAK_BASE_URL" not in cli.os.environ
     assert "_".join(("legacy backend", "API", "KEY")) not in cli.os.environ
     assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
@@ -235,8 +236,8 @@ def test_preflight_keeps_explicit_provider_keys(
     # Explicit provider keys are preserved.
     assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "openai-user-token"
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-user-token"
-    # GEAK speaks the OpenAI protocol, so its alias comes from the OpenAI key.
-    assert cli.os.environ["_".join(("GEAK", "API", "KEY"))] == "openai-user-token"
+    # GEAK runs on the Anthropic side, so its key alias is never derived.
+    assert "_".join(("GEAK", "API", "KEY")) not in cli.os.environ
     # The Anthropic auth-token alias is never cross-filled from another key.
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
 
@@ -485,14 +486,14 @@ def test_preflight_rewrites_stale_proxy_even_when_operator_set(
         "https://gateway.example/api/v1/llm-proxy/v1",
     )
     monkeypatch.setenv(
-        "GEAK_BASE_URL",
+        "LLM_API_BASE",
         "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
     )
 
     resolved = cli_preflight._preflight()
 
-    assert cli.os.environ["GEAK_BASE_URL"] == resolved[1]
-    assert "127.0.0.1:4002" not in cli.os.environ["GEAK_BASE_URL"]
+    assert cli.os.environ["LLM_API_BASE"] == resolved[1]
+    assert "127.0.0.1:4002" not in cli.os.environ["LLM_API_BASE"]
 
 
 def test_is_stale_proxy_url_matches_legacy_only():
