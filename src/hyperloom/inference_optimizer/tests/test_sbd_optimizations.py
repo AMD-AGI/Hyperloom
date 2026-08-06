@@ -362,6 +362,40 @@ def test_framework_stack_label_is_credited_by_both_collectors():
     assert result["entries"][0]["source_method"] == "action_family"
 
 
+def test_phase_breakdown_schema_declares_every_emitted_bucket():
+    """The declared shape must cover the keys the collector actually writes.
+
+    ``session_breakdown.json`` is a published contract, and the TypedDict is
+    what downstream code reads it through, so a bucket the producer emits but
+    the schema omits shows up as an empty section rather than an error. The
+    KERNEL_AGENT bucket sat in exactly that state.
+    """
+    from hyperloom.inference_optimizer.breakdown.schema import PhaseBreakdown
+
+    state = {
+        "session_id": "phase-bucket-contract",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": "kernel_opt",
+                "source_phase": "KERNEL_AGENT",
+                "variant_name": "k1",
+                "kernel_id": "fused_moe",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    emitted = set(collect_attribution(state, [], [], [])["phase_breakdown"])
+    undeclared = sorted(emitted - set(PhaseBreakdown.__annotations__))
+
+    assert not undeclared, f"phase_breakdown buckets missing from the schema: {undeclared}"
+
+
 def test_integrate_patch_projects_source_manifest_and_changed_files():
     state = {
         "session_id": "integrate-patch-artifacts",

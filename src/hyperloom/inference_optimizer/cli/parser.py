@@ -1414,7 +1414,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.28.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",
@@ -1422,7 +1422,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_sweep_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.12.",
+        help="Wall-clock budget cap for SWEEP. Default: 0.05.",
     )
     opt.add_argument(
         "--max-minutes-close-pct",

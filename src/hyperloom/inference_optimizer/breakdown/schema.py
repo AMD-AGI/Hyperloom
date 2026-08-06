@@ -1319,10 +1319,9 @@ class PhaseBreakdown(TypedDict, total=False):
         prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
         framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
         explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
-        kernel (PhaseBreakdownKernel): KERNEL_AGENT phase gain by ``kernel_id``.
-            The producer emits this bucket under the key ``kernel_agent``,
-            unlike ``framework`` which is normalized down from
-            ``FRAMEWORK_AGENT``.
+        kernel_agent (PhaseBreakdownKernel): KERNEL_AGENT phase gain by
+            ``kernel_id``. Unlike ``framework``, which the producer normalizes
+            down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
         gemm_tuning (PhaseBreakdownGemmTuning): KERNEL-entry GEMM-tuning gain,
             bucketed separately from source-level kernel rewrites.
         sweep (PhaseBreakdownExplore): SWEEP phase gain (usually 0; measurement).
@@ -1333,7 +1332,7 @@ class PhaseBreakdown(TypedDict, total=False):
     prelude: PhaseBreakdownExplore  # always 0 by definition
     framework: PhaseBreakdownFramework
     explore: PhaseBreakdownExplore
-    kernel: PhaseBreakdownKernel
+    kernel_agent: PhaseBreakdownKernel
     gemm_tuning: PhaseBreakdownGemmTuning
     sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
     close: PhaseBreakdownExplore  # usually 0
