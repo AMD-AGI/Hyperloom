@@ -104,7 +104,6 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel_agent": object()}
     return c
 
 
@@ -521,7 +520,6 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel_agent": object()}
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
         c.shared_state.record_kernel_integrate_result(
@@ -1041,11 +1039,10 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
-    role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=role_registry,
+        role_registry=default_role_registry(),
         recipe_kb=None,
         knowledge_plane=None,
     )
