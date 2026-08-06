@@ -934,7 +934,7 @@ class BaselineExecutor:
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
     def _resolve_shared_state(self, shared_state: Any | None = None) -> Any:
-        """Resolve the live SharedState to read/mutate the eager-fallback flag.
+        """Resolve the live SharedState for a session-scoped flag read/write.
 
         Args:
             shared_state: Optional live SharedState; falls back to
@@ -1489,8 +1489,8 @@ class BaselineExecutor:
     def _eval_disabled(self, ctx: RunnerContext) -> bool:
         """Whether ``--no-eval`` turned the accuracy eval off for this session."""
         extra = getattr(ctx, "extra", None) or {}
-        shared_state = extra.get("shared_state") or self.shared_state
-        return bool(getattr(shared_state, "eval_disabled", False))
+        state = self._resolve_shared_state(extra.get("shared_state"))
+        return bool(getattr(state, "eval_disabled", False))
 
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run.
@@ -1502,8 +1502,7 @@ class BaselineExecutor:
         from ._multi_node_env import is_multi_node
 
         extra = getattr(ctx, "extra", None) or {}
-        shared_state = extra.get("shared_state") or self.shared_state
-        if not eval_enablement_allowed(shared_state):
+        if not eval_enablement_allowed(self._resolve_shared_state(extra.get("shared_state"))):
             return False
         if is_multi_node():
             return False
@@ -1628,14 +1627,12 @@ class BaselineExecutor:
         workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
         absent, and serving records no accuracy at all, so both are covered.
 
-        Incidentally disabling the eval is no opt-out: via ``disable_run_eval``,
-        an explicit ``RUN_EVAL=false`` env, or a YAML/reference-env value it does
-        not make a missing accuracy acceptable on a genuine baseline -- it only
-        means the reference was never measured, which is exactly the state this
-        guard exists to reject. Synthetic kernel-lane re-baselines that reuse
-        ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``; the one
-        deliberate opt-out is ``--no-eval``, where no reference was ever asked
-        for and the baseline anchors on throughput alone.
+        Incidental disabling is no opt-out. ``disable_run_eval``, an explicit
+        ``RUN_EVAL=false`` env, or a YAML/reference-env value do not make a
+        missing accuracy acceptable on a genuine baseline -- they only mean the
+        reference was never measured, which is exactly what this guard rejects.
+        Two deliberate opt-outs exist: ``quality_ref_exempt`` (synthetic
+        kernel-lane re-baselines) and ``--no-eval`` (no reference was asked for).
 
         With eval-on-fail enablement active (the default), the result is stamped
         as an eval-failure contract -- ``eval_generation_pathology`` when the
@@ -1728,11 +1725,6 @@ class BaselineExecutor:
             # rather than reporting it as a missing measurement.
             acc = acc_val
 
-        # No opt-out: a genuine baseline exists to establish the accuracy
-        # reference, so turning the eval off does not make a missing accuracy
-        # acceptable -- it only means the reference was never measured. Every
-        # disable path (the ``disable_run_eval`` param, an explicit
-        # ``RUN_EVAL=false`` env, a YAML/reference-env value) now lands here.
         # Route into enablement instead of stopping: the throughput baseline
         # stays for diagnostics but is blocked from anchoring.
         if eval_enablement:
@@ -1986,9 +1978,8 @@ class BaselineExecutor:
                 model_path=resolved_model,
             )
         # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval``
-        # param and the in-executor eval-failure fallback force ``RUN_EVAL=false``.
-        # Candidates inherit it from this materialized YAML, so the whole session
-        # goes eval-less from here.
+        # param and the eval-failure fallback force ``RUN_EVAL=false``. Candidates
+        # template from this materialized YAML, so they inherit it.
         base_extra_envs = dict(params.get("extra_envs") or {})
         eval_disabled = self._eval_disabled(ctx)
         # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.

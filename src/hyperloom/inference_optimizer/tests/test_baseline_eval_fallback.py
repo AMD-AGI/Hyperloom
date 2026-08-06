@@ -199,8 +199,6 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
 
 
 def test_no_eval_forces_run_eval_false(tmp_path):
-    # Candidates template from this YAML, so turning it off here takes the whole
-    # session eval-less.
     base = tmp_path / "base.yaml"
     _write_yaml(base)
     captured: dict = {}
@@ -235,6 +233,20 @@ def test_no_eval_forces_run_eval_false(tmp_path):
     assert result["status"] == "succeeded"
     assert str(captured["cfg"]["benchmark"]["envs"]["RUN_EVAL"]).lower() == "false"
     assert ctx.extra["shared_state"].stop_reason == ""
+
+
+def test_eval_disabled_resolves_without_a_ctx_shared_state(tmp_path):
+    # The kernel integrate lane builds the executor with no shared_state= and a
+    # RunnerContext with no extra, so the flag has to come off the session dir.
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(session_id="s1")
+    state.eval_disabled = True
+    state.save(tmp_path)
+
+    executor = BaselineExecutor(session_dir=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", kind="baseline", params={}), extra=None)
+    assert executor._eval_disabled(ctx) is True
 
 
 # --- eval-failure fallback end-to-end --------------------------------------
