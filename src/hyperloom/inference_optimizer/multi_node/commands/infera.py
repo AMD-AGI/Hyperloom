@@ -843,7 +843,8 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
         f"--backup-dir {shlex.quote(str(args.backup_dir))} "
         f"--kernel-id {shlex.quote(str(args.kernel_id))} "
-        f"--jit-build-dir {shlex.quote(str(args.jit_build_dir or ''))}"
+        f"--jit-build-dir "
+        f"{shlex.quote(str(getattr(args, 'jit_build_dir', '') or ''))}"
     )
     per_node: list[dict] = []
     failures: list[dict] = []
@@ -907,7 +908,9 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     """
     state = _infera_require_state()
     try:
-        records_by_host = json.loads(args.records_json or "{}")
+        records_by_host = json.loads(
+            getattr(args, "records_json", "") or "{}"
+        )
         backup_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--backup-map-json not valid JSON: {exc}")

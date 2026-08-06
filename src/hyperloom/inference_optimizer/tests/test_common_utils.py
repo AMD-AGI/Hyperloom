@@ -619,6 +619,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         [
             ({"status": "ok", "backup_path": "/b0"}, {"rc": 0, "stderr": ""}),
             ({"status": "failed", "error": "nope"}, {"rc": 1, "stderr": "bad"}),
+            ({"status": "restored"}, {"rc": 0, "stderr": ""}),
         ]
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: next(responses))

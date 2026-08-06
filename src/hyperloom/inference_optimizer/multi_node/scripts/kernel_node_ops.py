@@ -112,8 +112,9 @@ def _do_apply(a: argparse.Namespace) -> int:
         data = base64.b64decode(a.patch_b64.encode("ascii"))
     except Exception as exc:  # noqa: BLE001
         return _emit({"status": "failed", "host": host, "error": f"patch_b64 not valid base64: {exc!r}"})
+    jit_build_dir = str(getattr(a, "jit_build_dir", "") or "")
     jit_backup = invalidate_aiter_jit_build(
-        Path(a.jit_build_dir) if a.jit_build_dir else None,
+        Path(jit_build_dir) if jit_build_dir else None,
         bdir,
         f"{_safe_name(a.kernel_id or target.stem)}_{host}_{int(time.time())}",
     )
@@ -123,6 +124,19 @@ def _do_apply(a: argparse.Namespace) -> int:
         if target.suffix.lower() == ".py":
             py_compile.compile(str(target), doraise=True)
             compile_result = {"status": "ok"}
+    except py_compile.PyCompileError as exc:
+        shutil.copy2(backup_path, target)
+        restore_aiter_jit_build(jit_backup)
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": (
+                    "py_compile failed (auto-reverted): "
+                    f"{exc.msg}"
+                ),
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         shutil.copy2(backup_path, target)
         restore_aiter_jit_build(jit_backup)
@@ -154,7 +168,21 @@ def _do_revert(a: argparse.Namespace) -> int:
         int: the process exit code from emitting the result.
     """
     host = socket.gethostname()
-    records = json.loads(a.records_json or "[]")
+    records_json = getattr(a, "records_json", "") or ""
+    records = json.loads(records_json or "[]")
+    if (
+        not records_json
+        and getattr(a, "backup_path", "")
+        and not Path(a.backup_path).is_file()
+    ):
+        return _emit(
+            {
+                "status": "noop_missing_backup",
+                "host": host,
+                "target_path": str(getattr(a, "target_path", "")),
+                "backup_path": str(a.backup_path),
+            }
+        )
     if not records and a.target_path and a.backup_path:
         records = [
             {
