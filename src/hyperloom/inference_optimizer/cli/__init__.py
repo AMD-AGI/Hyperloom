@@ -59,9 +59,7 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aite
 
 from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
-    _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
-    _CODEX_PREFERRED_MODEL as _CODEX_PREFERRED_MODEL,
     _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
@@ -700,9 +698,8 @@ def _validate_and_resolve_claude_model(
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
-            f"Orchestration model must be one of {list(_CLAUDE_ALLOWED_MODELS)} "
-            f"(preferred: {_CLAUDE_PREFERRED_MODEL}, "
-            f"fallback: {_CLAUDE_FALLBACK_MODEL}). Refusing to start. "
+            f"Orchestration model must be one of "
+            f"{list(_CLAUDE_ALLOWED_MODELS)} (best first). Refusing to start. "
             f"For a non-AMD gateway, set "
             f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 to use a custom "
             f"orchestration model validated against your gateway catalog.",
