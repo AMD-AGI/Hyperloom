@@ -44,8 +44,8 @@ lives in `orchestrator/prompts/orchestration.md`. In brief:
 ## FRAMEWORK_AGENT phase
 
 Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
-Coordinator owns the loop end-to-end — the LLM never proposes the `framework`
-action. It discovers a candidate batch **once** via `fa phase-discover`; each
+Coordinator owns the loop end-to-end — the LLM never proposes the
+`framework_agent` action. It discovers a candidate batch **once** via `fa phase-discover`; each
 exploration then processes exactly **one** candidate, with the agent ranking the
 still-available candidates and choosing the one most likely to raise throughput
 (LLM ranker; deterministic discovery-order fallback on any failure). The chosen
@@ -69,7 +69,7 @@ Rules that look reasonable but break the current flow:
   `prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow. Framework-agent runs in the dedicated
   **FRAMEWORK** phase before EXPLORE; the LLM never proposes the
-  `framework` action — it is Coordinator-managed and absent from
+  `framework_agent` action — it is Coordinator-managed and absent from
   `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any LLM-side propose /
   delegate with `rule='phase_incompatible'`. Use `--no-framework-agent` to skip the
   phase entirely.
