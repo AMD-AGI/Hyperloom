@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -875,8 +876,14 @@ def _check_platform_tuning() -> None:
     has neither the MSR access to resolve a BIOS "Auto" nor a route to the
     BMC, so the knobs reachable here (SMT, NPS, boost, governor) are the ones
     reported. The remaining BIOS-only knobs -- APBDIS, DF C-states,
-    determinism -- need Redfish and are covered by the standalone host-side
-    auditor; their absence here is not worth failing a run over.
+    determinism -- need Redfish; ``scripts/platform_audit.py`` covers those
+    host-side. Their absence here is not worth failing a run over.
+
+    Only genuinely anomalous settings warn. SMT is recorded but never warned
+    about: it is on by default on EPYC, so alerting would fire on nearly every
+    node and train readers to ignore the check entirely. What would merit an
+    alert is a node whose knobs disagree with the others in the same session,
+    which needs the per-node collection this does not yet do.
     """
     smt_active = _read_sysfs("/sys/devices/system/cpu/smt/active")
     if not smt_active:
@@ -896,15 +903,10 @@ def _check_platform_tuning() -> None:
     boost = _read_sysfs("/sys/devices/system/cpu/cpufreq/boost")
 
     print(
-        f"Preflight: platform — SMT {smt}, {nps} ({nodes} NUMA nodes / "
-        f"{sockets or '?'} sockets), governor {governor}"
+        f"Preflight: platform [{socket.gethostname()}] — SMT {smt}, {nps} "
+        f"({nodes} NUMA nodes / {sockets or '?'} sockets), governor {governor}"
     )
 
-    if smt_active == "1":
-        print(
-            "Preflight: WARNING — SMT is enabled; sibling threads add run-to-run "
-            "variance and usually cost throughput on GPU serving hosts"
-        )
     if governor not in ("performance", "unknown"):
         print(
             f"Preflight: WARNING — cpufreq governor is {governor!r}, not 'performance'; "

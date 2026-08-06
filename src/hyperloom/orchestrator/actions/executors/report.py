@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import subprocess
 from collections import Counter
 from datetime import datetime, timezone
@@ -436,6 +437,14 @@ def _platform_fingerprint() -> dict[str, Any] | None:
     means a knob toggled mid-session shows up as a mismatch rather than being
     silently attributed to the optimizer.
 
+    Scope: this samples the process's own node. In a multi-node session the
+    orchestrator is usually not the benchmark node, so the record would then
+    describe a machine the numbers did not come from -- worse than no record,
+    since it reads as fact when someone explains a delta. ``host`` names the
+    sampled machine and ``multi_node_session`` marks when it is known to be
+    partial, so a reader can tell the two apart. Per-node collection is the
+    real fix and is not attempted here.
+
     Returns:
         dict[str, Any] | None: Platform facts, or ``None`` off Linux sysfs
         (containers without a host /sys), where the check is not meaningful.
@@ -457,7 +466,15 @@ def _platform_fingerprint() -> dict[str, Any] | None:
             ),
             "unknown",
         )
+        try:  # local import keeps this probe free of executor import order
+            from ._multi_node_env import is_multi_node
+
+            multi_node = bool(is_multi_node())
+        except Exception:
+            multi_node = False
         return {
+            "host": socket.gethostname(),
+            "multi_node_session": multi_node,
             "cpu": cpu,
             "smt": "on" if smt_active == "1" else "off",
             "sockets": sockets or None,
@@ -647,6 +664,13 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
     plat = summary.get("platform")
     if plat:
+        if plat.get("multi_node_session"):
+            lines.append(
+                f"- platform scope : ⚠ multi-node session — sampled on `{plat.get('host')}` "
+                f"(the orchestrator), which may not be the benchmark node"
+            )
+        else:
+            lines.append(f"- host           : {plat.get('host', 'unknown')}")
         lines.append(
             f"- platform       : {plat['cpu']} — SMT {plat['smt']}, {plat['nps']} "
             f"({plat['numa_nodes']} NUMA nodes / {plat['sockets']} sockets), "
