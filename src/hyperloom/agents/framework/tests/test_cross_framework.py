@@ -3,9 +3,9 @@
 
 """Tests for hyperloom.agents.framework.cross_framework (cross-framework audit).
 
-Hermetic: redirects the KB root via FRAMEWORK_AGENT_KB_DIR so the seeded
+Hermetic: redirects both KB roots at a tmp_path so the seeded
 ``cross_framework_map.jsonl`` and persisted ``semantic_audit.json`` never
-touch a real workspace.
+touch a real workspace or the installed package.
 """
 
 from __future__ import annotations
@@ -41,10 +41,18 @@ _MAP_ROW = {
 
 @pytest.fixture
 def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point KB resolution at a clean tmp_path for every test."""
-    monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path))
+    """Point both KB roots at a clean tmp_path for every test.
+
+    The module map is packaged seed data and the audit output is written to
+    the mutable partition, so a hermetic run has to redirect both.
+    """
+    import hyperloom.agents.framework.kb as kb
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
+    monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
     monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+    monkeypatch.setattr(kb, "packaged_kb_root", lambda: tmp_path)
+    monkeypatch.setattr(cf, "packaged_kb_root", lambda: tmp_path)
     return tmp_path
 
 
