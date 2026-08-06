@@ -1088,22 +1088,115 @@ def test_research_lane_capacity_is_core_state_field():
 # --------------------------------------------------------------------------- #
 # Stage-1 guard: read-only domains never grant patch authoring
 # --------------------------------------------------------------------------- #
+READONLY_DOMAIN_KEYS = (
+    "research_scout_specialist",
+    "static_recon_specialist",
+    "pr_intel_specialist",
+)
+
+# Every phrase that promises patch authoring, a worktree, or a GPU. A
+# research-mode dispatch is leased none of them.
+PATCH_CAPABILITY_PHRASES = (
+    "author source patches",
+    "optionally author patches",
+    "patches_written",
+    "artifacts_written",
+    "your own worktree",
+    "VISIBLE_DEVICES",
+)
+
+
 def test_readonly_domains_never_grant_patch_authoring():
-    """research_scout, static_recon, and pr_intel system prompts must NOT
-    contain the 'author source patches' grant from _section_identity."""
-    for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
-        system, _ = build_specialist_prompts(
+    """Read-only domains must not be told they may author patches anywhere in
+    the prompt — identity, iron rules, and output protocol alike."""
+    for key in READONLY_DOMAIN_KEYS:
+        system, user = build_specialist_prompts(
             SpecialistPromptInputs(
                 task_id=f"task-{key}",
                 domain=get_domain(key),
                 max_turns=4,
                 mode="research",
                 gap_canonical_id=f"gap.{key}.test",
+                workspace_path=f"/ws/{key}",
             )
         )
-        assert "author source patches" not in system, (
-            f"{key} system prompt grants patch authoring but should not"
+        whole = system + user
+        for phrase in PATCH_CAPABILITY_PHRASES:
+            assert phrase not in whole, f"{key} prompt leaks {phrase!r} to a read-only dispatch"
+
+
+def test_readonly_dispatch_states_the_read_only_boundary():
+    """The iron rule that replaces the staging grant must say so explicitly."""
+    system, _ = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-ro",
+            domain=get_domain("static_recon_specialist"),
+            max_turns=4,
+            mode="research",
+            workspace_path="/ws/ro",
         )
+    )
+    assert "Read-only dispatch:" in system
+    assert "MUST NOT author" in system
+
+
+def test_freeform_research_dispatch_drops_patch_deliverable():
+    """A bare freeform dispatch resolves to research mode, so its mandate must
+    not promise a patch deliverable."""
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-ff",
+            domain=get_domain("serving_specialist"),
+            max_turns=4,
+            scope="freeform",
+            mode="research",
+            task_description="look around",
+            workspace_path="/ws/ff",
+        )
+    )
+    whole = system + user
+    for phrase in PATCH_CAPABILITY_PHRASES:
+        assert phrase not in whole, f"freeform research prompt leaks {phrase!r}"
+
+
+def test_patch_mode_keeps_full_authoring_contract():
+    """The gating must not strip anything from a patch-capable dispatch."""
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-patch",
+            domain=get_domain("serving_specialist"),
+            max_turns=4,
+            mode="patch",
+            allocated_gpu_ids=[0, 1],
+            gap_canonical_id="gap.serving.test",
+            workspace_path="/ws/patch",
+        )
+    )
+    whole = system + user
+    for phrase in (
+        "author source patches",
+        "patches_written",
+        "artifacts_written",
+        "your own worktree",
+        "VISIBLE_DEVICES",
+    ):
+        assert phrase in whole, f"patch-mode prompt lost {phrase!r}"
+
+
+def test_patch_mode_without_gpu_keeps_the_authoring_clause():
+    """The no-GPU iron rule still offers patch authoring in patch mode; only
+    research mode drops it."""
+    kwargs = dict(
+        task_id="task-patch-cpu",
+        domain=get_domain("serving_specialist"),
+        max_turns=4,
+        allocated_gpu_ids=[],
+        workspace_path="/ws/patch-cpu",
+    )
+    patch_system, _ = build_specialist_prompts(SpecialistPromptInputs(mode="patch", **kwargs))
+    research_system, _ = build_specialist_prompts(SpecialistPromptInputs(mode="research", **kwargs))
+    assert "optionally author patches" in patch_system
+    assert "optionally author patches" not in research_system
 
 
 # --------------------------------------------------------------------------- #
