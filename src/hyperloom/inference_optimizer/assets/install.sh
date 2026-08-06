@@ -377,8 +377,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs Anthropic or DeepSeek credentials. The installer gate
-# intentionally does not default or require OpenAI.
+# a usable setup needs an Anthropic-side or OpenAI-side endpoint plus a key. A
+# dual-protocol gateway such as DeepSeek configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -412,10 +412,10 @@ preflight_validate_credentials() {
       export ANTHROPIC_API_KEY="$SAFE_API_KEY"
     fi
   fi
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
-  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL), or SAFE_API_KEY + OPENAI_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY, or SAFE_API_KEY")
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${OPENAI_BASE_URL:-}" ]; } && has_url=1
+  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${SAFE_API_KEY:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL, or SAFE_API_KEY + OPENAI_BASE_URL")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, or SAFE_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0
@@ -444,9 +444,10 @@ Fix one of:
   1. Anthropic:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
-  2. DeepSeek:
-       export DEEPSEEK_API_KEY=sk-...
-       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+  2. A dual-protocol gateway such as DeepSeek (same key, both sides):
+       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+       export OPENAI_BASE_URL=https://api.deepseek.com/v1
+       export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF

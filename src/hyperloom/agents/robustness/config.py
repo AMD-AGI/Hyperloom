@@ -24,7 +24,6 @@ from typing import Optional
 import httpx
 
 from hyperloom.common.env import env_bool, env_int
-from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -435,14 +434,6 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
             "anthropic",
         )
 
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_key:
-        return (
-            os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL,
-            deepseek_key,
-            "anthropic",
-        )
-
     return "", "", "openai"
 
 
@@ -451,8 +442,6 @@ def _discover_llm_model(provider: str) -> str:
     explicit = os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip()
     if explicit:
         return explicit
-    if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
-        return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
     if provider == "openai":
         return os.environ.get("OPENAI_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip() or "gpt-5.5"
     return (

@@ -103,9 +103,10 @@ Options:
 
 Credential resolution (highest precedence first): env > .env > interactive
 prompt (TTY + not --yes). Configure Anthropic
-(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or DeepSeek
-(DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime credential
-rules.
+(ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN), matching runtime
+credential rules. A dual-protocol gateway such as DeepSeek additionally sets
+OPENAI_BASE_URL+OPENAI_API_KEY on the same host; retired DEEPSEEK_* values are
+migrated automatically.
 Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
@@ -1069,13 +1070,60 @@ remove_dotenv_var() {
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
 
-# Resolve split Anthropic/DeepSeek entrypoints. Mirrors runtime credential
-# validation: DeepSeek may omit DEEPSEEK_BASE_URL because the CLI has a provider default.
+# Set to 1 by migrate_legacy_deepseek_env when the Anthropic and OpenAI sides
+# are two protocols of ONE gateway, so the OpenAI side must survive the
+# "Anthropic-only" .env cleanup below.
+DUAL_PROTOCOL_GATEWAY=0
+
+# Translate a retired DEEPSEEK_* configuration into the standard variables.
+# DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
+# the Anthropic API and /v1 speaks OpenAI chat-completions, both authenticated
+# with the same key. Mirrors hyperloom.common.llm_config.deepseek_compat_env.
+migrate_legacy_deepseek_env() {
+  local key url model base anthropic_url openai_url
+  key="${DEEPSEEK_API_KEY:-$(read_dotenv_var DEEPSEEK_API_KEY || true)}"
+  url="${DEEPSEEK_BASE_URL:-$(read_dotenv_var DEEPSEEK_BASE_URL || true)}"
+  model="${DEEPSEEK_MODEL:-$(read_dotenv_var DEEPSEEK_MODEL || true)}"
+  if [ -z "$key" ] && [ -z "$url" ]; then
+    return 0
+  fi
+
+  base="${url%/}"
+  case "$base" in
+    "")           anthropic_url="https://api.deepseek.com/anthropic"; openai_url="https://api.deepseek.com/v1" ;;
+    */anthropic)  anthropic_url="$base"; openai_url="${base%/anthropic}/v1" ;;
+    */v1)         anthropic_url="${base%/v1}/anthropic"; openai_url="$base" ;;
+    *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
+  esac
+  model="${model:-deepseek-v4-pro}"
+
+  # Explicit operator values always win.
+  [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
+  if [ -n "$key" ]; then
+    [ -n "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY="$key"
+    [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$key"
+  fi
+  [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
+  [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$model"
+  unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
+  DUAL_PROTOCOL_GATEWAY=1
+
+  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    remove_dotenv_var DEEPSEEK_API_KEY
+    remove_dotenv_var DEEPSEEK_BASE_URL
+    remove_dotenv_var DEEPSEEK_MODEL
+  fi
+  warn "DEEPSEEK_* is retired; migrated to ANTHROPIC_BASE_URL=${anthropic_url} + OPENAI_BASE_URL=${openai_url}"
+}
+
+# Resolve the Anthropic entrypoint (plus the OpenAI side of a dual-protocol
+# gateway). Mirrors runtime credential validation.
 resolve_credentials() {
   log "Phase 4: credentials"
-  local anthropic_key anthropic_token deepseek_key anthropic_url deepseek_url
-  local dv_anthropic_key dv_anthropic_token dv_deepseek_key
-  local dv_anthropic_url dv_deepseek_url
+  local anthropic_key anthropic_token anthropic_url
+  local dv_anthropic_key dv_anthropic_token dv_anthropic_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -1087,22 +1135,24 @@ resolve_credentials() {
     fi
   fi
 
+  # Retire DEEPSEEK_* before anything else reads credentials, so the rest of
+  # this function only ever sees the two protocol sides.
+  migrate_legacy_deepseek_env
+
   # .env fallbacks (used only for values missing from process env).
   dv_anthropic_key="$(read_dotenv_var ANTHROPIC_API_KEY || true)"
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
-  dv_deepseek_key="$(read_dotenv_var DEEPSEEK_API_KEY || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
-  dv_deepseek_url="$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
   setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
   setup_llm_mode="$(echo "$setup_llm_mode" | tr '[:upper:]' '[:lower:]')"
+  # ``deepseek`` was a mode of its own; it is now an Anthropic-side endpoint value.
+  [ "$setup_llm_mode" = "deepseek" ] && setup_llm_mode="anthropic"
   if [ "${HYPERLOOM_SETUP_ENV_AUTHORITATIVE:-}" = "1" ]; then
     setup_env_authoritative=1
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -z "$setup_llm_mode" ]; then
     if [ -n "$dv_anthropic_key" ] || [ -n "$dv_anthropic_token" ] || [ -n "$dv_anthropic_url" ]; then
       setup_llm_mode="anthropic"
-    elif [ -n "$dv_deepseek_key" ] || [ -n "$dv_deepseek_url" ]; then
-      setup_llm_mode="deepseek"
     fi
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -n "$setup_llm_mode" ]; then
@@ -1112,36 +1162,30 @@ resolve_credentials() {
   # Precedence: process env > .env.
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
-  deepseek_key="${DEEPSEEK_API_KEY:-$dv_deepseek_key}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
-  deepseek_url="${DEEPSEEK_BASE_URL:-$dv_deepseek_url}"
 
   # In the interactive setup flow, .env is the source of truth the user just
   # confirmed. Clear unsupported credential families before downstream scripts
-  # source env with "env wins".
+  # source env with "env wins". A dual-protocol gateway keeps its OpenAI side:
+  # both sides are the same gateway, not a second provider.
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
     unset SAFE_API_KEY LLM_GATEWAY_KEY
-    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
-  elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
-    anthropic_key=""
-    anthropic_token=""
-    anthropic_url=""
-    unset SAFE_API_KEY LLM_GATEWAY_KEY
-    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
-    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 0 ]; then
+      unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+    fi
   fi
 
-  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$deepseek_key" ] && is_interactive; then
-    read -rsp "[install-baremetal] Enter Anthropic/DeepSeek API key (or leave blank if already configured): " anthropic_key; echo >&2
+  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && is_interactive; then
+    read -rsp "[install-baremetal] Enter Anthropic API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
-  { [ -n "$anthropic_url" ] || [ -n "$deepseek_url" ] || [ -n "$deepseek_key" ]; } && has_url=1
-  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$deepseek_key" ]; } && has_key=1
+  [ -n "$anthropic_url" ] && has_url=1
+  { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ]; } && has_key=1
   if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure Anthropic (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or DeepSeek (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL)."
+      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN. A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
     fi
   fi
 
@@ -1149,38 +1193,30 @@ resolve_credentials() {
   # inference_optimizer skill install and CLI preflight.
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
   [ -n "$anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$anthropic_token"
-  [ -n "$deepseek_key" ] && export DEEPSEEK_API_KEY="$deepseek_key"
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
-  [ -n "$deepseek_url" ] && export DEEPSEEK_BASE_URL="$deepseek_url"
 
   # Persist resolved values to .env (skip on check-only / dry-run).
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
-      [ -n "$(read_dotenv_var DEEPSEEK_API_KEY || true)" ] && upsert_dotenv_var DEEPSEEK_API_KEY "$(read_dotenv_var DEEPSEEK_API_KEY || true)"
-      [ -n "$(read_dotenv_var DEEPSEEK_BASE_URL || true)" ] && upsert_dotenv_var DEEPSEEK_BASE_URL "$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
+    local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
+    if [ -n "$persist_anthropic_key" ]; then
+      upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
+    else
+      remove_dotenv_var ANTHROPIC_API_KEY
+    fi
+    if [ -n "$anthropic_url" ]; then
+      upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
+    else
+      remove_dotenv_var ANTHROPIC_BASE_URL
+    fi
+    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ]; then
+      [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
+      [ -n "${OPENAI_API_KEY:-}" ] && upsert_dotenv_var OPENAI_API_KEY "$OPENAI_API_KEY"
+      [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
+      [ -n "${CODEX_MODEL:-}" ] && upsert_dotenv_var CODEX_MODEL "$CODEX_MODEL"
+    else
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
-      remove_dotenv_var ANTHROPIC_API_KEY
-      remove_dotenv_var ANTHROPIC_BASE_URL
-    else
-      local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
-      if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-        remove_dotenv_var DEEPSEEK_API_KEY
-        remove_dotenv_var DEEPSEEK_BASE_URL
-      fi
-      if [ -n "$persist_anthropic_key" ]; then
-        upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
-      else
-        remove_dotenv_var ANTHROPIC_API_KEY
-      fi
-      if [ -n "$anthropic_url" ]; then
-        upsert_dotenv_var ANTHROPIC_BASE_URL "$anthropic_url"
-      else
-        remove_dotenv_var ANTHROPIC_BASE_URL
-      fi
     fi
-    remove_dotenv_var OPENAI_API_KEY
-    remove_dotenv_var OPENAI_BASE_URL
     remove_dotenv_var SAFE_API_KEY
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN

@@ -241,7 +241,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     )
 
 
-def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_path: Path):
+def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: Path):
+    """A legacy DEEPSEEK_* .env is rewritten into the standard two-sided form."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -256,8 +257,6 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
                 "OPENAI_BASE_URL=https://gateway.example/v1",
                 "OPENAI_API_KEY=stale-openai-key",
-                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
-                "ANTHROPIC_API_KEY=stale-anthropic-key",
                 "SAFE_API_KEY=stale-safe-key",
                 "LLM_GATEWAY_KEY=stale-gateway-key",
             ]
@@ -271,22 +270,22 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
+                # The credentials in this scenario must come from .env alone, so
+                # don't inherit any provider variable from the pytest process.
+                "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
+                "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
+                "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
                 f"DOTENV={dotenv}",
                 "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
-                "SAFE_API_KEY_ARG=",
-                "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
                 'die() { echo "$*" >&2; exit 99; }',
                 "is_interactive() { return 1; }",
                 credential_functions,
                 "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
-                "OPENAI_BASE_URL=https://gateway.example/v1",
-                "OPENAI_API_KEY=ambient-openai-key",
-                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
-                "ANTHROPIC_API_KEY=ambient-anthropic-key",
                 "SAFE_API_KEY=ambient-safe-key",
                 "LLM_GATEWAY_KEY=ambient-gateway-key",
                 "resolve_credentials",
@@ -294,9 +293,8 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'ANTHROPIC_BASE_URL=%s\n' \"${{ANTHROPIC_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'ANTHROPIC_API_KEY=%s\n' \"${{ANTHROPIC_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
-                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'CLAUDE_MODEL=%s\n' \"${{CLAUDE_MODEL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
                 f"printf 'DEEPSEEK_API_KEY=%s\n' \"${{DEEPSEEK_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
-                f"printf 'DEEPSEEK_BASE_URL=%s\n' \"${{DEEPSEEK_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
             ]
         )
         + "\n",
@@ -306,26 +304,26 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
     subprocess.run(["bash", str(runner)], check=True)
 
     text = dotenv.read_text(encoding="utf-8")
-    assert "DEEPSEEK_API_KEY=deepseek-test-key" in text
-    assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in text
-    assert "OPENAI_BASE_URL=" not in text
-    assert "OPENAI_API_KEY=" not in text
-    assert "ANTHROPIC_BASE_URL=" not in text
-    assert "ANTHROPIC_API_KEY=" not in text
+    # Retired variables are gone; both protocol sides now point at DeepSeek.
+    assert "DEEPSEEK_API_KEY=" not in text
+    assert "DEEPSEEK_BASE_URL=" not in text
+    assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in text
+    assert "ANTHROPIC_API_KEY=deepseek-test-key" in text
+    assert "OPENAI_BASE_URL=https://api.deepseek.com/v1" in text
+    assert "OPENAI_API_KEY=deepseek-test-key" in text
     assert "SAFE_API_KEY=" not in text
     resolved_env = (tmp_path / "deepseek-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
-        "OPENAI_BASE_URL=\n"
-        "OPENAI_API_KEY=\n"
-        "ANTHROPIC_BASE_URL=\n"
-        "ANTHROPIC_API_KEY=\n"
-        "SAFE_API_KEY=\n"
-        "DEEPSEEK_API_KEY=deepseek-test-key\n"
-        "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
+        "OPENAI_BASE_URL=https://api.deepseek.com/v1\n"
+        "OPENAI_API_KEY=deepseek-test-key\n"
+        "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\n"
+        "ANTHROPIC_API_KEY=deepseek-test-key\n"
+        "CLAUDE_MODEL=deepseek-v4-pro\n"
+        "DEEPSEEK_API_KEY=\n"
     )
 
 
-def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
+def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
     script_paths = [
         (
             "install",
@@ -342,7 +340,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
         script_text = script_path.read_text(encoding="utf-8")
         start = script_text.index("preflight_validate_credentials() {")
         end = script_text.index("\npreflight_validate_credentials", start)
-        runner = tmp_path / f"{name}-deepseek-preflight.sh"
+        runner = tmp_path / f"{name}-dual-protocol-preflight.sh"
         runner.write_text(
             "\n".join(
                 [
@@ -351,7 +349,10 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
                     f"REPO_ROOT={tmp_path}",
                     "CHECK_ONLY=0",
                     "DRY_RUN=0",
-                    "DEEPSEEK_API_KEY=deepseek-test-key",
+                    "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+                    "ANTHROPIC_API_KEY=deepseek-test-key",
+                    "OPENAI_BASE_URL=https://api.deepseek.com/v1",
+                    "OPENAI_API_KEY=deepseek-test-key",
                     "log() { :; }",
                     "warn() { :; }",
                     'die() { echo "$*" >&2; exit 99; }',
@@ -617,10 +618,10 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "_OPENAI_KEY_VAL" not in script_text
     assert "_snap_safe" not in script_text
     assert "_snap_openai" not in script_text
+    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays
+    # Anthropic-only regardless of what the gateway serves.
     assert "export OPENAI_BASE_URL" not in write_text
     assert "export OPENAI_API_KEY" not in write_text
-    assert "upsert_dotenv_var OPENAI_BASE_URL" not in write_text
-    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
 
     # The gateway credentials may be *read* in memory -- the single-gateway
     # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
@@ -633,6 +634,9 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
     assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
     assert "remove_dotenv_var OPENAI_API_KEY" in write_text
+    # Retired provider variables are scrubbed on every re-install.
+    assert "remove_dotenv_var DEEPSEEK_API_KEY" in write_text
+    assert "remove_dotenv_var DEEPSEEK_BASE_URL" in write_text
 
 
 def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):

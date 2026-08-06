@@ -618,8 +618,6 @@ def _codex_model_should_follow_claude() -> bool:
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
         or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     has_openai = bool(
         (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -638,8 +636,6 @@ def _claude_model_should_follow_codex() -> bool:
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
         or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     return has_openai and not has_anthropic
 
@@ -746,7 +742,6 @@ def _validate_and_resolve_claude_model(
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
@@ -761,7 +756,6 @@ def _validate_and_resolve_claude_model(
         anthropic_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
         )
         openai_key = (
