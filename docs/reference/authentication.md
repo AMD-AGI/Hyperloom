@@ -281,8 +281,10 @@ Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
 
 **Q: Where do provider-specific API keys come from?**
 
-In single-gateway mode the Anthropic-side key is derived from `OPENAI_API_KEY`
-by `install.sh`. In split mode each side uses its own key.
+From each side's own variable: the OpenAI side reads `OPENAI_API_KEY`, the
+Anthropic side reads `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`). Neither is
+derived from the other. One gateway serving both protocols still needs both set,
+even when the value is identical.
 
 **Q: My organization rotates the LLM gateway key weekly. How?**
 
