@@ -443,11 +443,12 @@ def safe_runtime_env() -> dict:
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # Each side's aliases come from that side's own credentials. GEAK speaks the
-    # OpenAI protocol.
+    # Each side's aliases come from that side's own credentials. GEAK_API_KEY /
+    # GEAK_BASE_URL are never derived: GEAK runs on the Anthropic side via
+    # GEAK_CLAUDE_MODEL + ANTHROPIC_*, so an OpenAI-side value could not start it.
+    # They are forwarded verbatim when an operator sets them.
     openai_key = env.get("OPENAI_API_KEY")
     if openai_key:
-        env.setdefault("GEAK_API_KEY", openai_key)
         env.setdefault("LLM_API_KEY", openai_key)
         env.setdefault("AMD_LLM_API_KEY", openai_key)
         env.setdefault("LLM_GATEWAY_KEY", openai_key)
@@ -457,7 +458,6 @@ def safe_runtime_env() -> dict:
         env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
     openai_url = env.get("OPENAI_BASE_URL")
     if openai_url:
-        env.setdefault("GEAK_BASE_URL", openai_url)
         env.setdefault("LLM_API_BASE", openai_url)
     if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:
         env["AMD_LLM_API_KEY"] = env["AMD_API_KEY"]

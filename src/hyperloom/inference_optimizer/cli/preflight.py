@@ -1272,14 +1272,15 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
-    # --- Auth alias export (internal GEAK / LLM aliases only) ---
+    # --- Auth alias export (internal LLM aliases only) ---
     # These aliases feed OpenAI-protocol consumers, so they are filled from the
     # OpenAI-side key only and stay unset when that side is not configured. An
     # explicitly set alias is kept, and the primary keys are never cross-filled.
+    # GEAK_API_KEY is not among them: GEAK runs on the Anthropic side, so an
+    # OpenAI-side value could not start it.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     if openai_key:
         for alias in (
-            "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
@@ -1351,12 +1352,14 @@ def _preflight(
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
-        # GEAK / LLM_API_BASE address OpenAI-protocol endpoints, so they default
-        # to the resolved OpenAI-side URL and stay unset when that side is not
-        # configured. An intentional operator override is preserved.
+        # LLM_API_BASE addresses an OpenAI-protocol endpoint, so it defaults to
+        # the resolved OpenAI-side URL and stays unset when that side is not
+        # configured. An intentional operator override is preserved. GEAK_BASE_URL
+        # is not defaulted here: GEAK runs on the Anthropic side, so an
+        # OpenAI-side endpoint could not start it.
         gateway_url = openai_url
         if gateway_url:
-            for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
+            for alias in ("LLM_API_BASE",):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
                     # A genuine operator override is preserved, but a leftover
