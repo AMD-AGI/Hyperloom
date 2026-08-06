@@ -142,8 +142,6 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
     source = workspace / "aiter" / "ops" / "triton" / "attention.py"
     source.parent.mkdir(parents=True)
     source.write_text("@triton.jit\ndef attention_kernel(x):\n    return x\n", encoding="utf-8")
-    driver = workspace / ".forge_driver_xyz.py"
-    driver.write_text("HARNESS\n", encoding="utf-8")
     candidate = {
         "framework": "vllm",
         "operation": "vllm :: unified_attention",
@@ -162,11 +160,14 @@ def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkey
             candidate,
             source_files=[str(source)],
         ),
-        framework=forge_submit._resolve_framework(candidate, str(source)),
-        gpu_target=forge_submit._normalize_gpu_target("MI355X"),
-        driver=str(driver),
-        driver_available=True,
-        shape_cases=[{"M": 128}],
+            framework=forge_submit._resolve_framework(candidate, str(source)),
+            gpu_target=forge_submit._normalize_gpu_target("MI355X"),
+            driver_contract={
+                "contract_version": 1,
+                "operator_family": "gemm",
+                "cases": [{"case_id": "case_001", "inputs": [{"shape": [128, 128], "dtype": "bf16"}]}],
+            },
+            shape_cases=[{"M": 128}],
         shapes={"M": 128},
         branch="forge/session/attention-0011223344",
         attempt_id="attempt-7",

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -2118,29 +2119,48 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
 )
 
 
+def _rewrite_driver_contract(**overrides) -> dict:
+    contract = {
+        "contract_version": 1,
+        "operator_family": "gemm",
+        "logical_operator": "vllm::fused_gemm",
+        "entry_symbols": ["matmul"],
+        "case_selector_key": "CASE_ID",
+        "cases": [
+            {
+                "case_id": "case_001",
+                "selector": {"CASE_ID": "case_001"},
+                "inputs": [
+                    {"shape": [64, 32], "dtype": "fp16"},
+                    {"shape": [32, 16], "dtype": "fp16"},
+                ],
+            }
+        ],
+    }
+    contract.update(overrides)
+    return contract
+
+
 def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
     workspace = tmp_path / "worktree"
-    kernel = workspace / "vllm" / "fused_moe.py"
+    kernel = workspace / "vllm" / "fused_gemm.py"
     kernel.parent.mkdir(parents=True, exist_ok=True)
     kernel.write_text("TRITON\n")
-    driver = workspace / ".forge_driver_abc123.py"
-    driver.write_text("HARNESS\n")
     kwargs = {
-        "candidate": {"name": "fused_moe", "source_symbol": "fused_moe_kernel"},
+        "candidate": {"name": "fused_gemm", "source_symbol": "matmul"},
         "source_type": "triton",
         "kernel_kind": "triton",
-        "logical_operator": "vllm::fused_moe",
+        "logical_operator": "vllm::fused_gemm",
         "source_kernel": str(kernel),
         "workspace": str(workspace),
         "implementation_sources": [str(kernel)],
-        "implementation_symbols": ["fused_moe_kernel"],
+        "implementation_symbols": ["matmul"],
         "framework": "vllm",
         "gpu_target": "gfx942",
-        "driver": str(driver),
-        "driver_available": True,
+        "driver_contract": _rewrite_driver_contract(),
         "shape_cases": [{"M": 8, "N": 16}],
         "shapes": {"M": 8},
-        "branch": "forge/session/fused-moe-abc123def456",
+        "branch": "forge/session/fused-gemm-abc123def456",
         "attempt_id": "attempt-1",
         "timeout_s": 7200,
     }
@@ -2238,7 +2258,8 @@ def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
         ({"framework": "torch"}, "framework_unsupported"),
         ({"timeout_s": 3600}, "budget_insufficient"),
         ({"implementation_symbols": []}, "target_functions_missing"),
-        ({"driver_available": False}, "driver_unavailable"),
+        ({"driver_contract": {}}, "driver_unavailable"),
+        ({"driver_contract": _rewrite_driver_contract(contract_version=2)}, "driver_contract_unsupported"),
     ],
 )
 def test_rewrite_route_rejects_candidates_before_probing_the_producer(
@@ -2337,17 +2358,20 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
     assert decision.reason == "eligible"
     assert decision.spec is not None
     assert decision.spec.as_dict() == {
-        "logical_operator": "vllm::fused_moe",
+        "logical_operator": "vllm::fused_gemm",
         "source_kernel": kwargs["source_kernel"],
-        "implementation_symbols": ["fused_moe_kernel"],
-        "source_entry": "fused_moe_kernel",
+        "implementation_symbols": ["matmul"],
+        "source_entry": "matmul",
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
-        "driver": kwargs["driver"],
-        "branch": "forge/session/fused-moe-abc123def456",
+        "operator_family": "gemm",
+        # The driver is generated only after the route is granted.
+        "driver": "",
+        "branch": "forge/session/fused-gemm-abc123def456",
         "attempt_id": "attempt-1",
     }
+    assert decision.with_driver("/ws/.forge_driver_x.py").spec.driver == "/ws/.forge_driver_x.py"
 
 
 def test_rewrite_spec_falls_back_to_the_single_shape_case(tmp_path, monkeypatch):
@@ -2360,22 +2384,24 @@ def test_rewrite_spec_falls_back_to_the_single_shape_case(tmp_path, monkeypatch)
             tmp_path,
             shape_cases=[],
             shapes={"M": 8, "K": 2048},
-            candidate={"name": "fused_moe", "source_entry": "fused_moe_forward"},
+            candidate={"name": "fused_gemm", "source_entry": "fused_gemm_forward"},
         ),
     )
 
     assert decision.eligible is True
     assert decision.spec.shape_cases == ({"M": 8, "K": 2048},)
-    assert decision.spec.source_entry == "fused_moe_forward"
+    assert decision.spec.source_entry == "fused_gemm_forward"
 
 
-def _submit_with_rewrite_route(tmp_path, monkeypatch, **submit_overrides) -> dict:
+def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_overrides) -> dict:
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "rewrite-route"
     prompt = tmp_path / "prompt.md"
     prompt.write_text("# Optimize\n")
 
     def fake_loop(**kwargs):
+        if captured is not None:
+            captured.update(kwargs)
         return forge_submit.ForgeLoopOutcome(
             baseline_ms=2.0,
             best_ms=1.0,
@@ -2400,13 +2426,15 @@ def _submit_with_rewrite_route(tmp_path, monkeypatch, **submit_overrides) -> dic
         "test_command": "python -c 'print(\"allclose: True\")'",
         "source_type": "triton",
         "candidate": {
-            "name": "fused_moe",
-            "operation": "vllm::fused_moe",
+            "name": "fused_gemm",
+            "operation": "vllm::fused_gemm",
             "source_framework": "vllm",
-            "source_symbol": "fused_moe_kernel",
+            "source_symbol": "matmul",
             "kernel_sources": [str(source)],
             "kernel_kind": "triton",
             "platform": "mi355x",
+            "input_shapes": [{"call_num": 4, "shape": "(64,32) fp16<br>(32,16) fp16"}],
+            "input_dtypes": ["fp16", "fp16"],
         },
         "timeout_s": 7200,
         "kernel_repo": str(repo),
@@ -2435,13 +2463,20 @@ def test_submit_records_an_eligible_rewrite_route_without_leaving_forge_loop(
         lambda **_kwargs: _SUPPORTED_CAPABILITIES,
     )
 
-    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+    captured: dict = {}
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch, captured=captured)
 
     assert result["returncode"] == 0
     verdict = result["flydsl_rewrite"]
     assert verdict["eligible"] is True
     assert verdict["spec"]["framework"] == "vllm"
-    assert verdict["spec"]["implementation_symbols"] == ["fused_moe_kernel"]
+    assert verdict["spec"]["implementation_symbols"] == ["matmul"]
+    assert verdict["spec"]["operator_family"] == "gemm"
+    # The dual-mode rewrite driver replaces the generic harness for this attempt.
+    driver = Path(verdict["spec"]["driver"])
+    assert driver.name.startswith(".forge_driver_")
+    assert captured["driver"] == str(driver)
+    assert "--ref-bench-mode" in driver.read_text()
     # The generic loop still owns the run until the rewrite runner exists.
     assert result["best_ms"] == 1.0
 
@@ -2466,3 +2501,235 @@ def test_submit_falls_back_to_forge_loop_on_an_incompatible_producer(tmp_path, m
     assert verdict["eligible"] is False
     assert verdict["reason"] == "capability_artifact_schema_unsupported"
     assert result["best_ms"] == 1.0
+
+
+_SOURCE_MODULE = """
+import os
+
+
+def matmul(a, b):
+    with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
+        log.write("source\\n")
+    return a @ b
+"""
+
+_CANDIDATE_MODULE = """
+import os
+
+
+def build_gemm_module():
+    def launch(a, b):
+        with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
+            log.write("candidate\\n")
+        return (a.float() @ b.float()).to(a.dtype)
+
+    return launch
+"""
+
+
+def _rewrite_driver_workspace(tmp_path, *, contract=None, candidate_module=_CANDIDATE_MODULE):
+    pytest.importorskip("torch")
+    workspace = tmp_path / "rewrite-ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "source.py").write_text(_SOURCE_MODULE)
+    (workspace / "candidate.py").write_text(candidate_module)
+    driver = _flydsl_rewrite.build_rewrite_driver(
+        contract or _rewrite_driver_contract(),
+        workspace=str(workspace),
+        writer=forge_submit._write_generated_driver,
+    )
+    return workspace, driver
+
+
+def _run_rewrite_driver(workspace, driver, *args, candidate=True, builder="build_gemm_module"):
+    env = dict(os.environ)
+    env["REWRITE_CALL_LOG"] = str(workspace / "calls.log")
+    env[_flydsl_rewrite.ENV_SOURCE_KERNEL] = str(workspace / "source.py")
+    env[_flydsl_rewrite.ENV_BUILDER_SYMBOL] = builder
+    env[_flydsl_rewrite.ENV_LOGICAL_OP] = "vllm::fused_gemm"
+    if candidate:
+        env[_flydsl_rewrite.ENV_CANDIDATE_KERNEL] = str(workspace / "candidate.py")
+    else:
+        env.pop(_flydsl_rewrite.ENV_CANDIDATE_KERNEL, None)
+    return subprocess.run(
+        [sys.executable, driver, *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(workspace),
+    )
+
+
+def _called_implementations(workspace) -> list[str]:
+    log = workspace / "calls.log"
+    return sorted(set(log.read_text().split())) if log.exists() else []
+
+
+def test_rewrite_driver_bench_modes_measure_different_implementations(tmp_path):
+    workspace, driver = _rewrite_driver_workspace(tmp_path)
+
+    reference = _run_rewrite_driver(workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "2")
+    assert reference.returncode == 0, reference.stderr
+    assert _called_implementations(workspace) == ["source"]
+
+    (workspace / "calls.log").unlink()
+    candidate = _run_rewrite_driver(workspace, driver, "--bench-mode", "--warmup", "1", "--iters", "2")
+    assert candidate.returncode == 0, candidate.stderr
+    assert _called_implementations(workspace) == ["candidate"]
+
+
+def test_rewrite_driver_timing_is_readable_by_the_producer_parser(tmp_path):
+    workspace, driver = _rewrite_driver_workspace(tmp_path)
+
+    proc = _run_rewrite_driver(workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "3")
+
+    assert proc.returncode == 0, proc.stderr
+    # Same expression the generic harness adapter uses to recover a latency.
+    match = re.search(r"(?:median_ms|wall_ms)\s*[:=]\s*([0-9.]+)", proc.stdout)
+    assert match is not None, proc.stdout
+    assert float(match.group(1)) > 0.0
+    # Per-case detail must not collide with the aggregate the parser reads.
+    assert match.group(1) == re.search(r"^median_ms:\s*([0-9.]+)$", proc.stdout, re.M).group(1)
+
+
+def test_rewrite_driver_correctness_covers_every_grouped_case(tmp_path):
+    contract = _rewrite_driver_contract(
+        cases=[
+            {
+                "case_id": "case_001",
+                "selector": {"CASE_ID": "case_001"},
+                "inputs": [
+                    {"shape": [64, 32], "dtype": "fp16"},
+                    {"shape": [32, 16], "dtype": "fp16"},
+                ],
+            },
+            {
+                "case_id": "case_002",
+                "selector": {"CASE_ID": "case_002"},
+                "inputs": [
+                    {"shape": [128, 64], "dtype": "fp32"},
+                    {"shape": [64, 8], "dtype": "fp32"},
+                ],
+            },
+        ]
+    )
+    workspace, driver = _rewrite_driver_workspace(tmp_path, contract=contract)
+
+    proc = _run_rewrite_driver(workspace, driver)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "[case] case_001 output=0 snr_db=" in proc.stdout
+    assert "[case] case_002 output=0 snr_db=" in proc.stdout
+    reported = float(re.search(r"^SNR:\s*([-0-9.]+) dB$", proc.stdout, re.M).group(1))
+    per_case = [float(value) for value in re.findall(r"snr_db=([-0-9.]+)", proc.stdout)]
+    assert len(per_case) == 2
+    assert reported == pytest.approx(min(per_case), abs=0.01)
+    assert _called_implementations(workspace) == ["candidate", "source"]
+
+
+def test_rewrite_driver_selects_a_single_grouped_case(tmp_path):
+    contract = _rewrite_driver_contract(
+        cases=[
+            {
+                "case_id": "case_001",
+                "selector": {"CASE_ID": "case_001"},
+                "inputs": [{"shape": [64, 32], "dtype": "fp16"}, {"shape": [32, 16], "dtype": "fp16"}],
+            },
+            {
+                "case_id": "case_002",
+                "selector": {"CASE_ID": "case_002"},
+                "inputs": [{"shape": [16, 8], "dtype": "fp16"}, {"shape": [8, 4], "dtype": "fp16"}],
+            },
+        ]
+    )
+    workspace, driver = _rewrite_driver_workspace(tmp_path, contract=contract)
+
+    proc = _run_rewrite_driver(
+        workspace, driver, "--ref-bench-mode", "--warmup", "1", "--iters", "2", "--shape", "CASE_ID=case_002"
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "[case] case_002 ms=" in proc.stdout
+    assert "case_001" not in proc.stdout
+
+
+def test_rewrite_driver_reports_a_missing_candidate_without_a_metric(tmp_path):
+    workspace, driver = _rewrite_driver_workspace(tmp_path)
+
+    proc = _run_rewrite_driver(workspace, driver, candidate=False)
+
+    assert proc.returncode == 1
+    assert _flydsl_rewrite.ENV_CANDIDATE_KERNEL in proc.stderr
+    # A harness failure is never reported as a correctness verdict.
+    assert "SNR:" not in proc.stdout
+    assert "allclose:" not in proc.stdout
+
+
+def test_rewrite_driver_fails_closed_when_the_candidate_shape_diverges(tmp_path):
+    diverging = """
+import os
+
+
+def build_gemm_module():
+    def launch(a, b):
+        with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
+            log.write("candidate\\n")
+        return (a.float() @ b.float()).to(a.dtype)[:1]
+
+    return launch
+"""
+    workspace, driver = _rewrite_driver_workspace(tmp_path, candidate_module=diverging)
+
+    proc = _run_rewrite_driver(workspace, driver)
+
+    assert proc.returncode == 1
+    assert "allclose: False" in proc.stdout
+    assert "SNR:" not in proc.stdout
+
+
+def test_rewrite_driver_calls_a_parameterised_builder_symbol_directly(tmp_path):
+    direct = """
+import os
+
+
+def flydsl_gemm(a, b):
+    with open(os.environ["REWRITE_CALL_LOG"], "a") as log:
+        log.write("candidate\\n")
+    return (a.float() @ b.float()).to(a.dtype)
+"""
+    workspace, driver = _rewrite_driver_workspace(tmp_path, candidate_module=direct)
+
+    proc = _run_rewrite_driver(workspace, driver, builder="flydsl_gemm")
+
+    assert proc.returncode == 0, proc.stderr
+    assert "SNR:" in proc.stdout
+    assert _called_implementations(workspace) == ["candidate", "source"]
+
+
+def test_rewrite_driver_is_staged_and_reclaimed_like_every_generated_driver(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    driver = _flydsl_rewrite.build_rewrite_driver(
+        _rewrite_driver_contract(),
+        workspace=str(repo),
+        writer=forge_submit._write_generated_driver,
+    )
+    staged = Path(driver)
+
+    assert staged.parent == repo
+    assert staged.name.startswith(".forge_driver_")
+    # Untracked, so a base..best export can never carry it into the patch.
+    assert staged.name in _git(repo, "status", "--porcelain", "--ignored=no")
+    assert staged.name not in _git(repo, "ls-files")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver=driver,
+        workspace=str(repo),
+        output_dir=tmp_path / "attempt",
+        branch="forge/session/kernel",
+        nogit_scratch=False,
+    )
+
+    assert not staged.exists()
+    assert kernel.exists()
