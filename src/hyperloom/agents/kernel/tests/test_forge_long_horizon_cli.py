@@ -2452,7 +2452,87 @@ def test_submit_omits_the_rewrite_verdict_when_the_route_is_off(tmp_path, monkey
     assert "flydsl_rewrite" not in result
 
 
-def test_submit_records_an_eligible_rewrite_route_without_leaving_forge_loop(
+_REWRITE_ARTIFACT_DIR = "forge_experiments/rewrite"
+_REWRITE_PINNED_REF = "refs/hyperloom/applyback/attempt-1"
+
+
+def _publish_applyback_in(workspace: str, base_commit: str, **outer_overrides) -> dict:
+    """Commit an apply-back in the producer workspace and report its artifacts."""
+    root = Path(workspace)
+    (root / "kernel.py").write_text("def kernel(x):\n    return flydsl_kernel(x)\n")
+    (root / "flydsl_kernel.py").write_text("def flydsl_kernel(x):\n    return x\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "flydsl apply-back")
+    best_commit = _git(root, "rev-parse", "HEAD")
+    _git(root, "update-ref", _REWRITE_PINNED_REF, best_commit)
+
+    artifact_dir = root / _REWRITE_ARTIFACT_DIR
+    (artifact_dir / "files").mkdir(parents=True, exist_ok=True)
+    changed_files = ["flydsl_kernel.py", "kernel.py"]
+    for relative in changed_files:
+        (artifact_dir / "files" / relative).write_text((root / relative).read_text())
+    (artifact_dir / "forge.patch").write_text(
+        _git(root, "diff", f"{base_commit}..{best_commit}") + "\n"
+    )
+    scratch = artifact_dir / "scratch_port.py"
+    scratch.write_text("SCRATCH\n")
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "validation_scope": "reference",
+                "reference_correctness_passed": True,
+                "reference_snr_db": 51.0,
+                "integration_validation_required": True,
+                "integration_validation_status": "pending",
+                "base_commit": base_commit,
+                "commit_hash": best_commit,
+                "commit_ref": _REWRITE_PINNED_REF,
+                "builder_symbol": "build_fused_gemm_module",
+                "baseline_wall_ms": 4.0,
+                "best_wall_ms": 2.0,
+                "changed_files": changed_files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    outer = {
+        "success": True,
+        "applyback_required": True,
+        "applyback_ok": True,
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "best_commit": best_commit,
+        "canonical_manifest": f"{_REWRITE_ARTIFACT_DIR}/manifest.json",
+        "canonical_patch_path": f"{_REWRITE_ARTIFACT_DIR}/forge.patch",
+        "canonical_files_root": f"{_REWRITE_ARTIFACT_DIR}/files",
+        "temporary_paths": [f"{_REWRITE_ARTIFACT_DIR}/scratch_port.py"],
+    }
+    outer.update(outer_overrides)
+    return outer
+
+
+def _stub_rewrite_runner(monkeypatch, *, publish=True, error=None, timed_out=False):
+    captured: dict = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        result = None
+        if publish:
+            base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
+            result = _publish_applyback_in(kwargs["workspace"], base_commit)
+        return forge_submit.RewriteRunOutcome(
+            result=result,
+            output="forge rewrite ran",
+            error=error,
+            timed_out=timed_out,
+        )
+
+    monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
+    return captured
+
+
+def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
     tmp_path,
     monkeypatch,
 ):
@@ -2462,23 +2542,330 @@ def test_submit_records_an_eligible_rewrite_route_without_leaving_forge_loop(
         "probe_capabilities",
         lambda **_kwargs: _SUPPORTED_CAPABILITIES,
     )
+    rewrite_call = _stub_rewrite_runner(monkeypatch)
 
-    captured: dict = {}
-    result = _submit_with_rewrite_route(tmp_path, monkeypatch, captured=captured)
+    loop_call: dict = {}
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch, captured=loop_call)
 
     assert result["returncode"] == 0
+    # The generic loop is never reached once the rewrite route is granted.
+    assert loop_call == {}
     verdict = result["flydsl_rewrite"]
     assert verdict["eligible"] is True
-    assert verdict["spec"]["framework"] == "vllm"
-    assert verdict["spec"]["implementation_symbols"] == ["matmul"]
     assert verdict["spec"]["operator_family"] == "gemm"
-    # The dual-mode rewrite driver replaces the generic harness for this attempt.
     driver = Path(verdict["spec"]["driver"])
     assert driver.name.startswith(".forge_driver_")
-    assert captured["driver"] == str(driver)
-    assert "--ref-bench-mode" in driver.read_text()
-    # The generic loop still owns the run until the rewrite runner exists.
-    assert result["best_ms"] == 1.0
+    assert rewrite_call["driver"] == str(driver)
+    assert rewrite_call["logical_op_name"] == "vllm::fused_gemm"
+
+    applyback = result["flydsl_applyback"]
+    assert applyback["artifact_kind"] == "framework_applyback"
+    assert applyback["integration_validation_status"] == "pending"
+    assert applyback["changed_files"] == ["flydsl_kernel.py", "kernel.py"]
+    assert result["best_commit"] == applyback["best_commit"]
+    assert result["best_ms"] == 2.0
+    assert result["mean_case_speedup"] == 2.0
+    assert result["salvaged"] is False
+    exported = tmp_path / "results" / "rewrite-route" / "optimized_versions"
+    assert sorted(path.name for path in (exported / "files").iterdir()) == [
+        "flydsl_kernel.py",
+        "kernel.py",
+    ]
+
+
+def test_submit_salvages_an_applyback_published_before_a_hard_kill(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(
+        monkeypatch,
+        error=RuntimeError("forge rewrite exceeded absolute deadline after 7200s"),
+        timed_out=True,
+    )
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is True
+    assert result["salvaged"] is True
+    assert result["flydsl_applyback"]["validation_scope"] == "reference"
+
+
+@pytest.mark.parametrize(
+    ("publish", "error", "timed_out"),
+    [
+        pytest.param(False, None, False, id="clean_exit_without_an_applyback"),
+        pytest.param(False, RuntimeError("rc=1"), False, id="failed_without_an_applyback"),
+        pytest.param(False, RuntimeError("deadline"), True, id="killed_before_publishing"),
+    ],
+)
+def test_submit_produces_no_bundle_when_no_applyback_is_published(
+    tmp_path,
+    monkeypatch,
+    publish,
+    error,
+    timed_out,
+):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+    _stub_rewrite_runner(monkeypatch, publish=publish, error=error, timed_out=timed_out)
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert result["salvaged"] is False
+    assert "best_commit" not in result
+    output_dir = tmp_path / "results" / "rewrite-route"
+    assert not (output_dir / "optimized_versions").exists()
+    assert not (output_dir / "optimization_report.md").exists()
+
+
+def test_submit_rejects_an_applyback_that_fails_its_own_contract(tmp_path, monkeypatch):
+    """A published-but-invalid result is discarded, not degraded into a keep."""
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    monkeypatch.setattr(
+        _flydsl_rewrite,
+        "probe_capabilities",
+        lambda **_kwargs: _SUPPORTED_CAPABILITIES,
+    )
+
+    def fake_runner(**kwargs):
+        base_commit = _git(Path(kwargs["workspace"]), "rev-parse", "HEAD")
+        outer = _publish_applyback_in(
+            kwargs["workspace"], base_commit, temporary_paths=None
+        )
+        return forge_submit.RewriteRunOutcome(
+            result=outer, output="", error=None, timed_out=False
+        )
+
+    monkeypatch.setattr(forge_submit, "_run_rewrite_via_cli", fake_runner)
+
+    result = _submit_with_rewrite_route(tmp_path, monkeypatch)
+
+    assert result["returncode"] == 1
+    assert "flydsl_applyback" not in result
+    assert not (tmp_path / "results" / "rewrite-route" / "optimization_report.md").exists()
+
+
+def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    kernel = workspace / "fused_gemm.py"
+    driver = workspace / ".forge_driver_abc.py"
+    kernel.write_text("pass\n")
+    driver.write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+    result_json.write_text('{"stale": true}')
+    captured = {}
+
+    class FakeProcess:
+        pid = 4242
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            captured["communicate_timeout"] = timeout
+            payload = {"success": True, "applyback_ok": True}
+            return f"__FORGE_RESULT__{json.dumps(payload)}", ""
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["popen_kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    deadline = time.time() + 7200.0
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(kernel),
+        driver=str(driver),
+        logical_op_name="vllm::fused_gemm",
+        source_entry="matmul",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=["matmul", "matmul_kernel"],
+        shapes={"primary": {"CASE_ID": "case_001"}},
+        snr_threshold=30.0,
+        gpu_target="gfx950",
+        max_iters=8,
+        max_hours=2.0,
+        branch="forge/session/fused-gemm",
+        framework="vllm",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=7200,
+        deadline_unix=deadline,
+    )
+
+    command = captured["command"]
+    assert command[:4] == [sys.executable, "-m", "kernel_agents.cli", "forge-rewrite-by-flydsl"]
+    expected = {
+        "--source-kernel": str(kernel),
+        "--driver": str(driver),
+        "--logical-op-name": "vllm::fused_gemm",
+        "--source-entry": "matmul",
+        "--workspace": str(workspace),
+        "--experiments-dir": str(experiments),
+        "--target-functions": "matmul,matmul_kernel",
+        "--shapes-json": json.dumps({"primary": {"CASE_ID": "case_001"}}),
+        "--snr-threshold": "30.0",
+        "--gpu-target": "gfx950",
+        "--max-iters": "8",
+        "--max-hours": "2.0",
+        "--deadline-unix": str(deadline),
+        "--framework": "vllm",
+        "--git-branch": "forge/session/fused-gemm",
+        "--result-json": str(result_json),
+    }
+    for flag, value in expected.items():
+        assert flag in command, flag
+        assert command[command.index(flag) + 1] == value, flag
+    # Options that only exist on the generic loop must never be smuggled across.
+    for forbidden in (
+        "--kernel",
+        "--fellow",
+        "--experiment-id",
+        "--experience-id",
+        "--e2e-pct",
+        "--operator-name",
+        "--source-files",
+        "--program-md-file",
+        "--invocation-spec-file",
+        "--resume",
+        "--task-type",
+        "--workload-key",
+        "--return-after-read-kb",
+    ):
+        assert forbidden not in command, forbidden
+
+    assert captured["popen_kwargs"]["start_new_session"] is True
+    assert captured["popen_kwargs"]["cwd"] == str(workspace)
+    assert 7100.0 < captured["communicate_timeout"] <= 7200.0
+    # A stale result from an earlier attempt is cleared before the child starts.
+    assert outcome.result == {"success": True, "applyback_ok": True}
+    assert outcome.error is None
+    assert outcome.timed_out is False
+
+
+def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+
+    class FakeProcess:
+        pid = 4243
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            result_json.write_text(json.dumps({"success": True, "from": "sidecar"}))
+            return '__FORGE_RESULT__{"success": true, "from": "sentinel"}', ""
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: FakeProcess())
+
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        logical_op_name="vllm::op",
+        source_entry="",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=None,
+        shapes={},
+        snr_threshold=30.0,
+        gpu_target="gfx942",
+        max_iters=4,
+        max_hours=1.0,
+        branch="forge/session/op",
+        framework="",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+
+    assert outcome.result == {"success": True, "from": "sidecar"}
+
+
+def test_finalizer_reclaims_only_declared_temporary_paths(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    scratch_file = repo / "scratch_port.py"
+    scratch_file.write_text("SCRATCH\n")
+    scratch_dir = repo / "scratch_tree"
+    scratch_dir.mkdir()
+    (scratch_dir / "inner.py").write_text("INNER\n")
+    untouched = repo / "untracked_note.txt"
+    untouched.write_text("KEEP\n")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=True,
+        restore_info=None,
+        driver="",
+        workspace=str(repo),
+        output_dir=tmp_path / "attempt",
+        branch="forge/session/kernel",
+        nogit_scratch=False,
+        temporary_paths=[str(scratch_file), str(scratch_dir)],
+    )
+
+    assert not scratch_file.exists()
+    assert not scratch_dir.exists()
+    assert untouched.exists()
+    assert kernel.exists()
+
+
+def test_finalizer_refuses_temporary_paths_outside_the_workspace(tmp_path):
+    repo, kernel = _make_repo(tmp_path)
+    outsider = tmp_path / "outside.py"
+    outsider.write_text("KEEP\n")
+
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        forge_submit._finalize_forge_workspace(
+            inplace=True,
+            restore_info=None,
+            driver="",
+            workspace=str(repo),
+            output_dir=tmp_path / "attempt",
+            branch="forge/session/kernel",
+            nogit_scratch=False,
+            temporary_paths=[str(outsider), str(repo)],
+        )
+
+    assert outsider.exists()
+    assert kernel.exists()
+
+
+def test_retained_workspace_finalizer_ignores_temporary_paths(tmp_path):
+    """Only the in-place route reclaims; a retained worktree is left intact."""
+    repo, _kernel = _make_repo(tmp_path)
+    scratch = repo / "scratch_port.py"
+    scratch.write_text("SCRATCH\n")
+
+    forge_submit._finalize_forge_workspace(
+        inplace=False,
+        restore_info=None,
+        driver="",
+        workspace=str(repo),
+        output_dir=tmp_path / "attempt",
+        branch="forge/session/kernel",
+        nogit_scratch=False,
+        temporary_paths=[str(scratch)],
+    )
+
+    assert scratch.exists()
 
 
 def test_submit_falls_back_to_forge_loop_on_an_incompatible_producer(tmp_path, monkeypatch):
@@ -2717,8 +3104,10 @@ def test_rewrite_driver_is_staged_and_reclaimed_like_every_generated_driver(tmp_
 
     assert staged.parent == repo
     assert staged.name.startswith(".forge_driver_")
-    # Untracked, so a base..best export can never carry it into the patch.
-    assert staged.name in _git(repo, "status", "--porcelain", "--ignored=no")
+    # Excluded from git, so even a broad producer `git add` cannot carry the
+    # driver into the framework patch.
+    assert staged.name not in _git(repo, "status", "--porcelain")
+    _git(repo, "add", "-A")
     assert staged.name not in _git(repo, "ls-files")
 
     forge_submit._finalize_forge_workspace(
