@@ -273,6 +273,28 @@ def stream_events(fileobj, bufsize: int = 8 * 1024 * 1024) -> Iterator[dict]:
             pos = 0
 
 
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable workload.
+
+    Prefers the canonical ``framework_registry`` so every ``kind=scriptable``
+    entry is covered rather than ``xdit`` alone; falls back to a name check so
+    the reader stays usable when run standalone (outside an importable
+    ``inference_optimizer`` package).
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for scriptable frameworks.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except Exception:  # noqa: BLE001 - standalone use must not hard-fail
+        return str(framework or "").strip().lower() in {"xdit", "hunyuan_image3"}
+
+
 def _union_ms(intervals: list[tuple[float, float]]) -> float:
     """Return the union length (in ms) of ``[start_us, end_us)`` intervals."""
     if not intervals:
@@ -349,8 +371,10 @@ def select_steady_window(
         is_step = 1 if _STEP_MARKER_RE.search(norm) else 0
         return (is_step, len(ws))
 
-    is_xdit = (framework or "").lower() == "xdit"
-    threshold = 2 if is_xdit else min_repeats
+    # Diffusion frameworks run few, long denoise iterations, so a lower repeat
+    # threshold is needed to find the loop. This is a property of the scriptable
+    # kind, not of xDiT specifically.
+    threshold = 2 if _is_scriptable_framework(framework) else min_repeats
     # Filter by threshold before ranking so a spurious low-count step-named
     # annotation cannot win over a real high-count loop and then be rejected.
     qualified = [(n, w) for n, w in groups.items() if len(w) >= threshold]

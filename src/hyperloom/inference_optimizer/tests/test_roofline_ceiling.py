@@ -2888,3 +2888,51 @@ class TestDiffusionCeiling:
         bd = compute_roofline_breakdown_from_state(state, arm="baseline")
         assert bd.bound_kind == "unknown"
         assert bd.peak_tok_per_sec == 0.0
+
+
+class TestScriptableRooflineRouting:
+    """The diffusion ceiling must be chosen by registry kind, not by name."""
+
+    @staticmethod
+    def _rt(framework: str):
+        return RuntimeWorkload(
+            model_path="/x",
+            gpu_type="mi325x",
+            precision="bf16",
+            framework=framework,
+            tp=1,
+            concurrency=1,
+            isl=0,
+            osl=0,
+            server_args="",
+        )
+
+    @pytest.mark.parametrize("framework", ["xdit", "hunyuan_image3"])
+    def test_scriptable_frameworks_take_the_diffusion_path(self, monkeypatch, framework):
+        import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
+        taken: list[str] = []
+        monkeypatch.setattr(rc, "resolve_runtime_workload", lambda state, arm=None: self._rt(framework))
+        monkeypatch.setattr(
+            rc,
+            "_compute_diffusion_breakdown_from_state",
+            lambda state, runtime: taken.append("diffusion") or rc._EMPTY_BREAKDOWN,
+        )
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: taken.append("llm") or None)
+        rc.compute_roofline_breakdown_from_state(object())
+        assert taken == ["diffusion"], f"{framework} should use the diffusion ceiling"
+
+    @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+    def test_serving_frameworks_keep_the_decode_path(self, monkeypatch, framework):
+        import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
+        taken: list[str] = []
+        monkeypatch.setattr(rc, "resolve_runtime_workload", lambda state, arm=None: self._rt(framework))
+        monkeypatch.setattr(
+            rc,
+            "_compute_diffusion_breakdown_from_state",
+            lambda state, runtime: taken.append("diffusion") or rc._EMPTY_BREAKDOWN,
+        )
+        monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: taken.append("llm") or None)
+        rc.compute_roofline_breakdown_from_state(object())
+        assert taken == ["llm"], f"{framework} must not use the diffusion ceiling"

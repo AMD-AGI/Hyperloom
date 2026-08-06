@@ -896,3 +896,48 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
     cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
     assert cov["graph_launch_count"] == 1
     assert cov["graph_under_recorded"] is False
+
+
+# ---- scriptable-framework detection is registry-driven -------------------
+def test_scriptable_detection_covers_every_registry_entry():
+    """Not just xdit: any kind=scriptable framework must be detected.
+
+    hunyuan_image3 ships baseline/profile configs and is registered
+    kind=scriptable, so gating on the literal "xdit" silently treated it as an
+    LLM workload.
+    """
+    from hyperloom.inference_optimizer import framework_registry as fr
+
+    for name, spec in fr.FRAMEWORKS.items():
+        assert bta._is_scriptable_framework(name) is (spec.kind == fr.SCRIPTABLE), name
+
+
+def test_scriptable_throughput_unit_matches_registry():
+    from hyperloom.inference_optimizer import framework_registry as fr
+
+    for name, spec in fr.FRAMEWORKS.items():
+        assert bta._scriptable_throughput_unit(name) == spec.throughput_unit, name
+    assert bta._scriptable_throughput_unit("hunyuan_image3") == "img/s"
+    # Unknown / empty keeps the previous tok/s default.
+    for unknown in ("", None, "not-a-framework"):
+        assert bta._scriptable_throughput_unit(unknown) == "tok/s"
+        assert bta._is_scriptable_framework(unknown) is False
+
+
+def test_scriptable_helpers_fall_back_without_the_package(monkeypatch):
+    """Standalone use (no importable inference_optimizer) still works."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_registry(name, *a, **k):
+        if "framework_registry" in name:
+            raise ImportError("simulated standalone run")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_registry)
+    assert bta._is_scriptable_framework("xdit") is True
+    assert bta._is_scriptable_framework("hunyuan_image3") is True
+    assert bta._is_scriptable_framework("sglang") is False
+    assert bta._scriptable_throughput_unit("hunyuan_image3") == "img/s"
+    assert bta._scriptable_throughput_unit("sglang") == "tok/s"

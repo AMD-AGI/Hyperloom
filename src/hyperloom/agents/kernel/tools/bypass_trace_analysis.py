@@ -472,7 +472,42 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     full-trace (with the existing warning) when no window is found.
     """
     mode = (steady_state_mode or "").strip().lower()
-    return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
+    return bool(env_steady) or _is_scriptable_framework(framework) or mode not in _STEADY_OFF_VALUES
+
+
+def _is_scriptable_framework(framework: str | None) -> bool:
+    """Return whether ``framework`` is a server-less scriptable workload.
+
+    Scriptable frameworks are the diffusion-style ones: a denoise loop instead
+    of an LLM decode phase, throughput in images/sec, and a workload-level
+    diffusion roofline. Prefers the canonical ``framework_registry`` so every
+    ``kind=scriptable`` entry is covered rather than ``xdit`` alone; falls back
+    to a name check so the tool stays usable when run standalone (outside an
+    importable ``inference_optimizer`` package). Mirrors the helper of the same
+    name in ``tracelens_analysis``.
+
+    Args:
+        framework: Framework name (matched case-insensitively).
+
+    Returns:
+        bool: ``True`` for scriptable frameworks.
+    """
+    try:
+        from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+        return is_scriptable(framework)
+    except Exception:  # noqa: BLE001 - standalone use must not hard-fail
+        return str(framework or "").strip().lower() in {"xdit", "hunyuan_image3"}
+
+
+def _scriptable_throughput_unit(framework: str | None) -> str:
+    """Return the throughput unit for ``framework`` (img/s vs tok/s)."""
+    try:
+        from hyperloom.inference_optimizer.framework_registry import throughput_unit
+
+        return throughput_unit(framework)
+    except Exception:  # noqa: BLE001 - standalone use must not hard-fail
+        return "img/s" if _is_scriptable_framework(framework) else "tok/s"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -564,25 +599,28 @@ def main(argv: list[str] | None = None) -> int:
     # ``estimated`` marks shares not anchored to a real per-step window (steady
     # windowing requested but fell back to the full trace).
     estimated = enable_steady and scope != AGGREGATION_SCOPE_STEADY
-    if framework_l == "xdit" and estimated:
+    # Every scriptable (diffusion) framework has a denoise loop, so the
+    # anchored/estimated distinction applies to all of them, not just xDiT.
+    # The two code strings keep their ``xdit`` spelling for wire stability.
+    if _is_scriptable_framework(framework_l) and estimated:
         trace_health_warnings.append(
             {
                 "code": "bypass_xdit_estimated",
                 "severity": "info",
                 "message": (
-                    "xDiT analysis fell back to full-trace shares (no per-step denoising "
+                    "diffusion analysis fell back to full-trace shares (no per-step denoising "
                     "window found; trace lacks step annotations such as ProfilerStep) — "
                     "treat kernel shares / roofline as estimated."
                 ),
             }
         )
-    elif framework_l == "xdit":
+    elif _is_scriptable_framework(framework_l):
         trace_health_warnings.append(
             {
                 "code": "bypass_xdit_steady_anchored",
                 "severity": "info",
                 "message": (
-                    f"xDiT analysis anchored to a real per-step denoising window "
+                    f"diffusion analysis anchored to a real per-step denoising window "
                     f"({(steady_window or {}).get('step_name', 'step')}×"
                     f"{(steady_window or {}).get('step_count', 0)}); per-step kernel "
                     "shares are trace-anchored (not estimated)."
@@ -680,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     for cand in candidates.get("hot_kernels", []):
         cand["trace_report_path"] = str(analysis_md_path)
 
-    throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
+    throughput_unit = _scriptable_throughput_unit(args.framework)
     write_text(
         analysis_md_path,
         _report.render_analysis_md(
@@ -760,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     # split. Best-effort sidecar over all device kernels, independent of the
     # per-kernel high-idle gate, so still emitted in the high-idle regime.
     diffusion_roofline_path: str | None = None
-    if (args.framework or "").lower() == "xdit":
+    if _is_scriptable_framework(args.framework):
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 
