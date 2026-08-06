@@ -125,7 +125,9 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
     assert "setting_sources" not in opts.kwargs
 
 
-def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> None:
+def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch) -> None:
+    """An OpenAI-only environment must not produce Anthropic credentials for the
+    Claude child process: that would authenticate Claude with a foreign key."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
@@ -138,8 +140,8 @@ def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> N
 
     child_env = opts.kwargs["env"]
     assert opts.kwargs["setting_sources"] == []
-    assert child_env["ANTHROPIC_API_KEY"] == "openai-key"
-    assert child_env["ANTHROPIC_AUTH_TOKEN"] == "openai-key"
+    assert "ANTHROPIC_API_KEY" not in child_env
+    assert "ANTHROPIC_AUTH_TOKEN" not in child_env
     # OPENAI_CUSTOM_HEADERS is not copied to the Anthropic side.
     assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
 

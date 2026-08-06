@@ -91,15 +91,16 @@ def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypat
 
     assert credentials._derive_anthropic_base_url("https://gw.example/v1") == "https://gw.example"
 
+    # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    assert credentials._resolve_llm_endpoints() == ("https://open.example", "https://open.example/v1")
+    assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
     assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://open.example/v1")
 
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "https://anthropic.example")
+    assert credentials._resolve_llm_endpoints() == ("https://anthropic.example", "")
 
     cfg = tmp_path / "geak.yaml"
     cfg.write_text("model: x\n  base_url: https://old/v1\n", encoding="utf-8")

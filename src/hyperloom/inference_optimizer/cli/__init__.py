@@ -763,10 +763,9 @@ def _validate_and_resolve_claude_model(
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
             or os.environ.get("DEEPSEEK_API_KEY", "")
         )
-        openai_key = (
-            os.environ.get("OPENAI_API_KEY", "")
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        )
+        # OpenAI-side key only: probing the OpenAI catalog with an Anthropic
+        # token would hand that token to the OpenAI host.
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
         # The Claude catalog must come from the Anthropic side. Fall back to the
         # OpenAI side only for a single-gateway deploy where both sides resolve
         # to the same endpoint.
@@ -880,10 +879,8 @@ def _smoke_test_codex_model(
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     if not openai_url and resolved_urls is not None:
         openai_url = resolved_urls[1]
-    openai_key = (
-        os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    )
+    # OpenAI-side key only: never probe the OpenAI host with an Anthropic token.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     catalog_ids = _probe_llm_catalog(base_url=openai_url, api_key=openai_key)
     if catalog_ids is None:
         # WARN-only path: don't block startup just because the OpenAI catalog
