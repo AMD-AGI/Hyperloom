@@ -33,6 +33,7 @@ _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
 if _TOOLS_DIR_INSERTED:
     sys.path.insert(0, _TOOLS_DIR)
+from _invocation_spec import build_rewrite_driver_contract  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     forge_shapes_from_candidate,
     logical_operator_name,
@@ -3354,6 +3355,40 @@ def submit(
             implementation_sources,
         )
         source_framework = _resolve_framework(candidate, source_file)
+        gpu_target = _resolve_gpu_target(candidate)
+        rewrite_driver_contract = build_rewrite_driver_contract(candidate)
+
+        # Decide the producer route before any driver exists. Rewriting the
+        # kernel to FlyDSL and consuming a framework apply-back is a different
+        # producer contract with its own dual-mode driver, so it is taken only
+        # on an explicit opt-in with a matching candidate and producer; every
+        # other verdict keeps the attempt on the generic forge-loop.
+        rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
+            candidate=candidate,
+            source_type=source_type,
+            kernel_kind=kernel_kind,
+            logical_operator=logical_operator,
+            source_kernel=worktree_kernel,
+            workspace=workspace,
+            implementation_sources=implementation_sources,
+            implementation_symbols=implementation_symbols,
+            framework=source_framework,
+            gpu_target=gpu_target,
+            driver_contract=rewrite_driver_contract,
+            shape_cases=grouped_cases,
+            shapes=shapes,
+            branch=branch,
+            attempt_id=output_dir.name,
+            timeout_s=timeout_s,
+            forge_root=forge_root,
+        )
+        if not rewrite_route.eligible and rewrite_route.reason != "route_disabled":
+            log.info(
+                "forge route: FlyDSL rewrite declined for op=%s (%s: %s); using forge-loop",
+                logical_operator or worktree_kernel,
+                rewrite_route.reason,
+                rewrite_route.detail,
+            )
 
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
@@ -3361,8 +3396,20 @@ def submit(
         # a missing driver path. Its task-preparer owns the final driver-authoring
         # fallback and will either create a conforming driver or fail explicitly.
         driver_from_adapter = False
-        driver_is_placeholder = False
-        if requires_multi_case_driver:
+        if rewrite_route.eligible:
+            driver = _flydsl_rewrite.build_rewrite_driver(
+                rewrite_driver_contract,
+                workspace=workspace,
+                writer=_write_generated_driver,
+            )
+            rewrite_route = rewrite_route.with_driver(driver)
+            log.info(
+                "forge driver: FlyDSL rewrite dual-mode driver for op=%s family=%s -> %s",
+                logical_operator or worktree_kernel,
+                rewrite_route.spec.operator_family,
+                driver,
+            )
+        elif requires_multi_case_driver:
             if not _invocation_spec_covers_cases(
                 invocation_spec_file,
                 grouped_cases,
@@ -3374,7 +3421,6 @@ def submit(
                     time.time() - started,
                 )
             driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
-            driver_is_placeholder = True
             log.info(
                 "forge driver: delegating grouped task with %d distinct shapes to task-preparer -> %s",
                 len(grouped_cases),
@@ -3395,7 +3441,6 @@ def submit(
                     log.info("forge driver: autogen fallback -> %s", driver)
                 else:
                     driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
-                    driver_is_placeholder = True
                     log.warning(
                         "forge driver: adapter and autogen unavailable; delegating missing driver %s "
                         "to forge-loop task-preparer",
@@ -3411,10 +3456,8 @@ def submit(
                     worktree_kernel,
                 )
                 driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
-                driver_is_placeholder = True
             else:
                 log.info("forge driver: autogen -> %s", driver)
-        gpu_target = _resolve_gpu_target(candidate)
         # Baseline-correctness gate: verify the unmodified kernel passes up
         # front and skip forge cleanly otherwise, instead of spinning the whole
         # budget reverting. Only gates the harness-adapter path (test_command
@@ -3448,48 +3491,6 @@ def submit(
                 kernel_kind or "-",
                 (candidate or {}).get("operation", ""),
             )
-        # Decide the producer route once the workspace, symbols and driver for
-        # this attempt are final. Rewriting the kernel to FlyDSL and consuming a
-        # framework apply-back is a different producer contract, so it is taken
-        # only on an explicit opt-in with a matching candidate and producer;
-        # every other verdict keeps the attempt on the generic forge-loop.
-        rewrite_route = _flydsl_rewrite.evaluate_rewrite_route(
-            candidate=candidate,
-            source_type=source_type,
-            kernel_kind=kernel_kind,
-            logical_operator=logical_operator,
-            source_kernel=worktree_kernel,
-            workspace=workspace,
-            implementation_sources=implementation_sources,
-            implementation_symbols=implementation_symbols,
-            framework=source_framework,
-            gpu_target=gpu_target,
-            driver=driver,
-            driver_available=bool(driver)
-            and not driver_is_placeholder
-            and not _driver_is_compile_only(driver),
-            shape_cases=grouped_cases,
-            shapes=shapes,
-            branch=branch,
-            attempt_id=output_dir.name,
-            timeout_s=timeout_s,
-            forge_root=forge_root,
-        )
-        if rewrite_route.eligible:
-            log.info(
-                "forge route: FlyDSL rewrite eligible for op=%s framework=%s symbols=%s",
-                logical_operator or worktree_kernel,
-                source_framework,
-                ",".join(rewrite_route.spec.implementation_symbols),
-            )
-        elif rewrite_route.reason != "route_disabled":
-            log.info(
-                "forge route: FlyDSL rewrite declined for op=%s (%s: %s); using forge-loop",
-                logical_operator or worktree_kernel,
-                rewrite_route.reason,
-                rewrite_route.detail,
-            )
-
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
         forge_log = output_dir / "forge_loop.log"
