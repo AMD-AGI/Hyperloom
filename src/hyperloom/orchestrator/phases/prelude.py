@@ -651,6 +651,36 @@ class PreludePhase(PhaseHandler):
                 exc,
             )
 
+    def _analysis_attempt_suffix(self, kind: str) -> str:
+        """Idempotency-key suffix separating a re-armed roofline retry from the
+        attempt that failed.
+
+        ``_needs_roofline_for_watermark`` deliberately re-arms once a roofline
+        has failed — a failed analysis must not suppress later refreshes. But
+        the key it re-enqueued under was a per-cycle singleton, so the registry
+        handed back the failed attempt and the retry the system had just armed
+        for was deduplicated away. One trace failure therefore blacked out the
+        GPU side of the search for a whole macro-cycle: four sessions ran with
+        an empty roofline, no kernel hot spots ever reached a specialist, and
+        the log said "enqueued" every time.
+
+        The failure streak is the attempt counter and already resets to zero on
+        a successful snapshot, so a roofline that worked is still never re-run.
+
+        Args:
+            kind: The analysis task kind; only ``roofline`` retries.
+
+        Returns:
+            ``"-a<streak>"`` while a roofline retry is outstanding, else ``""``.
+        """
+        if kind != "roofline":
+            return ""
+        try:
+            streak = int(getattr(self.shared_state, "roofline_failure_streak", 0) or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        return f"-a{streak}" if streak > 0 else ""
+
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>.
 
@@ -705,7 +735,11 @@ class PreludePhase(PhaseHandler):
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=kind,
             params=params,
-            idempotency_key=f"internal-analysis-{reason}{self._cycle_idem_suffix()}",
+            idempotency_key=(
+                f"internal-analysis-{reason}"
+                f"{self._cycle_idem_suffix()}"
+                f"{self._analysis_attempt_suffix(kind)}"
+            ),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )

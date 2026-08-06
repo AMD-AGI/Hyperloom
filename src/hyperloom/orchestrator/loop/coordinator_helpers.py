@@ -201,6 +201,12 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
 
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
+# Consecutive roofline failures tolerated before the watermark stops re-arming.
+# A roofline leg costs the better part of an hour, so retrying without bound
+# would spend a session re-measuring a broken collector; giving up after the
+# first failure is what left four sessions with no GPU evidence at all.
+_MAX_ROOFLINE_FAILURE_RETRIES: int = 3
+
 
 def effective_closing_grace_sec(
     max_minutes: float | None,
