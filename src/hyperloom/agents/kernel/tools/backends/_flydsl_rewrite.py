@@ -1,0 +1,517 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Route gate for KernelForge's source-to-FlyDSL rewrite of one Forge attempt.
+
+The generic per-kernel route optimizes a kernel in its own language and
+consumes a schema-1 ``best_result.json``. The rewrite route instead asks
+KernelForge to port the kernel to FlyDSL and publish a framework apply-back
+patch. That is a different producer contract, so an attempt may only switch
+routes when the operator opted in, the candidate matches the supported MVP
+shape, and the installed producer advertises the protocol/schema/driver
+versions this consumer knows how to read.
+
+Every verdict carries a stable reason code. A negative verdict is never a
+kernel skip: the attempt stays on the generic forge-loop route untouched.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+_TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
+_TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
+if _TOOLS_DIR_INSERTED:
+    sys.path.insert(0, _TOOLS_DIR)
+from _collective_names import kernel_name_implies_multigpu  # noqa: E402
+
+if _TOOLS_DIR_INSERTED:
+    sys.path.remove(_TOOLS_DIR)
+
+log = logging.getLogger(__name__)
+
+REWRITE_ENV = "HYPERLOOM_FORGE_REWRITE_BY_FLYDSL"
+REWRITE_COMMAND = "forge-rewrite-by-flydsl"
+CAPABILITIES_FLAG = "--capabilities-json"
+
+# Consumer-side halves of the cross-repo contract. Bumping any of these means
+# this module can no longer read what an older producer emits.
+PROTOCOL_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
+DRIVER_CONTRACT_VERSION = 1
+RESULT_SENTINEL = "__FORGE_RESULT__"
+
+SUPPORTED_SOURCE_TYPES = frozenset({"triton"})
+SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
+
+# Mirrors kernel_agents.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
+# --max-hours outright, so a budget that cannot reach it is ineligible rather
+# than a child-process hard failure.
+PRODUCER_MIN_BUDGET_SEC = 3600
+# Head-room reserved on top of the producer's own budget so the apply-back
+# commit is published before Hyperloom's absolute deadline kills the child.
+APPLYBACK_RESERVE_SEC = 900
+MIN_BUDGET_SEC = PRODUCER_MIN_BUDGET_SEC + APPLYBACK_RESERVE_SEC
+
+CAPABILITY_PROBE_TIMEOUT_SEC = 60
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+_CAPABILITY_CACHE: dict[str, "RewriteCapabilities"] = {}
+
+
+@dataclass(frozen=True)
+class RewriteCapabilities:
+    """What the installed KernelForge advertises for the rewrite route."""
+
+    supported: bool
+    reason: str
+    detail: str = ""
+    frameworks: tuple[str, ...] = ()
+    protocol_versions: tuple[int, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "supported": self.supported,
+            "reason": self.reason,
+            "detail": self.detail,
+            "frameworks": list(self.frameworks),
+            "protocol_versions": list(self.protocol_versions),
+        }
+
+
+@dataclass(frozen=True)
+class RewriteCandidateSpec:
+    """The candidate identity Hyperloom hands to the rewrite producer."""
+
+    logical_operator: str
+    source_kernel: str
+    implementation_symbols: tuple[str, ...]
+    source_entry: str
+    shape_cases: tuple[dict[str, Any], ...]
+    framework: str
+    gpu_target: str
+    driver: str
+    branch: str
+    attempt_id: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "logical_operator": self.logical_operator,
+            "source_kernel": self.source_kernel,
+            "implementation_symbols": list(self.implementation_symbols),
+            "source_entry": self.source_entry,
+            "shape_cases": [dict(case) for case in self.shape_cases],
+            "framework": self.framework,
+            "gpu_target": self.gpu_target,
+            "driver": self.driver,
+            "branch": self.branch,
+            "attempt_id": self.attempt_id,
+        }
+
+
+@dataclass(frozen=True)
+class RewriteDecision:
+    """Whether one attempt may take the rewrite route, and why."""
+
+    eligible: bool
+    reason: str
+    detail: str = ""
+    spec: RewriteCandidateSpec | None = None
+    capabilities: RewriteCapabilities | None = field(default=None)
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "eligible": self.eligible,
+            "reason": self.reason,
+            "detail": self.detail,
+        }
+        if self.spec is not None:
+            payload["spec"] = self.spec.as_dict()
+        if self.capabilities is not None:
+            payload["capabilities"] = self.capabilities.as_dict()
+        return payload
+
+
+def rewrite_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Report whether the operator opted this session into the rewrite route.
+
+    Args:
+        env: Environment mapping to read; defaults to ``os.environ``.
+
+    Returns:
+        ``True`` when ``$HYPERLOOM_FORGE_REWRITE_BY_FLYDSL`` is truthy.
+    """
+    source = os.environ if env is None else env
+    return str(source.get(REWRITE_ENV) or "").strip().lower() in _TRUE_VALUES
+
+
+def reset_capability_cache() -> None:
+    """Drop the per-process capability answer so the next probe re-runs."""
+    _CAPABILITY_CACHE.clear()
+
+
+def _decode_capability_payload(stdout: str) -> dict[str, Any] | None:
+    """Extract the capability object from producer stdout that may carry logs."""
+    decoder = json.JSONDecoder()
+    text = stdout or ""
+    index = text.find("{")
+    while index >= 0:
+        try:
+            payload, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(payload, dict):
+            return payload
+        index = text.find("{", index + 1)
+    return None
+
+
+def _int_versions(payload: Mapping[str, Any], plural_key: str, singular_key: str) -> tuple[int, ...]:
+    """Read a version list, tolerating a producer that reports a single value."""
+    raw = payload.get(plural_key)
+    if raw is None:
+        raw = payload.get(singular_key)
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    versions: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            continue
+        try:
+            versions.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return tuple(versions)
+
+
+def _capability_frameworks(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = payload.get("frameworks")
+    values = raw if isinstance(raw, (list, tuple)) else []
+    frameworks: list[str] = []
+    for value in values:
+        name = str(value or "").strip().lower()
+        if name and name not in frameworks:
+            frameworks.append(name)
+    return tuple(frameworks)
+
+
+def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabilities:
+    """Check one capability payload against the versions this consumer reads."""
+    if not isinstance(payload, dict):
+        return RewriteCapabilities(False, "capability_payload_invalid", "capability output is not a JSON object")
+    protocols = _int_versions(payload, "protocol_versions", "protocol_version")
+    if PROTOCOL_VERSION not in protocols:
+        return RewriteCapabilities(
+            False,
+            "capability_protocol_unsupported",
+            f"producer protocol versions {list(protocols)} exclude {PROTOCOL_VERSION}",
+        )
+    schemas = _int_versions(payload, "artifact_schema_versions", "artifact_schema_version")
+    if ARTIFACT_SCHEMA_VERSION not in schemas:
+        return RewriteCapabilities(
+            False,
+            "capability_artifact_schema_unsupported",
+            f"producer artifact schemas {list(schemas)} exclude {ARTIFACT_SCHEMA_VERSION}",
+        )
+    contracts = _int_versions(payload, "driver_contract_versions", "driver_contract_version")
+    if DRIVER_CONTRACT_VERSION not in contracts:
+        return RewriteCapabilities(
+            False,
+            "capability_driver_contract_unsupported",
+            f"producer driver contracts {list(contracts)} exclude {DRIVER_CONTRACT_VERSION}",
+        )
+    sentinel = str(payload.get("result_sentinel") or "").strip()
+    if sentinel != RESULT_SENTINEL:
+        return RewriteCapabilities(
+            False,
+            "capability_sentinel_mismatch",
+            f"producer result sentinel {sentinel!r} is not {RESULT_SENTINEL!r}",
+        )
+    frameworks = _capability_frameworks(payload)
+    if not frameworks:
+        return RewriteCapabilities(
+            False,
+            "capability_frameworks_missing",
+            "producer advertises no apply-back frameworks",
+        )
+    return RewriteCapabilities(True, "capability_ok", "", frameworks, protocols)
+
+
+def probe_capabilities(
+    *,
+    forge_root: str = "",
+    timeout_s: int = CAPABILITY_PROBE_TIMEOUT_SEC,
+    env: Mapping[str, str] | None = None,
+) -> RewriteCapabilities:
+    """Ask the installed producer what rewrite contract it speaks.
+
+    The answer is cached for the process: it describes the installed
+    KernelForge, not the candidate, and the probe must not cost a subprocess
+    per attempt. ``--capabilities-json`` is an eager short-circuit option, so a
+    failure here is reported as-is and never re-tried with guessed arguments.
+
+    Args:
+        forge_root: Directory holding ``kernel_agents``, prepended to the child
+            ``PYTHONPATH``; empty relies on an installed package.
+        timeout_s: Hard timeout for the probe subprocess.
+        env: Base environment for the child; defaults to ``os.environ``.
+
+    Returns:
+        The validated :class:`RewriteCapabilities` for this process.
+    """
+    cache_key = forge_root or "<installed>"
+    cached = _CAPABILITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    child_env = dict(os.environ if env is None else env)
+    if forge_root:
+        child_env["PYTHONPATH"] = forge_root + os.pathsep + child_env.get("PYTHONPATH", "")
+    cmd = [sys.executable, "-m", "kernel_agents.cli", REWRITE_COMMAND, CAPABILITIES_FLAG]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=child_env,
+            timeout=timeout_s,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        capabilities = RewriteCapabilities(
+            False,
+            "capability_probe_failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    else:
+        if proc.returncode != 0:
+            capabilities = RewriteCapabilities(
+                False,
+                "capability_probe_failed",
+                f"{REWRITE_COMMAND} {CAPABILITIES_FLAG} exited rc={proc.returncode}: "
+                f"{(proc.stderr or proc.stdout or '').strip()[-400:]}",
+            )
+        else:
+            capabilities = _validated_capabilities(_decode_capability_payload(proc.stdout or ""))
+    _CAPABILITY_CACHE[cache_key] = capabilities
+    return capabilities
+
+
+def _shape_cases(
+    shape_cases: Sequence[Any] | None,
+    shapes: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], ...]:
+    """Normalize the grouped shape context, falling back to the single case."""
+    cases = [dict(case) for case in (shape_cases or []) if isinstance(case, dict)]
+    if cases:
+        return tuple(cases)
+    return (dict(shapes),) if shapes else ()
+
+
+def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
+    """Return the optional host-entry hint echoed back by the producer."""
+    candidate = candidate or {}
+    explicit = str(candidate.get("source_entry") or "").strip()
+    if explicit:
+        return explicit
+    symbol = candidate.get("source_symbol")
+    return str(symbol).strip() if isinstance(symbol, str) else ""
+
+
+def _is_multi_node() -> bool:
+    """Report multi-node fan-out through the apply-side authority.
+
+    Returns:
+        ``True`` when the session fans out over several nodes, and also when
+        that cannot be determined: the route runs only where single-node apply
+        is proven.
+    """
+    tools_dir = str(Path(__file__).resolve().parent.parent)
+    inserted = tools_dir not in sys.path
+    if inserted:
+        sys.path.insert(0, tools_dir)
+    try:
+        import apply_kernel_patch
+
+        return bool(apply_kernel_patch._is_multi_node())
+    except (ImportError, AttributeError):
+        log.warning("forge route: cannot resolve node fan-out; treating the session as multi-node")
+        return True
+    finally:
+        if inserted and tools_dir in sys.path:
+            sys.path.remove(tools_dir)
+
+
+def _mapped_into_workspace(paths: Sequence[str], workspace: str) -> str:
+    """Return the first path that does not resolve inside ``workspace``."""
+    try:
+        root = Path(workspace).resolve()
+    except (OSError, RuntimeError):
+        return workspace
+    for raw in paths:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, RuntimeError):
+            return path
+        if resolved != root and not resolved.is_relative_to(root):
+            return path
+    return ""
+
+
+def evaluate_rewrite_route(
+    *,
+    candidate: Mapping[str, Any] | None,
+    source_type: str,
+    kernel_kind: str,
+    logical_operator: str,
+    source_kernel: str,
+    workspace: str,
+    implementation_sources: Sequence[str],
+    implementation_symbols: Sequence[str],
+    framework: str,
+    gpu_target: str,
+    driver: str,
+    driver_available: bool,
+    shape_cases: Sequence[Any] | None,
+    shapes: Mapping[str, Any] | None,
+    branch: str,
+    attempt_id: str,
+    timeout_s: int,
+    forge_root: str = "",
+    capability_probe: Callable[..., RewriteCapabilities] | None = None,
+) -> RewriteDecision:
+    """Decide whether one prepared Forge attempt may take the rewrite route.
+
+    Local candidate facts are checked before the producer is probed, so an
+    ineligible candidate never spends a subprocess or any rewrite budget.
+
+    Args:
+        candidate: The kernel candidate payload.
+        source_type: Detected source language of the candidate.
+        kernel_kind: Curated kernel kind that refines ``source_type``.
+        logical_operator: Stable workload/KB operator identity.
+        source_kernel: Workspace path of the kernel to rewrite.
+        workspace: Prepared Forge workspace root.
+        implementation_sources: Declared sources remapped into the workspace.
+        implementation_symbols: Target functions the rewrite must cover.
+        framework: Resolved apply-back framework identity.
+        gpu_target: Resolved gfx target.
+        driver: Path of the driver prepared for this attempt.
+        driver_available: Whether that driver is a real harness rather than a
+            task-preparer placeholder.
+        shape_cases: Grouped shape cases from the task group.
+        shapes: Single-case shape mapping used when no group exists.
+        branch: Unique branch created for this attempt.
+        attempt_id: Unique attempt identity.
+        timeout_s: Remaining wall-clock budget for the attempt.
+        forge_root: Directory holding ``kernel_agents`` for the probe child.
+        capability_probe: Injection point for the capability probe.
+
+    Returns:
+        A :class:`RewriteDecision`; ineligible verdicts keep the generic route.
+    """
+    if not rewrite_enabled():
+        return RewriteDecision(False, "route_disabled", f"{REWRITE_ENV} is not set")
+
+    kind = str(kernel_kind or "").strip().lower().replace("-", "_")
+    language = str(source_type or "").strip().lower()
+    if "flydsl" in kind or language == "flydsl":
+        return RewriteDecision(False, "already_flydsl_source", "candidate is already a FlyDSL kernel")
+    if "asm" in kind or "prebuilt" in kind:
+        return RewriteDecision(False, "prebuilt_binary_unsupported", f"kernel_kind={kernel_kind}")
+    if language not in SUPPORTED_SOURCE_TYPES:
+        return RewriteDecision(False, "source_type_unsupported", f"source_type={source_type}")
+
+    candidate = candidate or {}
+    if bool(candidate.get("is_multigpu")) or kernel_name_implies_multigpu(
+        logical_operator or str(candidate.get("name") or "")
+    ):
+        return RewriteDecision(False, "collective_unsupported", "candidate is a multi-GPU collective")
+
+    canonical_framework = str(framework or "").strip().lower()
+    if canonical_framework not in SUPPORTED_FRAMEWORKS:
+        return RewriteDecision(False, "framework_unsupported", f"framework={framework or 'unresolved'}")
+
+    # Multi-node apply runs a separate stdlib path-safety allowlist that this
+    # route does not feed, so it must fail here rather than at apply time.
+    if _is_multi_node():
+        return RewriteDecision(False, "multi_node_unsupported", "apply-back is single-node only")
+
+    if timeout_s < MIN_BUDGET_SEC:
+        return RewriteDecision(
+            False,
+            "budget_insufficient",
+            f"remaining budget {timeout_s}s is below the {MIN_BUDGET_SEC}s rewrite minimum",
+        )
+
+    unmapped = _mapped_into_workspace([source_kernel, *implementation_sources], workspace)
+    if unmapped:
+        return RewriteDecision(
+            False,
+            "workspace_mapping_unresolved",
+            f"source outside the prepared workspace: {unmapped}",
+        )
+
+    symbols = tuple(str(symbol).strip() for symbol in implementation_symbols if str(symbol or "").strip())
+    if not symbols:
+        return RewriteDecision(False, "target_functions_missing", "no implementation symbol resolved")
+
+    if not driver_available or not driver:
+        return RewriteDecision(False, "driver_unavailable", "no rewrite-capable driver for this candidate")
+
+    probe = capability_probe or probe_capabilities
+    capabilities = probe(forge_root=forge_root)
+    if not capabilities.supported:
+        return RewriteDecision(False, capabilities.reason, capabilities.detail, capabilities=capabilities)
+    if canonical_framework not in capabilities.frameworks:
+        return RewriteDecision(
+            False,
+            "capability_framework_unsupported",
+            f"producer frameworks {list(capabilities.frameworks)} exclude {canonical_framework}",
+            capabilities=capabilities,
+        )
+
+    spec = RewriteCandidateSpec(
+        logical_operator=logical_operator,
+        source_kernel=source_kernel,
+        implementation_symbols=symbols,
+        source_entry=_source_entry_hint(candidate),
+        shape_cases=_shape_cases(shape_cases, shapes),
+        framework=canonical_framework,
+        gpu_target=gpu_target,
+        driver=driver,
+        branch=branch,
+        attempt_id=attempt_id,
+    )
+    return RewriteDecision(True, "eligible", "", spec=spec, capabilities=capabilities)
+
+
+__all__ = [
+    "APPLYBACK_RESERVE_SEC",
+    "ARTIFACT_SCHEMA_VERSION",
+    "DRIVER_CONTRACT_VERSION",
+    "MIN_BUDGET_SEC",
+    "PROTOCOL_VERSION",
+    "RESULT_SENTINEL",
+    "REWRITE_COMMAND",
+    "REWRITE_ENV",
+    "SUPPORTED_FRAMEWORKS",
+    "SUPPORTED_SOURCE_TYPES",
+    "RewriteCandidateSpec",
+    "RewriteCapabilities",
+    "RewriteDecision",
+    "evaluate_rewrite_route",
+    "probe_capabilities",
+    "reset_capability_cache",
+    "rewrite_enabled",
+]

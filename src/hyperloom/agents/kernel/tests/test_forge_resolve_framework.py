@@ -7,6 +7,7 @@ from pathlib import Path
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
+import _flydsl_rewrite  # noqa: E402
 import forge_submit  # noqa: E402
 
 
@@ -132,3 +133,57 @@ def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):
 def test_gpu_target_normalization_extracts_canonical_gfx_arch():
     assert forge_submit._normalize_gpu_target("GFX942:sramecc+:xnack-") == "gfx942"
     assert forge_submit._normalize_gpu_target("MI355X") == "gfx950"
+
+
+def test_rewrite_candidate_identity_reuses_the_shared_resolvers(tmp_path, monkeypatch):
+    monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
+    _flydsl_rewrite.reset_capability_cache()
+    workspace = tmp_path / "worktree"
+    source = workspace / "aiter" / "ops" / "triton" / "attention.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("@triton.jit\ndef attention_kernel(x):\n    return x\n", encoding="utf-8")
+    driver = workspace / ".forge_driver_xyz.py"
+    driver.write_text("HARNESS\n", encoding="utf-8")
+    candidate = {
+        "framework": "vllm",
+        "operation": "vllm :: unified_attention",
+        "kernel_sources": [str(source)],
+    }
+
+    decision = _flydsl_rewrite.evaluate_rewrite_route(
+        candidate=candidate,
+        source_type="triton",
+        kernel_kind="triton",
+        logical_operator=forge_submit._logical_operator(candidate),
+        source_kernel=str(source),
+        workspace=str(workspace),
+        implementation_sources=[str(source)],
+        implementation_symbols=forge_submit._stable_implementation_symbols(
+            candidate,
+            source_files=[str(source)],
+        ),
+        framework=forge_submit._resolve_framework(candidate, str(source)),
+        gpu_target=forge_submit._normalize_gpu_target("MI355X"),
+        driver=str(driver),
+        driver_available=True,
+        shape_cases=[{"M": 128}],
+        shapes={"M": 128},
+        branch="forge/session/attention-0011223344",
+        attempt_id="attempt-7",
+        timeout_s=7200,
+        capability_probe=lambda **_kwargs: _flydsl_rewrite.RewriteCapabilities(
+            True,
+            "capability_ok",
+            "",
+            ("aiter", "sglang", "vllm"),
+            (1,),
+        ),
+    )
+
+    assert decision.eligible is True
+    assert decision.spec.framework == "aiter"
+    assert decision.spec.logical_operator == "vllm::unified_attention"
+    assert decision.spec.implementation_symbols == ("attention_kernel",)
+    assert decision.spec.gpu_target == "gfx950"
+    # The producer owns the FlyDSL builder symbol; nothing here may re-derive it.
+    assert "builder_symbol" not in decision.spec.as_dict()
