@@ -265,6 +265,29 @@ def test_preflight_keeps_anthropic_side_supplied_by_dotenv(
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "ak-gw"
 
 
+def test_preflight_rejects_half_configured_side_from_dotenv(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A key in ``.env`` whose own base URL is absent is a mispaired shape and is
+    rejected, not silently dropped, even though the shell side is complete."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
+
+    def _dotenv_has_stale_anthropic_key():
+        monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "old-anthropic-key")
+
+    monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", _dotenv_has_stale_anthropic_key)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_preflight._preflight()
+
+    assert excinfo.value.code == 2
+
+
 def test_preflight_openai_only_drops_anthropic_creds_from_installer_env(
     monkeypatch,
     tmp_path,
