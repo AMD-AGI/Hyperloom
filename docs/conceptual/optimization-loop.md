@@ -310,8 +310,7 @@ conversation, so reasoning continuity is preserved between ticks.
   its own prior attempts. Robustness additionally surfaces a
   conversation no-progress signal as an external circuit-breaker.
 
-The other three roles (Kernel, Critic, Robustness) remain reactive and
-stateless per tick.
+The other two roles (Critic, Robustness) remain reactive and stateless per tick.
 
 ## Feedback loops
 

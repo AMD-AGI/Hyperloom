@@ -39,7 +39,7 @@ orchestration (path-sandbox, phase-action gate) but never sees the RESPONSE.
 
 ## KERNEL phase entry: Coordinator-direct calls
 
-When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_phase_entered`),
+When the Coordinator enters the KERNEL phase (`phases/kernel.py::_on_enter_kernel`, dispatched by `phases/machine.py::_on_phase_entered`),
 it calls the handlers directly in Python — not through the REQUEST bus:
 
 ```python
@@ -60,10 +60,10 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 |---|---|
 | IR-1 submit all candidates in parallel | `_batch_kernel_candidates` + `_DEFAULT_KERNEL_BATCH_PARALLEL=8` in `request_handlers.py` |
 | IR-2 never modify source before GEAK submission | `_is_runtime_generated_kernel` gate in `request_handlers.py` |
-| IR-3 integration is mandatory after every KEEP | `_auto_enqueue_pending_integrations()` in `intent_router.py` |
-| IR-4 kill_server + check_gpu_memory before server restart | `apply_and_bench.py` and `restart_server_for_round` in `request_handlers.py` |
-| IR-5 safe process management | subprocess kill helpers in `executors/_subprocess_kill.py` |
-| IR-6 use apply_kernel_patch.py --target-file | `kernel_stack.py::apply_kernel_patch_from_artifact` |
+| IR-3 integration is mandatory after every KEEP | `phases/kernel_stack.py::KernelStackPhase._auto_enqueue_pending_integrations` (called by `intent_router.py`) |
+| IR-4 kill_server + check_gpu_memory before server restart | `apply_and_bench.py` subprocess tool; `_multi_node_server_lifecycle.py::restart_server_for_round` for multi-node |
+| IR-5 safe process management | `orchestrator/actions/executors/_subprocess_kill.py` |
+| IR-6 use apply_kernel_patch.py --target-file | `request_handlers.py::_maybe_apply_kernel_patch` → `agents/kernel/tools/apply_kernel_patch.py::apply_kernel_patch` |
 | IR-7 never modify GEAK config | GEAK invocation wrappers in `request_handlers.py` / `geak_runner.py` |
 
 ## Backend selection
@@ -71,7 +71,7 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 GEAK owns the KERNEL phase by default and decides kernel strategy internally.
 The per-kernel Forge backend is an opt-in:
 
-- **Default**: no per-kernel backend selection. Set no env var.
+- **Default**: `KERNEL_OPT_BACKEND_ORDER=geak` (every launcher exports this default).
 - **Forge (per-kernel)**: set `KERNEL_OPT_BACKEND_ORDER=forge` exactly. Any
   other value (including `--backends` CLI flags, payload `backends` hints, or
   `GEMM_TUNING_BACKEND`) does not enable Forge.
@@ -98,15 +98,14 @@ source "${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh"
 `install.sh` is idempotent. It sets up TraceLens, GEAK, Ray, and writes the
 env file. Re-run it after a venv rebuild or before each session.
 
-Required env vars (set by `install.sh` / operator):
+Required env vars:
 
-| Variable | Purpose |
-|---|---|
-| `SAFE_API_KEY` | LLM gateway key (GEAK and TraceLens inherit this) |
-| `OPENAI_BASE_URL` | LLM gateway endpoint |
-| `TRACELENS_ROOT` | TraceLens checkout; `install.sh` clones to `.cache/TraceLens` by default |
-| `HYPERLOOM_KERNEL_AGENT_ROOT` | Root of the kernel tool scripts (auto-set by bootstrap) |
-| `KERNEL_OPT_BACKEND_ORDER` | Set to `forge` to enable per-kernel Forge; omit for GEAK default |
+| Variable | Set by | Purpose |
+|---|---|---|
+| `SAFE_API_KEY` | operator | LLM gateway key (GEAK and TraceLens inherit this) |
+| `OPENAI_BASE_URL` | operator | LLM gateway endpoint |
+| `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
+| `KERNEL_OPT_BACKEND_ORDER` | launcher (default `geak`) | Set to `forge` to enable per-kernel Forge |
 
 Optional:
 
