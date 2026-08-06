@@ -9,12 +9,16 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+
+
+_ACTION_REGISTRY = ActionRegistry().load()
 
 
 class _StateStub:
@@ -149,6 +153,8 @@ class _Stub:
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
+    # The raw-diff track resolves its lanes and lease TTL from the registry.
+    _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def _framework_gpu_params(self) -> dict[str, Any]:
         return {}
@@ -156,6 +162,7 @@ class _Stub:
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         self.session_dir = tmp_path
         self.shared_state = _StateStub(authoring=authoring)
+        self.action_registry = _ACTION_REGISTRY
         self.tasks = _TasksStub()
         self.framework_agent_discover_timeout_sec = 0.0
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
