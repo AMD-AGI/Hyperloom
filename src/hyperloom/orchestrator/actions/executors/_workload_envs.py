@@ -17,6 +17,7 @@ Used by ``baseline.py`` (materializes once, surfaces the path) and the
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -154,24 +155,23 @@ def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
     )
 
 
-def _worldplay_script_path(runner_type: str) -> Path:
-    """Return the shipped WorldPlay benchmark entrypoint path."""
+def _shipped_script_path(framework: str, runner_type: str) -> Path:
+    """Return a shipped scriptable entrypoint, falling back to the mi355x one.
+
+    Args:
+        framework: Framework name the script is named after.
+        runner_type: Runner suffix; the machine, not the workload.
+
+    Returns:
+        The runner-specific script when it exists, else the mi355x default —
+        which is returned unconditionally so a missing entrypoint surfaces as
+        one missing path rather than a silent no-op.
+    """
     scripts_dir = asset_root() / "assets" / "benchmark_scripts"
-    preferred = scripts_dir / f"worldplay_{runner_type}.sh"
+    preferred = scripts_dir / f"{framework}_{runner_type}.sh"
     if preferred.is_file():
         return preferred
-    return scripts_dir / "worldplay_mi355x.sh"
-
-
-
-
-def _worldmirror_script_path(runner_type: str) -> Path:
-    """Return the shipped WorldMirror benchmark entrypoint path."""
-    scripts_dir = asset_root() / "assets" / "benchmark_scripts"
-    preferred = scripts_dir / f"worldmirror_{runner_type}.sh"
-    if preferred.is_file():
-        return preferred
-    return scripts_dir / "worldmirror_mi355x.sh"
+    return scripts_dir / f"{framework}_mi355x.sh"
 
 
 def _default_worldplay_action_ckpt(model_path: str, model_type: str) -> str:
@@ -183,40 +183,33 @@ def _default_worldplay_action_ckpt(model_path: str, model_type: str) -> str:
     return str(model.parent / "HY-WorldPlay" / subdir / "diffusion_pytorch_model.safetensors")
 
 
-def _sync_worldplay_repo_aliases(
+def _sync_repo_aliases(
     bench: dict[str, Any],
     envs: dict[str, Any],
     *,
+    framework: str,
     prefer_dir: bool = False,
 ) -> None:
-    """Keep WORLDPLAY_REPO_PATH and WORLDPLAY_DIR pointing at the same checkout."""
-    if str(bench.get("framework") or "").strip().lower() != "worldplay":
-        return
-    if prefer_dir:
-        repo_path = str(envs.get("WORLDPLAY_DIR") or envs.get("WORLDPLAY_REPO_PATH") or "").strip()
-    else:
-        repo_path = str(envs.get("WORLDPLAY_REPO_PATH") or envs.get("WORLDPLAY_DIR") or "").strip()
-    if repo_path:
-        envs["WORLDPLAY_REPO_PATH"] = repo_path
-        envs["WORLDPLAY_DIR"] = repo_path
+    """Keep ``<FRAMEWORK>_REPO_PATH`` and ``<FRAMEWORK>_DIR`` on one checkout.
 
+    Both spellings reach the benchmark and a script may read either, so letting
+    them drift points one half of a run at a different tree than the other.
 
-def _sync_worldmirror_repo_aliases(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    prefer_dir: bool = False,
-) -> None:
-    """Keep WORLDMIRROR_REPO_PATH and WORLDMIRROR_DIR pointing at one checkout."""
-    if str(bench.get("framework") or "").strip().lower() != "worldmirror":
+    Args:
+        bench: The ``benchmark`` section; the sync applies only to its framework.
+        envs: The ``benchmark.envs`` mapping, updated in place.
+        framework: Framework whose prefix the two aliases carry.
+        prefer_dir: Resolve ``_DIR`` first, for the caller that saw the operator
+            supply only that spelling.
+    """
+    if str(bench.get("framework") or "").strip().lower() != framework.strip().lower():
         return
-    if prefer_dir:
-        repo_path = str(envs.get("WORLDMIRROR_DIR") or envs.get("WORLDMIRROR_REPO_PATH") or "").strip()
-    else:
-        repo_path = str(envs.get("WORLDMIRROR_REPO_PATH") or envs.get("WORLDMIRROR_DIR") or "").strip()
+    prefix = framework.strip().upper()
+    order = (f"{prefix}_DIR", f"{prefix}_REPO_PATH") if prefer_dir else (f"{prefix}_REPO_PATH", f"{prefix}_DIR")
+    repo_path = str(envs.get(order[0]) or envs.get(order[1]) or "").strip()
     if repo_path:
-        envs["WORLDMIRROR_REPO_PATH"] = repo_path
-        envs["WORLDMIRROR_DIR"] = repo_path
+        envs[f"{prefix}_REPO_PATH"] = repo_path
+        envs[f"{prefix}_DIR"] = repo_path
 
 
 def _sync_worldplay_action_ckpt(bench: dict[str, Any], envs: dict[str, Any]) -> None:
@@ -323,7 +316,7 @@ def _apply_worldplay_runtime_defaults(
     runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
-        bench["benchmark_script"] = str(_worldplay_script_path(runner_type))
+        bench["benchmark_script"] = str(_shipped_script_path("worldplay", runner_type))
 
     repo_path = _resolve_framework_repo_path(
         envs,
@@ -368,7 +361,7 @@ def _apply_worldmirror_runtime_defaults(
     runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
-        bench["benchmark_script"] = str(_worldmirror_script_path(runner_type))
+        bench["benchmark_script"] = str(_shipped_script_path("worldmirror", runner_type))
 
     repo_path = _resolve_framework_repo_path(envs, framework="worldmirror")
     if not repo_path:
@@ -409,6 +402,29 @@ def _custom_script_path(runner_type: str) -> str:
     return str(candidates[0]) if len(candidates) == 1 else ""
 
 
+def _operator_extra_env() -> dict[str, str]:
+    """Return the ``--extra-env`` pins the CLI serialized, or ``{}``.
+
+    Args:
+        None.
+
+    Returns:
+        The operator's ``NAME=VALUE`` pins; empty when unset or unparseable,
+        because a malformed pin must not take the run down with it.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_EXTRA_ENV", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("custom: ignoring unparseable INFERENCE_OPTIMIZER_EXTRA_ENV")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k).strip(): str(v) for k, v in parsed.items() if str(k).strip()}
+
+
 def _apply_custom_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -416,11 +432,18 @@ def _apply_custom_runtime_defaults(
     gpu_type: str | None,
     explicit_benchmark_script: bool,
 ) -> None:
-    """Resolve an operator-supplied workload's checkout and entrypoint.
+    """Resolve an operator-supplied workload's checkout, entrypoint and pins.
 
     The other scriptable helpers know their framework's repo URL and shipped
     script; here both arrive at launch, so this only wires what was given and
     leaves anything missing to fail where it is diagnosable.
+
+    ``--extra-env`` is the only channel an operator has for the knobs their own
+    script reads, so those pins are written into ``benchmark.envs`` rather than
+    left in the orchestrator's environment: the materialized config is what the
+    measurement contract is read from, and a pin that never lands there is
+    neither delivered to the benchmark nor protected from being overwritten by
+    a variant.
     """
     if str(bench.get("framework") or "").strip().lower() != "custom":
         return
@@ -432,11 +455,25 @@ def _apply_custom_runtime_defaults(
         if script:
             bench["benchmark_script"] = script
 
+    # A variant's own overrides are applied after this hook, so they still win
+    # for keys the operator did not pin; setdefault only fills the gaps.
+    for key, value in _operator_extra_env().items():
+        envs.setdefault(key, value)
+
     repo_path = _resolve_framework_repo_path(envs, framework="custom")
     if not repo_path:
         return
     envs["CUSTOM_REPO_PATH"] = repo_path
     envs["CUSTOM_DIR"] = repo_path
+    # Also under the framework-agnostic name, and in the config rather than only
+    # in os.environ. An entrypoint Hyperloom did not write can only be expected
+    # to know the generic spelling, and the benchmark inherits its environment
+    # from whichever process launched the runner — a Ray worker carries the
+    # environment the raylet booted with, hours or days earlier, so a stale
+    # <FRAMEWORK>_DIR there outranks anything published later. Config envs are
+    # applied on top of that inherited environment, so this is what actually
+    # reaches the script.
+    envs["FRAMEWORK_REPO_PATH"] = repo_path
     _publish_scriptable_repo_root("custom", repo_path)
 
 
@@ -1204,16 +1241,16 @@ def materialize_config_with_envs(
         log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
-    _sync_worldplay_repo_aliases(
-        bench,
-        envs,
-        prefer_dir="WORLDPLAY_DIR" in safe_extra_envs and "WORLDPLAY_REPO_PATH" not in safe_extra_envs,
-    )
-    _sync_worldmirror_repo_aliases(
-        bench,
-        envs,
-        prefer_dir="WORLDMIRROR_DIR" in safe_extra_envs and "WORLDMIRROR_REPO_PATH" not in safe_extra_envs,
-    )
+    for _fw in ("worldplay", "worldmirror", "custom"):
+        _prefix = _fw.upper()
+        _sync_repo_aliases(
+            bench,
+            envs,
+            framework=_fw,
+            prefer_dir=(
+                f"{_prefix}_DIR" in safe_extra_envs and f"{_prefix}_REPO_PATH" not in safe_extra_envs
+            ),
+        )
     if "WORLDPLAY_ACTION_CKPT" not in safe_extra_envs:
         _sync_worldplay_action_ckpt(bench, envs)
     framework_env = server_args_env_name(bench.get("framework"))

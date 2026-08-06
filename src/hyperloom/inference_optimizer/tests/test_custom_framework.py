@@ -156,6 +156,61 @@ class TestEntrypointAndCheckout:
         assert envs["CUSTOM_REPO_PATH"] == str(repo)
         assert envs["CUSTOM_DIR"] == str(repo)
         assert os.environ.get("CUSTOM_REPO_PATH") == str(repo)
+        # The generic name has to travel in the config, not just os.environ: a
+        # Ray worker inherits the raylet's environment from whenever it booted,
+        # and a stale checkout there wins over anything published afterwards.
+        assert envs["FRAMEWORK_REPO_PATH"] == str(repo)
+
+    def test_extra_env_pins_reach_the_benchmark_config(self, monkeypatch):
+        """The operator's only channel for their own knobs has to land in envs.
+
+        The CLI serializes ``--extra-env`` into a JSON env var that, on its own,
+        only the grid filter reads. Left there the pins are neither delivered to
+        the script nor visible to the measurement contract, which is read off
+        the materialized config.
+        """
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        monkeypatch.setenv(
+            "INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50", "MYFW_CKPT": "/w/x.pt"}'
+        )
+        bench, envs = self._bench(), {}
+        we.apply_scriptable_runtime_defaults(
+            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
+        )
+        assert envs["MYFW_STEPS"] == "50"
+        assert envs["MYFW_CKPT"] == "/w/x.pt"
+
+    def test_a_config_value_outranks_an_extra_env_pin(self, monkeypatch):
+        """setdefault, not overwrite: a variant's override still has to win."""
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
+        bench, envs = self._bench(), {"MYFW_STEPS": "4"}
+        we.apply_scriptable_runtime_defaults(
+            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
+        )
+        assert envs["MYFW_STEPS"] == "4"
+
+    def test_an_unparseable_pin_does_not_take_the_run_down(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "{not json")
+        bench, envs = self._bench(), {}
+        we.apply_scriptable_runtime_defaults(
+            bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
+        )
+        assert envs == {}
+
+    def test_extra_env_pins_stay_out_of_other_frameworks(self, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
+        envs: dict = {}
+        we.apply_scriptable_runtime_defaults(
+            {"framework": "worldmirror"}, envs, gpu_type="mi355x", explicit_benchmark_script=False
+        )
+        assert "MYFW_STEPS" not in envs
 
     def test_the_helpers_stay_inert_for_other_frameworks(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.actions.executors import _workload_envs as we
