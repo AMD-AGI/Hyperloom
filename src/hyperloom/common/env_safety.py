@@ -69,8 +69,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
-        # Retained for defense-in-depth: SAFE_API_KEY is no longer consumed, but
-        # a stray legacy value must still be scrubbed from the benchmark subprocess env.
+        # Legacy: not consumed anymore, still scrubbed if present.
         "SAFE_API_KEY",
     }
 )

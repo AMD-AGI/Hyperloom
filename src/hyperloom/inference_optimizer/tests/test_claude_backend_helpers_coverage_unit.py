@@ -126,8 +126,8 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
 
 
 def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch) -> None:
-    """An OpenAI-only environment must not produce Anthropic credentials for the
-    Claude child process: that would authenticate Claude with a foreign key."""
+    """An OpenAI-only environment produces no Anthropic credentials for the Claude
+    child process."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)

@@ -194,8 +194,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
         "_".join(("AMD_LLM", "API", "KEY")),
     ):
         assert cli.os.environ[name] == "new-gateway-key"
-    # The Anthropic-side keys are never cross-filled from the OpenAI key; the
-    # operator sets ANTHROPIC_API_KEY explicitly when Claude needs its own key.
+    # The Anthropic-side keys are never cross-filled from the OpenAI key.
     assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
     for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
@@ -203,8 +202,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert "_".join(("legacy backend", "API", "KEY")) not in cli.os.environ
     assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
-    # With no Anthropic side there is nothing to write for Claude, and the
-    # OpenAI key is never promoted into ~/.claude/config.json.
+    # No Anthropic side: nothing is written for Claude.
     config_text = (config_dir / "config.json").read_text(encoding="utf-8")
     assert "new-gateway-key" not in config_text
     assert "gateway.example" not in config_text
@@ -1457,8 +1455,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
     if codex_follows_before:
         args.codex_model = args.claude_model
 
-    # The OpenAI/Codex side is left unset; nothing is derived from the Anthropic
-    # gateway, so the Codex path stays disabled and follows the Claude model.
+    # The OpenAI/Codex side stays unset, so Codex follows the Claude model.
     assert resolved == ("https://llm.example.invalid/anthropic", "")
     assert cli._codex_model_should_follow_claude() is True
     assert args.codex_model == "claude-sonnet-5"

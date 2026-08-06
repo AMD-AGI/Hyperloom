@@ -214,12 +214,10 @@ def _is_stale_proxy_url(value: str | None) -> bool:
 def _resolve_llm_endpoints() -> tuple[str, str]:
     """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
 
-    Each side resolves from its own configuration only -- there is no
-    cross-provider derivation. A side is its explicit ``*_BASE_URL``, or the
-    official SDK endpoint implied by that side's own key, or empty. An empty
-    side means the features that speak its protocol are disabled; the other
-    provider's endpoint is never substituted, because that would send this
-    side's key to a foreign host.
+    Each side resolves from its own configuration only: its explicit
+    ``*_BASE_URL``, or the official SDK endpoint implied by that side's own key,
+    or empty. An empty side disables the features that speak its protocol; the
+    other provider's endpoint is never substituted.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -278,20 +276,16 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
 
 
 def _reject_cross_provider_pairing() -> None:
-    """Fail fast on any configuration that would borrow across providers.
+    """Fail fast unless the credentials form one of the three legal shapes.
 
-    Runs on the *raw* environment, before :func:`_resolve_llm_endpoints`, and
-    enforces the three legal shapes: the Anthropic side alone, the OpenAI side
-    alone, or both sides with each self-consistent. A side is self-consistent
-    when it is either fully absent or carries both its own base URL and its own
-    key. Anything else -- a base URL whose only key belongs to the other
-    provider, or a key whose only endpoint would come from the other provider --
-    is rejected rather than silently repaired, because every such repair ends up
-    sending a provider-specific key to a foreign host.
+    Legal: the Anthropic side alone, the OpenAI side alone, or both sides. A side
+    is either fully absent or carries both its own base URL and its own key.
+    Rejected: a base URL whose only key belongs to the other provider, and a key
+    whose only endpoint would come from the other provider.
 
-    Official provider keys may still omit their own ``*_BASE_URL`` as long as the
-    other side is not configured, since the SDK default endpoint belongs to that
-    same provider.
+    Reads the *raw* environment, before :func:`_resolve_llm_endpoints` fills in
+    any implied endpoint. Official provider keys may omit their own
+    ``*_BASE_URL`` while the other side is unconfigured.
     """
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -302,10 +296,8 @@ def _reject_cross_provider_pairing() -> None:
         or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
         or deepseek_key
     )
-    # DeepSeek ships its own Anthropic-compatible endpoint, so its key carries an
-    # implied base URL. Treat the Anthropic side as endpoint-complete then, or the
-    # pairing check would reject a config that _resolve_llm_endpoints() resolves
-    # perfectly well.
+    # DeepSeek serves its own Anthropic-compatible endpoint, so its key carries an
+    # implied base URL.
     anthropic_endpoint = anthropic_url or (
         (os.environ.get("DEEPSEEK_BASE_URL", "").strip() or _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL)
         if deepseek_key

@@ -42,9 +42,7 @@ def _clear(monkeypatch):
 
 
 def test_openai_only_fills_openai_aliases_and_leaves_anthropic_unset(monkeypatch):
-    """OpenAI side only: its own aliases are filled, and nothing is invented on
-    the Anthropic side (forwarding the OpenAI key as ANTHROPIC_* would hand it to
-    a foreign host)."""
+    """OpenAI side only: its own aliases are filled, nothing on the Anthropic side."""
     _clear(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "ak-gateway")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
@@ -95,9 +93,7 @@ def test_split_gateway_geak_takes_openai_key(monkeypatch):
 
 
 def test_anthropic_only_leaves_openai_side_unset(monkeypatch):
-    """Anthropic-only entry: GEAK speaks the OpenAI protocol, so it is left
-    unconfigured rather than pointed at the Anthropic host with the Anthropic
-    key."""
+    """Anthropic-only entry: GEAK speaks the OpenAI protocol, so it stays unconfigured."""
     _clear(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")

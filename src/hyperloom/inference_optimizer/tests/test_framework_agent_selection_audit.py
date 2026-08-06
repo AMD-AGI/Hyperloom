@@ -336,8 +336,8 @@ def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None
 
 
 def test_ranker_client_none_for_anthropic_only_deploy(coord: Coordinator, monkeypatch) -> None:
-    """The ranker speaks the OpenAI protocol: an Anthropic-only deploy leaves it
-    disabled instead of caching a client aimed at the Anthropic endpoint."""
+    """The ranker speaks the OpenAI protocol, so an Anthropic-only deploy leaves it
+    disabled."""
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

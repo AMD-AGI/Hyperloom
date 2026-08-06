@@ -443,9 +443,8 @@ def safe_runtime_env() -> dict:
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # Each provider side is forwarded from its own credentials only: borrowing
-    # across sides would hand one provider's key to the other's host. GEAK
-    # speaks the OpenAI protocol, so its aliases come from the OpenAI side.
+    # Each side's aliases come from that side's own credentials. GEAK speaks the
+    # OpenAI protocol.
     openai_key = env.get("OPENAI_API_KEY")
     if openai_key:
         env.setdefault("GEAK_API_KEY", openai_key)

@@ -274,10 +274,6 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
   fi
 fi
-# No cross-provider derivation: the Anthropic side is configured by the operator
-# (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY) or left unset, which disables the
-# Claude-side features. Deriving it from OPENAI_* would point Claude at the
-# OpenAI host and reuse an OpenAI-specific key there.
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
 # + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
@@ -442,9 +438,8 @@ verify_die() {
 # install without them cannot finish anyway. The only downgrade path
 # is --check-only / --dry-run, which is for introspection only and
 # does not actually install.
-# Reject a configuration that pairs one provider's base URL with the other
-# provider's key -- the same contract the CLI preflight enforces. DeepSeek's key
-# implies its own Anthropic-compatible endpoint, so it counts as an endpoint.
+# Reject one provider's base URL paired with only the other provider's key.
+# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
   a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
@@ -478,14 +473,11 @@ EOF
 preflight_validate_credentials() {
   local missing=()
   local has_anthropic=0 has_openai=0
-  # No cross-provider derivation: each side must carry its own base URL and its
-  # own key. A side left unset disables the features that speak its protocol.
+  # Each side needs its own base URL and key; an unset side is fine.
   { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
-  # Mirror the CLI's cross-provider rejection so a mispaired config fails here
-  # rather than after a full install.
   preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
     log "credentials preflight: at least one self-consistent provider side present"
@@ -1193,11 +1185,8 @@ write_env_file() {
   else
     remove_dotenv_var ANTHROPIC_API_KEY
   fi
-  # This installer resolves only the Anthropic / DeepSeek side. It must neither
-  # write the OpenAI-side creds (no cross-writing, nothing extra persisted) nor
-  # clear them -- clearing the operator's OPENAI_BASE_URL / OPENAI_API_KEY here
-  # would silently disable Codex / GEAK on the next run, and this function is
-  # editing the shared $REPO_ROOT/.env.
+  # Only the Anthropic / DeepSeek side is persisted here. The OpenAI-side entries
+  # in the shared .env are owned elsewhere and left untouched.
   if [ -n "${_deepseek_url}" ]; then
     upsert_dotenv_var DEEPSEEK_BASE_URL "$_deepseek_url"
   else
@@ -1209,8 +1198,7 @@ write_env_file() {
     remove_dotenv_var DEEPSEEK_API_KEY
   fi
   remove_dotenv_var ANTHROPIC_AUTH_TOKEN
-  # Legacy gateway key: never read anymore, but purge a stale value so it does
-  # not linger on disk in a migrating .env.
+  # Legacy gateway key: not read, purged if present.
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY

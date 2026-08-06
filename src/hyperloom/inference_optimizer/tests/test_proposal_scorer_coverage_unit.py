@@ -109,8 +109,7 @@ def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
 
 
 def test_ensure_client_refuses_anthropic_token(monkeypatch):
-    """The scorer speaks the OpenAI protocol: an Anthropic token is not borrowed
-    to auth it, so with no OpenAI-side key it raises."""
+    """The scorer speaks the OpenAI protocol, so it raises with no OpenAI-side key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")

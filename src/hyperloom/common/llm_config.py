@@ -131,8 +131,7 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    # OpenAI-side credentials only: an Anthropic key or an Anthropic base URL
-    # would authenticate this OpenAI-protocol client against a foreign provider.
+    # OpenAI-side credentials only.
     api_key = (
         (source.get(api_key_env) or "").strip()
         or (source.get("OPENAI_API_KEY") or "").strip()
@@ -180,8 +179,7 @@ def claude_sdk_env_options(
     if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
         source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
 
-    # Anthropic-side credentials only: the OpenAI key must never become the
-    # child process's ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN.
+    # Anthropic-side credentials only.
     fallback_key = (
         source.get("ANTHROPIC_AUTH_TOKEN")
         or source.get("ANTHROPIC_API_KEY")

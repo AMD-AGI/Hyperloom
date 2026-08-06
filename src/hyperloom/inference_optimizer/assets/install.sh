@@ -392,9 +392,8 @@ preflight_load_dotenv() {
   fi
 }
 
-# Reject a configuration that pairs one provider's base URL with the other
-# provider's key -- the same contract the CLI preflight enforces. DeepSeek's key
-# implies its own Anthropic-compatible endpoint, so it counts as an endpoint.
+# Reject one provider's base URL paired with only the other provider's key.
+# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
 preflight_reject_cross_provider() {
   local a_key a_endpoint conflict=""
   a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
@@ -429,17 +428,11 @@ preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
   local has_anthropic=0 has_openai=0
-  # No cross-provider derivation: each side must be self-consistent on its own
-  # (its own base URL and its own key). A side left unset is fine -- it just
-  # disables the features that speak its protocol. Deriving one side from the
-  # other would send a provider-specific key to a foreign host.
+  # Each side needs its own base URL and key; an unset side is fine.
   { { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } &&
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
-  # Mirror the CLI's cross-provider rejection so a mispaired config fails here
-  # rather than after a full install. A key belonging to one provider must not be
-  # the only credential behind the other provider's base URL.
   preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
     log "credentials preflight: at least one self-consistent provider side present"

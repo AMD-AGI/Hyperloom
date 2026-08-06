@@ -62,7 +62,7 @@ def test_setup_env_preserves_sed_replacement_metacharacters(tmp_path: Path) -> N
 
 
 def test_setup_env_keeps_existing_key_when_env_unset(tmp_path: Path, monkeypatch) -> None:
-    """An unset OPENAI_API_KEY must not blank the value already in .env."""
+    """An unset OPENAI_API_KEY leaves the value already in .env alone."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     text = _run_setup_env_script(tmp_path, {"USER_DATA_PATH": "/workspace/hyperloom"})
