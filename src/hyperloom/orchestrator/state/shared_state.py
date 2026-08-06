@@ -150,6 +150,9 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
 # summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
+# Session-level kernel-roofline report the analyzer writes for a non-close run;
+# read back when the trace_analyze envelope arrives without its payload keys.
+_DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
 
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 10
@@ -2459,6 +2462,23 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         kernel_roofline_path = result.get("kernel_roofline_path") or ""
         if not kernel_roofline_path:
             kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
+        disk = self._read_session_roofline_report(payload, kernel_roofline_path)
+        if disk:
+            kernel_roofline_path = kernel_roofline_path or str(disk["path"])
+            candidates_path = candidates_path or str(disk["payload"].get("kernel_candidates_path") or "")
+            if not result.get("trace_report_path"):
+                result = dict(result)
+                result["trace_report_path"] = str(disk["payload"].get("analysis_md_path") or "")
+            if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
+                result = dict(result)
+                result["hot_kernels"] = disk["kernels"]
+                log.warning(
+                    "record_trace_analyze: envelope carried no hot kernels; "
+                    "recovered %d from %s. The analysis succeeded — the result "
+                    "envelope lost its payload in transit.",
+                    len(disk["kernels"]),
+                    disk["path"],
+                )
         steady_state_trace = (
             result.get("steady_state_trace")
             or artifacts.get("tracelens_steady_state_trace")
@@ -2547,6 +2567,43 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             trace_input=trace_input,
             kernel_roofline_path=kernel_roofline_path,
         )
+
+    def _read_session_roofline_report(
+        self,
+        payload: dict[str, Any],
+        kernel_roofline_path: str,
+    ) -> "dict[str, Any] | None":
+        """Read the session-level kernel-roofline report written by TraceLens.
+
+        The analyzer writes this report as a side effect of a successful run, so
+        it survives a result envelope that lost its payload keys in transit.
+
+        Args:
+            payload (dict[str, Any]): The trace_analyze task payload; supplies
+                ``roofline_output_name`` when the envelope named no path.
+            kernel_roofline_path (str): Report path recovered from the envelope,
+                or ``""`` to resolve the session default.
+
+        Returns:
+            ``{"path", "payload", "kernels"}`` with kernels ordered by
+            descending GPU share, or ``None`` when no report is readable.
+        """
+        path = Path(kernel_roofline_path) if kernel_roofline_path else None
+        if path is None:
+            session_dir = getattr(self, "_session_dir", None)
+            if not session_dir:
+                return None
+            name = str((payload or {}).get("roofline_output_name") or "").strip()
+            path = Path(session_dir) / "reports" / (name or _DEFAULT_ROOFLINE_REPORT_NAME)
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(report, dict):
+            return None
+        rows = [row for row in (report.get("kernels") or []) if isinstance(row, dict)]
+        rows.sort(key=lambda row: float(row.get("gpu_pct") or 0.0), reverse=True)
+        return {"path": path, "payload": report, "kernels": rows}
 
     def _build_hot_kernel_summaries(
         self,
