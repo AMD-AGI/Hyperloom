@@ -164,6 +164,7 @@ class OpResolution:
     # templates to the ck-fellow instead of the generic hip-fellow.
     kernel_kinds: list[str] = field(default_factory=list)
     prebuilt_binaries: list[str] = field(default_factory=list)
+    runtime_backends: list[str] = field(default_factory=list)
 
     @property
     def primary_source(self) -> str:
@@ -185,6 +186,13 @@ class OpResolution:
         if 0 <= self.target_index < len(self.prebuilt_binaries):
             return self.prebuilt_binaries[self.target_index]
         return self.prebuilt_binaries[0] if self.prebuilt_binaries else ""
+
+    @property
+    def primary_runtime_backend(self) -> str:
+        """The production attention/backend identity for the selected source."""
+        if 0 <= self.target_index < len(self.runtime_backends):
+            return self.runtime_backends[self.target_index]
+        return self.runtime_backends[0] if self.runtime_backends else ""
 
     @property
     def is_routable(self) -> bool:
@@ -219,6 +227,9 @@ class OpResolution:
         item["op_to_source_reason"] = self.reason
         if self.matched_route:
             item["op_to_source_matched_route"] = self.matched_route
+        runtime_backend = self.primary_runtime_backend
+        if runtime_backend:
+            item["runtime_backend"] = runtime_backend
 
     def apply_to(self, item: dict[str, Any]) -> None:
         """Override an item's source with this leaf's editable ``.cu`` (ground truth).
@@ -516,6 +527,7 @@ class OpResolver:
                             matched_route=kname,
                             kernel_kinds=[str(info.get("kernel_kind") or "")],
                             prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
+                            runtime_backends=[str(info.get("backend") or "")],
                         )
                     return OpResolution(
                         op_name=op_name,
@@ -526,6 +538,7 @@ class OpResolver:
                         sources=[],
                         reason="dispatch route has no editable source",
                         matched_route=kname,
+                        runtime_backends=[str(info.get("backend") or "")],
                     )
         return OpResolution(
             op_name=op_name,
