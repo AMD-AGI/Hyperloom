@@ -38,7 +38,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 
@@ -734,8 +734,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
     """Regression: a config-lever ENABLEMENT deliverable must carry the
     ``enablement`` marker + setup commands into integrate_patch, otherwise the
     integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement``
-    no-ops — leaving ``enablement_dispatched`` stuck and the run spinning until
-    wall-clock instead of firing ``enablement_stalled``.
+    no-ops, the stall streak never advances, and the run spins until wall-clock.
     """
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],

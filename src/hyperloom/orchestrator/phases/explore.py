@@ -8,7 +8,6 @@ from __future__ import annotations
 from hashlib import sha1
 import logging as _logging
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,8 +19,9 @@ from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..loop.sub_agent_runner import SubAgentResult
+from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..specialists.runner import SpecialistFailureType
-from ..state.shared_state import resolve_grading_anchor_tput
+from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
@@ -280,9 +280,10 @@ class ExplorePhase(PhaseHandler):
         """Rebuild the orchestration system prompt for the new macro-cycle.
 
         Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
-        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
-        records the directive in the ``cycle_directive_history`` ring. Skips a
-        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``,
+        snapshots the installed scope, and records the directive in the
+        ``cycle_directive_history`` ring. Skips a user-supplied
+        ``--orch-prompt``. Best-effort; returns True when reseeded.
         """
         if getattr(self, "_orch_prompt_is_user_supplied", False):
             return False
@@ -296,11 +297,12 @@ class ExplorePhase(PhaseHandler):
         if not directive:
             directive = self._cycle_directive_fallback()
             source = "deterministic"
-        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive, phase=state.phase)
         overrides = getattr(self, "system_prompt_overrides", None)
         if not isinstance(overrides, dict):
             return False
         overrides["orchestration"] = new_prompt
+        _write_prompt_snapshot(self.session_dir, "orchestration", new_prompt, phase=state.phase)
         history = list(getattr(state, "cycle_directive_history", []) or [])
         history.append(
             {
@@ -1071,6 +1073,40 @@ class ExplorePhase(PhaseHandler):
                             "severity": str(gap.get("severity") or ""),
                         }
 
+        if "baseline_tput" not in params:
+            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+            if _bt > 0:
+                params["baseline_tput"] = _bt
+        if "current_tput" not in params:
+            cb = getattr(state, "current_best", None)
+            _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
+            if _ct > 0:
+                params["current_tput"] = _ct
+        if "cumulative_gain_validated" not in params:
+            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            if _cgv != 0:
+                params["cumulative_gain_validated"] = _cgv
+        if "keep_threshold_pct" not in params:
+            try:
+                from ..phases.machine_state import decaying_keep_threshold_pct
+                from ..actions.executors._multi_node_env import is_multi_node
+
+                _kth = decaying_keep_threshold_pct(
+                    int(getattr(state, "macro_cycle", 0) or 0),
+                    multi_node=is_multi_node(),
+                )
+                params["keep_threshold_pct"] = _kth
+            except Exception:  # noqa: BLE001
+                pass
+        if "applied_stack" not in params:
+            _stack = list(getattr(state, "optimization_stack", None) or [])
+            if _stack:
+                params["applied_stack"] = [
+                    {"variant_name": str(e.get("variant_name") or ""), "gain_pct": float(e.get("gain_pct") or 0.0)}
+                    for e in _stack
+                    if isinstance(e, dict)
+                ]
+
         # Pack bottleneck signals into roofline_evidence for the specialist.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         if isinstance(last_ta, dict) and last_ta.get("analysis_md_text") and "roofline_evidence" not in params:
@@ -1158,7 +1194,7 @@ class ExplorePhase(PhaseHandler):
             gaps.append(
                 {
                     "canonical_id": f"{anchor}#throughput_below_target",
-                    "symptom": (f"current_best is {target_gap:.1f}% short of --target-gain"),
+                    "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
                     "layer": "framework",
                     "severity": severity,
                     "domain_hint": "serving_specialist",
@@ -1179,7 +1215,7 @@ class ExplorePhase(PhaseHandler):
         return gaps
 
     def _extract_gaps_from_attempts(self) -> list[dict[str, Any]]:
-        """Derive gaps from rolling failures + winners history (recurring (action, error_class) + explore plateau).
+        """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau).
 
         Returns:
             A list of gap row dicts derived from recurring action failures and
@@ -1189,18 +1225,23 @@ class ExplorePhase(PhaseHandler):
         anchor = self._workload_canonical_id()
         gaps: list[dict[str, Any]] = []
 
-        failures = list(state.last_action_failures or [])[-10:]
+        # Already capped by ``record_action_failure``; read the whole log.
         seen_failures: dict[str, dict[str, Any]] = {}
-        for row in failures:
+        for row in state.last_action_failures or []:
             if not isinstance(row, dict):
                 continue
             action = str(row.get("action") or "").strip() or "unknown"
             err = str(row.get("error_class") or "").strip() or "unknown_error"
-            key = f"{action}::{err}"
+            variant = str(row.get("variant_name") or "").strip()
+            # Variant discriminator keeps distinct crash causes in distinct gaps.
+            key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
             layer, domain = self._gap_layer_for_action(action)
+            excerpt = str(row.get("error_excerpt") or "")
+            detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
+            symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"
             attempt = {
                 "action": action,
-                "variant_name": str(row.get("variant_name") or ""),
+                "variant_name": variant,
                 "outcome": "REVERT",
                 "error_class": err,
                 "ts": str(row.get("ts") or datetime.now(timezone.utc).isoformat()),
@@ -1208,9 +1249,10 @@ class ExplorePhase(PhaseHandler):
             if key in seen_failures:
                 seen_failures[key]["attempts"].append(attempt)
             else:
+                cid_variant = f":{variant}" if variant else ""
                 seen_failures[key] = {
-                    "canonical_id": f"{anchor}#fail:{action}:{err}",
-                    "symptom": f"{action} repeatedly fails with {err}",
+                    "canonical_id": f"{anchor}#fail:{action}:{err}{cid_variant}",
+                    "symptom": symptom,
                     "layer": layer,
                     "severity": "medium",
                     "domain_hint": domain,
@@ -1311,6 +1353,45 @@ class ExplorePhase(PhaseHandler):
                     "variant_name": str(outcome.get("variant_name") or ""),
                     "outcome": str(outcome.get("outcome") or "").upper(),
                     "gain_pct": outcome.get("gain_pct"),
+                    "reason": str(outcome.get("reason") or ""),
+                    "error_class": str(outcome.get("error_class") or ""),
+                },
+            )
+
+    def _record_explore_variant_failures(
+        self,
+        *,
+        task: "Task | None",
+        result: dict[str, Any],
+    ) -> None:
+        """Record each FAILED ``per_variant_outcomes`` row into ``last_action_failures``.
+
+        A crashed variant does not fail the round, so the round-level recorder
+        never sees it.
+
+        Args:
+            task: The completed explore task; ``None`` is a no-op.
+            result: The explore result dict carrying ``per_variant_outcomes``.
+        """
+        if task is None:
+            return
+        per_variant = result.get("per_variant_outcomes")
+        if not isinstance(per_variant, list):
+            return
+        for vo in per_variant:
+            if not isinstance(vo, dict):
+                continue
+            if str(vo.get("outcome") or "").upper() != "FAILED":
+                continue
+            self.shared_state.record_action_failure(
+                action="explore",
+                task_id=str(task.task_id or ""),
+                result={
+                    "variant_name": str(vo.get("variant_name") or ""),
+                    "error_class": str(vo.get("error_class") or ""),
+                    "error": str(vo.get("reason") or ""),
+                    "workspace": vo.get("workspace"),
+                    "stderr_log_path": vo.get("server_log_path"),
                 },
             )
 
@@ -1410,32 +1491,7 @@ class ExplorePhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        cb = state.current_best or {}
-        if isinstance(cb, dict):
-            cb_args = str(cb.get("extra_server_args") or "")
-            if cb_args:
-                params["base_extra_args"] = cb_args
-            _raw_remove = cb.get("remove_args")
-            _raw_unset = cb.get("unset_envs")
-            cb_remove = (
-                [_raw_remove]
-                if isinstance(_raw_remove, str) and _raw_remove.strip()
-                else [str(v) for v in (_raw_remove or []) if str(v).strip()]
-            )
-            cb_unset = (
-                [_raw_unset]
-                if isinstance(_raw_unset, str) and _raw_unset.strip()
-                else [str(v) for v in (_raw_unset or []) if str(v).strip()]
-            )
-            if cb_remove:
-                params["base_remove_args"] = cb_remove
-            if cb_unset:
-                params["base_unset_envs"] = cb_unset
-            if str(cb.get("args_mode") or "").strip().lower() == "replace":
-                params["base_args_mode"] = "replace"
-        base_tput = resolve_grading_anchor_tput(state)
-        if base_tput:
-            params["base_tput"] = base_tput
+        inject_stack_base_params(params, state, anchor=True)
         last_bl = state.last_baseline or {}
         if isinstance(last_bl, dict):
             bs = str(last_bl.get("benchmark_script") or "").strip()
@@ -1671,7 +1727,7 @@ class ExplorePhase(PhaseHandler):
         # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
         # integrate_patch owns the enablement stall accounting, so an enablement
         # round must reach it to bump ``enablement_stall_streak`` / clear
-        # ``enablement_dispatched`` and eventually fire ``enablement_stalled``.
+        # ``enablement_stall_streak`` and eventually fire ``enablement_stalled``.
         # Non-enablement config deliverables keep the strict "levers required" gate.
         if not config_levers and not is_enablement:
             return
@@ -1724,9 +1780,7 @@ class ExplorePhase(PhaseHandler):
         # config-lever-only enablement deliverable MUST still flow the enablement
         # marker + setup_commands into integrate_patch, otherwise the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
-        # ``enablement_dispatched`` stays stuck ``True`` forever — the run then
-        # cannot reach ``enablement_stalled`` and spins until wall-clock. See
-        # framework.py::_maybe_rearm_enablement.
+        # the enablement stall streak is only advanced via _maybe_rearm_enablement.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)

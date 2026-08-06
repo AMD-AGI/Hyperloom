@@ -243,6 +243,7 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "kernel_sources": [str(implementation)],
         "kernel_kind": "triton",
         "device_kernel_names": ["unified_attention_kernel"],
+        "runtime_backend": "ROCM_ATTN",
         "task_group": {
             "operator_identity": {
                 "operation": "vllm :: unified_attention_with_output"
@@ -259,7 +260,9 @@ def test_invocation_spec_adds_logical_and_implementation_provenance(tmp_path):
         "sources": [str(wrapper), str(implementation)],
         "kernel_kind": "triton",
         "symbols": ["unified_attention_kernel"],
+        "runtime_backend": "ROCM_ATTN",
     }
+    assert spec["execution"]["runtime_backend"] == "ROCM_ATTN"
     assert spec["edit_target"]["kernel_sources"] == [str(implementation)]
 
 
@@ -376,7 +379,9 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
         def communicate(self, timeout=None):
             return (
                 '__FORGE_RESULT__{"baseline_ms": 1.0, '
-                '"best_ms": 0.9, "improved": true}',
+                '"best_ms": 1.1, "mean_case_speedup": 1.2, '
+                '"search_start_mean_case_speedup": 1.0, '
+                '"total_improved": true, "incremental_improved": true}',
                 "",
             )
 
@@ -411,14 +416,18 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     assert cmd[cmd.index("--experience-id") + 1] == "forge-attempt-1"
     assert cmd[cmd.index("--deadline-unix") + 1] == "9999999999.0"
     assert captured["popen_kwargs"]["start_new_session"] is True
-    assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
+    assert (result[0], result[1], result[2], result[4]) == (1.0, 1.1, True, None)
+    assert result.mean_case_speedup == 1.2
     assert result.pristine_baseline_ms == 1.0
     assert result.search_start_ms == 1.0
     assert result.improved_during_search is True
     assert result.structured_result == {
         "baseline_ms": 1.0,
-        "best_ms": 0.9,
-        "improved": True,
+        "best_ms": 1.1,
+        "mean_case_speedup": 1.2,
+        "search_start_mean_case_speedup": 1.0,
+        "total_improved": True,
+        "incremental_improved": True,
     }
 
 

@@ -74,6 +74,17 @@ class Objective(ABC):
             str: Human-readable description of the configured target.
         """
 
+    @abstractmethod
+    def gap_pct(self, state: "SharedState") -> float:
+        """Compute the percent improvement still required to reach the goal.
+
+        Args:
+            state (SharedState): Current shared optimization state to evaluate.
+
+        Returns:
+            float: Remaining distance in percent; 0.0 once the goal is met.
+        """
+
 
 @dataclass
 class _RatioObjective(Objective):
@@ -102,6 +113,13 @@ class _RatioObjective(Objective):
     def reached(self, state: "SharedState") -> bool:
         """Report whether the live metric meets or exceeds the target."""
         return self._current(state) >= self._target()
+
+    def gap_pct(self, state: "SharedState") -> float:
+        """Return the shortfall as a percent of the live metric (0.0 before the first measurement)."""
+        cur = self._current(state)
+        if cur <= 0:
+            return 0.0
+        return max(0.0, (self._target() - cur) / cur * 100.0)
 
 
 @dataclass
@@ -134,6 +152,10 @@ class TargetGainObjective(_RatioObjective):
     def _target(self) -> float:
         """Return the configured gain-percent target."""
         return self.target_gain_pct
+
+    def gap_pct(self, state: "SharedState") -> float:
+        """Return the gain percentage points still missing (both sides are already percentages)."""
+        return max(0.0, self._target() - self._current(state))
 
     def describe(self) -> str:
         """Return a one-line summary of the configured gain target.
@@ -291,6 +313,17 @@ class TimeOnlyObjective(Objective):
             str: Always ``"time_only (no target)"``.
         """
         return "time_only (no target)"
+
+    def gap_pct(self, state: "SharedState") -> float:
+        """Report the distance to the goal, which is always zero since there is no target.
+
+        Args:
+            state (SharedState): Current shared optimization state (unused).
+
+        Returns:
+            float: Always 0.0.
+        """
+        return 0.0
 
 
 def build_objective(env: dict[str, Any]) -> Objective:

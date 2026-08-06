@@ -203,8 +203,15 @@ def test_audit_patches_path_source(tmp_path: Path):
 
 # opt-in LLM layer: no creds -> static verdict kept, risk noted (hermetic)
 def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    for var in (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "LLM_GATEWAY_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
     content = "def scaled_op(q, k):\n    scale = compute_scale_factor(q)\n    return q * scale + k\n"
     root = _make_root(tmp_path, "model_executor/layer.py", content)
     out = run_phase_audit(
@@ -221,6 +228,79 @@ def test_audit_use_llm_without_creds_keeps_static(tmp_path: Path, monkeypatch):
     )
     assert out["layer"] == "static"
     assert any("missing" in r.lower() for r in out["risks"])
+
+
+# opt-in LLM layer: stream_chat_completion_text is called (stream=True path)
+def test_audit_llm_refine_uses_streaming(tmp_path: Path, monkeypatch):
+    import sys
+    import types
+
+    captured: list[dict] = []
+
+    _valid_reply = '{"semantic_status":"not_present","applicability":"direct_apply","confidence":0.9,"recommended_next_step":"author_via_specialist","note":""}'
+
+    def _fake_stream(client, **kw):
+        captured.append(kw)
+        return _valid_reply, None
+
+    monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _fake_stream)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = lambda **_kw: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    content = "def scaled_op(q, k):\n    return q + k\n"
+    root = _make_root(tmp_path, "model_executor/layer.py", content)
+    run_phase_audit(
+        {
+            "candidate": {"candidate_id": "c"},
+            "framework_source_roots": [str(root)],
+            "diff_text": _diff(
+                added=["    q = apply_rotary(q)"],
+                context=["def scaled_op(q, k):", "    return q + k"],
+            ),
+            "work_dir": str(tmp_path / "wd"),
+            "use_llm": True,
+        }
+    )
+    assert captured, "stream_chat_completion_text was not called"
+    assert "model" in captured[0]
+
+
+# opt-in LLM layer: exception in refine leaves a risk entry
+def test_audit_llm_refine_exception_leaves_risk(tmp_path: Path, monkeypatch):
+    import sys
+    import types
+
+    def _boom(client, **_kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("hyperloom.common.llm_config.stream_chat_completion_text", _boom)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://fake-gateway/v1")
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = lambda **_kw: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    content = "def scaled_op(q, k):\n    return q + k\n"
+    root = _make_root(tmp_path, "model_executor/layer.py", content)
+    out = run_phase_audit(
+        {
+            "candidate": {"candidate_id": "c"},
+            "framework_source_roots": [str(root)],
+            "diff_text": _diff(
+                added=["    q = apply_rotary(q)"],
+                context=["def scaled_op(q, k):", "    return q + k"],
+            ),
+            "work_dir": str(tmp_path / "wd"),
+            "use_llm": True,
+        }
+    )
+    assert out["layer"] == "static"
+    assert any("exception" in r.lower() or "boom" in r.lower() for r in out.get("risks", []))
 
 
 # CLI end-to-end

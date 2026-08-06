@@ -51,7 +51,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     backends: dict[str, Backend] = {}
-    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
+    for name in ("orchestration", "critic", "robustness"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
 
@@ -157,9 +157,9 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 4 agents × 2 ticks × 1 heartbeat = 8 send_message events
+        # 3 agents × 2 ticks × 1 heartbeat = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="heartbeat")
-        assert len(msgs) == 8
+        assert len(msgs) == 6
     finally:
         await c.stop()
 
@@ -184,6 +184,136 @@ class _AlwaysFailingBackend(Backend):
 
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
+
+
+class _LLMFailingBackend(Backend):
+    """Backend whose provider call fails (raises the ``LLMCallFailed`` marker)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+
+        self.calls += 1
+        raise LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+
+
+def _llm_error_rows(session_dir: Path) -> list[dict]:
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    path = llm_calls_path(session_dir)
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("status") == "error"]
+
+
+@pytest.mark.asyncio
+async def test_plain_backend_error_records_no_llm_error_row(session_dir):
+    """A deterministic local fault must not be counted as a provider failure.
+
+    ``BackendError`` covers unreadable ``emit.json``, a missing ``--review``
+    path, an absent SDK — none of which touched the model. Recording those
+    would make the Langfuse LLM error rate meaningless.
+    """
+    backends = _build_backends({})
+    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        assert _llm_error_rows(session_dir) == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
+    backends = _build_backends({})
+    backends["robustness"] = _LLMFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == 2
+        row = rows[0]
+        assert row["component"] == "robustness"
+        assert row["error_type"] == "LLMCallFailed"
+        assert "gateway 400" in row["error_message"]
+        assert row["input_tokens"] is None and row["output_tokens"] is None
+    finally:
+        await c.stop()
+
+
+class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
+    """A self-tracing backend (critic-shaped): writes its own row, then raises.
+
+    Having ``set_trace_context`` is the contract that marks a backend as owning
+    its trace rows, so the Coordinator must not add one of its own.
+    """
+
+    def __init__(self, name: str, session_dir: Path) -> None:
+        super().__init__(name)
+        self._session_dir = session_dir
+        self.trace_ctx_calls = 0
+
+    def set_trace_context(self, *, tick: int | None = None, phase: str | None = None) -> None:
+        self.trace_ctx_calls += 1
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+        from hyperloom.orchestrator.trace.llm_trace import LLMCallRecord, append_llm_call
+
+        self.calls += 1
+        error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+        append_llm_call(
+            session_dir=self._session_dir,
+            record=LLMCallRecord.for_failure(
+                session_id=self._session_dir.name,
+                component="critic",
+                role="critic",
+                error=error,
+                model="claude-opus-4-7",
+            ),
+        )
+        raise error
+
+
+@pytest.mark.asyncio
+async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
+    """One provider failure must produce one row, not one per writer.
+
+    The critic writes its own error row (carrying the review model) and then
+    raises; if the Coordinator also wrote one, Langfuse would count a single
+    critic failure twice, with disagreeing model/latency on the two rows.
+    """
+    backends = _build_backends({})
+    backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == backends["critic"].calls
+        # The surviving row is the backend's richer one (real review model).
+        assert {r["model"] for r in rows} == {"claude-opus-4-7"}
+        assert {r["component"] for r in rows} == {"critic"}
+    finally:
+        await c.stop()
 
 
 class _AlwaysCrashingBackend(Backend):
@@ -479,41 +609,39 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_response_routes_back_to_requester(session_dir):
+    """Programmatic handler emits RESPONSE to orchestration without an LLM turn."""
+    from unittest.mock import patch
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
     req = Intent(
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
             "kind": "trace_analyze",
+            "params": {"trace_input": "/tmp/trace.json.gz"},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
-        assert kernel_inbox, "no request mirrored to kernel"
-        request_msg_id = kernel_inbox[0].msg_id
 
-        await c._handle_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.RESPONSE,
-                payload={
-                    "in_reply_to": request_msg_id,
-                    "kind": "trace_analyze_done",
-                    "status": "ok",
-                    "result": {"chosen": ["k1", "k2"]},
-                },
-            ),
-        )
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert responses
-        assert responses[0].payload["status"] == "ok"
-    finally:
-        await c.stop()
+    async def _fake_handler(payload, *, session_dir, **_kw):
+        return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": _fake_handler}):
+        try:
+            c.shared_state.baseline_tput = 100.0
+            c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+            c.shared_state.kernel_enabled = True
+            c.shared_state.save(session_dir)
+            await c.tick(1)
+            kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+            assert kernel_inbox, "no request mirrored to kernel"
+            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            assert responses
+            assert responses[0].payload["status"] == "ok"
+            assert responses[0].payload["source"] == "programmatic_handler"
+        finally:
+            await c.stop()
 
 
 @pytest.mark.asyncio
@@ -721,7 +849,6 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }
@@ -862,8 +989,8 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 1500.0
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
         task = Task(
             task_id="t-reval-1",
             kind="baseline",
@@ -878,7 +1005,7 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
         )
         assert c.shared_state.baseline_tput == pytest.approx(1200.0)
         assert c.shared_state.baseline_accuracy == pytest.approx(0.72)
-        assert c.shared_state.enablement_succeeded is True
+        assert c.shared_state.enablement.succeeded is True
         assert c.shared_state.last_baseline["decision"] == "promoted"
     finally:
         await c.stop()
@@ -1069,13 +1196,13 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason in ("", None)
-        assert c.shared_state.enablement_origin == "eval"
-        assert c.shared_state.enablement_pending is True
-        assert c.shared_state.enablement_accuracy_floor == 0.2
-        assert c.shared_state.enablement_probe_config_path == "/runs/baseline/materialized.yaml"
-        assert c.shared_state.enablement_eval_contract_fingerprint == "abc123"
-        assert c.shared_state.enablement_baseline_eval_kind == "eval_runtime_failure"
-        assert c.shared_state.enablement_launch_log
+        assert c.shared_state.enablement.origin == "eval"
+        assert c.shared_state.enablement.pending is True
+        assert c.shared_state.enablement.accuracy_floor == 0.2
+        assert c.shared_state.enablement.probe_config_path == "/runs/baseline/materialized.yaml"
+        assert c.shared_state.enablement.eval_contract_fingerprint == "abc123"
+        assert c.shared_state.enablement.baseline_eval_kind == "eval_runtime_failure"
+        assert c.shared_state.enablement.launch_log
     finally:
         await c.stop()
 
@@ -1117,8 +1244,8 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
         # An enablement round is on record, but the lane was never admitted, so
         # it must not hold the baseline_failed budget open.
         c.shared_state.enablement_mode = "off"
-        c.shared_state.enablement_attempts = 2
-        c.shared_state.enablement_dispatched = True
+        c.shared_state.enablement.attempts = 2
+        c.shared_state.enablement.inflight_task_id = "spec-off"
         for i in range(3):
             await c._handle_unpromotable_result(
                 _mk_task("baseline", f"t-off-{i}"),
@@ -1134,20 +1261,20 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
         # Set tracked task_id so the gate recognizes this as the revalidation task.
-        c.shared_state.enablement_revalidation_task_id = "t-reval-ok"
+        c.shared_state.enablement.revalidation_task_id = "t-reval-ok"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
             task=_mk_task("baseline", "t-reval-ok"),
         )
         assert c.shared_state.baseline_tput == 1000.0
-        assert c.shared_state.enablement_succeeded is True
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_origin == ""
+        assert c.shared_state.enablement.succeeded is True
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.origin == ""
     finally:
         await c.stop()
 
@@ -1158,10 +1285,10 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
-        c.shared_state.enablement_revalidation_task_id = "t-reval-tracked"
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
+        c.shared_state.enablement.revalidation_task_id = "t-reval-tracked"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
@@ -1169,9 +1296,9 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
         )
         assert c.shared_state.baseline_tput == 1000.0
         # Pending state must NOT be consumed by the unrelated baseline.
-        assert c.shared_state.enablement_validation_pending is True
-        assert c.shared_state.enablement_succeeded is False
-        assert c.shared_state.enablement_revalidation_task_id == "t-reval-tracked"
+        assert c.shared_state.enablement.validation_pending is True
+        assert c.shared_state.enablement.succeeded is False
+        assert c.shared_state.enablement.revalidation_task_id == "t-reval-tracked"
     finally:
         await c.stop()
 
@@ -1182,10 +1309,10 @@ async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.8
-        c.shared_state.enablement_revalidation_task_id = "t-reval-subflo"
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.8
+        c.shared_state.enablement.revalidation_task_id = "t-reval-subflo"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.5},
@@ -1193,10 +1320,10 @@ async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
         )
         # Baseline tput anchors normally, but enablement is NOT succeeded.
         assert c.shared_state.baseline_tput == 1000.0
-        assert c.shared_state.enablement_succeeded is False
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
-        assert c.shared_state.enablement_revalidation_task_id == ""
+        assert c.shared_state.enablement.succeeded is False
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
+        assert c.shared_state.enablement.revalidation_task_id == ""
     finally:
         await c.stop()
 
@@ -1207,11 +1334,11 @@ async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir,
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_revalidation_task_id = "t-reval-fail"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.revalidation_task_id = "t-reval-fail"
         await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
     finally:
         await c.stop()
 
@@ -1246,28 +1373,28 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
     _mute_action_scoring(c)
     try:
         st = c.shared_state
-        st.enablement_baseline_eval_kind = "accuracy_below_floor"
-        st.enablement_observed_accuracy = 0.0
-        st.enablement_observed_task = "gsm8k"
-        st.enablement_observed_metric = "exact_match,strict-match"
-        st.enablement_baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
-        st.enablement_probe_config_path = "/runs/baseline/measured.yaml"
-        st.enablement_eval_contract_fingerprint = "measured-fp"
+        st.enablement.baseline_eval_kind = "accuracy_below_floor"
+        st.enablement.observed_accuracy = 0.0
+        st.enablement.observed_task = "gsm8k"
+        st.enablement.observed_metric = "exact_match,strict-match"
+        st.enablement.baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
+        st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
+        st.enablement.eval_contract_fingerprint = "measured-fp"
 
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
         )
 
         # The measured characterization survives...
-        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement_observed_task == "gsm8k"
-        assert st.enablement_observed_metric == "exact_match,strict-match"
-        assert "accuracy=0.0" in st.enablement_baseline_eval_evidence
-        assert st.enablement_probe_config_path == "/runs/baseline/measured.yaml"
-        assert st.enablement_eval_contract_fingerprint == "measured-fp"
+        assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement.observed_task == "gsm8k"
+        assert st.enablement.observed_metric == "exact_match,strict-match"
+        assert "accuracy=0.0" in st.enablement.baseline_eval_evidence
+        assert st.enablement.probe_config_path == "/runs/baseline/measured.yaml"
+        assert st.enablement.eval_contract_fingerprint == "measured-fp"
         # ...while the round still registers as an eval-rooted failure.
-        assert st.enablement_origin == "eval"
-        assert st.enablement_pending is True
+        assert st.enablement.origin == "eval"
+        assert st.enablement.pending is True
     finally:
         await c.stop()
 
@@ -1280,8 +1407,8 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
     _mute_action_scoring(c)
     try:
         st = c.shared_state
-        st.enablement_baseline_eval_kind = "accuracy_unavailable"
-        st.enablement_baseline_eval_evidence = "accuracy=None"
+        st.enablement.baseline_eval_kind = "accuracy_unavailable"
+        st.enablement.baseline_eval_evidence = "accuracy=None"
 
         measured = _eval_unavailable_result()
         measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
@@ -1291,9 +1418,9 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
 
         await c._handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
 
-        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement_observed_task == "gsm8k"
-        assert "measured" in st.enablement_baseline_eval_evidence
+        assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement.observed_task == "gsm8k"
+        assert "measured" in st.enablement.baseline_eval_evidence
     finally:
         await c.stop()
 
@@ -1305,20 +1432,20 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_revalidation_task_id = "t-reval-boot"
-        c.shared_state.enablement_eval_contract_fingerprint = "frozen-fp"
-        c.shared_state.enablement_accuracy_floor = 0.5
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
+        c.shared_state.enablement.eval_contract_fingerprint = "frozen-fp"
+        c.shared_state.enablement.accuracy_floor = 0.5
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
             {"status": "failed", "error_class": "oom"},
         )
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
-        assert c.shared_state.enablement_revalidation_task_id == ""
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
+        assert c.shared_state.enablement.revalidation_task_id == ""
         # Frozen trigger identity must be preserved.
-        assert c.shared_state.enablement_eval_contract_fingerprint == "frozen-fp"
-        assert c.shared_state.enablement_accuracy_floor == 0.5
+        assert c.shared_state.enablement.eval_contract_fingerprint == "frozen-fp"
+        assert c.shared_state.enablement.accuracy_floor == 0.5
     finally:
         await c.stop()
 

@@ -343,3 +343,138 @@ def test_explore_started_default_false_when_keys_absent():
     )
     ctx = from_coordinator_prompt(prompt)
     assert ctx.shared_state.explore_started is False
+
+
+# ---------------------------------------------------------------------------
+# Phase block parsing
+# ---------------------------------------------------------------------------
+
+
+def test_phase_block_parsed_correctly():
+    prompt = (
+        "=== Phase ===\n"
+        "phase     : EXPLORE\n"
+        "cycle     : 2\n"
+        "entered   : 2026-08-04T00:00:00\n"
+        "budget    : pct=0.40 elapsed_sec=123 remaining_sec=456\n"
+        "allowed   : specialist, explore, integrate_patch\n"
+        "=== Shared session state ===\n"
+        "session_id=sess\n"
+        "crash_count=0\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.phase == "EXPLORE"
+
+
+def test_phase_block_absent_gives_empty_string():
+    prompt = (
+        "=== Shared session state ===\n"
+        "session_id=sess\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.phase == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase budget telemetry parsing
+# ---------------------------------------------------------------------------
+
+
+def test_phase_budget_parsed_correctly():
+    prompt = (
+        "=== Phase budget telemetry ===\n"
+        "  PRELUDE: elapsed=120s cap=600s used=20%\n"
+        "  EXPLORE: elapsed=300s cap=unlimited used=0%\n"
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert len(ctx.phase_budget) == 2
+    prelude = ctx.phase_budget[0]
+    assert prelude.phase == "PRELUDE"
+    assert prelude.elapsed_sec == 120
+    assert prelude.cap_sec == 600
+    assert prelude.used_pct == 20.0
+    explore = ctx.phase_budget[1]
+    assert explore.phase == "EXPLORE"
+    assert explore.cap_sec == -1
+
+
+def test_phase_budget_no_history_sentinel():
+    prompt = (
+        "=== Phase budget telemetry ===\n"
+        "(no phase history yet)\n"
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.phase_budget == []
+
+
+def test_phase_budget_absent_gives_empty_list():
+    prompt = (
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.phase_budget == []
+
+
+# ---------------------------------------------------------------------------
+# Conversation progress parsing
+# ---------------------------------------------------------------------------
+
+
+def test_conversation_progress_parsed_correctly():
+    prompt = (
+        "=== Conversation progress ===\n"
+        "ticks_without_progress=5 threshold=12 severity=ok last_progress_tick=42\n"
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.conversation_progress is not None
+    cp = ctx.conversation_progress
+    assert cp.ticks_without_progress == 5
+    assert cp.threshold == 12
+    assert cp.severity == "ok"
+    assert cp.last_progress_tick == 42
+
+
+def test_conversation_progress_high_severity():
+    prompt = (
+        "=== Conversation progress ===\n"
+        "ticks_without_progress=15 threshold=12 severity=high last_progress_tick=3\n"
+        "WARNING: no observable progress ...\n"
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.conversation_progress is not None
+    assert ctx.conversation_progress.severity == "high"
+    assert ctx.conversation_progress.ticks_without_progress == 15
+
+
+def test_conversation_progress_absent_gives_none():
+    prompt = (
+        "=== Shared session state ===\n"
+        "session_id=s\n"
+        "=== Inbox for robustness ===\n"
+        "(no new messages)\n"
+    )
+    ctx = from_coordinator_prompt(prompt)
+    assert ctx.conversation_progress is None

@@ -417,7 +417,7 @@ class CapabilityEntry(TypedDict, total=False):
     e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
-    reason: str  # human readable, e.g. "kernel-claude only this run"
+    reason: str  # human readable, e.g. "geak backend only this run"
     # explore-specific:
     keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
     winners_history: int  # cumulative explore_search.winners_history length
@@ -1136,6 +1136,34 @@ class LaneTimelineEntry(TypedDict, total=False):
     lease_expired_count: int
 
 
+class OrchestrationContext(TypedDict, total=False):
+    """Health of the orchestration conversation's compaction loop.
+
+    Attributes:
+        seed_prompts (int): Full state pushes to the orchestration backend.
+        delta_prompts (int): Thin delta pushes.
+        compactions (int): ``orchestration_checkpoint`` events recorded.
+        degenerate_compactions (int): Compactions skipped on an unusable summary.
+        tick_count (int): Ticks executed, for the per-tick rates below.
+        compactions_per_tick (float): ``compactions / tick_count``; near 1.0
+            means the conversation is re-seeded every tick.
+        delta_ratio (float): ``delta_prompts / (seed + delta)``; near 0 means
+            the persistent conversation is buying nothing.
+        context_tokens_at_compaction (dict[str, int]): ``min`` / ``median`` /
+            ``max`` water level recorded on the compaction events. A ``min``
+            above the soft budget means compacting cannot un-trip the trigger.
+    """
+
+    seed_prompts: int
+    delta_prompts: int
+    compactions: int
+    degenerate_compactions: int
+    tick_count: int
+    compactions_per_tick: float
+    delta_ratio: float
+    context_tokens_at_compaction: dict[str, int]
+
+
 class Telemetry(TypedDict, total=False):
     """Pointers to telemetry artifacts and aggregated hardware metrics.
 
@@ -1147,6 +1175,7 @@ class Telemetry(TypedDict, total=False):
         server_log_paths (list[str]): Paths to server logs.
         gpu_monitor_aggregate (GpuMonitorAggregate): Aggregated GPU telemetry.
         lane_timeline (list[LaneTimelineEntry]): Per-lane capacity/occupancy summary.
+        orchestration_context (OrchestrationContext): Compaction-loop health.
     """
 
     baseline_report_path: str | None
@@ -1157,6 +1186,8 @@ class Telemetry(TypedDict, total=False):
     gpu_monitor_aggregate: GpuMonitorAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
+    # SEED/DELTA census + compaction rate for the orchestration conversation.
+    orchestration_context: OrchestrationContext
 
 
 # Attribution
@@ -2302,7 +2333,6 @@ class EnablementBreakdown(TypedDict, total=False):
         stall_streak: Consecutive no-progress rounds toward ``enablement_stalled``.
         inflight_task_id: Specialist task id of the in-flight round.
         last_specialist_task_id: Specialist task id of the most recent round.
-        dispatch_tick: Coordinator tick the in-flight round was dispatched on.
         revalidation_task_id: TaskRegistry id of the tracked revalidation task.
         revalidation_generation: Revalidation window counter (idempotency).
         launch_log_excerpt: Tail of the captured boot failure text that triggered
@@ -2346,7 +2376,6 @@ class EnablementBreakdown(TypedDict, total=False):
     stall_streak: int
     inflight_task_id: str
     last_specialist_task_id: str
-    dispatch_tick: int
     revalidation_task_id: str
     revalidation_generation: int
     launch_log_excerpt: str
@@ -2772,6 +2801,7 @@ __all__ = [
     "OptimizationSourceMethod",
     "OptimizationSourceSummary",
     "OptimizationValidation",
+    "OrchestrationContext",
     "Final",
     "GpuMonitorAggregate",
     "Invocation",

@@ -39,6 +39,7 @@ from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from .benchmark_result import (
     estimate_killed_variant_throughput,
@@ -1230,6 +1231,7 @@ async def run_grid(
                     results.append(_session_deadline_skip_result(skipped_variant))
                 break
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
+        server_log = slot / "server.log"
         # Capability fast-fail: drop a variant whose env flag the build cannot
         # honour before booting a doomed server, still recording the failure so
         # the LLM learns not to re-pick it.
@@ -1354,6 +1356,7 @@ async def run_grid(
         warmup_tput: float | None = None
         if auto_warmup:
             warmup_slot = slot / "warmup_round"
+            warmup_server_log = warmup_slot / "server.log"
             warmup_lifecycle = {
                 "cleanup": False,
                 "pid_dir": str(slot),
@@ -1447,6 +1450,7 @@ async def run_grid(
                         status="failed",
                         error=f"warmup_timeout: {exc}",
                         error_class="warmup_magpie_timeout",
+                        server_log_path=_existing_log_path(warmup_server_log),
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=["run_grid_warmup_round_failed"],
@@ -1478,7 +1482,8 @@ async def run_grid(
                     port=int(lifecycle.get("port") or 0),
                 )
                 warmup_error = (
-                    redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
+                    server_log_death_excerpt(str(warmup_server_log))
+                    or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
                     if warmup_rc != 0
                     else "warmup benchmark_report missing valid throughput/completed requests"
                 )
@@ -1514,6 +1519,7 @@ async def run_grid(
                         returncode=warmup_rc,
                         error=warmup_error,
                         error_class="warmup_round_failed",
+                        server_log_path=_existing_log_path(warmup_server_log),
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=[
@@ -1687,6 +1693,7 @@ async def run_grid(
                     status="failed",
                     error=f"timeout: {exc}",
                     error_class="magpie_timeout",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     runtime_sec=round(
                         max(0.0, time.time() - variant_started_unix),
@@ -1732,13 +1739,14 @@ async def run_grid(
                 variant.name,
                 variant_runtime_sec,
             )
+            death_excerpt = server_log_death_excerpt(str(server_log)) or (
+                "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
+            )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
                 error_class="server_init_dead",
-                error_summary=(
-                    "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
-                ),
+                error_summary=death_excerpt,
                 extra_args=variant.extra_server_args,
             )
             results.append(
@@ -1749,8 +1757,9 @@ async def run_grid(
                     status="failed",
                     returncode=rc,
                     runtime_sec=variant_runtime_sec,
-                    error="server_init_dead: engine/worker bootstrap failed",
+                    error=death_excerpt,
                     error_class="server_init_dead",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
                 )
@@ -1826,6 +1835,7 @@ async def run_grid(
                     runtime_sec=variant_runtime_sec,
                     error="detokenizer_stall: server ready but log went silent",
                     error_class="detokenizer_stall",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
@@ -1874,6 +1884,7 @@ async def run_grid(
                         f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
                         f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
                     ),
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=ok_warnings,
                 )
@@ -1908,10 +1919,8 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = (
-                redact_secret_values((stderr or stdout)[-2000:])
-                if rc != 0
-                else "no benchmark_* workspace produced"
+            no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
+                redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
             )
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
@@ -1936,6 +1945,7 @@ async def run_grid(
                     returncode=rc,
                     error=no_ws_error_summary,
                     error_class="no_benchmark_workspace",
+                    server_log_path=_existing_log_path(server_log),
                     nonfatal_warnings=harvest_tags,
                     note=variant.note,
                 )
@@ -1962,14 +1972,15 @@ async def run_grid(
             warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
+            death_excerpt = server_log_death_excerpt(str(server_log))
             if rc != 0:
-                error = redact_secret_values((stderr or stdout)[-2000:])
+                error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
-                error = "benchmark_report missing"
+                error = death_excerpt or "benchmark_report missing"
                 invalid_class = "benchmark_report_missing"
             else:
-                error = "benchmark_report missing valid throughput/completed requests"
+                error = death_excerpt or "benchmark_report missing valid throughput/completed requests"
                 invalid_class = "benchmark_report_invalid_metric"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
@@ -2001,6 +2012,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=error,
                     error_class=invalid_class,
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                 )
             )
@@ -2061,6 +2073,18 @@ def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
 
 SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
+
+
+def _existing_log_path(path: Path) -> str | None:
+    """Return ``path`` as a string when it exists, else ``None``.
+
+    Args:
+        path (Path): Candidate ``server.log`` path.
+
+    Returns:
+        str | None: The stringified path, or ``None`` when absent.
+    """
+    return str(path) if path.exists() else None
 
 
 def _safe(name: str) -> str:

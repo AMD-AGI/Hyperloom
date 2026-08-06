@@ -338,7 +338,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   MAGPIE_PYTHON="${MAGPIE_PYTHON}" setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
     --resume --resume-from "$session_dir" \
     --target-gain "${TARGET_GAIN:-10}" --max-hours "${MAX_HOURS:-24}" \
-    --tick-interval-sec 30 --kernel-claude \
+    --tick-interval-sec 30 \
     > "$resume_log" 2>&1 < /dev/null &
   # Record the REAL resumed optimizer pid, not the setsid wrapper ($!), which
   # exits immediately and would make the next loop misfire another resume.

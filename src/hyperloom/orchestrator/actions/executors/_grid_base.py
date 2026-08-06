@@ -250,6 +250,9 @@ class VariantResult:
             logs when the variant was killed before finishing. Informational
             only — never a real measurement and never used for winner
             selection; ``output_throughput`` stays ``None`` on the kill path.
+        server_log_path (str | None): Absolute path to the variant's
+            ``server.log`` when a server was launched; ``None`` for pre-launch
+            failures where no server ran.
     """
 
     name: str
@@ -281,6 +284,7 @@ class VariantResult:
     # Rough output tok/s salvaged from server.log on the killed_overtime path;
     # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
+    server_log_path: str | None = None
 
     @property
     def fingerprint(self) -> str:

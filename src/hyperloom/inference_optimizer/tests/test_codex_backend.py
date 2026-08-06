@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.roles import CodexBackend
-from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
 from hyperloom.orchestrator.roles.codex import _extract_envelope, _extract_responses_output
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
@@ -227,6 +227,42 @@ async def test_run_records_call_metadata():
     assert res.metadata["finish_reason"] == "stop"
     assert b.calls[0]["prompt_chars"] > 0
     assert b.calls[0]["reply_chars"] == len(reply)
+
+
+@pytest.mark.asyncio
+async def test_api_failure_raises_llm_call_failed():
+    """A provider call that blows up must be distinguishable from a local fault.
+
+    Only ``LLMCallFailed`` is counted in the LLM error rate; a plain
+    ``BackendError`` here would let the reactor record a deterministic local
+    fault as a provider failure.
+    """
+
+    class _BoomCompletions(FakeChatCompletions):
+        async def create(self, **kwargs):
+            raise RuntimeError("gateway 400")
+
+    client = FakeOpenAIClient([])
+    client.completions = _BoomCompletions([])
+    client.chat = FakeChat(client.completions)
+    backend = CodexBackend(model="gpt-5.4", client_factory=lambda: client)
+
+    with pytest.raises(LLMCallFailed, match="Codex API call failed"):
+        await backend.run("p")
+
+
+@pytest.mark.asyncio
+async def test_responses_api_failure_raises_llm_call_failed():
+    class _BoomResponses(FakeResponses):
+        async def create(self, **kwargs):
+            raise RuntimeError("gateway 500")
+
+    client = FakeOpenAIClient([], responses_replies=[])
+    client.responses = _BoomResponses([])
+    backend = CodexBackend(model="gpt-5.5", web_search=True, client_factory=lambda: client)
+
+    with pytest.raises(LLMCallFailed, match="Codex Responses API call failed"):
+        await backend.run("p")
 
 
 def test_construct_without_creds_raises_backend_error(monkeypatch):

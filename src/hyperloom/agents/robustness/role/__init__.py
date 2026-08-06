@@ -19,16 +19,20 @@ from .envelope import (
     build_update_state,
 )
 from .prompt_inputs import (
+    ConversationProgress,
     InboxItem,
+    PhaseBudgetRow,
     ReactorContext,
     SharedStateSnapshot,
     from_coordinator_prompt,
 )
 
 __all__ = [
+    "ConversationProgress",
     "InboxItem",
     "Intent",
     "IntentType",
+    "PhaseBudgetRow",
     "ReactorContext",
     "SharedStateSnapshot",
     "build_alert",

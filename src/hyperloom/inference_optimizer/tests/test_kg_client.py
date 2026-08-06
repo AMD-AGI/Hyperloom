@@ -549,6 +549,29 @@ def test_native_query_facts_object_anchor_uses_backlinks() -> None:
     assert facts[0].subject == "aiter_backend"
 
 
+def test_native_query_facts_reads_legacy_punctuation_slug() -> None:
+    mcp = _LinkGraphMcp(
+        pages=["foo=1", "target:2"],
+        edges=[
+            {
+                "from_slug": "foo=1",
+                "to_slug": "target:2",
+                "link_type": "improves",
+                "context": "{}",
+            }
+        ],
+    )
+    kg = KGClient(mcp, use_native_kg=True)
+
+    facts = kg.query_facts(subject="foo=1", object="target:2")
+
+    assert len(facts) == 1
+    assert facts[0].subject == "foo_1"
+    assert facts[0].object == "target_2"
+    queried = [args["slug"] for tool, args in mcp.calls if tool == "get_links"]
+    assert queried == ["foo=1", "foo_1"]
+
+
 def test_native_query_facts_conditions_filter() -> None:
     mcp = _LinkGraphMcp(
         pages=["a", "arch"],
@@ -583,6 +606,29 @@ def test_native_graph_traverse_two_hops() -> None:
     entities = {n.entity for n in nodes}
     assert "qwen2forcausallm" in entities
     assert "llamaforcausallm" in entities
+
+
+def test_native_graph_traverse_reads_legacy_punctuation_slug() -> None:
+    mcp = _LinkGraphMcp(
+        pages=["foo=1", "target:2"],
+        edges=[
+            {
+                "from_slug": "foo=1",
+                "to_slug": "target:2",
+                "link_type": "improves",
+                "context": "{}",
+            }
+        ],
+    )
+    kg = KGClient(mcp, use_native_kg=True)
+
+    nodes = kg.graph_traverse(start_entity="foo=1", max_hops=1)
+
+    assert [node.entity for node in nodes] == ["target_2"]
+    traversed = [
+        args["slug"] for tool, args in mcp.calls if tool == "traverse_graph"
+    ]
+    assert traversed == ["foo_1", "foo=1"]
 
 
 def test_native_emit_fact_materializes_nodes_and_links() -> None:

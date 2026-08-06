@@ -28,8 +28,8 @@ def _repo_root() -> Path:
 
 @pytest.fixture
 def patch_env(tmp_path, monkeypatch):
-    fw = tmp_path / "fw"
-    fw.mkdir()
+    fw = tmp_path / "lib" / "python3.12" / "site-packages" / "vllm"
+    fw.mkdir(parents=True)
     bak = tmp_path / "bak"
     bak.mkdir()
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", f"{fw}/")
@@ -177,6 +177,52 @@ def test_revert_missing_backup_is_noop(tmp_path, capsys):
     payload = _last_json(capsys)
     assert rc == 0
     assert payload["status"] == "noop_missing_backup"
+
+
+def test_revert_invalid_records_json_is_structured(tmp_path, capsys):
+    k = _load("kno_revert_invalid_json")
+    rc = k._do_revert(argparse.Namespace(records_json="{"))
+    payload = _last_json(capsys)
+
+    assert rc == 1
+    assert payload["status"] == "failed"
+    assert payload["restored_targets"] == []
+
+
+def test_revert_failure_reports_already_restored_targets(
+    patch_env,
+    capsys,
+):
+    fw, bak = patch_env
+    k = _load("kno_revert_partial")
+    restored_target = fw / "restored.py"
+    restored_target.write_text("candidate\n", encoding="utf-8")
+    valid_backup = bak / "restored.bak"
+    valid_backup.write_text("baseline\n", encoding="utf-8")
+    missing_target = fw / "missing.py"
+    missing_target.write_text("candidate\n", encoding="utf-8")
+    rc = k._do_revert(
+        argparse.Namespace(
+            records_json=json.dumps(
+                [
+                    {
+                        "target_path": str(missing_target),
+                        "backup_path": str(bak / "missing.bak"),
+                    },
+                    {
+                        "target_path": str(restored_target),
+                        "backup_path": str(valid_backup),
+                    },
+                ]
+            )
+        )
+    )
+    payload = _last_json(capsys)
+
+    assert rc == 1
+    assert payload["status"] == "failed"
+    assert payload["restored_targets"] == [str(restored_target)]
+    assert restored_target.read_text(encoding="utf-8") == "baseline\n"
 
 
 def test_revert_restores_from_backup(patch_env, capsys):

@@ -32,7 +32,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 
@@ -190,10 +190,9 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
 async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinator) -> None:
     """A Critic-rejected ENABLEMENT integrate_patch never reaches the executor,
     so it must still advance the enablement stall accounting (bump streak, clear
-    the in-flight guard) — otherwise enablement_dispatched stays stuck True and
-    the run spins forever instead of converging to enablement_stalled."""
-    coord.shared_state.enablement_dispatched = True
-    coord.shared_state.enablement_stall_streak = 0
+    inflight_task_id) to avoid stalling before enablement_stalled fires."""
+    coord.shared_state.enablement.inflight_task_id = "spec-e"
+    coord.shared_state.enablement.stall_streak = 0
     pending = PendingProposal(
         proposal_msg_id="m-enable",
         from_agent="coordinator",
@@ -205,8 +204,8 @@ async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinat
     await coord._handle_single_verdict(
         source="critic", pending=pending, verdict="reject", reasoning="empty deliverable; nothing to enable"
     )
-    assert coord.shared_state.enablement_stall_streak == 1
-    assert coord.shared_state.enablement_dispatched is False
+    assert coord.shared_state.enablement.stall_streak == 1
+    assert not coord.shared_state.enablement.inflight_task_id
 
 
 def _append(bucket: list, candidate) -> "object":
