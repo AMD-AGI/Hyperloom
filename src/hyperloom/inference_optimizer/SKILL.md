@@ -565,7 +565,7 @@ submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
-aliases from `OPENAI_API_KEY`, derive/override `ANTHROPIC_BASE_URL`,
+aliases (GEAK / LLM) from `OPENAI_API_KEY`,
 auto-`pip install` the SDKs / `ray` / `Magpie` /
 `InferenceX`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status

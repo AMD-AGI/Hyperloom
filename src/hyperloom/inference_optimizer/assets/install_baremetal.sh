@@ -1165,8 +1165,7 @@ resolve_credentials() {
     else
       local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
       if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-        # Operator declared an Anthropic-only deployment: scrub the other
-        # providers' entries.
+        # Anthropic-only deployment: scrub the other providers' entries.
         remove_dotenv_var DEEPSEEK_API_KEY
         remove_dotenv_var DEEPSEEK_BASE_URL
         remove_dotenv_var OPENAI_API_KEY
@@ -1183,16 +1182,13 @@ resolve_credentials() {
         remove_dotenv_var ANTHROPIC_BASE_URL
       fi
     fi
-    # This installer resolves only the Anthropic / DeepSeek side, so it must not
-    # clear the operator's OpenAI-side entries -- doing so silently disables
-    # Codex / GEAK on the next run. They are only scrubbed above, inside an
-    # authoritative single-provider mode where the operator declared that this
-    # deployment has no OpenAI side.
+    # Only the Anthropic / DeepSeek side is persisted here. The OpenAI-side entries
+    # are owned elsewhere and only scrubbed above, under an authoritative
+    # single-provider mode.
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
     remove_dotenv_var OPENAI_CUSTOM_HEADERS
-    # Legacy gateway key: never read anymore, but purge a stale value so it does
-    # not linger on disk in a migrating .env.
+    # Legacy gateway key: not read, purged if present.
     remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
   fi

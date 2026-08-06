@@ -59,7 +59,7 @@ def test_validate_credentials_rejects_openai_key_with_anthropic_url(clean_creds_
 
 
 def test_validate_credentials_passes_anthropic_auth_token_only(clean_creds_env):
-    """ANTHROPIC_AUTH_TOKEN alone satisfies the check, as the failure text claims."""
+    """ANTHROPIC_AUTH_TOKEN alone satisfies the check."""
     clean_creds_env.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "anthropic-fake-token")
     cli_credentials._validate_credentials()
 
@@ -149,9 +149,8 @@ def test_resolve_llm_endpoints_one_gateway_under_both_names(clean_creds_env):
 
 
 def test_validate_credentials_rejects_openai_gateway_with_foreign_anthropic_key(clean_creds_env, capsys):
-    """A gateway URL on the OpenAI side must not be paired with a different
-    Anthropic key: deriving the Anthropic base would send that key to the
-    gateway host. The check runs on the raw env, before any derivation."""
+    """A gateway URL on the OpenAI side must not be paired with only an Anthropic
+    key. The check reads the raw env, before any endpoint resolution."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-ant-real")
     with pytest.raises(SystemExit) as exc_info:
@@ -183,9 +182,8 @@ def test_validate_credentials_rejects_gateway_key_plus_foreign_anthropic_key(cle
 
 
 def test_validate_credentials_rejects_mirrored_key_without_its_own_base_url(clean_creds_env, capsys):
-    """Mirroring the gateway key into ANTHROPIC_API_KEY is not enough: without
-    ANTHROPIC_BASE_URL the Anthropic side would fall back to the official
-    endpoint and ship the gateway key there."""
+    """An Anthropic-side key still needs ANTHROPIC_BASE_URL, even when its value
+    matches the OpenAI-side key."""
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")

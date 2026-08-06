@@ -271,8 +271,8 @@ def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatc
 
 
 def test_codex_refuses_to_auth_with_anthropic_token(monkeypatch):
-    """Codex speaks the OpenAI protocol: with only an Anthropic token it fails to
-    construct rather than sending that token to the OpenAI host."""
+    """Codex speaks the OpenAI protocol, so an Anthropic token alone fails to
+    construct it."""
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")

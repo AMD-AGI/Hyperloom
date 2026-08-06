@@ -48,9 +48,7 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "DEEPSEEK_BASE_URL",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
-    # Retained for defense-in-depth: SAFE_API_KEY is no longer consumed, but a
-    # stray legacy value injected by the installer env fallback must still be
-    # stripped in an Anthropic-only deploy so it never leaks to child processes.
+    # Legacy: not consumed anymore, still stripped if present.
     "SAFE_API_KEY",
 )
 
@@ -1253,14 +1251,9 @@ def _preflight(
     # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
-    # --- Auth alias export (internal derived keys only) ---
-    # The provider key (ANTHROPIC_API_KEY, else OPENAI_API_KEY) is the single
-    # source the internal GEAK / LLM aliases fall back to; an explicitly set
-    # alias is kept. Only these non-provider aliases are filled. The per-provider
-    # primary keys (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)
-    # are never cross-filled between providers, so an explicit single-provider
-    # deploy is never flipped to a dual entrypoint; endpoint routing is resolved
-    # from the base URLs by _resolve_llm_endpoints.
+    # --- Auth alias export (internal GEAK / LLM aliases only) ---
+    # An explicitly set alias is kept. The per-provider primary keys are never
+    # cross-filled.
     provider_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if provider_key:
         for alias in (
@@ -1318,9 +1311,7 @@ def _preflight(
             if prev != want:
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
-        # Claude CLI primary key: Anthropic-side credentials only. The OpenAI key
-        # is never borrowed here -- writing it into ~/.claude/config.json would
-        # authenticate Claude against the Anthropic host with a foreign key.
+        # Claude CLI primary key: Anthropic-side credentials only.
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")

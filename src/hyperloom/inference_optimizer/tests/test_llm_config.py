@@ -75,8 +75,8 @@ def test_openai_kwargs_reads_openai_custom_headers():
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
-    """The OpenAI/Codex client reads only the OpenAI side: Anthropic headers and
-    the Anthropic host are ignored, never borrowed."""
+    """The OpenAI/Codex client reads only the OpenAI side; Anthropic headers and
+    host are ignored."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -93,8 +93,7 @@ def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
 
 
 def test_openai_kwargs_refuse_anthropic_only_env():
-    """With only Anthropic credentials there is nothing to auth an OpenAI-protocol
-    client with, so it raises instead of borrowing the Anthropic key."""
+    """Anthropic-only credentials cannot auth an OpenAI-protocol client."""
     with pytest.raises(LLMConfigError):
         openai_client_kwargs(
             env={

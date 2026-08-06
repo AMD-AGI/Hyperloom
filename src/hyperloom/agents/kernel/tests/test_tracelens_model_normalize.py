@@ -51,9 +51,8 @@ def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
 
 
 def test_gateway_detected_via_llm_gateway_key(tl_module, monkeypatch):
-    """A gateway whose hostname carries no protocol marker is still detected via
-    LLM_GATEWAY_KEY, so the dot-form model id is normalized (the strict gateway
-    rejects `Claude-Opus-4.7`)."""
+    """LLM_GATEWAY_KEY marks a strict gateway on its own, so the dot-form model id
+    is normalized."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://internal.example.invalid/api/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-test")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")

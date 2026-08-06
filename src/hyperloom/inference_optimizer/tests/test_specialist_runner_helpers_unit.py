@@ -47,8 +47,7 @@ def test_safe_redact_headers():
 
 
 def test_safe_redact_bare_gateway_token_shapes():
-    """Gateway keys are ak-/pk- shaped, so a bare token must be masked even when
-    it appears without its env-var name."""
+    """ak-/pk- shaped tokens are masked even without their env-var name."""
     line = "curl --header x ak-abc123def456 and pk-lf-98765 and sk-zyx987"
     out = sr._safe_redact(line)
     assert "ak-abc123def456" not in out

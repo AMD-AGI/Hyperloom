@@ -6,9 +6,8 @@
 No-tools by default, so the intent transport is a JSON-in-text envelope
 (``{"intents": [...]}``) validated with the same ``validate_envelope`` the
 Claude path uses. Credentials come from the OpenAI side only
-(``OPENAI_BASE_URL`` + ``OPENAI_API_KEY``); ``ANTHROPIC_*`` values are never
-borrowed, so an Anthropic-only deployment fails to construct this backend
-instead of sending an Anthropic key to the OpenAI host.
+(``OPENAI_BASE_URL`` + ``OPENAI_API_KEY``); an Anthropic-only deployment fails to
+construct this backend.
 
 Optional web search: when ``HYPERLOOM_CODEX_WEB_SEARCH`` is enabled, every turn
 uses the OpenAI **Responses API** with the built-in server-side ``web_search``

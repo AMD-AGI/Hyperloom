@@ -126,9 +126,7 @@ _SECRET_ENV_NAMES: tuple[str, ...] = (
     "HYPERLOOM_PR_CI_GH_TOKEN",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
-    # Retained for defense-in-depth: SAFE_API_KEY is no longer consumed, but a
-    # stray legacy ``SAFE_API_KEY=ak-...`` must still be redacted from logs
-    # (the ak- value shape is not matched by _TOKEN_VALUE_RES).
+    # Legacy: not consumed anymore, still redacted if present.
     "SAFE_API_KEY",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -140,8 +138,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
-    # ak-/pk- cover gateway-issued keys; kept in sync with the value shapes
-    # env_safety.redact_secret_values() masks.
+    # Keep in sync with env_safety.redact_secret_values().
     re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),

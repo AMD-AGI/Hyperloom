@@ -359,8 +359,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
 
 
 def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
-    """Both installers must reject a mispaired config at install time, matching the
-    CLI preflight, instead of letting it fail only at runtime."""
+    """Both installers reject a mispaired config at install time."""
     script_paths = [
         (
             "install",
@@ -676,8 +675,7 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "export SAFE_API_KEY" not in script_text
     assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
-    # ... and it must not clear the OpenAI side either: this installer does not
-    # resolve it, and .env is shared, so deleting it would disable Codex / GEAK.
+    # ... and it does not touch the OpenAI side, which it never resolves.
     assert "remove_dotenv_var OPENAI_BASE_URL" not in write_text
     assert "remove_dotenv_var OPENAI_API_KEY" not in write_text
 
@@ -883,8 +881,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
     assert "export OPENAI_BASE_URL=" not in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
-    # The OpenAI side is not resolved by this installer, so its .env entries are
-    # left untouched -- clearing them would disable Codex / GEAK on the next run.
+    # The OpenAI side is not resolved by this installer, so its .env entries stay.
     assert "OPENAI_BASE_URL=https://api.anthropic.com" in dotenv_text
     assert "OPENAI_API_KEY=stale-openai-key" in dotenv_text
     # Gateway aliases it does own are still purged.

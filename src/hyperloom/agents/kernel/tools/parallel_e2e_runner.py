@@ -53,9 +53,8 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         env[key.strip()] = value.strip().strip('"').strip("'")
-    # Each provider side derives its aliases from its own credentials only:
-    # borrowing across sides would send one provider's key to the other's host.
-    # GEAK speaks the OpenAI protocol, so its aliases come from the OpenAI side.
+    # Each side's aliases come from that side's own credentials. GEAK speaks the
+    # OpenAI protocol.
     openai_key = env.get("OPENAI_API_KEY") or env.get("AMD_API_KEY")
     if openai_key:
         env.setdefault("GEAK_API_KEY", openai_key)

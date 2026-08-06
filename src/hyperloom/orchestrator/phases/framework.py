@@ -2845,12 +2845,7 @@ class FrameworkPhase(PhaseHandler):
         api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
         base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
         # This client speaks the OpenAI protocol, so only the OpenAI-side key and
-        # base URL are usable: an Anthropic key or an Anthropic base URL would
-        # build a client that 404s on /chat/completions, and it is cached, so
-        # every later ranking call would fail. Preflight already exports the
-        # resolved OPENAI_BASE_URL (an Anthropic-compatible gateway derives one),
-        # so no cross-provider fallback is needed. Without an OpenAI-side key the
-        # ranker stays disabled.
+        # base URL are usable. Without an OpenAI-side key the ranker stays disabled.
         api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return None
