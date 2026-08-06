@@ -172,7 +172,7 @@ def test_phase_goal_blocks_render_only_in_their_own_phase(registry):
 
 
 def test_kernel_request_kinds_only_in_kernel_phase(registry):
-    """The request-kind whitelist is actionable only where REQUESTs are legal."""
+    """The request-kind whitelist is scoped to KERNEL_AGENT where the Coordinator routes them."""
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         if phase == _ps.PHASE_KERNEL_AGENT:

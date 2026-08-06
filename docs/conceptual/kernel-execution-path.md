@@ -10,14 +10,17 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
 before any agent backend runs:
 
-1. Records the request on the message bus.
-2. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
+1. `_sequence_denial_for_request` checks the baseline prerequisite — if
+   `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
+   policy-denied immediately (no bus record, no cursor advance).
+2. Records the request on the message bus (`source: "orchestration"`).
+3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (i.e. `--no-kernel`).
-3. Looks up the handler in `KERNEL_REQUEST_HANDLERS`; auto-rejects with
+4. Looks up the handler in `KERNEL_REQUEST_HANDLERS`; auto-rejects with
    `unknown_kernel_kind` (and a `valid_kinds` list) when none is found.
-4. Runs the handler inline: `result = await handler(payload, session_dir=...)`.
-5. Posts a `response{source: "programmatic_handler"}` directly to the bus.
-6. Advances the kernel cursor past the request sequence number.
+5. Runs the handler inline: `result = await handler(payload, session_dir=...)`.
+6. Posts a `response{source: "programmatic_handler"}` directly to the bus.
+7. Advances the kernel cursor past the request sequence number.
 
 No PolicyGate path runs for the RESPONSE because it is written directly via
 `bus.append_and_seq`, not emitted by an LLM.
