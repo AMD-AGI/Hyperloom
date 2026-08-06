@@ -115,6 +115,95 @@ def test_confirm_source_present_no_cue_is_unknown(tmp_path: Path) -> None:
     assert krh._confirm_source_imported("my_kernel.py", tmp_path) is None
 
 
+# -- _confirm_sources_imported (multi-file aggregate) ----------------------
+def _write_server_log(tmp_path: Path, text: str) -> None:
+    (tmp_path / "server.log").write_text(text, encoding="utf-8")
+
+
+def test_confirm_sources_without_paths_is_unknown(tmp_path: Path) -> None:
+    assert krh._confirm_sources_imported([], tmp_path) == (None, {})
+    assert krh._confirm_sources_imported(["", "   "], tmp_path) == (None, {})
+
+
+def test_confirm_sources_all_imported_is_true(tmp_path: Path) -> None:
+    _write_server_log(
+        tmp_path,
+        "INFO importing flydsl_gemm.py\nINFO loading dispatcher.py\n",
+    )
+
+    overall, per_file = krh._confirm_sources_imported(
+        ["vllm/flydsl_gemm.py", "vllm/dispatcher.py"],
+        tmp_path,
+    )
+
+    assert overall is True
+    assert per_file == {"vllm/flydsl_gemm.py": True, "vllm/dispatcher.py": True}
+
+
+def test_confirm_sources_nothing_loaded_is_false(tmp_path: Path) -> None:
+    """None of the change ran, so the measured delta is unattributable."""
+    _write_server_log(tmp_path, "nothing relevant here\n")
+
+    overall, per_file = krh._confirm_sources_imported(
+        ["vllm/flydsl_gemm.py", "vllm/dispatcher.py"],
+        tmp_path,
+    )
+
+    assert overall is False
+    assert set(per_file.values()) == {False}
+
+
+def test_confirm_sources_partial_evidence_never_condemns(tmp_path: Path) -> None:
+    """A module can be imported lazily, so a partial trace is audit-only."""
+    _write_server_log(tmp_path, "INFO importing dispatcher.py\n")
+
+    overall, per_file = krh._confirm_sources_imported(
+        ["vllm/flydsl_gemm.py", "vllm/dispatcher.py"],
+        tmp_path,
+    )
+
+    assert overall is None
+    assert per_file["vllm/flydsl_gemm.py"] is False
+    assert per_file["vllm/dispatcher.py"] is True
+
+
+def test_confirm_sources_mixed_unknown_stays_unknown(tmp_path: Path) -> None:
+    _write_server_log(
+        tmp_path,
+        "INFO importing dispatcher.py\nflydsl_gemm mentioned bare\n",
+    )
+
+    overall, per_file = krh._confirm_sources_imported(
+        ["vllm/flydsl_gemm.py", "vllm/dispatcher.py"],
+        tmp_path,
+    )
+
+    assert overall is None
+    assert per_file["vllm/flydsl_gemm.py"] is None
+
+
+def test_confirm_sources_deduplicates_repeated_paths(tmp_path: Path) -> None:
+    _write_server_log(tmp_path, "INFO importing dispatcher.py\n")
+
+    overall, per_file = krh._confirm_sources_imported(
+        ["vllm/dispatcher.py", "vllm/dispatcher.py"],
+        tmp_path,
+    )
+
+    assert overall is True
+    assert list(per_file) == ["vllm/dispatcher.py"]
+
+
+def test_confirm_sources_matches_single_file_semantics(tmp_path: Path) -> None:
+    """A one-file bundle must grade exactly as the single-file check does."""
+    _write_server_log(tmp_path, "nothing relevant here\n")
+
+    overall, _ = krh._confirm_sources_imported(["my_kernel.py"], tmp_path)
+
+    assert overall is krh._confirm_source_imported("my_kernel.py", tmp_path)
+    assert overall is False
+
+
 # -- _kernel_result_rank ---------------------------------------------------
 def _needs_review_result() -> dict:
     return {
