@@ -2419,6 +2419,11 @@ def run_attempt(
         "timed_out": bool(result.get("timed_out")) if isinstance(result, dict) else False,
         "salvaged": bool(result.get("salvaged")) if isinstance(result, dict) else False,
         "best_commit": str(result.get("best_commit") or "") if isinstance(result, dict) else "",
+        "flydsl_applyback": (
+            dict(result.get("flydsl_applyback") or {})
+            if isinstance(result, dict) and isinstance(result.get("flydsl_applyback"), dict)
+            else {}
+        ),
         "forge_result": (
             dict(result.get("forge_result") or {})
             if isinstance(result, dict) and isinstance(result.get("forge_result"), dict)
@@ -3226,6 +3231,39 @@ def _select_source_artifact(
     return "", "missing", f"no complete {target_suffix} source artifact found; tried: {tried}"
 
 
+def _framework_applyback_evidence(applyback: dict[str, Any]) -> dict[str, Any]:
+    """Summarize a validated apply-back for the attempt ledger and integrate.
+
+    Args:
+        applyback (dict[str, Any]): The backend's validated apply-back record.
+
+    Returns:
+        dict[str, Any]: The provenance downstream needs, or ``{}`` when this
+            attempt produced no framework apply-back.
+    """
+    if not applyback.get("artifact_kind"):
+        return {}
+    return {
+        "artifact_kind": str(applyback.get("artifact_kind") or ""),
+        "artifact_schema_version": applyback.get("artifact_schema_version"),
+        "validation_scope": str(applyback.get("validation_scope") or ""),
+        "reference_correctness_passed": bool(
+            applyback.get("reference_correctness_passed")
+        ),
+        "reference_snr_db": applyback.get("reference_snr_db"),
+        "integration_validation_required": bool(
+            applyback.get("integration_validation_required")
+        ),
+        "integration_validation_status": str(
+            applyback.get("integration_validation_status") or ""
+        ),
+        "commit": str(applyback.get("best_commit") or ""),
+        "commit_ref": str(applyback.get("commit_ref") or ""),
+        "builder_symbol": str(applyback.get("builder_symbol") or ""),
+        "changed_files": [str(item) for item in (applyback.get("changed_files") or [])],
+    }
+
+
 def build_verification(
     args: argparse.Namespace, attempts: list[dict[str, Any]], benchmark_available: bool
 ) -> dict[str, Any]:
@@ -3404,8 +3442,15 @@ def build_verification(
                     "Forge produced a patch, but its complete snapshot or "
                     "consumer repo root could not be resolved"
                 )
+    applyback = dict((best or {}).get("flydsl_applyback") or {})
     correctness_signal = getattr(args, "correctness_passed", None)
     correctness_source = "cli_override" if correctness_signal is not None else "missing"
+    # A validated framework apply-back already proved reference correctness
+    # against the source kernel, so it answers the micro gate directly instead
+    # of being re-derived from report prose.
+    if correctness_signal is None and applyback.get("reference_correctness_passed") is True:
+        correctness_signal = True
+        correctness_source = "forge_rewrite_reference"
     if correctness_signal is None and best is not None:
         bp = best.get("backend_paths") or {}
         correctness_signal = _extract_correctness_from_report(bp.get("partial_report") or bp.get("report") or "")
@@ -3441,6 +3486,10 @@ def build_verification(
         "e2e_gain_pct": e2e_gain_pct,
         "accuracy_passed": accuracy_passed,
         "verification_status": "complete" if correctness_passed and e2e_gain_pct is not None else "deferred",
+        "integration_validation_status": str(
+            applyback.get("integration_validation_status") or ""
+        ),
+        "framework_applyback": _framework_applyback_evidence(applyback),
         "best_attempt_id": best["attempt_id"] if best else "",
         "best_backend": best["backend"] if best else "",
         "best_artifact_path": best_artifact_path,
@@ -3503,6 +3552,17 @@ def make_proposal(verification: dict[str, Any]) -> dict[str, Any]:
     if reasons:
         return {"decision": "NEEDS_REVIEW", "reasons": reasons}
     if verification["e2e_gain_pct"] is None or verification["accuracy_passed"] is None:
+        # A reference-verified apply-back is a micro KEEP by design: only the
+        # serving run can prove the framework integration, and refusing to keep
+        # it here would stop the patch ever reaching that run.
+        if verification.get("integration_validation_status") == "pending":
+            return {
+                "decision": "KEEP",
+                "reasons": [
+                    "framework apply-back reference-verified; framework E2E/accuracy "
+                    "deferred to integrate"
+                ],
+            }
         return {
             "decision": "KEEP",
             "reasons": ["kernel artifact ready; E2E/accuracy deferred to integrate"],
