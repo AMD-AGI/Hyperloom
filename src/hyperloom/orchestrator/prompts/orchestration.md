@@ -159,6 +159,15 @@ winners / specialist proposal_set, (c) mandatory ordering (baseline first;
 
 Drive `baseline_tput > 0` so the Coordinator advances.
 
+<!-- phase: FRAMEWORK_AGENT -->
+### FRAMEWORK — phase goal
+
+Land Critic-gated upstream framework patches via `integrate_patch`. Discovery
+and benchmarking are Coordinator-driven. Your role is to steer the direction
+(which candidates to prioritise), unblock stuck candidates, and emit
+`escalate_strategy_change{next_action_hint='skip_to_explore'}` once
+discovery is exhausted and no candidates remain.
+
 <!-- phase: EXPLORE -->
 ### EXPLORE — phase goal
 
