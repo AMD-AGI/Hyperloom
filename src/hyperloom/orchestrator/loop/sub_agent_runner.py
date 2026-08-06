@@ -68,12 +68,17 @@ class SubAgentResult:
         state (str): Terminal state — ``"succeeded"`` / ``"failed"``.
         result (dict): Executor result payload (empty on failure).
         error (str | None): Error string when the task failed, else None.
+        error_class (str): Machine-readable failure category (e.g.
+            ``"policy_source_file_outside_trusted_scope"``) for a
+            ``PolicyDenied`` dispatch rejection; empty for other failures
+            (executors set their own ``error_class`` inside ``result``).
     """
 
     task_id: str
     state: str  # "succeeded" / "failed"
     result: dict
     error: str | None = None
+    error_class: str = ""
 
 
 class SubAgentRunner:
@@ -239,11 +244,13 @@ class SubAgentRunner:
                 )
                 if prebound_lease is not None:
                     await self.locks.release(prebound_lease)
+                rule = getattr(denied, "rule", "") or "denied"
                 return SubAgentResult(
                     task_id=task.task_id,
                     state="failed",
                     result={},
                     error=str(denied),
+                    error_class=f"policy_{rule}",
                 )
 
         await self._transition_resilient(

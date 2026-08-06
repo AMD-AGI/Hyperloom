@@ -264,14 +264,13 @@ class MachinePhase(PhaseHandler):
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
-        elif (
-            str(prior or "").strip().upper() == _phase_state.PHASE_SWEEP
-            and str(getattr(state, "pending_escalate_hint", "") or "").strip()
-            == _phase_state.ESCALATE_HINT_SKIP_TO_CLOSE
-        ):
-            # SWEEP already had an honest closeout, so skip_to_close was
-            # suppressed. Drop it here or the next phase inherits it and
-            # becomes robustness_escalated.
+        elif getattr(state, "pending_escalate_hint", ""):
+            # A phase change fired for a reason unrelated to the hint while
+            # one was still pending (e.g. set by a different phase's agent
+            # turn and never claimed, or SWEEP closing honestly on its own
+            # conc_sweep result while skip_to_close was suppressed) — clear it
+            # so it isn't inherited by the next phase's own exit checks as if
+            # it earned that leverage.
             state.consume_pending_escalate_hint()
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
