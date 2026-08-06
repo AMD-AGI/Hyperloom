@@ -1275,7 +1275,7 @@ def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
 
 
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
-    args = _make_args(codex_model="gpt-99.9")
+    args = _make_args(codex_model="gpt-99.9", critic_mock=False)
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
     cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
