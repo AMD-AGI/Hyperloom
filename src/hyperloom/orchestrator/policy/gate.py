@@ -429,6 +429,14 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
+# Placeholder/not-found sentinels that upstream lookups (or an LLM restating
+# a miss as prose) can leave in a SOURCE_LIKE_FIELDS value instead of leaving
+# the field empty. Treated as an absent field, not a bogus path: a resolver
+# miss should degrade the delegate gracefully, not deny the whole intent.
+_SOURCE_FILE_ABSENT_SENTINELS: frozenset[str] = frozenset(
+    {"not found", "none", "n/a", "null", "unknown", "unresolved", "missing"}
+)
+
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
 def _trace_path_allowlist() -> tuple[str, ...]:
@@ -2084,6 +2092,8 @@ class PolicyGate:
                 return
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
+                if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
+                    return
                 if self._path_in_source_allowlist(node) or self._path_under_session(node):
                     return
                 raise PolicyDenied(

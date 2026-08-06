@@ -160,6 +160,12 @@ class MachinePhase(PhaseHandler):
         # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
+        elif getattr(state, "pending_escalate_hint", ""):
+            # A phase change fired for a reason unrelated to the hint while
+            # one was still pending (e.g. set by a different phase's agent
+            # turn and never claimed) — clear it so it isn't inherited by the
+            # next phase's own exit checks as if it earned that leverage.
+            state.consume_pending_escalate_hint()
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE

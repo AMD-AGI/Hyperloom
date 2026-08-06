@@ -303,6 +303,28 @@ class ActionLadder:
                 )
             )
             return intents
+        # Dead inference server -> ``delegate(recover, force_gpu_cleanup=True)``.
+        # ``recover``'s owner-pattern kill list already covers the atom/Magpie
+        # server process names (Magpie, EngineCore); this is the same remedy
+        # as gpu_memory_leaked, just triggered by an unreachable health check
+        # instead of a VRAM leak. ("server_lifecycle", named in this
+        # symptom's own suggestion text, is an internal warm-reuse config
+        # helper, not a real dispatchable action — PolicyGate would reject it
+        # as unknown_action.)
+        if sym.name == "local_server_unreachable":
+            evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
+            intents.append(
+                build_delegate(
+                    action_name="recover",
+                    params={
+                        "reason": "local_server_unreachable",
+                        "force_gpu_cleanup": True,
+                        "evidence": evidence,
+                    },
+                    idempotency_key=(f"recover-server-unreachable-tick-{self._last_tick_index}"),
+                )
+            )
+            return intents
         # Wall-clock wind-down: ``delegate(report)`` lands a deterministic
         # report in the remaining budget before the deadline supervisor
         # SIGTERMs work; ``recover_unsuccessful`` is the finalization path.
