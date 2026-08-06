@@ -686,7 +686,7 @@ def main():
     # ranks execute the generation (collectives stay in lockstep); only rank 0
     # records + exports the chrome trace the profile executor discovers.
     if cli.torch_profiler_dir:
-        _run_profiled_capture(cli, args, run_once, barrier)
+        _run_profiled_capture(cli, args, run_once, barrier, pipe)
 
     # ---- Self-calibrating equivalence band (establish only) ----
     # Runs extra perturbed generations; ALL ranks must participate (collectives
@@ -709,19 +709,122 @@ def main():
     _finalize_and_write(cli, args, runs, world_size, done=True, quality_gate=quality_gate)
 
 
-def _run_profiled_capture(cli, args, run_once, barrier):
-    """Capture a torch.profiler trace of a single generation for TraceLens.
+# A profiled generation must stay inside ROCm's record budget. kineto collects
+# roctracer records into one buffer shared by HIP API calls AND GPU kernel ops,
+# capped at Config::maxEvents_ (1,000,000 in torch 2.9.1+rocm7.2.0; upstream
+# kineto #1114 later raised the default to 5M, which this build predates). A
+# whole generation issues ~8M records, so the API calls exhaust the budget and
+# every GPU op record is dropped: traces come out with exactly 1,000,000
+# cuda_runtime events and *zero* kernel events, and TraceLens rejects them. On
+# the build before that cap existed the same capture instead produced a 2.7 GB
+# trace that took TraceLens 287 GB of RSS and over an hour, so it timed out.
+# Both symptoms are the same defect — an unbounded capture — and roofline had
+# never once succeeded because of it.
+#
+# So bound the window rather than the workload: record a fixed number of
+# complete denoise steps out of a steady-state chunk. That is faithful (the
+# denoise loop is where the GPU time is), it is bounded by construction rather
+# than by a guessed step count, and it holds regardless of chunk count, step
+# count or model size. A denoise step cost ~84k records on the pre-cap build, so
+# four of them project to ~340k: a third of the budget, which is the margin this
+# wants given the estimate is itself derived and the failure it guards against
+# is silent. Each step still runs all 54 layers, so kernel coverage is complete.
+_PROFILE_WINDOW_SKIP_CHUNKS = 1   # chunk 0 runs a different, warm-up path
+_PROFILE_WINDOW_STEPS = 4
+
+
+class _ProfileWindow:
+    """Run the profiler over ``steps`` denoise steps of a steady-state chunk.
+
+    Hooks ``pipe.progress_bar`` the way :class:`ChunkTimer` does: the pipeline
+    opens one per AR chunk and calls ``update()`` once per denoise step, so the
+    two boundaries the window needs are already exposed without touching model
+    code. Installed on rank 0 only; the hook issues no collectives, so the
+    sequence-parallel ranks stay in lockstep.
+    """
+
+    def __init__(self, pipe, prof, skip_chunks, steps):
+        self._pipe = pipe
+        self._prof = prof
+        self._skip_chunks = skip_chunks
+        self._steps = steps
+        self._orig = pipe.progress_bar
+        self._chunks = 0
+        self._recorded = 0
+        self.started = False
+        self._stopped = False
+
+    def __enter__(self):
+        window = self
+
+        class _Bar:
+            def __init__(self, inner):
+                self._inner = inner
+                self._entered = None
+
+            def __enter__(self):
+                self._entered = self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def update(self, *a, **k):
+                window._on_step()
+                return self._entered.update(*a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def wrapped(*a, **k):
+            self._chunks += 1
+            if self._chunks > self._skip_chunks:
+                self._start()
+            return _Bar(self._orig(*a, **k))
+
+        self._pipe.progress_bar = wrapped
+        return self
+
+    def __exit__(self, *exc):
+        self._pipe.progress_bar = self._orig
+        self._stop()
+        return False
+
+    def _start(self):
+        if not self.started:
+            self._prof.start()
+            self.started = True
+
+    def _stop(self):
+        if self.started and not self._stopped:
+            torch.cuda.synchronize()
+            self._prof.stop()
+            self._stopped = True
+
+    def _on_step(self):
+        if self.started and not self._stopped:
+            self._recorded += 1
+            if self._recorded >= self._steps:
+                self._stop()
+
+    @property
+    def recorded_steps(self):
+        return self._recorded
+
+
+def _run_profiled_capture(cli, args, run_once, barrier, pipe):
+    """Capture a torch.profiler trace of a bounded window for TraceLens.
 
     All ranks execute ``run_once`` (the pipeline issues collective ops that must
-    stay in lockstep across sequence-parallel ranks); only rank 0 wraps it in a
-    profiler and exports a chrome trace. Hyperloom's ProfileExecutor discovers
-    ``*.trace.json.gz`` under ``<workspace>/torch_trace`` and hands it to
-    TraceLens, which attributes GPU time per kernel for the roofline + kernel
+    stay in lockstep across sequence-parallel ranks); only rank 0 records a
+    window of it and exports a chrome trace. Hyperloom's ProfileExecutor
+    discovers ``*.trace.json.gz`` under ``<workspace>/torch_trace`` and hands it
+    to TraceLens, which attributes GPU time per kernel for the roofline + kernel
     agent. Best-effort: a profiler/export failure must never lose the fps data.
 
-    The profiled generation uses ``cli.profile_steps`` denoise steps (when > 0)
-    instead of the full count, keeping the trace small enough to write over NFS
-    and parse quickly while still exercising every kernel type.
+    The generation itself uses ``cli.profile_steps`` denoise steps (when > 0)
+    instead of the full count, which bounds only wall-clock; trace size is
+    bounded separately by :class:`_ProfileWindow`.
     """
     import contextlib
 
@@ -740,38 +843,80 @@ def _run_profiled_capture(cli, args, run_once, barrier):
     # chain fallback. Overridable in case a torch build regresses stack capture.
     with_stack = os.environ.get("WORLDPLAY_PROFILER_WITH_STACK", "1") != "0"
     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-    prof_cm = (
+    prof = (
         profile(activities=activities, record_shapes=True,
                 with_stack=with_stack, with_modules=with_stack)
         if rank == 0
+        else None
+    )
+    window_cm = (
+        _ProfileWindow(pipe, prof, _PROFILE_WINDOW_SKIP_CHUNKS,
+                       _PROFILE_WINDOW_STEPS)
+        if prof is not None
         else contextlib.nullcontext()
     )
     # Bound the profiled workload (all ranks must agree on step count).
     orig_steps = args.num_inference_steps
     if cli.profile_steps and cli.profile_steps > 0:
         args.num_inference_steps = cli.profile_steps
-    rank0(f"[bench] capturing torch.profiler trace "
-          f"(1 generation, {args.num_inference_steps} steps) ...")
+    rank0(f"[bench] capturing torch.profiler trace ({args.num_inference_steps}-step "
+          f"generation, recording {_PROFILE_WINDOW_STEPS} steps from chunk "
+          f"{_PROFILE_WINDOW_SKIP_CHUNKS}) ...")
     barrier()
     torch.cuda.synchronize()
     try:
-        with prof_cm as prof:
+        with window_cm as window:
             run_once()
             torch.cuda.synchronize()
     except Exception as exc:  # noqa: BLE001 — profiling must not sink the run
         rank0(f"[bench][warn] profiled generation failed: {type(exc).__name__}: {exc}")
         prof = None
+        window = None
     finally:
         args.num_inference_steps = orig_steps
     barrier()
 
     if rank == 0 and prof is not None:
+        if window is None or not window.started:
+            rank0("[bench][warn] profiler window never opened "
+                  f"(generation produced <= {_PROFILE_WINDOW_SKIP_CHUNKS} chunk(s)); "
+                  "trace will be empty")
+            return
+        rank0(f"[bench] profiler recorded {window.recorded_steps} denoise step(s)")
+        _report_gpu_coverage(prof)
         out_trace = os.path.join(prof_dir, "worldplay-TP-0.pt.trace.json.gz")
         try:
             prof.export_chrome_trace(out_trace)
             rank0(f"[bench] wrote torch profiler trace -> {out_trace}")
         except Exception as exc:  # noqa: BLE001
             rank0(f"[bench][warn] export_chrome_trace failed: {type(exc).__name__}: {exc}")
+
+
+def _report_gpu_coverage(prof):
+    """Say whether the capture actually holds GPU activity, at capture time.
+
+    A trace with no kernel events is only diagnosed today by TraceLens, ~20
+    minutes downstream, and the orchestrator then continues in degraded mode
+    with no retry — so four sessions burned a roofline leg each without anyone
+    noticing the GPU half of the search was dark. The profiler already knows the
+    answer here; saying it out loud costs nothing. Reporting only: a profiling
+    problem must never sink the fps data this run exists to produce.
+    """
+    try:
+        totals = prof.key_averages()
+    except Exception as exc:  # noqa: BLE001
+        rank0(f"[bench][warn] could not summarize profiler events: "
+              f"{type(exc).__name__}: {exc}")
+        return
+    device_us = sum(getattr(e, "self_device_time_total", 0) for e in totals)
+    if device_us > 0:
+        rank0(f"[bench] profiler GPU coverage: {device_us / 1e3:.1f} ms "
+              f"across {len(totals)} distinct op(s)")
+        return
+    rank0("[bench][warn] profiler captured ZERO GPU activity — the trace is "
+          "CPU-only and TraceLens will reject it. On ROCm this is what "
+          "exhausting kineto's roctracer record budget looks like; narrow the "
+          "capture window further.")
 
 
 def _agg(runs, key):
