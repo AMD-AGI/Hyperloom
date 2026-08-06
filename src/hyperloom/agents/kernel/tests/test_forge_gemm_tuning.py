@@ -63,6 +63,26 @@ def test_build_cmd_maps_all_options():
     assert "--thorough" in cmd
 
 
+def test_build_cmd_uses_mode_selected_reads_without_enable_flag(monkeypatch):
+    payload = _payload()
+    payload.update(
+        {
+            "kb_read": True,
+            "kb_accept_candidate": True,
+            "kb_strict_lib": True,
+            "kb_current_lib": "aiter-1",
+        }
+    )
+    monkeypatch.setenv("FORGE_GEMM_TUNE_KB_READ", "1")
+
+    cmd = forge_gemm_tuning._build_cmd(payload)
+
+    assert "--kb-read" not in cmd
+    assert "--kb-accept-candidate" in cmd
+    assert "--kb-strict-lib" in cmd
+    assert cmd[cmd.index("--kb-current-lib") + 1] == "aiter-1"
+
+
 def test_build_cmd_requires_mandatory_fields():
     payload = _payload()
     payload.pop("model_path")
