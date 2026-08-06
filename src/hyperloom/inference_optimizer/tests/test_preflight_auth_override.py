@@ -497,6 +497,44 @@ def test_preflight_rewrites_stale_proxy_even_when_operator_set(
     assert "127.0.0.1:4002" not in cli.os.environ["LLM_API_BASE"]
 
 
+def test_preflight_keeps_official_anthropic_endpoint_despite_leftover_deepseek_key(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """Regression: a forgotten DEEPSEEK_API_KEY must not hijack a real Anthropic key.
+
+    Half-adopting the retired gateway would resolve ANTHROPIC_BASE_URL to
+    DeepSeek's host while the operator's own Anthropic key is what gets sent
+    there, and would add an OpenAI side they never configured.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "sk-real-anthropic")
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "sk-legacy-deepseek")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+
+    cli_preflight._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert cli.os.environ.get("OPENAI_BASE_URL", "") == ""
+    assert cli.os.environ.get("_".join(("OPENAI", "API", "KEY")), "") == ""
+
+
+def test_provider_fallback_keys_strip_retired_deepseek_vars_in_either_mode():
+    """A stale .env must not hand a single-provider run the other side.
+
+    The retired variables normalize to BOTH protocol sides, so an Anthropic-only
+    shell has to drop them just like an OpenAI-only one does.
+    """
+    for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+        assert key in cli_preflight._PROVIDER_FALLBACK_KEYS, key
+        assert key in cli_preflight._ANTHROPIC_FALLBACK_KEYS, key
+
+
 def test_is_stale_proxy_url_matches_legacy_only():
     assert cli_credentials._is_stale_proxy_url("http://127.0.0.1:4002/api/v1/llm-proxy/v1")
     assert not cli_credentials._is_stale_proxy_url("https://127.0.0.1:18444/api/v1/llm-proxy/v1")

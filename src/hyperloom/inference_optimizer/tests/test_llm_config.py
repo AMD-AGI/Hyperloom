@@ -166,23 +166,35 @@ def test_deepseek_compat_env_bare_known_host_gets_both_segments():
     assert updates["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
 
 
-def test_deepseek_compat_env_keeps_anthropic_key_pair_atomic():
-    """A leftover legacy key must not authenticate beside an explicit one.
+@pytest.mark.parametrize(
+    "configured",
+    [
+        {"_".join(("ANTHROPIC", "API", "KEY")): "sk-explicit"},
+        {"_".join(("ANTHROPIC", "AUTH", "TOKEN")): "sk-explicit"},
+        {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+    ],
+)
+def test_deepseek_compat_env_ignores_leftovers_once_anthropic_side_exists(configured):
+    """A stale legacy key must never re-point an explicit Anthropic credential.
 
-    ANTHROPIC_API_KEY is sent as x-api-key and ANTHROPIC_AUTH_TOKEN as a bearer
-    token; filling only the missing one would put two different secrets on the
-    same request, and gateways generally prefer the bearer token.
+    Half-adopting the gateway would put ANTHROPIC_BASE_URL on DeepSeek's host
+    while the operator's own key is what gets sent there, and would invent an
+    OpenAI side they never asked for.
     """
-    api_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
-    auth_token_var = "_".join(("ANTHROPIC", "AUTH", "TOKEN"))
+    assert deepseek_compat_env({**configured, _LEGACY_KEY: "sk-legacy"}) == {}
 
-    updates = deepseek_compat_env({api_key_var: "sk-explicit", _LEGACY_KEY: "sk-legacy"})
-    assert api_key_var not in updates
-    assert auth_token_var not in updates
 
-    updates = deepseek_compat_env({auth_token_var: "sk-explicit", _LEGACY_KEY: "sk-legacy"})
-    assert api_key_var not in updates
-    assert auth_token_var not in updates
+def test_deepseek_compat_env_leaves_official_anthropic_endpoint_alone():
+    """Regression: an explicit key alone still implies the OFFICIAL endpoint.
+
+    ``_resolve_llm_endpoints`` fills ``ANTHROPIC_BASE_URL`` from an explicit
+    Anthropic key; the shim must not get there first with DeepSeek's host.
+    """
+    env = {"_".join(("ANTHROPIC", "API", "KEY")): "sk-real-anthropic", _LEGACY_KEY: "sk-legacy"}
+    updates = deepseek_compat_env(env)
+    assert "ANTHROPIC_BASE_URL" not in updates
+    assert "OPENAI_BASE_URL" not in updates
+    assert "CLAUDE_MODEL" not in updates
 
 
 def test_claude_sdk_env_options_does_not_mix_legacy_and_explicit_keys():
@@ -226,6 +238,33 @@ def test_deepseek_compat_env_never_overrides_explicit_values():
     assert "_".join(("OPENAI", "API", "KEY")) not in updates
     assert "CLAUDE_MODEL" not in updates
     assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+
+
+def test_deepseek_compat_env_leaves_a_foreign_openai_side_alone():
+    """Another gateway on the OpenAI side keeps its own key AND its own model.
+
+    Replacing only ``CODEX_MODEL`` would leave that gateway being asked for
+    ``deepseek-v4-pro``, which it does not serve.
+    """
+    updates = deepseek_compat_env(
+        {
+            _LEGACY_KEY: "sk-legacy",
+            "OPENAI_BASE_URL": "https://gateway.example/v1",
+            "_".join(("OPENAI", "API", "KEY")): "sk-gateway",
+        }
+    )
+    assert "OPENAI_BASE_URL" not in updates
+    assert "_".join(("OPENAI", "API", "KEY")) not in updates
+    assert "CODEX_MODEL" not in updates
+    # The Anthropic side is still free, so it is adopted.
+    assert updates["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+
+
+def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
+    """GEAKv4 must not be pointed at a model the operator overrode."""
+    updates = deepseek_compat_env({_LEGACY_KEY: "sk-legacy", "CLAUDE_MODEL": "claude-opus-5"})
+    assert "CLAUDE_MODEL" not in updates
+    assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
 
 
 def test_deepseek_compat_env_is_idempotent():

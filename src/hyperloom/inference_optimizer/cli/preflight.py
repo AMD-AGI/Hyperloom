@@ -49,6 +49,10 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "LLM_API_BASE",
     # Legacy: not consumed anymore, still stripped if present.
     "SAFE_API_KEY",
+    # A retired DeepSeek config normalizes to BOTH protocol sides, so it is
+    # stripped in either single-provider mode: neither an Anthropic-only nor an
+    # OpenAI-only shell may acquire the other side from a stale .env.
+    *LEGACY_DEEPSEEK_ENV_KEYS,
 )
 
 _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
@@ -56,9 +60,6 @@ _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_CUSTOM_HEADERS",
-    # Retired DeepSeek variables normalize to the Anthropic side, so they are
-    # stripped with it: an OpenAI-only shell must not be re-pointed at DeepSeek
-    # by a stale .env.
     *LEGACY_DEEPSEEK_ENV_KEYS,
 )
 

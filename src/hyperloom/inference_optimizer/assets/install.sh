@@ -399,6 +399,13 @@ preflight_load_dotenv() {
 # hyperloom.common.llm_config.deepseek_compat_env.
 normalize_legacy_deepseek_env() {
   [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || return 0
+  # Adopt the gateway whole or not at all. Anything already on the Anthropic
+  # side means the retired variables are stale leftovers: half-adopting them
+  # would send an explicit Anthropic credential to DeepSeek's host.
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
+    return 0
+  fi
   local base lowered anthropic_url openai_url model
   base="${DEEPSEEK_BASE_URL:-}"
   base="${base%/}"
@@ -414,19 +421,18 @@ normalize_legacy_deepseek_env() {
     *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
   esac
   model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
-  [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
-  [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
-  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    # One credential in two spellings: fill as a unit so a legacy key never
-    # joins an explicitly configured Anthropic one.
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
-    fi
-    [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-  fi
+  export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "${DEEPSEEK_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
   [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
-  [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
-  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$model"
+  # GEAKv4 follows whichever Claude model is actually in effect.
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$model}"
+  # The OpenAI side is adopted only when it is entirely free; otherwise some
+  # other gateway already runs there and keeps its own key and model.
+  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_BASE_URL="$openai_url"
+    [ -n "${DEEPSEEK_API_KEY:-}" ] && export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  fi
   unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
   warn "DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*"
 }

@@ -7,6 +7,9 @@ import subprocess
 
 from pathlib import Path
 
+import pytest
+
+from hyperloom.common.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import setup
 
 
@@ -459,6 +462,89 @@ def test_baremetal_setup_keeps_legacy_env_when_validation_fails(tmp_path: Path):
 
     assert proc.returncode == 99, f"expected the credential die(), got {proc.returncode}: {proc.stderr}"
     assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in dotenv.read_text(encoding="utf-8")
+
+
+_SHIM_REPORTED_VARS = (
+    "ANTHROPIC_BASE_URL",
+    "_".join(("ANTHROPIC", "API", "KEY")),
+    "OPENAI_BASE_URL",
+    "_".join(("OPENAI", "API", "KEY")),
+    "CLAUDE_MODEL",
+    "CODEX_MODEL",
+    "GEAK_CLAUDE_MODEL",
+)
+
+_SHIM_CASES = {
+    "key only": {"_".join(("DEEPSEEK", "API", "KEY")): "sk-ds"},
+    "explicit anthropic key": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "_".join(("ANTHROPIC", "API", "KEY")): "sk-real",
+    },
+    "explicit anthropic url": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
+    },
+    "foreign openai side": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "OPENAI_BASE_URL": "https://gw.example/v1",
+        "_".join(("OPENAI", "API", "KEY")): "sk-gw",
+    },
+    "explicit models": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "CLAUDE_MODEL": "claude-opus-5",
+        "CODEX_MODEL": "gpt-5.6-sol",
+    },
+    "uppercase anthropic segment": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "DEEPSEEK_BASE_URL": "https://gw.example/Anthropic",
+    },
+    "bare deepseek host": {
+        "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    },
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SHIM_CASES))
+def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str):
+    """The shell shim and ``deepseek_compat_env`` must resolve identically.
+
+    Four copies of this translation exist (Python plus three installers); a
+    divergence would send credentials to a different endpoint depending on
+    which entrypoint the operator used.
+    """
+    env = _SHIM_CASES[case]
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("normalize_legacy_deepseek_env() {")
+    end = script_text.index("\npreflight_validate_credentials() {")
+
+    runner = tmp_path / "shim.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                # The Python side is given an explicit mapping, so the shell has
+                # to start from the same blank slate rather than inherit pytest's.
+                *_CLEAN_PROVIDER_ENV,
+                "warn() { :; }",
+                *(f'export {name}="{value}"' for name, value in env.items()),
+                script_text[start:end],
+                "normalize_legacy_deepseek_env",
+                *(f'printf "%s=%s\\n" {name} "${{{name}-}}"' for name in _SHIM_REPORTED_VARS),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True, check=True)
+    from_shell = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    from_python = {**env, **deepseek_compat_env(env)}
+
+    for name in _SHIM_REPORTED_VARS:
+        assert from_shell.get(name, "") == from_python.get(name, ""), name
 
 
 def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
