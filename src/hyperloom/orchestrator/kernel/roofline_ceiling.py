@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
 
 
@@ -1434,8 +1435,10 @@ def compute_roofline_breakdown_from_state(
         fields).
     """
     runtime = resolve_runtime_workload(state, arm=arm)
-    # Diffusion (xDiT) uses a distinct images/sec ceiling.
-    if (runtime.framework or "").strip().lower() == "xdit":
+    # Diffusion uses a distinct images/sec ceiling. Gate on the registry kind
+    # so every scriptable framework (e.g. hunyuan_image3) takes this path
+    # rather than falling through to the LLM decode roofline below.
+    if is_scriptable(runtime.framework):
         return _compute_diffusion_breakdown_from_state(state, runtime)
     meta = load_model_meta(
         runtime.model_path,

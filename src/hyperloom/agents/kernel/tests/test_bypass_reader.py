@@ -620,3 +620,14 @@ def test_steady_state_with_zero_annotations_falls_back(tmp_path):
     assert out["aggregation_scope"] == "full_trace"
     assert out.get("steady_window_status")
     assert len(out["kernels"]) == 2
+
+
+def test_reader_scriptable_detection_is_registry_driven():
+    """The steady-window threshold must apply to every scriptable framework."""
+    from hyperloom.inference_optimizer import framework_registry as fr
+
+    for name, spec in fr.FRAMEWORKS.items():
+        assert reader._is_scriptable_framework(name) is (spec.kind == fr.SCRIPTABLE), name
+    assert reader._is_scriptable_framework("hunyuan_image3") is True
+    assert reader._is_scriptable_framework("sglang") is False
+    assert reader._is_scriptable_framework(None) is False
