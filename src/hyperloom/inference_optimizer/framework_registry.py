@@ -128,6 +128,21 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="recon/s",
     ),
+    # An operator's own workload. Everything the entries above hardcode — the
+    # checkout, the entrypoint, the knobs the script reads — arrives at launch
+    # instead: ``--framework-path`` and ``--benchmark-scripts-dir`` (or their
+    # env forms), plus ``--extra-env`` for whatever the script itself reads.
+    # There is no upstream repo to discover PRs from, and the throughput unit
+    # is deliberately neutral: only the operator's own report knows whether the
+    # number it produced counts frames, images or anything else.
+    "custom": FrameworkSpec(
+        name="custom",
+        kind=SCRIPTABLE,
+        extra_args_env="EXTRA_CUSTOM_ARGS",
+        repo_url=None,
+        supports_server_reuse=False,
+        throughput_unit="unit/s",
+    ),
 }
 
 DEFAULT_FRAMEWORK = "sglang"
