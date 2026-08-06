@@ -197,6 +197,14 @@ def _queue_kernel_keep(
             "trace_gpu_pct": entry.get("last_gpu_pct", 0.0),
             "created_at": str(entry.get("last_ts") or _now_iso()),
             "status": "pending",
+            "correctness_source": str(entry.get("last_correctness_source") or ""),
+            "artifact_kind": str(
+                (entry.get("last_framework_applyback") or {}).get("artifact_kind") or ""
+            ),
+            "integration_validation_status": str(
+                entry.get("last_integration_validation_status") or ""
+            ),
+            "framework_applyback": dict(entry.get("last_framework_applyback") or {}),
         }
     else:
         # The patch snapshot is immutable, but trace-local routing metadata must
@@ -1052,6 +1060,15 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled).
     entry["last_backend"] = str(verification.get("best_backend") or "")
     entry["last_correctness_passed"] = verification.get("correctness_passed")
+    # Provenance for how correctness was established and whether the artifact
+    # still owes a framework integration verdict.
+    entry["last_correctness_source"] = str(verification.get("correctness_source") or "")
+    entry["last_integration_validation_status"] = str(
+        verification.get("integration_validation_status") or ""
+    )
+    entry["last_framework_applyback"] = dict(
+        verification.get("framework_applyback") or {}
+    )
     entry["last_ts"] = ts
     entry["history"] = history
     if test_command:
@@ -1077,6 +1094,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "micro_speedup": micro_float,
             "compile_passed": verification.get("compile_passed"),
             "correctness_passed": verification.get("correctness_passed"),
+            "correctness_source": str(verification.get("correctness_source") or ""),
+            "integration_validation_status": str(
+                verification.get("integration_validation_status") or ""
+            ),
+            "framework_applyback": dict(verification.get("framework_applyback") or {}),
             "best_artifact_path": best_artifact_path,
             "best_artifact_bundle": best_artifact_bundle,
             "deploy_snapshot_dir": deploy_snapshot_dir,
