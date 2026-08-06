@@ -186,7 +186,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
     assert "ANTHROPIC_BASE_URL" not in cli.os.environ
     assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
-    # The provider key fills its own name plus the internal GEAK / LLM aliases.
+    # The OpenAI key fills its own name plus the internal GEAK / LLM aliases.
     for name in (
         "_".join(("OPENAI", "API", "KEY")),
         "_".join(("GEAK", "API", "KEY")),
@@ -241,26 +241,28 @@ def test_preflight_keeps_explicit_provider_keys(
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
 
 
-def test_preflight_anthropic_only_leaves_openai_protocol_aliases_unset(
+def test_preflight_keeps_anthropic_side_supplied_by_dotenv(
     monkeypatch,
     tmp_path,
     clean_url_env,
     stub_install_steps,
 ):
-    """GEAK / LLM aliases feed OpenAI-protocol consumers, so an Anthropic-only
-    deploy leaves them unset rather than handing them the Anthropic key."""
+    """``.env`` is operator configuration: with the OpenAI side exported in the
+    shell and the Anthropic side coming from ``.env``, both sides survive."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
 
-    cli_preflight._preflight()
+    def _dotenv_supplies_anthropic_side():
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com")
+        monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-gw")
 
-    for name in (
-        "_".join(("GEAK", "API", "KEY")),
-        "_".join(("LLM", "API", "KEY")),
-        "_".join(("AMD_LLM", "API", "KEY")),
-    ):
-        assert name not in cli.os.environ, name
+    monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", _dotenv_supplies_anthropic_side)
+
+    resolved = cli_preflight._preflight()
+
+    assert resolved == ("https://gw.example.com", "https://gw.example.com/v1")
+    assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "ak-gw"
 
 
 def test_preflight_openai_only_drops_anthropic_creds_from_installer_env(
@@ -307,13 +309,14 @@ def test_preflight_claude_config_uses_explicit_anthropic_key(
     assert '"customApiUrl": "https://api.anthropic.com"' in config_text
 
 
-def test_preflight_anthropic_only_backfills_geak_aliases(
+def test_preflight_anthropic_only_leaves_openai_protocol_aliases_unset(
     monkeypatch,
     tmp_path,
     clean_url_env,
     stub_install_steps,
 ):
-    """Anthropic-only entry still backfills GEAK/LLM_API_BASE from the resolved URL."""
+    """The GEAK / LLM aliases address OpenAI-protocol endpoints, so an
+    Anthropic-only entry leaves both the URL and the key side unset."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -323,8 +326,14 @@ def test_preflight_anthropic_only_backfills_geak_aliases(
 
     # Official Anthropic is not OpenAI-compatible; only Anthropic side resolved.
     assert resolved == ("https://api.anthropic.com", "")
-    for name in ("GEAK_BASE_URL", "LLM_API_BASE"):
-        assert cli.os.environ[name] == "https://api.anthropic.com"
+    for name in (
+        "GEAK_BASE_URL",
+        "LLM_API_BASE",
+        "_".join(("GEAK", "API", "KEY")),
+        "_".join(("LLM", "API", "KEY")),
+        "_".join(("AMD_LLM", "API", "KEY")),
+    ):
+        assert name not in cli.os.environ, name
     assert "_".join(("legacy backend", "BASE", "URL")) not in cli.os.environ
 
 
@@ -373,7 +382,8 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
     # Defense-in-depth: a stray legacy gateway key from the installer env is
     # stripped too, so it never reaches child processes.
     assert "_".join(("SAFE", "API", "KEY")) not in cli.os.environ
-    assert cli.os.environ["LLM_API_BASE"] == "https://api.anthropic.com"
+    # The stale OpenAI-side LLM_API_BASE is dropped, not rewritten to Anthropic.
+    assert "LLM_API_BASE" not in cli.os.environ
 
 
 def test_preflight_official_openai_key_only_uses_default_endpoint(

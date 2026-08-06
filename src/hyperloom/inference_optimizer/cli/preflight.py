@@ -83,8 +83,8 @@ def _resolve_dotenv_file() -> Path | None:
     return None
 
 
-def _provider_only_mode_before_fallback() -> str:
-    """Detect explicit single-provider intent before installer env fallback runs."""
+def _provider_only_mode() -> str:
+    """Detect explicit single-provider intent from the current environment."""
     has_anthropic = bool(
         os.environ.get("ANTHROPIC_BASE_URL")
         or os.environ.get("ANTHROPIC_API_KEY")
@@ -102,11 +102,11 @@ def _provider_only_mode_before_fallback() -> str:
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
-    """Undo stale cross-provider credentials loaded from installer env fallback.
+    """Undo cross-provider credentials injected by the installer env file.
 
-    Symmetric: a single-provider run keeps the other side exactly as the caller
-    had it, so a stale installer env file cannot turn it into a mispaired
-    configuration.
+    Symmetric: a single-provider run keeps the other side exactly as the shell
+    and ``.env`` left it, so a stale installer env file cannot turn a valid
+    configuration into a mispaired one.
     """
     if provider_mode == "anthropic":
         keys: tuple[str, ...] = _PROVIDER_FALLBACK_KEYS
@@ -1257,13 +1257,14 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    # Capture explicit single-provider intent before the installer env fallbacks
-    # run, then undo any cross-provider credentials they inject.
-    provider_mode = _provider_only_mode_before_fallback()
+    _load_dotenv_fallback()
+    # ``.env`` is operator configuration, so both the single-provider intent and
+    # the restore baseline are taken after it loads. Only what the installer env
+    # file injects on top is undone below.
+    provider_mode = _provider_only_mode()
     provider_snapshot = {
         key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)
     }
-    _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
@@ -1272,9 +1273,9 @@ def _preflight(
     _validate_credentials()
 
     # --- Auth alias export (internal GEAK / LLM aliases only) ---
-    # These aliases feed OpenAI-protocol consumers, so they come from the
-    # OpenAI-side key. An explicitly set alias is kept, and the per-provider
-    # primary keys are never cross-filled.
+    # These aliases feed OpenAI-protocol consumers, so they are filled from the
+    # OpenAI-side key only and stay unset when that side is not configured. An
+    # explicitly set alias is kept, and the primary keys are never cross-filled.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     if openai_key:
         for alias in (
@@ -1350,9 +1351,10 @@ def _preflight(
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
-        # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
-        # URL, but an intentional operator override is preserved.
-        gateway_url = openai_url or anthropic_url
+        # GEAK / LLM_API_BASE address OpenAI-protocol endpoints, so they default
+        # to the resolved OpenAI-side URL and stay unset when that side is not
+        # configured. An intentional operator override is preserved.
+        gateway_url = openai_url
         if gateway_url:
             for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
