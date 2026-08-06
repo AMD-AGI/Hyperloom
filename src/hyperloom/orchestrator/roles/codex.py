@@ -5,10 +5,10 @@
 
 No-tools by default, so the intent transport is a JSON-in-text envelope
 (``{"intents": [...]}``) validated with the same ``validate_envelope`` the
-Claude path uses. The AMD gateway hosts both protocols on one host under split
-paths, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``:
-``OPENAI_BASE_URL`` wins, otherwise ``ANTHROPIC_BASE_URL`` is rewritten
-(``/anthropic`` -> ``/Unified/v1``) by ``derive_openai_base_url``.
+Claude path uses. Credentials come from the OpenAI side only
+(``OPENAI_BASE_URL`` + ``OPENAI_API_KEY``); ``ANTHROPIC_*`` values are never
+borrowed, so an Anthropic-only deployment fails to construct this backend
+instead of sending an Anthropic key to the OpenAI host.
 
 Optional web search: when ``HYPERLOOM_CODEX_WEB_SEARCH`` is enabled, every turn
 uses the OpenAI **Responses API** with the built-in server-side ``web_search``

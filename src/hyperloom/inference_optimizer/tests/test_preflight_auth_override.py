@@ -94,13 +94,6 @@ def clean_url_env(monkeypatch):
         os.environ.update(snapshot)
 
 
-def test_derive_anthropic_base_url_strips_openai_v1_suffix():
-    assert (
-        cli_credentials._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
-        == "https://gateway.example/api/v1/llm-proxy"
-    )
-
-
 def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
     monkeypatch.delenv("REPO_ROOT", raising=False)
     monkeypatch.delenv("LD_PRELOAD", raising=False)

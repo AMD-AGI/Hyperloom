@@ -442,6 +442,39 @@ verify_die() {
 # install without them cannot finish anyway. The only downgrade path
 # is --check-only / --dry-run, which is for introspection only and
 # does not actually install.
+# Reject a configuration that pairs one provider's base URL with the other
+# provider's key -- the same contract the CLI preflight enforces. DeepSeek's key
+# implies its own Anthropic-compatible endpoint, so it counts as an endpoint.
+preflight_reject_cross_provider() {
+  local a_key a_endpoint conflict=""
+  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${DEEPSEEK_API_KEY:-}}}"
+  a_endpoint="${ANTHROPIC_BASE_URL:-}"
+  if [ -z "$a_endpoint" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    a_endpoint="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}"
+  fi
+  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
+    conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
+  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
+  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
+    conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
+  elif [ -n "$a_endpoint" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+    conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
+  fi
+  [ -z "$conflict" ] && return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    warn "conflicting LLM credentials: ${conflict}; continuing because --check-only / --dry-run is active."
+    return 0
+  fi
+  cat >&2 <<EOF
+[kernel-agent ERROR] Conflicting LLM credentials: ${conflict}.
+
+Hyperloom never borrows one provider's key or endpoint for the other. Give each
+side its own base URL and key, or drop the other provider's key.
+EOF
+  return 1
+}
+
 preflight_validate_credentials() {
   local missing=()
   local has_anthropic=0 has_openai=0
@@ -451,6 +484,9 @@ preflight_validate_credentials() {
     { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; }; } &&
     has_anthropic=1
   { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
+  # Mirror the CLI's cross-provider rejection so a mispaired config fails here
+  # rather than after a full install.
+  preflight_reject_cross_provider || return 1
   if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
     log "credentials preflight: at least one self-consistent provider side present"
     return 0
@@ -1157,8 +1193,11 @@ write_env_file() {
   else
     remove_dotenv_var ANTHROPIC_API_KEY
   fi
-  remove_dotenv_var OPENAI_BASE_URL
-  remove_dotenv_var OPENAI_API_KEY
+  # This installer resolves only the Anthropic / DeepSeek side. It must neither
+  # write the OpenAI-side creds (no cross-writing, nothing extra persisted) nor
+  # clear them -- clearing the operator's OPENAI_BASE_URL / OPENAI_API_KEY here
+  # would silently disable Codex / GEAK on the next run, and this function is
+  # editing the shared $REPO_ROOT/.env.
   if [ -n "${_deepseek_url}" ]; then
     upsert_dotenv_var DEEPSEEK_BASE_URL "$_deepseek_url"
   else
