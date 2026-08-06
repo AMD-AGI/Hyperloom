@@ -329,8 +329,10 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
-        start = script_text.index("preflight_validate_credentials() {")
-        end = script_text.index("\npreflight_validate_credentials", start)
+        # Start at the cross-provider check so the extracted slice is the whole
+        # credential preflight, including the rejection helper it calls.
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index("\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {"))
         runner = tmp_path / f"{name}-deepseek-preflight.sh"
         runner.write_text(
             "\n".join(
@@ -354,6 +356,57 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
         )
 
         subprocess.run(["bash", str(runner)], check=True)
+
+
+def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
+    """Both installers must reject a mispaired config at install time, matching the
+    CLI preflight, instead of letting it fail only at runtime."""
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_reject_cross_provider() {")
+        end = script_text.index(
+            "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
+        )
+        runner = tmp_path / f"{name}-cross-provider.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    # OpenAI-side gateway URL paired with only an Anthropic key.
+                    "OPENAI_BASE_URL=https://gw.example.com/v1",
+                    "ANTHROPIC_API_KEY=sk-ant-real",
+                    "log() { :; }",
+                    "warn() { echo \"$*\" >&2; }",
+                    'die() { echo "$*" >&2; exit 99; }',
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+        assert proc.returncode != 0, f"{name}: mispaired credentials were accepted"
+        assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
@@ -623,8 +676,10 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "export SAFE_API_KEY" not in script_text
     assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
-    assert "remove_dotenv_var OPENAI_BASE_URL" in write_text
-    assert "remove_dotenv_var OPENAI_API_KEY" in write_text
+    # ... and it must not clear the OpenAI side either: this installer does not
+    # resolve it, and .env is shared, so deleting it would disable Codex / GEAK.
+    assert "remove_dotenv_var OPENAI_BASE_URL" not in write_text
+    assert "remove_dotenv_var OPENAI_API_KEY" not in write_text
 
 
 def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
@@ -828,8 +883,11 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
     assert "export OPENAI_BASE_URL=" not in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
-    assert "OPENAI_BASE_URL=" not in dotenv_text
-    assert "OPENAI_API_KEY=" not in dotenv_text
+    # The OpenAI side is not resolved by this installer, so its .env entries are
+    # left untouched -- clearing them would disable Codex / GEAK on the next run.
+    assert "OPENAI_BASE_URL=https://api.anthropic.com" in dotenv_text
+    assert "OPENAI_API_KEY=stale-openai-key" in dotenv_text
+    # Gateway aliases it does own are still purged.
     assert "LLM_GATEWAY_KEY=" not in dotenv_text
     assert "SAFE_API_KEY=" not in dotenv_text
 

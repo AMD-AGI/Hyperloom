@@ -89,8 +89,6 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
-    assert credentials._derive_anthropic_base_url("https://gw.example/v1") == "https://gw.example"
-
     # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)

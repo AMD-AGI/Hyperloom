@@ -1165,8 +1165,12 @@ resolve_credentials() {
     else
       local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
       if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+        # Operator declared an Anthropic-only deployment: scrub the other
+        # providers' entries.
         remove_dotenv_var DEEPSEEK_API_KEY
         remove_dotenv_var DEEPSEEK_BASE_URL
+        remove_dotenv_var OPENAI_API_KEY
+        remove_dotenv_var OPENAI_BASE_URL
       fi
       if [ -n "$persist_anthropic_key" ]; then
         upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
@@ -1179,8 +1183,11 @@ resolve_credentials() {
         remove_dotenv_var ANTHROPIC_BASE_URL
       fi
     fi
-    remove_dotenv_var OPENAI_API_KEY
-    remove_dotenv_var OPENAI_BASE_URL
+    # This installer resolves only the Anthropic / DeepSeek side, so it must not
+    # clear the operator's OpenAI-side entries -- doing so silently disables
+    # Codex / GEAK on the next run. They are only scrubbed above, inside an
+    # authoritative single-provider mode where the operator declared that this
+    # deployment has no OpenAI side.
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
     remove_dotenv_var OPENAI_CUSTOM_HEADERS
