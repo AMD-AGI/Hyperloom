@@ -319,6 +319,56 @@ async def test_promote_roofline_succeeded_writes_audit(session_dir):
     assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 
+@pytest.mark.asyncio
+async def test_roofline_with_an_analysis_anchors_the_watermark(session_dir):
+    """A roofline that produced an analysis costs the next one a 10% climb."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.cumulative_gain_validated = 75.0
+    s.last_roofline_tput = 0.0
+    s.last_trace_analyze = {
+        "roofline_snapshot_id": 5,
+        "analysis_md_path": "/tmp/a.md",
+        "analysis_md_text": "# roofline\nattention is 64.8% of GPU time\n",
+    }
+
+    await coord._promote_to_shared_state(
+        "roofline",
+        {"status": "succeeded", "snapshot_id": 5},
+        task=_task("roofline"),
+    )
+
+    assert s.last_roofline_tput == 175.0
+
+
+@pytest.mark.asyncio
+async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_dir):
+    """An empty analysis must not buy a cycle of silence.
+
+    The anchor is what stops the watermark firing again until throughput climbs
+    another 10%. A roofline that recorded nothing once anchored anyway, so the
+    specialist kept reading "(none — no fresh roofline snapshot has been
+    recorded yet)" while the anchor insisted one had been taken there, and the
+    only thing that could have lifted throughput past the anchor was the
+    evidence the empty snapshot was standing in for.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.cumulative_gain_validated = 75.0
+    s.last_roofline_tput = 0.0
+    s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_text": ""}
+
+    await coord._promote_to_shared_state(
+        "roofline",
+        {"status": "succeeded", "snapshot_id": 5},
+        task=_task("roofline"),
+    )
+
+    assert s.last_roofline_tput == 0.0
+
+
 # ---------------------------------------------------------------------------
 # GAP 3: successful profile with a trace clears the stale trace_analyze cache.
 # ---------------------------------------------------------------------------
