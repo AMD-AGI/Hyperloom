@@ -33,6 +33,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   which causes the Coordinator's request router to auto-reject kernel REQUESTs
   with `agent_disabled`.
 
+  The Slurm launcher's `HL_KERNEL_BACKEND` (`codex|claude`) selected the retired
+  LLM backend and is removed with it. Use `KERNEL_OPT_BACKEND_ORDER`
+  (`geak|forge`) to steer the kernel-opt rewrite ladder; the launcher forwards it
+  into the container and every carrier defaults it to `geak`.
+
   `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been replaced
   by `docs/conceptual/kernel-execution-path.md`, which documents the real
   programmatic dispatch flow.

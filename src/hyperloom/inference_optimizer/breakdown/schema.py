@@ -417,7 +417,7 @@ class CapabilityEntry(TypedDict, total=False):
     e2e_gain_pct: float | None  # best end-to-end integrate gain for this lane's kernel
     tested: int  # for backends/params/explore: distinct variants tested
     best_gain_pct: float | None
-    reason: str  # human readable, e.g. "kernel-claude only this run"
+    reason: str  # human readable, e.g. "geak backend only this run"
     # explore-specific:
     keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
     winners_history: int  # cumulative explore_search.winners_history length
