@@ -201,15 +201,29 @@ def test_tracker_reset():
 
 
 def test_context_window_known_and_unknown(monkeypatch):
-    assert context_window_for_model("claude-opus-5") == 200_000
-    # The gateway spells it "Claude-Opus-5"; folding must resolve it too.
-    assert context_window_for_model("Claude-Opus-5") == 200_000
     assert context_window_for_model("claude-opus-4-8") == 200_000
     monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 123_456)
     monkeypatch.setitem(om.MODEL_CONTEXT_WINDOWS, "unit-known-window", 234_567)
     assert context_window_for_model("unit-known-window") == 234_567
     assert context_window_for_model("") == 123_456
     assert context_window_for_model("totally-unknown") == 123_456
+
+
+def test_default_orchestration_model_has_an_explicit_window(monkeypatch):
+    """The default model must be listed, not merely coincide with the fallback.
+
+    ``claude-opus-5`` shares the 200k value with
+    ``DEFAULT_MODEL_CONTEXT_WINDOW``, so asserting the number alone would pass
+    even with the entry deleted. Pin membership and re-read under a different
+    fallback so a dropped entry actually fails.
+    """
+    from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
+
+    assert DEFAULT_CLAUDE_MODEL in om.MODEL_CONTEXT_WINDOWS
+    monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 1)
+    assert context_window_for_model(DEFAULT_CLAUDE_MODEL) == 200_000
+    # The gateway spells it "Claude-Opus-5"; folding must resolve it too.
+    assert context_window_for_model("Claude-Opus-5") == 200_000
 
 
 def test_context_window_matches_gateway_model_spelling(monkeypatch):

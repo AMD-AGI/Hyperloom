@@ -1103,6 +1103,41 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
     assert "claude-opus-4-6" in out
 
 
+def test_validate_claude_model_opus_5_missing_falls_back_to_next_rung(monkeypatch, capsys):
+    """A gateway that predates opus-5 must land on 4-8, not skip to the last rung.
+
+    This is the common transition-period catalog: every older allowlist entry is
+    present but the new default is not.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-4-8"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "falling back" in out
+
+
+def test_validate_claude_model_fallback_walks_the_allowlist_order(monkeypatch, capsys):
+    """The ladder skips rungs the gateway lacks and stops at the first it serves."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-4-7"
+
+
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing all allowed Claude models -> sys.exit(2)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")

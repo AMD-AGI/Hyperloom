@@ -458,11 +458,11 @@ def _discover_llm_model(provider: str) -> str:
     if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
         return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
     if provider == "openai":
-        return os.environ.get("OPENAI_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip() or "gpt-5.5"
+        return os.environ.get("OPENAI_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip() or "gpt-5.6-sol"
     return (
         os.environ.get("ANTHROPIC_MODEL", "").strip()
         or os.environ.get("CLAUDE_MODEL", "").strip()
-        or "claude-sonnet-4-5-20250929"
+        or "claude-opus-5"
     )
 
 

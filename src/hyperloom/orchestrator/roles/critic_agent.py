@@ -324,7 +324,7 @@ class CriticAgentBackend:
         Coordinator session directory. Scopes per-turn workdirs and the
         per-session critic memory store.
     codex_model:
-        OpenAI / Codex chat-completion model id (e.g. ``gpt-5.4``).
+        OpenAI / Codex chat-completion model id (e.g. ``gpt-5.6-sol``).
     codex_client_factory:
         Optional callable returning an ``AsyncOpenAI``-compatible client
         (test seam).
@@ -346,7 +346,7 @@ class CriticAgentBackend:
 
     critic_agent_root: Path
     session_dir: Path
-    codex_model: str = "gpt-5.4"
+    codex_model: str = "gpt-5.6-sol"
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None

@@ -34,6 +34,10 @@ DEFAULT_CHECKPOINT_MIN_TICK_GAP: int = 3
 # Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
 # Keys must be lower-case with ``-`` separators; lookups are folded to that form.
+# These drive the compaction trigger (window * soft fraction), so they stay at
+# the 200k every Claude model serves without an extended-window opt-in, even
+# where a gateway advertises 1M. Listing a model explicitly keeps it pinned to
+# that value if DEFAULT_MODEL_CONTEXT_WINDOW ever moves.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-5": 200_000,
     "claude-opus-4-8": 200_000,
