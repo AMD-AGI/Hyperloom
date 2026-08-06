@@ -3284,7 +3284,7 @@ def build_verification(
                     speedup_source = "structured_timing_result"
             except (TypeError, ValueError):
                 sp = None
-        if sp is None:
+        if sp is None and not is_forge:
             sp = _extract_speedup_from_report(report)
             speedup_source = "report_scan"
         if sp is not None:

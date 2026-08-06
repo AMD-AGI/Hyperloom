@@ -353,7 +353,7 @@ def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
-def test_forge_falls_back_to_report_when_structured_score_is_missing(tmp_path):
+def test_forge_rejects_ambiguous_report_without_structured_score(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.30x\n",
@@ -366,8 +366,9 @@ def test_forge_falls_back_to_report_when_structured_score_is_missing(tmp_path):
         benchmark_available=True,
     )
 
-    assert verification["micro_speedup"] == 1.30
-    assert verification["micro_speedup_source"] == "report_scan"
+    assert verification["micro_speedup"] == 1.0
+    assert verification["micro_speedup_source"] == "default_unmeasured"
+    assert ko.make_proposal(verification)["decision"] == "PARTIAL"
 
 
 def test_non_forge_preserves_structured_timing_fallback(tmp_path):

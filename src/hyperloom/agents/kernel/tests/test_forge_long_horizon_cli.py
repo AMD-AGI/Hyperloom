@@ -105,6 +105,28 @@ def _stub_submit_environment(monkeypatch) -> None:
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
+def test_observed_regression_score_is_preserved_for_diagnostics():
+    observed = forge_submit._observed_mean_case_result_fields(
+        {
+            "mean_case_speedup": 0.95,
+            "search_start_mean_case_speedup": 1.0,
+        }
+    )
+
+    assert observed == (0.95, 1.0, False, False)
+
+
+def test_regression_is_not_a_valid_recovery_best():
+    fields = forge_submit._mean_case_result_fields(
+        {
+            "mean_case_speedup": 0.95,
+            "search_start_mean_case_speedup": 1.0,
+        }
+    )
+
+    assert fields is None
+
+
 def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
     repo, kernel = _make_repo(tmp_path)
     sibling = repo / "kernels" / "device.py"
