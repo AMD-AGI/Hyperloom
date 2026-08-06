@@ -58,6 +58,40 @@ _MI355X_PEAK_TFLOPS: dict[str, float] = {
     "fp4": 10066.4,
     "float4": 10066.4,
 }
+#: RDNA4 vendor-dense peak TFLOPS — per SKU. The four RX 9000-series SKUs do
+#: *not* share a single table: AMD's published CU count and game clock differ
+#: per SKU (see wiki/RDNA_4). rx9070xt (64 CU @ 2.4 GHz) is the baseline; the
+#: other rows are scaled by (CUs * game_clock) so FP32/FP16/FP8 throughput is
+#: distinct and correctly ordered: 9070xt > 9000xt > 9070 > 9060xt. Absolute
+#: magnitude is preserved for rx9070xt so existing KB recipes stay calibrated.
+_RDNA4_PEAK_TFLOPS_RX9070XT: dict[str, float] = {
+    "bf16": 194.8,
+    "bfloat16": 194.8,
+    "fp16": 194.8,
+    "float16": 194.8,
+    "fp8": 389.0,
+    "float8_e4m3fn": 389.0,
+    "float8_e5m2": 389.0,
+    "fp32": 14.6,
+    "float32": 14.6,
+    "fp64": 0.46,
+    "float64": 0.46,
+    "int4": 1557.0,
+}
+
+
+def _rdna4_peak_tflops(cu_count: int, boost_ghz: float, base: dict[str, float]) -> dict[str, float]:
+    """Scale a reference RDNA4 (RX 9070 XT, 64 CU @ 2.4 GHz) peak table by
+    the CU-count × boost-clock ratio for the target SKU."""
+    ref_cu = 64
+    ref_ghz = 2.4
+    scale = (cu_count * boost_ghz) / (ref_cu * ref_ghz)
+    return {dtype: round(v * scale, 1) for dtype, v in base.items()}
+
+
+_RDNA4_PEAK_TFLOPS_R9000: dict[str, float] = _RDNA4_PEAK_TFLOPS_RX9070XT
+_RDNA4_PEAK_TFLOPS_RX9070: dict[str, float] = _rdna4_peak_tflops(56, 2.07, _RDNA4_PEAK_TFLOPS_RX9070XT)
+_RDNA4_PEAK_TFLOPS_RX9060XT: dict[str, float] = _rdna4_peak_tflops(32, 2.53, _RDNA4_PEAK_TFLOPS_RX9070XT)
 HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {
         "hbm_gb": 192.0,
@@ -78,6 +112,26 @@ HW_SPECS: dict[str, dict[str, Any]] = {
         "hbm_gb": 288.0,
         "hbm_bw_gbps": 8000.0,
         "peak_tflops": _MI355X_PEAK_TFLOPS,
+    },
+    "rx9070xt": {
+        "gddr_gb": 16.0,
+        "hbm_bw_gbps": 640.0,
+        "peak_tflops": _RDNA4_PEAK_TFLOPS_RX9070XT,
+    },
+    "rx9070": {
+        "gddr_gb": 16.0,
+        "hbm_bw_gbps": 640.0,
+        "peak_tflops": _RDNA4_PEAK_TFLOPS_RX9070,
+    },
+    "rx9060xt": {
+        "gddr_gb": 16.0,
+        "hbm_bw_gbps": 640.0,
+        "peak_tflops": _RDNA4_PEAK_TFLOPS_RX9060XT,
+    },
+    "r9000": {
+        "gddr_gb": 32.0,
+        "hbm_bw_gbps": 640.0,
+        "peak_tflops": _RDNA4_PEAK_TFLOPS_R9000,
     },
 }
 
@@ -1574,6 +1628,29 @@ _MI355X_ACHIEVABLE_TFLOPS: dict[str, float] = {
     "float32": 137.0,
 }
 
+
+#: RDNA4 sustained (achievable) TFLOPS — reference is the RX 9070 XT
+#: (64 CU, Navi 48). Other SKUs scaled by (CUs × game_clock) ratio.
+#: The R9000 Pro is the workstation twin of the RX 9070 XT (same die,
+#: 64 CU) and therefore shares its achievable table.
+_RDNA4_ACHIEVABLE_TFLOPS_RX9070XT: dict[str, float] = {
+    "bf16": 140.0,
+    "bfloat16": 140.0,
+    "fp16": 135.0,
+    "float16": 135.0,
+    "fp8": 300.0,
+    "float8_e4m3fn": 300.0,
+    "float8_e5m2": 300.0,
+    "fp64": 0.035,
+    "float64": 0.035,
+    "int4": 1100.0,
+    "fp32": 11.0,
+    "float32": 11.0,
+}
+_RDNA4_ACHIEVABLE_TFLOPS_R9000: dict[str, float] = _RDNA4_ACHIEVABLE_TFLOPS_RX9070XT
+_RDNA4_ACHIEVABLE_TFLOPS_RX9070: dict[str, float] = _rdna4_peak_tflops(56, 2.07, _RDNA4_ACHIEVABLE_TFLOPS_RX9070XT)
+_RDNA4_ACHIEVABLE_TFLOPS_RX9060XT: dict[str, float] = _rdna4_peak_tflops(32, 2.53, _RDNA4_ACHIEVABLE_TFLOPS_RX9070XT)
+
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
     "mi300x": {
         "hbm_bw_gbps": 5300.0,
@@ -1589,6 +1666,26 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
         "hbm_bw_gbps": 8000.0,
         "hbm_gb": 288.0,
         "peak_tflops": _MI355X_ACHIEVABLE_TFLOPS,
+    },
+    "rx9070xt": {
+        "hbm_bw_gbps": 640.0,
+        "hbm_gb": 16.0,
+        "peak_tflops": _RDNA4_ACHIEVABLE_TFLOPS_RX9070XT,
+    },
+    "rx9070": {
+        "hbm_bw_gbps": 640.0,
+        "hbm_gb": 16.0,
+        "peak_tflops": _RDNA4_ACHIEVABLE_TFLOPS_RX9070,
+    },
+    "rx9060xt": {
+        "hbm_bw_gbps": 640.0,
+        "hbm_gb": 16.0,
+        "peak_tflops": _RDNA4_ACHIEVABLE_TFLOPS_RX9060XT,
+    },
+    "r9000": {
+        "hbm_bw_gbps": 640.0,
+        "hbm_gb": 32.0,
+        "peak_tflops": _RDNA4_ACHIEVABLE_TFLOPS_R9000,
     },
 }
 
