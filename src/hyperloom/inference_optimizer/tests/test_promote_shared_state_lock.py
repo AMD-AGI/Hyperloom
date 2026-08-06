@@ -538,6 +538,9 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     assert s.current_best["tput"] == 130.0
     assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
     assert s.optimization_stack[-1]["provenance"] == "framework_agent"
+    # The stack variant must be the canonical candidate key, undecorated, so
+    # resume can reconcile it against the recorded framework_agent KEEP.
+    assert s.optimization_stack[-1]["variant_name"] == "https://x/pull/1"
     assert not hasattr(s, "last_framework_agent")
 
 
