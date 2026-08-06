@@ -1035,7 +1035,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "gates; rater identities are anonymized in the orchestration "
         "prompt). Only takes effect when --proposal-scoring is also "
         "passed (scoring is OFF by default); this flag alone does not "
-        "enable scoring. Default 'claude-opus-4-8,gpt-5.5,"
+        "enable scoring. Default 'claude-opus-5,gpt-5.5,"
         "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
         "Add a model by appending its slug. Empty list disables scoring "
         "even when enabled.",

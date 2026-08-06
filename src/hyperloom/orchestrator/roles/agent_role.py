@@ -47,7 +47,7 @@ class BackendType(str, Enum):
     CODEX = "codex"  # no-tools, validated_json_output only
 
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"

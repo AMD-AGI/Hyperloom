@@ -306,7 +306,7 @@ if [ -z "${GEAK_ROOT:-}" ]; then
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
 if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
   GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
 fi

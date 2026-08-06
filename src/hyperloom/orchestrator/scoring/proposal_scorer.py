@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
-    "claude-opus-4-8",
+    "claude-opus-5",
     "gpt-5.5",
     # Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",

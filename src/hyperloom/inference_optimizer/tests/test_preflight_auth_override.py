@@ -938,6 +938,23 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
     assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
 
 
+def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsys):
+    """The new default passes the gateway gate; the gateway spelling also resolves."""
+    # The AMD gateway lists it as "Claude-Opus-5"; the probe folds that form.
+    assert cli._catalog_compare_model_id("Claude-Opus-5") == "claude-opus-5"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-5", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-5"
+    assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
@@ -1100,6 +1117,7 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
         cli._validate_and_resolve_claude_model(args, None)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
+    assert "claude-opus-5" in err
     assert "claude-opus-4-8" in err
     assert "claude-opus-4-7" in err
     assert "claude-opus-4-6" in err

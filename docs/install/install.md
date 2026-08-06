@@ -73,7 +73,7 @@ It asks for these values with a fixed option order:
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
 2. Model:
-   - `Use default (claude-opus-4-8)`
+   - `Use default (claude-opus-5)`
    - `Custom`
 3. Secrets:
    - Setup writes placeholders in `.env`.
@@ -164,7 +164,7 @@ LLM defaults:
 
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there.
@@ -291,7 +291,7 @@ paste API keys into chat.
 cat > .env <<'EOF'
 ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
 ANTHROPIC_BASE_URL=https://api.anthropic.com
-CLAUDE_MODEL=claude-opus-4-8
+CLAUDE_MODEL=claude-opus-5
 # Writable artifact root for runtime files, dependency checkouts, logs,
 # optimizer runs, and generated env files. Set an absolute path you own.
 USER_DATA_PATH=<PLEASE_FILL_IN>
