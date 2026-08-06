@@ -50,7 +50,10 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "vllm": ("VLLM_VERSION",),
 }
 
-_GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH", "PYTORCH_ROCM_ARCH")
+#: Runtime-arch overrides only. ``PYTORCH_ROCM_ARCH`` is deliberately absent:
+#: it names the archs a wheel is *compiled* for, not the installed device, and
+#: ``framework/targeted_build.py`` sets it for exactly that purpose.
+_GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH")
 _GRAPH_MODE_ENVS = ("HYPERLOOM_GRAPH_MODE", "GRAPH_MODE")
 _SERVER_ARGS_ENVS = ("HYPERLOOM_SERVER_ARGS", "SERVER_ARGS")
 _IMAGE_ENVS = ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE")
@@ -95,22 +98,19 @@ def detect_gfx_arch(env: Mapping[str, str], *, probe: bool = True) -> str | None
     env override first; else, when ``probe`` is set, a guarded ``rocminfo``
     invocation. Returns ``None`` when neither resolves (never raises).
 
-    A multi-arch env value is ignored rather than sampled. ``PYTORCH_ROCM_ARCH``
-    lists the archs a wheel was *built* for ("gfx90a;gfx942;gfx950;..."), which
-    says nothing about the installed device; taking its first match labelled
-    MI355X nodes ``gfx90a`` (MI200, two generations off) and suppressed the
-    ``rocminfo`` probe that would have answered correctly.
+    Only ``_GFX_ENVS`` is consulted, which excludes ``PYTORCH_ROCM_ARCH``.
+    That variable is a build-target list ("gfx90a;gfx942;gfx950;...") and says
+    nothing about the installed device: reading it labelled MI355X nodes
+    ``gfx90a`` (MI200, two generations off) and, because an env hit
+    short-circuits the probe, suppressed the ``rocminfo`` call that would have
+    answered correctly. A single-valued ``PYTORCH_ROCM_ARCH=gfx942`` -- common
+    in vendor images -- was wrong in the same way while looking plausible, so
+    the variable is excluded outright rather than screened by value shape.
     """
-    for name in _GFX_ENVS:
-        raw = (env.get(name) or "").strip()
-        if not raw:
-            continue
-        found = {m.lower() for m in _GFX_RE.findall(raw)}
-        if len(found) > 1:
-            continue  # build-target list, not this node's arch
-        if found:
-            return found.pop()
-        return raw  # set but unparseable: honour the operator's override
+    raw = _env_first(env, *_GFX_ENVS)
+    if raw:
+        m = _GFX_RE.search(raw)
+        return m.group(0).lower() if m else raw
     if not probe:
         return None
     try:
