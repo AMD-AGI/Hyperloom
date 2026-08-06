@@ -133,6 +133,10 @@ class ForgeLoopOutcome(NamedTuple):
     search_start_ms: float | None = None
     improved_during_search: bool = False
     structured_result: dict | None = None
+    mean_case_speedup: float | None = None
+    search_start_mean_case_speedup: float | None = None
+    total_improved: bool = False
+    incremental_improved: bool = False
 
 
 class _WorktreePreparationError(RuntimeError):
@@ -1804,27 +1808,29 @@ def _write_report(
     best_ms: float | None,
     improved: bool,
     *,
+    mean_case_speedup: float | None = None,
     search_start_ms: float | None = None,
     improved_during_search: bool = False,
 ) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
-    Only claims a KEEP-worthy result when the loop actually kept a validated
-    kernel strictly faster than baseline (improved=True). Otherwise emits no
-    speedup and [correctness] fail, so build_verification never KEEPs a kernel
-    that wasn't really optimized/validated.
+    Only claims a KEEP-worthy result when Forge reports a validated
+    ``mean_case_speedup > 1``. Raw aggregate timings are diagnostic and may
+    regress because they are not the optimization objective.
     """
     lines = ["# Forge optimization report", ""]
-    if improved and baseline_ms and best_ms and best_ms > 0:
-        speedup = baseline_ms / best_ms
-        lines.append(f"[micro_speedup] {speedup:.4f}x")
-        lines.append(
-            f"pristine_baseline_ms={baseline_ms:.4f} best_ms={best_ms:.4f}"
-        )
+    if improved and mean_case_speedup and mean_case_speedup > 1.0:
+        lines.append(f"[micro_speedup] {mean_case_speedup:.4f}x")
+        lines.append(f"mean_case_speedup={mean_case_speedup:.6f}")
         if search_start_ms:
             lines.append(
                 f"search_start_ms={search_start_ms:.4f} "
                 f"improved_during_search={str(improved_during_search).lower()}"
+            )
+        if baseline_ms and best_ms and best_ms > 0:
+            lines.append(
+                "# diagnostic raw means (not monotonic): "
+                f"baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}"
             )
         lines.append("[correctness] pass")
     else:
@@ -1837,7 +1843,7 @@ def _write_report(
         if baseline_ms and best_ms and best_ms > 0:
             lines.append(
                 f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
-                f"best_ms={best_ms:.4f} ratio={baseline_ms / best_ms:.4f}"
+                f"selected_ms={best_ms:.4f}"
             )
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
@@ -2516,6 +2522,46 @@ def _canonical_forge_artifacts(
     }
 
 
+def _mean_case_result_fields(
+    payload: dict,
+    *,
+    default_search_start: float = 1.0,
+) -> dict | None:
+    """Normalize authoritative per-case scoring fields from Forge output."""
+    try:
+        mean_case_speedup = float(payload.get("mean_case_speedup"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(mean_case_speedup) or mean_case_speedup <= 1.0:
+        return None
+    try:
+        search_start = float(
+            payload.get("search_start_mean_case_speedup")
+            or default_search_start
+        )
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(search_start) or search_start <= 0.0:
+        return None
+    incremental = bool(
+        payload.get(
+            "incremental_improved",
+            payload.get(
+                "improved_during_search",
+                mean_case_speedup > search_start,
+            ),
+        )
+    )
+    return {
+        "mean_case_speedup": mean_case_speedup,
+        "search_start_mean_case_speedup": search_start,
+        "total_improved": True,
+        "incremental_improved": incremental,
+        "improved": True,
+        "improved_during_search": incremental,
+    }
+
+
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -2559,18 +2605,21 @@ def _validated_forge_best_result(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(payload)
+    if score_fields is None:
+        return None
     try:
         baseline_ms = float(payload.get("baseline_wall_ms"))
         best_ms = float(payload.get("best_wall_ms"))
     except (TypeError, ValueError):
         return None
-    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+    if baseline_ms <= 0 or best_ms <= 0:
         return None
     return {
         "best_commit": best_commit,
         "baseline_ms": baseline_ms,
         "best_ms": best_ms,
-        "improved": True,
+        **score_fields,
         "iteration": payload.get("iteration"),
         "snr_db": payload.get("snr_db"),
         "source": "best_result.json",
@@ -2621,12 +2670,15 @@ def _validated_forge_checkpoint(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(checkpoint)
+    if score_fields is None:
+        return None
     try:
         baseline_ms = float(checkpoint.get("baseline_ms"))
         best_ms = float(checkpoint.get("best_ms"))
     except (TypeError, ValueError):
         return None
-    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+    if baseline_ms <= 0 or best_ms <= 0:
         return None
     expected_coverage = list(shapes.get("validation") or [])
     if not expected_coverage:
@@ -2644,7 +2696,7 @@ def _validated_forge_checkpoint(
     normalized["best_commit"] = best_commit
     normalized["baseline_ms"] = baseline_ms
     normalized["best_ms"] = best_ms
-    normalized["improved"] = True
+    normalized.update(score_fields)
     return normalized
 
 
@@ -2710,6 +2762,12 @@ def _validated_warm_start_result(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(
+        result,
+        default_search_start=result.get("mean_case_speedup") or 1.0,
+    )
+    if score_fields is None:
+        return None
     try:
         pristine_ms = float(
             result.get("pristine_baseline_ms")
@@ -2725,13 +2783,13 @@ def _validated_warm_start_result(
         )
     except (TypeError, ValueError):
         return None
-    if pristine_ms <= 0 or best_ms <= 0 or best_ms >= pristine_ms:
+    if pristine_ms <= 0 or best_ms <= 0:
         return None
     return {
         "best_commit": best_commit,
         "baseline_ms": pristine_ms,
         "best_ms": best_ms,
-        "improved": True,
+        **score_fields,
         "source": "kb_warm_start",
         "kb_experience": kb_experience,
     }
@@ -2906,8 +2964,11 @@ def _run_loop_via_cli(
     # Parse the result: prefer the JSON sidecar, else the sentinel line.
     baseline_ms = best_ms = None
     pristine_baseline_ms = search_start_ms = None
+    mean_case_speedup = search_start_mean_case_speedup = None
     improved = False
     improved_during_search = False
+    total_improved = False
+    incremental_improved = False
     parsed = None
     try:
         if result_json.exists():
@@ -2923,18 +2984,38 @@ def _run_loop_via_cli(
     if parsed:
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
-        improved = bool(parsed.get("improved"))
         pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
         search_start_ms = parsed.get("search_start_ms", baseline_ms)
-        improved_during_search = bool(
+        try:
+            parsed_speedup = float(parsed.get("mean_case_speedup"))
+            if math.isfinite(parsed_speedup) and parsed_speedup > 0.0:
+                mean_case_speedup = parsed_speedup
+        except (TypeError, ValueError):
+            mean_case_speedup = None
+        try:
+            parsed_search_start = float(
+                parsed.get("search_start_mean_case_speedup") or 1.0
+            )
+            if math.isfinite(parsed_search_start) and parsed_search_start > 0.0:
+                search_start_mean_case_speedup = parsed_search_start
+        except (TypeError, ValueError):
+            search_start_mean_case_speedup = None
+        total_improved = bool(
+            mean_case_speedup is not None and mean_case_speedup > 1.0
+        )
+        incremental_improved = bool(
             parsed.get(
-                "improved_during_search",
+                "incremental_improved",
                 parsed.get(
-                    "incremental_improved",
-                    search_start_ms and best_ms and best_ms < search_start_ms,
+                    "improved_during_search",
+                    mean_case_speedup is not None
+                    and search_start_mean_case_speedup is not None
+                    and mean_case_speedup > search_start_mean_case_speedup,
                 ),
             )
         )
+        improved = total_improved
+        improved_during_search = incremental_improved
         if parsed.get("deadline_expired"):
             timed_out = True
             if loop_exc is None:
@@ -2954,6 +3035,10 @@ def _run_loop_via_cli(
         search_start_ms=search_start_ms,
         improved_during_search=improved_during_search,
         structured_result=parsed if isinstance(parsed, dict) else None,
+        mean_case_speedup=mean_case_speedup,
+        search_start_mean_case_speedup=search_start_mean_case_speedup,
+        total_improved=total_improved,
+        incremental_improved=incremental_improved,
     )
 
 
@@ -3494,22 +3579,23 @@ def submit(
             else loop_outcome.baseline_ms
         )
         best_ms = loop_outcome.best_ms
-        improved = bool(
-            baseline_ms
-            and best_ms
-            and float(best_ms) < float(baseline_ms)
+        mean_case_speedup = loop_outcome.mean_case_speedup
+        search_start_mean_case_speedup = (
+            loop_outcome.search_start_mean_case_speedup
         )
-        improved_during_search = loop_outcome.improved_during_search
+        improved = loop_outcome.total_improved
+        improved_during_search = loop_outcome.incremental_improved
         best_commit = ""
         if recovery is not None:
             if loop_outcome.pristine_baseline_ms is None:
                 baseline_ms = recovery["baseline_ms"]
             best_ms = recovery["best_ms"]
-            improved = bool(
-                baseline_ms
-                and best_ms
-                and float(best_ms) < float(baseline_ms)
-            )
+            mean_case_speedup = recovery["mean_case_speedup"]
+            search_start_mean_case_speedup = recovery[
+                "search_start_mean_case_speedup"
+            ]
+            improved = recovery["total_improved"]
+            improved_during_search = recovery["incremental_improved"]
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
         if published is not None and checkpoint_recovery is not None:
@@ -3542,6 +3628,7 @@ def submit(
             baseline_ms,
             best_ms,
             improved,
+            mean_case_speedup=mean_case_speedup,
             search_start_ms=search_start_ms,
             improved_during_search=improved_during_search,
         )
@@ -3549,7 +3636,8 @@ def submit(
         msg = (
             f"forge done (cli): pristine_baseline={baseline_ms} "
             f"search_start={search_start_ms} best={best_ms} "
-            f"improved={improved} improved_during_search={improved_during_search} "
+            f"mean_case_speedup={mean_case_speedup} improved={improved} "
+            f"improved_during_search={improved_during_search} "
             f"fellow={fellow} gpu={gpu_target} "
             f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
@@ -3583,7 +3671,13 @@ def submit(
         res["pristine_baseline_ms"] = baseline_ms
         res["search_start_ms"] = search_start_ms
         res["best_ms"] = best_ms
+        res["mean_case_speedup"] = mean_case_speedup
+        res["search_start_mean_case_speedup"] = (
+            search_start_mean_case_speedup
+        )
         res["improved"] = improved
+        res["total_improved"] = improved
+        res["incremental_improved"] = improved_during_search
         res["improved_during_search"] = improved_during_search
         canonical_artifacts = _canonical_forge_artifacts(
             workspace,
