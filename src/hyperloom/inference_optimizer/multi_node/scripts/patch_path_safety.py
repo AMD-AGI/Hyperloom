@@ -240,17 +240,45 @@ def restore_aiter_jit_build(record: dict) -> dict:
         return {"status": "skipped", "reason": "no JIT invalidation record"}
     src = Path(str(record.get("src") or ""))
     assert_aiter_jit_build_allowed(src)
-    if src.exists():
-        shutil.rmtree(src)
     if record.get("status") == "clean":
+        if src.exists():
+            shutil.rmtree(src)
         return {"status": "restored_clean", "restored_to": str(src)}
     backup = Path(str(record.get("backup_path") or ""))
     assert_backup_path_allowed(backup)
     if not backup.exists():
         raise FileNotFoundError(f"JIT backup does not exist: {backup}")
+    if src.exists():
+        shutil.rmtree(src)
     src.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(backup), str(src))
     return {"status": "restored", "restored_to": str(src)}
+
+
+def finalize_patch_records(records: list[dict]) -> dict:
+    """Delete source/JIT backups after a patch becomes the accepted baseline."""
+    deleted: list[str] = []
+    jit_backups: set[str] = set()
+    for record in records:
+        backup_raw = str(record.get("backup_path") or "").strip()
+        if backup_raw:
+            backup = Path(backup_raw)
+            assert_backup_path_allowed(backup)
+            if backup.is_file():
+                backup.unlink()
+                deleted.append(str(backup))
+        jit_record = record.get("jit_backup")
+        if isinstance(jit_record, dict):
+            jit_backup = str(jit_record.get("backup_path") or "").strip()
+            if jit_backup:
+                jit_backups.add(jit_backup)
+    for backup_raw in sorted(jit_backups):
+        backup = Path(backup_raw)
+        assert_backup_path_allowed(backup)
+        if backup.is_dir():
+            shutil.rmtree(backup)
+            deleted.append(str(backup))
+    return {"status": "finalized", "deleted": deleted}
 
 
 def atomic_write_bytes(target: Path, data: bytes) -> None:

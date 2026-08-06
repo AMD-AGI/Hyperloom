@@ -273,6 +273,42 @@ def _dispatch_multinode_revert(
     }
 
 
+def _dispatch_multinode_finalize(
+    records_by_host: dict[str, list[dict[str, Any]]],
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    """Delete accepted transaction backups on every inference pod."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "hyperloom.inference_optimizer.multi_node",
+        "finalize-patch",
+        "--records-json",
+        json.dumps(records_by_host, sort_keys=True),
+        "--timeout-sec",
+        str(timeout_sec),
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+    )
+    out = (proc.stdout or "").strip()
+    try:
+        parsed = json.loads(out) if out.startswith("{") else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    if proc.returncode != 0 or parsed.get("status") != "ok":
+        return {
+            "status": "partial",
+            "returncode": proc.returncode,
+            "result": parsed,
+            "stderr_tail": (proc.stderr or "")[-2000:],
+        }
+    return parsed
+
+
 def _safe_name(value: str) -> str:
     """Sanitize a filename component to a safe, short identifier.
 
@@ -914,6 +950,15 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     return any(marker in norm for marker in _AITER_CSRC_MARKERS)
 
 
+def _target_uses_aiter_jit(target_file: Path) -> bool:
+    """Return whether a source belongs to an installed/editable AITER runtime."""
+    normalized = str(target_file).replace(os.sep, "/")
+    return (
+        _installed_aiter_runtime_root(target_file) is not None
+        or "/sgl-workspace/aiter/" in normalized
+    )
+
+
 def _aiter_jit_build_dir() -> Path | None:
     """Locate the importable aiter package's ``jit/build`` directory.
 
@@ -1448,6 +1493,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         root = Path("/sgl-workspace/aiter")
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
+        jit_build_dir = "/sgl-workspace/aiter/aiter/jit/build"
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
@@ -1836,6 +1882,76 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     return result
 
 
+def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
+    """Delete backups after an integrated patch becomes the new baseline."""
+    manifest_file = Path(manifest_path)
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    backup_root = manifest_file.resolve().parent
+    deleted: list[str] = []
+    issues: list[dict[str, Any]] = []
+    multinode = manifest.get("multinode") or {}
+    records_by_host = dict(multinode.get("records_by_host") or {})
+    remote_result: dict[str, Any] = {}
+    if records_by_host:
+        remote_result = _dispatch_multinode_finalize(records_by_host)
+        if remote_result.get("status") != "ok":
+            issues.append(
+                {"kind": "multinode_finalize", **remote_result}
+            )
+
+    candidates: set[str] = set()
+    for entry in manifest.get("artifacts") or []:
+        candidates.add(str(entry.get("backup_path") or ""))
+    for entry in manifest.get("source_backups") or []:
+        candidates.add(str(entry.get("backup_path") or ""))
+    source_backup = manifest.get("source_backup") or {}
+    candidates.add(str(source_backup.get("backup_path") or ""))
+    for key in ("jit_build_backup", "cpp_itfs_cache_backup"):
+        record = manifest.get(key) or {}
+        candidates.add(str(record.get("backup_path") or ""))
+
+    for raw in sorted(path for path in candidates if path):
+        path = Path(raw)
+        if not _within_root(path, backup_root):
+            issues.append(
+                {"kind": "untrusted_backup", "path": str(path)}
+            )
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            deleted.append(str(path))
+        except OSError as exc:
+            issues.append(
+                {
+                    "kind": "delete_failed",
+                    "path": str(path),
+                    "error": str(exc),
+                }
+            )
+
+    manifest["status"] = "finalized_partial" if issues else "finalized"
+    manifest["finalized_at"] = utc_now()
+    manifest["finalize_deleted"] = deleted
+    if remote_result:
+        manifest["multinode_finalize"] = remote_result
+    if issues:
+        manifest["finalize_issues"] = issues
+    manifest_file.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "status": "partial" if issues else "ok",
+        "manifest_path": str(manifest_file),
+        "deleted": deleted,
+        "issues": issues,
+        "multinode_finalize": remote_result,
+    }
+
+
 def _multi_root_strategies(
     live_paths: Iterable[Path],
     *,
@@ -2020,7 +2136,8 @@ def apply_kernel_patch(
     remote_jit_dir = (
         strategy_jit_dir
         if (
-            strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+            strategy["compiled"]
+            and strategy_jit_dir
             and not skip_rebuild
         )
         else ""
@@ -2060,9 +2177,10 @@ def apply_kernel_patch(
         for entry in mn_apply.get("per_node", []) or []:
             host = (entry.get("host") or "").strip()
             bp = (entry.get("backup_path") or "").strip()
-            if host and bp:
-                backup_map[host] = bp
+            if host:
                 records_by_host.setdefault(host, []).append(dict(entry))
+                if bp:
+                    backup_map[host] = bp
         multinode_info = {
             "status": "ok",
             "target_path": str(target),
@@ -2315,15 +2433,15 @@ def _apply_kernel_patch_snapshot(
 
     rebuild_strategies = _multi_root_strategies(write_paths, allow_unknown_target=allow_unknown_target)
     compiled = bool(rebuild_strategies)
-    runtime_jit_strategies = [
+    jit_strategies = [
         strategy
         for strategy in rebuild_strategies
-        if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+        if strategy.get("jit_build_dir")
     ]
-    if len(runtime_jit_strategies) > 1:
+    if len(jit_strategies) > 1:
         return {
             "status": "failed",
-            "error": "snapshot spans multiple installed AITER runtime-JIT roots",
+            "error": "snapshot spans multiple AITER JIT roots",
         }
 
     artifacts: list[dict[str, str]] = []
@@ -2352,7 +2470,7 @@ def _apply_kernel_patch_snapshot(
             "jit_build_dirs": sorted(
                 {
                     str(strat["jit_build_dir"])
-                    for strat in runtime_jit_strategies
+                    for strat in jit_strategies
                     if strat.get("jit_build_dir")
                 }
             ),
@@ -2432,19 +2550,23 @@ def _apply_kernel_patch_snapshot(
 
     # Multi-node fan-out: push every write path to every pod.
     multinode_info: dict[str, Any] = {}
-    runtime_jit_strategy = (
-        runtime_jit_strategies[0] if runtime_jit_strategies else {}
+    jit_strategy = (
+        jit_strategies[0] if jit_strategies else {}
     )
     strategy_jit_dir = str(
-        runtime_jit_strategy.get("jit_build_dir") or ""
+        jit_strategy.get("jit_build_dir") or ""
     ).strip()
+    jit_dispatch_target = next(
+        (path for path in write_paths if _target_uses_aiter_jit(path)),
+        None,
+    )
     if _is_multi_node():
         pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
         per_node_all: list[dict[str, Any]] = []
         backup_map: dict[str, str] = {}
         records_by_host: dict[str, list[dict[str, Any]]] = {}
         try:
-            for index, p in enumerate(write_paths):
+            for p in write_paths:
                 mn_apply = _dispatch_multinode_apply(
                     target_file=p,
                     patch_path=snap / Path(p).relative_to(repo_root),
@@ -2452,7 +2574,11 @@ def _apply_kernel_patch_snapshot(
                     backup_dir_on_pod=pod_backup_dir,
                     jit_build_dir=(
                         strategy_jit_dir
-                        if index == 0 and strategy_jit_dir and not skip_rebuild
+                        if (
+                            p == jit_dispatch_target
+                            and strategy_jit_dir
+                            and not skip_rebuild
+                        )
                         else ""
                     ),
                 )
@@ -2461,11 +2587,12 @@ def _apply_kernel_patch_snapshot(
                 for entry in new_records:
                     host = (entry.get("host") or "").strip()
                     bp = (entry.get("backup_path") or "").strip()
-                    if host and bp:
-                        backup_map[host] = bp
+                    if host:
                         records_by_host.setdefault(host, []).append(
                             dict(entry)
                         )
+                        if bp:
+                            backup_map[host] = bp
                 multinode_info = {
                     "status": "partial",
                     "target_path": str(target),
@@ -2506,14 +2633,7 @@ def _apply_kernel_patch_snapshot(
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}
     cpp_itfs_cache_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run", "is_cpp_itfs": False}
     if compiled and not skip_rebuild:
-        aiter_jit_target = next(
-            (
-                path
-                for path in write_paths
-                if _target_is_in_aiter_csrc(path)
-            ),
-            target,
-        )
+        aiter_jit_target = jit_dispatch_target or target
         if _is_multi_node() and strategy_jit_dir:
             records_by_host = dict(
                 multinode_info.get("records_by_host") or {}
@@ -2555,7 +2675,7 @@ def _apply_kernel_patch_snapshot(
             ""
             if jit_build_backup.get("status") == "remote"
             else _runtime_jit_invalidation_error(
-                runtime_jit_strategy,
+                jit_strategy,
                 jit_build_backup,
             )
         )

@@ -869,6 +869,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
     assert res["patch_path"] == str(patch_file)
     assert res["target_file"] == str(target)
     assert res["apply_result"]["status"] == "ok"
+    assert res["finalize_result"]["status"] == "ok"
     assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'optimized'\n"
 
 

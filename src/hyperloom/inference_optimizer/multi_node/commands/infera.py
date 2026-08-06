@@ -954,6 +954,54 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
+def _infera_finalize_patch(args: argparse.Namespace) -> int:
+    """Delete accepted patch backups on each Infera pod."""
+    state = _infera_require_state()
+    try:
+        records_by_host = json.loads(args.records_json or "{}")
+    except json.JSONDecodeError as exc:
+        err(f"--records-json not valid JSON: {exc}")
+        return EXIT_CONFIG_ERROR
+    per_node, failures = [], []
+    for ip, records in records_by_host.items():
+        target = _infera_target_for_host(state, str(ip))
+        op_args = (
+            "finalize --records-json "
+            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
+        )
+        parsed, tx = _infera_ssh_node_op(
+            state,
+            target,
+            op_args,
+            timeout=args.timeout_sec,
+        )
+        if parsed and str(parsed.get("status")) == "finalized":
+            per_node.append({"host": ip, **parsed})
+        else:
+            failures.append(
+                {
+                    "host": ip,
+                    "error": (parsed or {}).get("error")
+                    or tx.get("stderr")
+                    or "unknown",
+                    **tx,
+                }
+            )
+    print(
+        json.dumps(
+            {
+                "command": "finalize",
+                "per_node": per_node,
+                "failures": failures,
+                "status": "ok" if not failures else "partial",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if not failures else 1
+
+
 def _infera_kernel_bench(args: argparse.Namespace) -> int:
     """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH.
 

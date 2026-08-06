@@ -1169,6 +1169,20 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     return tool.revert_kernel_patch(apply_result["manifest_path"])
 
 
+def _maybe_finalize_kernel_patch(
+    apply_result: HandlerResult,
+) -> HandlerResult:
+    """Delete backups once a KEEP becomes the accepted baseline."""
+    if (
+        apply_result.get("status") != "ok"
+        or not apply_result.get("manifest_path")
+    ):
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    return _load_apply_tool().finalize_kernel_patch(
+        apply_result["manifest_path"]
+    )
+
+
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     """Look up a kernel's source file from the last trace-analyze result.
 
@@ -6410,6 +6424,11 @@ async def integrate_handler(
             paired_pristine_revert if paired_pristine_revert is not None else _maybe_revert_kernel_patch(apply_result)
         )
     )
+    finalize_result = (
+        _maybe_finalize_kernel_patch(apply_result)
+        if decision == "KEEP"
+        else {"status": "skipped", "reason": "non-KEEP decision"}
+    )
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -6426,6 +6445,7 @@ async def integrate_handler(
         "extra_envs": dict(payload.get("extra_envs") or {}),
         "apply_result": apply_result,
         "revert_result": revert_result,
+        "finalize_result": finalize_result,
         "rebuild_check": rebuild_check,
         "task_group_key": str(payload.get("task_group_key") or ""),
         "identity_route": str(payload.get("identity_route") or ""),

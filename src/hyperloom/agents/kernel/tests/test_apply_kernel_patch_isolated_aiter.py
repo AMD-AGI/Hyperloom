@@ -136,6 +136,7 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     assert strat["root"] == "/sgl-workspace/aiter"
     assert strat["rebuild_mode"] == "command"
     assert strat["rebuild_command"] == ["/opt/venv/bin/python", "setup.py", "develop"]
+    assert strat["jit_build_dir"] == "/sgl-workspace/aiter/aiter/jit/build"
 
 
 @pytest.mark.parametrize(
@@ -501,6 +502,51 @@ def test_revert_exposes_runtime_jit_restore_failure(
     }
     assert reverted["revert_issues"][0]["kind"] == "jit_build_restore"
     assert target.read_text(encoding="utf-8") == original
+
+
+def test_finalize_keeps_patch_and_deletes_local_backups(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    target.write_text(
+        '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n',
+        encoding="utf-8",
+    )
+    patch = tmp_path / "v1_forge.cu"
+    optimized = (
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n'
+    )
+    patch.write_text(optimized, encoding="utf-8")
+    (aiter_pkg / "jit" / "build" / "baseline.so").write_text(
+        "baseline",
+        encoding="utf-8",
+    )
+    applied = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k-finalize",
+    )
+    manifest = json.loads(Path(applied["manifest_path"]).read_text())
+    source_backup = Path(manifest["source_backup"]["backup_path"])
+    jit_backup = Path(manifest["jit_build_backup"]["backup_path"])
+
+    finalized = akp.finalize_kernel_patch(applied["manifest_path"])
+
+    assert finalized["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == optimized
+    assert not source_backup.exists()
+    assert not jit_backup.exists()
 
 
 @pytest.mark.parametrize("multinode", (False, True))

@@ -42,6 +42,7 @@ from patch_path_safety import (  # noqa: E402
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
+    finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
 )
@@ -169,7 +170,17 @@ def _do_revert(a: argparse.Namespace) -> int:
     """
     host = socket.gethostname()
     records_json = getattr(a, "records_json", "") or ""
-    records = json.loads(records_json or "[]")
+    try:
+        records = json.loads(records_json or "[]")
+    except json.JSONDecodeError as exc:
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": f"records_json is invalid: {exc}",
+                "restored_targets": [],
+            }
+        )
     if (
         not records_json
         and getattr(a, "backup_path", "")
@@ -214,7 +225,14 @@ def _do_revert(a: argparse.Namespace) -> int:
                 raise ValueError("conflicting JIT backup records")
             jit_restore = restore_aiter_jit_build(first)
     except Exception as exc:  # noqa: BLE001
-        return _emit({"status": "failed", "host": host, "error": str(exc)})
+        return _emit(
+            {
+                "status": "failed",
+                "host": host,
+                "error": str(exc),
+                "restored_targets": restored,
+            }
+        )
     return _emit(
         {
             "status": "restored",
@@ -223,6 +241,17 @@ def _do_revert(a: argparse.Namespace) -> int:
             "jit_restore": jit_restore,
         }
     )
+
+
+def _do_finalize(a: argparse.Namespace) -> int:
+    """Delete backups for a transaction that has been accepted."""
+    host = socket.gethostname()
+    try:
+        records = json.loads(getattr(a, "records_json", "") or "[]")
+        result = finalize_patch_records(records)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        return _emit({"status": "failed", "host": host, "error": str(exc)})
+    return _emit({"host": host, **result})
 
 
 def _do_bench(a: argparse.Namespace) -> int:
@@ -339,6 +368,9 @@ def main() -> int:
     rp.add_argument("--backup-path", default="")
     rp.add_argument("--records-json", default="")
 
+    fp = sub.add_parser("finalize")
+    fp.add_argument("--records-json", required=True)
+
     bp = sub.add_parser("bench")
     bp.add_argument("--workspace", required=True)
     bp.add_argument("--bench-command", required=True)
@@ -351,6 +383,8 @@ def main() -> int:
         return _do_apply(a)
     if a.command == "revert":
         return _do_revert(a)
+    if a.command == "finalize":
+        return _do_finalize(a)
     if a.command == "bench":
         return _do_bench(a)
     p.print_help(sys.stderr)

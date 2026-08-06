@@ -36,6 +36,7 @@ from patch_path_safety import (  # noqa: E402
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
+    finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
 )
@@ -175,6 +176,11 @@ def _revert_remote(records: list[dict]) -> dict:
     }
 
 
+def _finalize_remote(records: list[dict]) -> dict:
+    """Delete backups for an accepted transaction on one pod."""
+    return {"host": socket.gethostname(), **finalize_patch_records(records)}
+
+
 def _alive_nodes(min_gpu: int = 0) -> list[dict]:
     """Return the list of currently-alive Ray nodes.
 
@@ -308,9 +314,27 @@ def _do_revert(args: argparse.Namespace) -> int:
         ``1`` (including when ``backup_map_json`` is empty).
     """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
-    records_by_host: dict[str, list[dict]] = json.loads(args.records_json or "{}")
-    if not records_by_host and args.backup_map_json:
-        backup_map: dict[str, str] = json.loads(args.backup_map_json)
+    try:
+        records_by_host: dict[str, list[dict]] = json.loads(
+            args.records_json or "{}"
+        )
+        backup_map: dict[str, str] = json.loads(
+            args.backup_map_json or "{}"
+        )
+    except json.JSONDecodeError as exc:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "revert",
+                    "status": "failed",
+                    "error": f"revert records JSON is invalid: {exc}",
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        return 1
+    if not records_by_host and backup_map:
         records_by_host = {
             host: [
                 {
@@ -386,6 +410,63 @@ def _do_revert(args: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
+def _do_finalize(args: argparse.Namespace) -> int:
+    """Finalize accepted patch transactions on every recorded host."""
+    try:
+        records_by_host: dict[str, list[dict]] = json.loads(
+            args.records_json or "{}"
+        )
+    except json.JSONDecodeError as exc:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "finalize",
+                    "status": "failed",
+                    "error": f"records JSON is invalid: {exc}",
+                }
+            )
+            + "\n"
+        )
+        return 1
+    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    by_host = {
+        str(node.get("NodeManagerHostname") or ""): node["NodeID"]
+        for node in _alive_nodes()
+        if node.get("NodeManagerHostname")
+    }
+    FinalizeActor = ray.remote(num_cpus=0, num_gpus=0)(_finalize_remote)
+    refs = []
+    failures = []
+    for host, records in records_by_host.items():
+        node_id = by_host.get(host)
+        if not node_id:
+            failures.append({"host": host, "error": "host is not alive"})
+            continue
+        ref = FinalizeActor.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node_id,
+                soft=False,
+            )
+        ).remote(records)
+        refs.append((host, ref))
+    per_node = []
+    for host, ref in refs:
+        try:
+            per_node.append(
+                {"host": host, **ray.get(ref, timeout=args.timeout_sec)}
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"host": host, "error": str(exc)})
+    payload = {
+        "command": "finalize",
+        "per_node": per_node,
+        "failures": failures,
+        "status": "ok" if not failures else "partial",
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    return 0 if not failures else 1
+
+
 def main() -> int:
     """Parse CLI arguments and dispatch the ``apply`` or ``revert`` command.
 
@@ -422,11 +503,17 @@ def main() -> int:
     rp.add_argument("--backup-map-json", default="", help="legacy hostname -> backup path map")
     rp.add_argument("--timeout-sec", type=int, default=60)
 
+    fp = sub.add_parser("finalize", help="delete backups for accepted patches")
+    fp.add_argument("--records-json", required=True)
+    fp.add_argument("--timeout-sec", type=int, default=60)
+
     args = p.parse_args()
     if args.command == "apply":
         return _do_apply(args)
     if args.command == "revert":
         return _do_revert(args)
+    if args.command == "finalize":
+        return _do_finalize(args)
     p.print_help(sys.stderr)
     return 2
 
