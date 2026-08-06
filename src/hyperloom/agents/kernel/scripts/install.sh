@@ -316,30 +316,12 @@ _ANTHROPIC_KEY_VAL="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
 _DEEPSEEK_BASE_URL_VAL="${DEEPSEEK_BASE_URL:-}"
 _DEEPSEEK_KEY_VAL="${DEEPSEEK_API_KEY:-}"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
-# Pick a key that matches a supported endpoint.
-_key_for_endpoint() {
-  local url="$1"
-  if [ -n "$_ANTHROPIC_BASE_URL_VAL" ] && [ "$url" = "$_ANTHROPIC_BASE_URL_VAL" ]; then
-    printf '%s' "$_ANTHROPIC_KEY_VAL"; return 0
-  fi
-  if [ -n "$_DEEPSEEK_BASE_URL_VAL" ] && [ "$url" = "$_DEEPSEEK_BASE_URL_VAL" ]; then
-    printf '%s' "$_DEEPSEEK_KEY_VAL"; return 0
-  fi
-  if [ "$url" = "$_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL" ]; then
-    printf '%s' "$_DEEPSEEK_KEY_VAL"; return 0
-  fi
-  printf '%s' "${DEEPSEEK_API_KEY:-${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}}"
-}
 # Legacy GEAK_BASE_URL/GEAK_API_KEY aliases for endpoint routing (#521).
 # GEAKv4 kernel optimization uses GEAK_CLAUDE_MODEL + Claude Code auth instead.
-GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${DEEPSEEK_BASE_URL:-${ANTHROPIC_BASE_URL:-${LLM_API_BASE:-}}}}"
-if [ -z "$GEAK_BASE_URL_VAL" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-  GEAK_BASE_URL_VAL="${_DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL}"
-fi
-# Pair the GEAK key to its endpoint so a split deploy never sends the wrong
-# provider's key. Explicit GEAK_API_KEY still wins.
-GEAK_API_KEY_VAL="${GEAK_API_KEY:-$(_key_for_endpoint "$GEAK_BASE_URL_VAL")}"
-[ -n "$GEAK_API_KEY_VAL" ] || GEAK_API_KEY_VAL="${DEEPSEEK_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-}}}}}}"
+# GEAK speaks the OpenAI protocol, so both come from the OpenAI side only and
+# stay empty when that side is unconfigured.
+GEAK_BASE_URL_VAL="${GEAK_BASE_URL:-${OPENAI_BASE_URL:-${LLM_API_BASE:-}}}"
+GEAK_API_KEY_VAL="${GEAK_API_KEY:-${OPENAI_API_KEY:-${AMD_API_KEY:-${AMD_LLM_API_KEY:-${LLM_API_KEY:-}}}}}"
 # install.sh always installs everything. A previous lazy
 # "install only the requested backend" scheme caused recurring
 # "missing dependency discovered at request time" issues, so the

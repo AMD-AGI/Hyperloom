@@ -1135,6 +1135,32 @@ resolve_credentials() {
     read -rsp "[install-baremetal] Enter Anthropic/DeepSeek API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
+  # Reject one provider's base URL paired with only the other provider's key,
+  # matching the CLI preflight. DeepSeek serves its own Anthropic-compatible
+  # endpoint, so its key counts as one.
+  local _x_akey _x_aend _x_conflict=""
+  _x_akey="${anthropic_key:-${anthropic_token:-${deepseek_key:-}}}"
+  _x_aend="${anthropic_url:-}"
+  if [ -z "$_x_aend" ] && [ -n "$deepseek_key" ]; then
+    _x_aend="${deepseek_url:-https://api.deepseek.com/anthropic}"
+  fi
+  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$_x_akey" ]; then
+    _x_conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
+  elif [ -n "$anthropic_url" ] && [ -z "$_x_akey" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    _x_conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
+  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$_x_akey" ] && [ -z "$_x_aend" ]; then
+    _x_conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
+  elif [ -n "$_x_aend" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+    _x_conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
+  fi
+  if [ -n "$_x_conflict" ]; then
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      warn "conflicting LLM credentials: ${_x_conflict} (continuing: --check-only / --dry-run)"
+    else
+      die "Conflicting LLM credentials: ${_x_conflict}. Give each side its own base URL and key, or drop the other provider's key."
+    fi
+  fi
+
   { [ -n "$anthropic_url" ] || [ -n "$deepseek_url" ] || [ -n "$deepseek_key" ]; } && has_url=1
   { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$deepseek_key" ]; } && has_key=1
   if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
