@@ -432,6 +432,9 @@ class ConversationCollaborator:
             sections.append(self._orchestration_seed_memory)
 
         if agent_name == "orchestration":
+            # Refresh before any section renders it, or the prompt ships last tick's gap.
+            obj = self._current_objective
+            self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
             if push_full:
@@ -486,8 +489,6 @@ class ConversationCollaborator:
                 sections.append("=== Resource pools ===")
                 sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
-            obj = self._current_objective
-            self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             # Advisory/ledger blocks below are part of the full SEED push only.
             if push_full:
                 denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
