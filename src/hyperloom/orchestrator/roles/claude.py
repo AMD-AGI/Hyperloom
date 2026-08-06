@@ -32,6 +32,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from .base import (
     BackendError,
     BackendTurnResult,
+    LLMCallFailed,
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
@@ -390,7 +391,7 @@ class ClaudeBackend:
                     ),
                 }
             )
-            error = BackendError(
+            error = LLMCallFailed(
                 f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             )
             self._finish_turn_diagnostic(outcome="backend_error", error=error)

@@ -186,6 +186,73 @@ class _AlwaysFailingBackend(Backend):
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
 
 
+class _LLMFailingBackend(Backend):
+    """Backend whose provider call fails (raises the ``LLMCallFailed`` marker)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+
+        self.calls += 1
+        raise LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+
+
+def _llm_error_rows(session_dir: Path) -> list[dict]:
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    path = llm_calls_path(session_dir)
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("status") == "error"]
+
+
+@pytest.mark.asyncio
+async def test_plain_backend_error_records_no_llm_error_row(session_dir):
+    """A deterministic local fault must not be counted as a provider failure.
+
+    ``BackendError`` covers unreadable ``emit.json``, a missing ``--review``
+    path, an absent SDK — none of which touched the model. Recording those
+    would make the Langfuse LLM error rate meaningless.
+    """
+    backends = _build_backends({})
+    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        assert _llm_error_rows(session_dir) == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
+    backends = _build_backends({})
+    backends["robustness"] = _LLMFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == 2
+        row = rows[0]
+        assert row["component"] == "robustness"
+        assert row["error_type"] == "LLMCallFailed"
+        assert "gateway 400" in row["error_message"]
+        assert row["input_tokens"] is None and row["output_tokens"] is None
+    finally:
+        await c.stop()
+
+
 class _AlwaysCrashingBackend(Backend):
     """Backend that raises an unexpected exception from ``run``."""
 

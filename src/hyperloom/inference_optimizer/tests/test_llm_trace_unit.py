@@ -138,6 +138,20 @@ def test_append_llm_call_rejects_unknown_status(tmp_path: Path):
         llm_trace.append_llm_call(session_dir=tmp_path, record=record)
 
 
+def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
+    """The marker must stay catchable as ``BackendError``.
+
+    Retry and error-streak accounting are written against ``BackendError``; if
+    the marker were a sibling type instead of a subclass, marking a call site
+    would silently change failure handling as well as tracing.
+    """
+    from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
+
+    assert issubclass(LLMCallFailed, BackendError)
+    with pytest.raises(BackendError):
+        raise LLMCallFailed("gateway 400")
+
+
 def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
 

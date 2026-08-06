@@ -54,7 +54,7 @@ from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ..actions.registry import ActionRegistry
 from ..roles.agent_role import AgentRole, default_role_registry
-from ..roles.base import Backend, BackendError, BackendTurnResult
+from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
 from ..bus.storage.connection import SqliteConnection
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
@@ -1756,11 +1756,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 outcome="backend_error",
                 error=exc,
             )
-            self._trace_reactor_llm_failure(
-                agent_name,
-                exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
-            )
+            if isinstance(exc, LLMCallFailed):
+                self._trace_reactor_llm_failure(
+                    agent_name,
+                    exc,
+                    latency_ms=int((time.perf_counter() - _t0) * 1000),
+                )
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1972,7 +1973,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     def _trace_reactor_llm_failure(
         self,
         agent_name: str,
-        error: BaseException,
+        error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
     ) -> None:
@@ -1983,9 +1984,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
         Langfuse — has no trace of a turn whose model call never returned. The
         row carries no token counters; it exists to make the failure countable.
 
+        Only :class:`LLMCallFailed` reaches here. A plain ``BackendError`` can
+        come from a deterministic local fault (unreadable ``emit.json``, missing
+        ``--review`` path, absent SDK) that never touched the provider, and
+        recording those would make the Langfuse error rate meaningless.
+
         Args:
             agent_name: The reactor role; doubles as trace component and role.
-            error: The backend error that ended the turn.
+            error: The model-call failure that ended the turn.
             latency_ms: Time spent before failing, when measured.
         """
         try:

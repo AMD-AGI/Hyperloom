@@ -5576,6 +5576,15 @@ def _trace_kernel_attempt_usage(
         try:
             usage = parse_forge_usage(stdout_text)
             if not usage:
+                # No failure row is written here, deliberately. This is a
+                # post-hoc log scrape of an out-of-process child, and the child
+                # prints FORGE_LLM_USAGE only on success — so a missing marker
+                # cannot be told apart from "the child's LLM calls failed".
+                # The attempt dict carries only business outcomes (improved,
+                # best_ms), and synthesizing an LLM error from those is exactly
+                # the conflation that makes an error rate untrustworthy.
+                # Closing this gap needs the child (GEAK / KernelForge
+                # forge_submit) to emit a failure marker of its own.
                 continue
             record = LLMCallRecord(
                 session_id=session_dir.name,
