@@ -1262,6 +1262,14 @@ def _fill_integrate_defaults_from_state(
             "identity_route",
             str(pending_record.get("identity_route") or ""),
         )
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
+        )
 
     current_best = getattr(state, "current_best", None) or {}
 
@@ -1372,6 +1380,17 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         resolved.setdefault(
             "identity_route",
             str(pending_record.get("identity_route") or ""),
+        )
+        # The artifact's own validation provenance travels with it, so the
+        # serving verdict can tell a reference-only apply-back from an artifact
+        # that was already correctness-proven in place.
+        resolved.setdefault(
+            "artifact_kind",
+            str(pending_record.get("artifact_kind") or ""),
+        )
+        resolved.setdefault(
+            "integration_validation_status",
+            str(pending_record.get("integration_validation_status") or ""),
         )
         _fill_integrate_snapshot_from_bundle(
             resolved,

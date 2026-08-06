@@ -458,3 +458,122 @@ def test_policy_blocks_llm_search_ledger_write(field_name):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "state_field"
+
+
+def _applyback_evidence():
+    return {
+        "artifact_kind": "framework_applyback",
+        "artifact_schema_version": 2,
+        "validation_scope": "reference",
+        "reference_correctness_passed": True,
+        "reference_snr_db": 48.5,
+        "integration_validation_required": True,
+        "integration_validation_status": "pending",
+        "commit": "a" * 40,
+        "commit_ref": "refs/hyperloom/applyback/attempt-1",
+        "builder_symbol": "build_fused_gemm_module",
+        "changed_files": ["flydsl_kernel.py", "kernel.py"],
+    }
+
+
+def _record_applyback_keep(state, **verification_overrides):
+    verification = {
+        "micro_speedup": 1.6,
+        "compile_passed": True,
+        "correctness_passed": True,
+        "correctness_source": "forge_rewrite_reference",
+        "integration_validation_status": "pending",
+        "framework_applyback": _applyback_evidence(),
+        "best_backend": "forge",
+        "best_artifact_path": "/artifacts/flydsl_kernel.py",
+        "deploy_patch_path": "/artifacts/forge.patch",
+        "deploy_repo_root": "/repo",
+        "deploy_snapshot_dir": "/artifacts/snapshot",
+    }
+    verification.update(verification_overrides)
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k007",
+            "source_file": "/repo/fused_gemm.py",
+            "task_group_id": "tg001",
+            "task_group_key": "tg-fused-gemm",
+            "proposal": {
+                "decision": "KEEP",
+                "reasons": [
+                    "framework apply-back reference-verified; framework "
+                    "E2E/accuracy deferred to integrate"
+                ],
+            },
+            "verification": verification,
+        }
+    )
+
+
+def test_reference_verified_applyback_queues_with_its_provenance():
+    state = SharedState()
+
+    _record_applyback_keep(state)
+
+    attempt = state.kernel_opt_attempts["k007"]
+    assert attempt["last_correctness_source"] == "forge_rewrite_reference"
+    assert attempt["last_integration_validation_status"] == "pending"
+    assert attempt["last_framework_applyback"] == _applyback_evidence()
+
+    assert state.last_kernel_opt["correctness_source"] == "forge_rewrite_reference"
+    assert state.last_kernel_opt["integration_validation_status"] == "pending"
+    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == (
+        "refs/hyperloom/applyback/attempt-1"
+    )
+
+    pending = state.pending_kernel_integration_records()
+    assert len(pending) == 1
+    record = pending[0]
+    assert record["status"] == "pending"
+    assert record["artifact_kind"] == "framework_applyback"
+    assert record["integration_validation_status"] == "pending"
+    assert record["correctness_source"] == "forge_rewrite_reference"
+    assert record["framework_applyback"]["changed_files"] == [
+        "flydsl_kernel.py",
+        "kernel.py",
+    ]
+
+
+def test_a_plain_keep_queues_without_applyback_provenance():
+    state = SharedState()
+
+    _record_applyback_keep(
+        state,
+        correctness_source="report_scan",
+        integration_validation_status="",
+        framework_applyback={},
+    )
+
+    record = state.pending_kernel_integration_records()[0]
+    assert record["artifact_kind"] == ""
+    assert record["integration_validation_status"] == ""
+    assert record["framework_applyback"] == {}
+
+
+def test_bare_kernel_id_integrate_resolves_the_pending_applyback(tmp_path):
+    """Orchestration may send only a kernel_id; the queue supplies the rest."""
+    from hyperloom.orchestrator.kernel.request_handlers import (
+        _fill_integrate_defaults_from_state,
+    )
+
+    sd = tmp_path / "session"
+    sd.mkdir()
+    state = SharedState()
+    state.baseline_tput = 100.0
+    state.baseline_config_path = "/configs/baseline.yaml"
+    _record_applyback_keep(state)
+    state.save(sd)
+
+    resolved = _fill_integrate_defaults_from_state({"kernel_id": "k007"}, session_dir=sd)
+
+    assert resolved["kernel_id"] == "k007"
+    assert resolved["task_group_key"] == "tg-fused-gemm"
+    assert resolved["artifact_kind"] == "framework_applyback"
+    assert resolved["integration_validation_status"] == "pending"
+    assert resolved["integration_id"]
+    assert resolved["config_path"] == "/configs/baseline.yaml"
