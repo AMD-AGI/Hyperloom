@@ -336,7 +336,10 @@ def _reject_cross_provider_pairing() -> None:
         "       export OPENAI_BASE_URL=...     OPENAI_API_KEY=...\n"
         "  3. Both sides, each with its own base URL and key.\n"
         "Leaving a side unset simply disables the features that speak its "
-        "protocol.",
+        "protocol.\n\n"
+        "Values are read from the shell AND from the repo .env, so a variable "
+        "you did not export yourself may come from there; remove the stale "
+        "entry or complete that side.",
         file=sys.stderr,
     )
     sys.exit(2)
