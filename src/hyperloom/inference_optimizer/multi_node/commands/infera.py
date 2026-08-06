@@ -842,7 +842,8 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         f"apply --target-path {shlex.quote(str(args.target_path))} "
         f"--patch-b64 {shlex.quote(str(patch_b64))} "
         f"--backup-dir {shlex.quote(str(args.backup_dir))} "
-        f"--kernel-id {shlex.quote(str(args.kernel_id))}"
+        f"--kernel-id {shlex.quote(str(args.kernel_id))} "
+        f"--jit-build-dir {shlex.quote(str(args.jit_build_dir or ''))}"
     )
     per_node: list[dict] = []
     failures: list[dict] = []
@@ -864,6 +865,22 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
                     **tx,
                 }
             )
+    rollback: list[dict] = []
+    if failures:
+        for record in per_node:
+            ip = str(record.get("host") or "")
+            target = _infera_target_for_host(state, ip)
+            op_args = (
+                "revert --records-json "
+                f"{shlex.quote(json.dumps([record], sort_keys=True))}"
+            )
+            parsed, tx = _infera_ssh_node_op(
+                state,
+                target,
+                op_args,
+                timeout=args.timeout_sec,
+            )
+            rollback.append({"host": ip, **(parsed or tx)})
     payload = {
         "command": "apply",
         "target_path": args.target_path,
@@ -871,6 +888,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
         "backup_dir": args.backup_dir,
         "per_node": per_node,
         "failures": failures,
+        "rollback": rollback,
         "status": "ok" if not failures else "partial",
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -889,21 +907,33 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     """
     state = _infera_require_state()
     try:
+        records_by_host = json.loads(args.records_json or "{}")
         backup_map = json.loads(args.backup_map_json or "{}")
     except json.JSONDecodeError as exc:
         err(f"--backup-map-json not valid JSON: {exc}")
         return EXIT_CONFIG_ERROR
-    if not backup_map:
-        err("--backup-map-json must be a non-empty {host: backup_path} object")
+    if not records_by_host and not backup_map:
+        err("revert requires non-empty records or backup map")
         return EXIT_CONFIG_ERROR
+    if not records_by_host:
+        records_by_host = {
+            host: [
+                {
+                    "target_path": args.target_path,
+                    "backup_path": backup_path,
+                }
+            ]
+            for host, backup_path in backup_map.items()
+        }
     per_node: list[dict] = []
     failures: list[dict] = []
-    for ip, backup_path in backup_map.items():
+    for ip, records in records_by_host.items():
         target = _infera_target_for_host(state, str(ip))
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
         op_args = (
-            f"revert --target-path {shlex.quote(str(args.target_path))} --backup-path {shlex.quote(str(backup_path))}"
+            "revert --records-json "
+            f"{shlex.quote(json.dumps(records, sort_keys=True))}"
         )
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):

@@ -9,6 +9,7 @@ hosts the atomic write both apply paths use to land a patched file.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -176,6 +177,64 @@ def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
     """
     assert_target_path_allowed(target, must_exist=False)
     assert_backup_path_allowed(backup)
+
+
+def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
+    """Validate an AITER ``jit/build`` path before recursive mutation."""
+    resolved = jit_build.resolve()
+    if (
+        resolved.name != "build"
+        or resolved.parent.name != "jit"
+        or resolved.parent.parent.name != "aiter"
+        or not (resolved.parent / "__init__.py").is_file()
+        or not (resolved.parent.parent / "__init__.py").is_file()
+    ):
+        raise ValueError(f"invalid AITER jit/build path: {jit_build}")
+
+
+def invalidate_aiter_jit_build(
+    jit_build: Path | None,
+    backup_dir: Path,
+    backup_name: str,
+) -> dict:
+    """Move one pod's stale AITER JIT cache aside before patched serving."""
+    if jit_build is None:
+        return {"status": "skipped", "reason": "no jit_build_dir supplied"}
+    assert_aiter_jit_build_allowed(jit_build)
+    assert_backup_dir_allowed(backup_dir)
+    resolved = jit_build.resolve()
+    if not resolved.exists() or not any(resolved.iterdir()):
+        return {"status": "clean", "src": str(resolved)}
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{backup_name}_jit_build"
+    assert_backup_path_allowed(backup)
+    if backup.exists():
+        raise ValueError(f"JIT backup already exists: {backup}")
+    shutil.move(str(resolved), str(backup))
+    return {
+        "status": "ok",
+        "src": str(resolved),
+        "backup_path": str(backup),
+    }
+
+
+def restore_aiter_jit_build(record: dict) -> dict:
+    """Remove candidate JIT output and restore a pod's baseline cache."""
+    if not isinstance(record, dict) or record.get("status") not in {"ok", "clean"}:
+        return {"status": "skipped", "reason": "no JIT invalidation record"}
+    src = Path(str(record.get("src") or ""))
+    assert_aiter_jit_build_allowed(src)
+    if src.exists():
+        shutil.rmtree(src)
+    if record.get("status") == "clean":
+        return {"status": "restored_clean", "restored_to": str(src)}
+    backup = Path(str(record.get("backup_path") or ""))
+    assert_backup_path_allowed(backup)
+    if not backup.exists():
+        raise FileNotFoundError(f"JIT backup does not exist: {backup}")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(backup), str(src))
+    return {"status": "restored", "restored_to": str(src)}
 
 
 def atomic_write_bytes(target: Path, data: bytes) -> None:

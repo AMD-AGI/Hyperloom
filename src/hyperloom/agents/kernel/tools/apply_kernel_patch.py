@@ -154,6 +154,7 @@ def _dispatch_multinode_apply(
     patch_path: Path,
     kernel_id: str,
     backup_dir_on_pod: str,
+    jit_build_dir: str = "",
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
     """Fan a patch out to every pod (head + workers).
@@ -185,6 +186,8 @@ def _dispatch_multinode_apply(
         backup_dir_on_pod,
         "--kernel-id",
         kernel_id or "",
+        "--jit-build-dir",
+        str(jit_build_dir or ""),
     ]
     proc = subprocess.run(
         cmd,
@@ -215,8 +218,9 @@ def _dispatch_multinode_apply(
 
 def _dispatch_multinode_revert(
     *,
-    target_path: str,
-    backup_map: dict[str, str],
+    target_path: str = "",
+    backup_map: dict[str, str] | None = None,
+    records_by_host: dict[str, list[dict[str, Any]]] | None = None,
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
     """Restore the original file on every pod that received the apply.
@@ -238,8 +242,10 @@ def _dispatch_multinode_revert(
         "revert-patch",
         "--target-path",
         str(target_path),
+        "--records-json",
+        json.dumps(records_by_host or {}, sort_keys=True),
         "--backup-map-json",
-        json.dumps(backup_map, sort_keys=True),
+        json.dumps(backup_map or {}, sort_keys=True),
     ]
     proc = subprocess.run(
         cmd,
@@ -1779,17 +1785,26 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     # Multi-node: fan-out a revert to every pod that received the apply (best-effort).
     multinode_info = manifest.get("multinode") or {}
     mn_revert: dict[str, Any] = {}
-    if multinode_info and multinode_info.get("host_backup_map"):
+    if multinode_info and (
+        multinode_info.get("records_by_host")
+        or multinode_info.get("host_backup_map")
+    ):
         target_path = multinode_info.get("target_path") or (source_backup.get("path") if source_backup else "")
         backup_map = multinode_info.get("host_backup_map") or {}
-        if target_path and backup_map:
+        records_by_host = multinode_info.get("records_by_host") or {}
+        if records_by_host or (target_path and backup_map):
             try:
                 mn_revert = _dispatch_multinode_revert(
                     target_path=target_path,
                     backup_map=backup_map,
+                    records_by_host=records_by_host,
                 )
             except Exception as exc:  # noqa: BLE001
                 mn_revert = {"status": "failed", "error": str(exc)}
+        if mn_revert and mn_revert.get("status") != "ok":
+            revert_issues.append(
+                {"kind": "multinode_revert", **mn_revert}
+            )
 
     reverted_at = utc_now()
     partial = bool(skipped_untrusted_backups or revert_issues)
@@ -2001,6 +2016,15 @@ def apply_kernel_patch(
         if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
         else {"status": "skipped", "reason": "not a python source target"}
     )
+    strategy_jit_dir = str(strategy.get("jit_build_dir") or "").strip()
+    remote_jit_dir = (
+        strategy_jit_dir
+        if (
+            strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+            and not skip_rebuild
+        )
+        else ""
+    )
 
     # Multi-node: fan-out the patch to every RayJob pod, else hard-revert the sandbox copy.
     multinode_info: dict[str, Any] = {}
@@ -2015,6 +2039,7 @@ def apply_kernel_patch(
                 patch_path=patch,
                 kernel_id=kernel_id,
                 backup_dir_on_pod=pod_backup_dir,
+                jit_build_dir=remote_jit_dir,
             )
         except Exception as exc:  # noqa: BLE001
             # Pod fan-out failed: revert sandbox copy.
@@ -2031,16 +2056,19 @@ def apply_kernel_patch(
             }
         # Persist per-host backups {hostname: backup_path} so revert can find them.
         backup_map: dict[str, str] = {}
+        records_by_host: dict[str, list[dict[str, Any]]] = {}
         for entry in mn_apply.get("per_node", []) or []:
             host = (entry.get("host") or "").strip()
             bp = (entry.get("backup_path") or "").strip()
             if host and bp:
                 backup_map[host] = bp
+                records_by_host.setdefault(host, []).append(dict(entry))
         multinode_info = {
             "status": "ok",
             "target_path": str(target),
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
+            "records_by_host": records_by_host,
             "per_node": mn_apply.get("per_node", []),
         }
         # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
@@ -2064,12 +2092,35 @@ def apply_kernel_patch(
     }
     if strategy["compiled"] and not skip_rebuild:
         # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
-        strategy_jit_dir = str(strategy.get("jit_build_dir") or "").strip()
-        jit_build_backup = _invalidate_aiter_jit_build(
-            target,
-            backup_dir,
-            jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
-        )
+        if _is_multi_node() and remote_jit_dir:
+            remote_records = list(multinode_info.get("per_node") or [])
+            invalid = [
+                record
+                for record in remote_records
+                if (record.get("jit_backup") or {}).get("status")
+                not in {"ok", "clean"}
+            ]
+            if not remote_records or invalid:
+                revert = revert_kernel_patch(manifest_path)
+                return {
+                    "status": "failed",
+                    "error_class": "aiter_jit_invalidation_failed",
+                    "error": "one or more pods did not invalidate AITER JIT",
+                    "manifest_path": str(manifest_path),
+                    "revert": revert,
+                }
+            jit_build_backup = {
+                "status": "remote",
+                "per_node": [
+                    record.get("jit_backup") for record in remote_records
+                ],
+            }
+        else:
+            jit_build_backup = _invalidate_aiter_jit_build(
+                target,
+                backup_dir,
+                jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
+            )
         if jit_build_backup.get("status") in {"ok", "clean"}:
             # Persist the backup record before rebuild so a failure can still restore.
             manifest["jit_build_backup"] = jit_build_backup
@@ -2077,9 +2128,10 @@ def apply_kernel_patch(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        invalidation_error = _runtime_jit_invalidation_error(
-            strategy,
-            jit_build_backup,
+        invalidation_error = (
+            ""
+            if jit_build_backup.get("status") == "remote"
+            else _runtime_jit_invalidation_error(strategy, jit_build_backup)
         )
         if jit_build_backup.get("status") == "failed" or invalidation_error:
             # Refuse to benchmark against an unknown/stale binary.
@@ -2102,19 +2154,16 @@ def apply_kernel_patch(
         # dir name, so pristine + patched collide; move the cache aside for a clean re-baseline.
         cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(target, backup_dir)
         if cpp_itfs_cache_backup.get("status") == "failed":
-            # Refuse to re-baseline against a stale runtime cache: restore and bail.
-            try:
-                shutil.copy2(source_backup["backup_path"], target)
-            except OSError:
-                pass
-            if jit_build_backup.get("status") == "ok":
-                _restore_aiter_jit_build(jit_build_backup)
+            # Refuse to re-baseline against a stale runtime cache. The manifest
+            # owns both local and per-pod source/JIT backups.
+            revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
                 "error_class": "aiter_cpp_itfs_invalidation_failed",
                 "error": (f"aiter cpp_itfs runtime cache invalidation failed: {cpp_itfs_cache_backup.get('error')}"),
                 "manifest_path": str(manifest_path),
                 "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
+                "revert": revert,
             }
         if cpp_itfs_cache_backup.get("status") == "ok":
             # Persist before rebuild so a failure can restore the moved-aside cache.
@@ -2144,7 +2193,7 @@ def apply_kernel_patch(
     manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
-    if jit_build_backup.get("status") in {"ok", "clean", "skipped"}:
+    if jit_build_backup.get("status") in {"ok", "clean", "remote", "skipped"}:
         # Surface skipped reason too for manifest auditing.
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
@@ -2383,36 +2432,69 @@ def _apply_kernel_patch_snapshot(
 
     # Multi-node fan-out: push every write path to every pod.
     multinode_info: dict[str, Any] = {}
+    runtime_jit_strategy = (
+        runtime_jit_strategies[0] if runtime_jit_strategies else {}
+    )
+    strategy_jit_dir = str(
+        runtime_jit_strategy.get("jit_build_dir") or ""
+    ).strip()
     if _is_multi_node():
         pod_backup_dir = os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", _MN_POD_BACKUP_DIR_DEFAULT)
         per_node_all: list[dict[str, Any]] = []
         backup_map: dict[str, str] = {}
+        records_by_host: dict[str, list[dict[str, Any]]] = {}
         try:
-            for p in write_paths:
+            for index, p in enumerate(write_paths):
                 mn_apply = _dispatch_multinode_apply(
                     target_file=p,
                     patch_path=snap / Path(p).relative_to(repo_root),
                     kernel_id=kernel_id,
                     backup_dir_on_pod=pod_backup_dir,
+                    jit_build_dir=(
+                        strategy_jit_dir
+                        if index == 0 and strategy_jit_dir and not skip_rebuild
+                        else ""
+                    ),
                 )
-                per_node_all.extend(mn_apply.get("per_node", []) or [])
+                new_records = list(mn_apply.get("per_node", []) or [])
+                per_node_all.extend(new_records)
+                for entry in new_records:
+                    host = (entry.get("host") or "").strip()
+                    bp = (entry.get("backup_path") or "").strip()
+                    if host and bp:
+                        backup_map[host] = bp
+                        records_by_host.setdefault(host, []).append(
+                            dict(entry)
+                        )
+                multinode_info = {
+                    "status": "partial",
+                    "target_path": str(target),
+                    "backup_dir_on_pod": pod_backup_dir,
+                    "host_backup_map": backup_map,
+                    "records_by_host": records_by_host,
+                    "per_node": per_node_all,
+                }
+                # Persist after every file so a later dispatch failure can
+                # revert all already-patched files on every pod.
+                manifest["multinode"] = multinode_info
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
         except Exception as exc:  # noqa: BLE001
-            revert_kernel_patch(manifest_path)
+            revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
                 "error": f"multi-node apply fan-out failed; repo restored: {exc}",
                 "manifest_path": str(manifest_path),
+                "revert": revert,
             }
-        for entry in per_node_all:
-            host = (entry.get("host") or "").strip()
-            bp = (entry.get("backup_path") or "").strip()
-            if host and bp:
-                backup_map[host] = bp
         multinode_info = {
             "status": "ok",
             "target_path": str(target),
             "backup_dir_on_pod": pod_backup_dir,
             "host_backup_map": backup_map,
+            "records_by_host": records_by_host,
             "per_node": per_node_all,
         }
         manifest["multinode"] = multinode_info
@@ -2432,23 +2514,50 @@ def _apply_kernel_patch_snapshot(
             ),
             target,
         )
-        runtime_jit_strategy = (
-            runtime_jit_strategies[0] if runtime_jit_strategies else {}
-        )
-        strategy_jit_dir = str(
-            runtime_jit_strategy.get("jit_build_dir") or ""
-        ).strip()
-        jit_build_backup = _invalidate_aiter_jit_build(
-            aiter_jit_target,
-            backup_dir,
-            jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
-        )
+        if _is_multi_node() and strategy_jit_dir:
+            records_by_host = dict(
+                multinode_info.get("records_by_host") or {}
+            )
+            host_jit = {
+                host: [
+                    record.get("jit_backup")
+                    for record in records
+                    if (record.get("jit_backup") or {}).get("status")
+                    in {"ok", "clean"}
+                ]
+                for host, records in records_by_host.items()
+            }
+            if not host_jit or any(
+                len(records) != 1 for records in host_jit.values()
+            ):
+                revert = revert_kernel_patch(manifest_path)
+                return {
+                    "status": "failed",
+                    "error_class": "aiter_jit_invalidation_failed",
+                    "error": "each pod must invalidate AITER JIT exactly once",
+                    "manifest_path": str(manifest_path),
+                    "revert": revert,
+                }
+            jit_build_backup = {
+                "status": "remote",
+                "per_host": host_jit,
+            }
+        else:
+            jit_build_backup = _invalidate_aiter_jit_build(
+                aiter_jit_target,
+                backup_dir,
+                jit_build_dir=Path(strategy_jit_dir) if strategy_jit_dir else None,
+            )
         if jit_build_backup.get("status") in {"ok", "clean"}:
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        invalidation_error = _runtime_jit_invalidation_error(
-            runtime_jit_strategy,
-            jit_build_backup,
+        invalidation_error = (
+            ""
+            if jit_build_backup.get("status") == "remote"
+            else _runtime_jit_invalidation_error(
+                runtime_jit_strategy,
+                jit_build_backup,
+            )
         )
         if jit_build_backup.get("status") == "failed" or invalidation_error:
             revert = revert_kernel_patch(manifest_path)
@@ -2516,7 +2625,7 @@ def _apply_kernel_patch_snapshot(
     manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
-    if jit_build_backup.get("status") in {"ok", "clean", "skipped"}:
+    if jit_build_backup.get("status") in {"ok", "clean", "remote", "skipped"}:
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
         manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
