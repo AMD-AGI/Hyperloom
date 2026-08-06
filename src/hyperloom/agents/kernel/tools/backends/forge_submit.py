@@ -2522,35 +2522,68 @@ def _canonical_forge_artifacts(
     }
 
 
-def _mean_case_result_fields(
+def _observed_mean_case_result_fields(
     payload: dict,
-) -> dict | None:
-    """Normalize authoritative per-case scoring fields from Forge output."""
+) -> tuple[float | None, float | None, bool, bool]:
+    """Parse measured Forge scores without conflating regressions with missing data."""
     try:
         mean_case_speedup = float(payload.get("mean_case_speedup"))
     except (TypeError, ValueError):
-        return None
-    if not math.isfinite(mean_case_speedup) or mean_case_speedup <= 1.0:
-        return None
+        mean_case_speedup = None
+    if (
+        mean_case_speedup is not None
+        and (
+            not math.isfinite(mean_case_speedup)
+            or mean_case_speedup <= 0.0
+        )
+    ):
+        mean_case_speedup = None
     try:
         search_start = float(payload.get("search_start_mean_case_speedup"))
     except (TypeError, ValueError):
-        return None
-    if not math.isfinite(search_start) or search_start <= 0.0:
-        return None
+        search_start = None
+    if (
+        search_start is not None
+        and (not math.isfinite(search_start) or search_start <= 0.0)
+    ):
+        search_start = None
+    total_improved = bool(
+        mean_case_speedup is not None and mean_case_speedup > 1.0
+    )
     incremental = bool(
         payload.get(
             "incremental_improved",
             payload.get(
                 "improved_during_search",
-                mean_case_speedup > search_start,
+                mean_case_speedup is not None
+                and search_start is not None
+                and mean_case_speedup > search_start,
             ),
         )
     )
+    return mean_case_speedup, search_start, total_improved, incremental
+
+
+def _mean_case_result_fields(
+    payload: dict,
+) -> dict | None:
+    """Normalize an improving, fully anchored Forge recovery result."""
+    (
+        mean_case_speedup,
+        search_start,
+        total_improved,
+        incremental,
+    ) = _observed_mean_case_result_fields(payload)
+    if (
+        mean_case_speedup is None
+        or search_start is None
+        or not total_improved
+    ):
+        return None
     return {
         "mean_case_speedup": mean_case_speedup,
         "search_start_mean_case_speedup": search_start,
-        "total_improved": True,
+        "total_improved": total_improved,
         "incremental_improved": incremental,
         "improved": True,
         "improved_during_search": incremental,
@@ -2978,33 +3011,13 @@ def _run_loop_via_cli(
         best_ms = parsed.get("best_ms")
         pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
         search_start_ms = parsed.get("search_start_ms", baseline_ms)
-        try:
-            parsed_speedup = float(parsed.get("mean_case_speedup"))
-            if math.isfinite(parsed_speedup) and parsed_speedup > 1.0:
-                mean_case_speedup = parsed_speedup
-        except (TypeError, ValueError):
-            mean_case_speedup = None
-        try:
-            parsed_search_start = float(
-                parsed.get("search_start_mean_case_speedup")
-            )
-            if math.isfinite(parsed_search_start) and parsed_search_start > 0.0:
-                search_start_mean_case_speedup = parsed_search_start
-        except (TypeError, ValueError):
-            search_start_mean_case_speedup = None
-        total_improved = bool(
-            mean_case_speedup is not None and mean_case_speedup > 1.0
-        )
-        incremental_improved = bool(
-            parsed.get(
-                "incremental_improved",
-                parsed.get(
-                    "improved_during_search",
-                    mean_case_speedup is not None
-                    and search_start_mean_case_speedup is not None
-                    and mean_case_speedup > search_start_mean_case_speedup,
-                ),
-            )
+        (
+            mean_case_speedup,
+            search_start_mean_case_speedup,
+            total_improved,
+            incremental_improved,
+        ) = _observed_mean_case_result_fields(
+            parsed
         )
         improved = total_improved
         improved_during_search = incremental_improved
