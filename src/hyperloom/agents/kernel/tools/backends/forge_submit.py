@@ -1239,6 +1239,40 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 '''
 
 
+_GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
+
+
+def _exclude_generated_drivers(workspace: Path) -> None:
+    """Keep generated drivers out of whatever the producer stages.
+
+    Drivers are Hyperloom scratch files living inside the producer's workspace,
+    so a broad ``git add`` would otherwise sweep one into the framework patch.
+    Registering the pattern in the repository's own exclude file is idempotent
+    and leaves the working tree untouched.
+    """
+    probe = _run(
+        ["git", "-C", str(workspace), "rev-parse", "--git-common-dir"],
+        timeout=30,
+    )
+    if probe.returncode != 0:
+        return
+    common = Path(probe.stdout.strip())
+    if not common.is_absolute():
+        common = (Path(workspace) / common).resolve()
+    exclude = common / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if _GENERATED_DRIVER_GLOB in existing.split():
+            return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(exclude, "a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write(_GENERATED_DRIVER_GLOB + "\n")
+    except OSError as error:
+        log.warning("forge: could not exclude generated drivers from git: %s", error)
+
+
 def _write_generated_driver(workspace: str | Path, content: str) -> str:
     """Atomically allocate a unique hidden driver inside ``workspace``.
 
@@ -1249,6 +1283,7 @@ def _write_generated_driver(workspace: str | Path, content: str) -> str:
     uses to clean these up after an in-place run.
     """
     workspace_path = Path(workspace)
+    _exclude_generated_drivers(workspace_path)
     fd, raw_path = tempfile.mkstemp(
         prefix=".forge_driver_",
         suffix=".py",
@@ -2696,6 +2731,198 @@ def _validated_forge_best_result(
     }
 
 
+_REWRITE_ARTIFACT_KIND = "framework_applyback"
+_REWRITE_ARTIFACT_SCHEMA_VERSION = 2
+_REWRITE_VALIDATION_SCOPE = "reference"
+_REWRITE_INTEGRATION_PENDING = "pending"
+_PATCH_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
+
+
+def _rewrite_contained_path(
+    workspace_root: Path,
+    value: object,
+    *,
+    allow_absolute: bool,
+) -> Path | None:
+    """Resolve a producer-reported path, rejecting anything outside the workspace."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        return _path_within(workspace_root, text)
+    if not allow_absolute:
+        return None
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return resolved if _path_is_within(resolved, workspace_root) else None
+
+
+def _patch_touched_paths(patch_path: Path) -> set[str] | None:
+    """Return the repo-relative paths a git patch claims to touch."""
+    try:
+        text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    touched: set[str] = set()
+    for old, new in _PATCH_HEADER_RE.findall(text):
+        for raw in (old, new):
+            path = raw.strip().strip('"')
+            if path and path != "/dev/null":
+                touched.add(path)
+    return touched
+
+
+def _validated_rewrite_applyback_result(
+    payload: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+) -> dict | None:
+    """Return normalized evidence only for a published framework apply-back.
+
+    The producer reports two documents with disjoint key sets: an outer result
+    naming the canonical artifacts, and the schema-2 manifest those artifacts
+    are described by. Both are checked with their own keys, and the manifest is
+    opened only through the path the outer result declares -- never by scanning
+    the workspace for whichever manifest looks newest.
+
+    Args:
+        payload: The outer result read from the caller-chosen result file.
+        workspace: The git workspace every reported path must stay inside.
+        base_commit: The commit this attempt started from.
+
+    Returns:
+        dict | None: Normalized apply-back evidence, or ``None`` when any part
+            of the two-document contract does not hold.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("success") is not True or payload.get("applyback_ok") is not True:
+        return None
+    if payload.get("artifact_kind") != _REWRITE_ARTIFACT_KIND:
+        return None
+    try:
+        artifact_schema_version = int(payload.get("artifact_schema_version"))
+    except (TypeError, ValueError):
+        return None
+    if artifact_schema_version != _REWRITE_ARTIFACT_SCHEMA_VERSION:
+        return None
+    outer_commit = str(payload.get("best_commit") or "").strip()
+    if not outer_commit:
+        return None
+
+    workspace_root = Path(workspace).resolve()
+    manifest_path = _rewrite_contained_path(
+        workspace_root, payload.get("canonical_manifest"), allow_absolute=True
+    )
+    patch_path = _rewrite_contained_path(
+        workspace_root, payload.get("canonical_patch_path"), allow_absolute=True
+    )
+    files_root = _rewrite_contained_path(
+        workspace_root, payload.get("canonical_files_root"), allow_absolute=True
+    )
+    if manifest_path is None or not manifest_path.is_file():
+        return None
+    if patch_path is None or not patch_path.is_file():
+        return None
+    if files_root is None or not files_root.is_dir():
+        return None
+
+    # Reclaiming these paths is destructive and keys off this declaration alone,
+    # so an absent or non-relative one fails the result rather than defaulting.
+    declared_temporary = payload.get("temporary_paths")
+    if not isinstance(declared_temporary, list):
+        return None
+    temporary_paths: list[str] = []
+    for raw in declared_temporary:
+        resolved = _rewrite_contained_path(workspace_root, raw, allow_absolute=False)
+        if resolved is None:
+            return None
+        temporary_paths.append(str(resolved))
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("schema_version") != _REWRITE_ARTIFACT_SCHEMA_VERSION:
+        return None
+    if manifest.get("validation_scope") != _REWRITE_VALIDATION_SCOPE:
+        return None
+    if manifest.get("reference_correctness_passed") is not True:
+        return None
+    if manifest.get("integration_validation_required") is not True:
+        return None
+    if str(manifest.get("integration_validation_status") or "") != _REWRITE_INTEGRATION_PENDING:
+        return None
+    if str(manifest.get("base_commit") or "").strip() != base_commit:
+        return None
+
+    lineage = _validated_commit_lineage_and_timing(
+        manifest,
+        workspace=workspace,
+        base_commit=base_commit,
+    )
+    if lineage is None:
+        return None
+    best_commit, baseline_ms, best_ms = lineage
+    if best_commit != outer_commit or best_ms >= baseline_ms:
+        return None
+
+    changed_files: list[str] = []
+    for raw in manifest.get("changed_files") or []:
+        relative = str(raw or "").strip()
+        if not relative:
+            return None
+        parts = Path(relative)
+        if parts.is_absolute() or ".." in parts.parts:
+            return None
+        changed_files.append(parts.as_posix())
+    if not changed_files:
+        return None
+    if _patch_touched_paths(patch_path) != set(changed_files):
+        return None
+
+    commit_ref = str(manifest.get("commit_ref") or "").strip()
+    if not commit_ref:
+        return None
+    pinned = _run(
+        ["git", "-C", workspace, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
+        timeout=30,
+    )
+    if pinned.returncode != 0 or pinned.stdout.strip() != best_commit:
+        return None
+
+    return {
+        "best_commit": best_commit,
+        "baseline_ms": baseline_ms,
+        "best_ms": best_ms,
+        "artifact_kind": _REWRITE_ARTIFACT_KIND,
+        "artifact_schema_version": artifact_schema_version,
+        "validation_scope": _REWRITE_VALIDATION_SCOPE,
+        "reference_correctness_passed": True,
+        "reference_snr_db": manifest.get("reference_snr_db"),
+        "integration_validation_required": True,
+        "integration_validation_status": _REWRITE_INTEGRATION_PENDING,
+        "base_commit": base_commit,
+        "commit_ref": commit_ref,
+        "builder_symbol": str(manifest.get("builder_symbol") or ""),
+        "canonical_manifest": str(manifest_path),
+        "canonical_patch_path": str(patch_path),
+        "canonical_files_root": str(files_root),
+        "changed_files": changed_files,
+        "temporary_paths": temporary_paths,
+        "applyback_required": payload.get("applyback_required"),
+        "logical_op_name": str(payload.get("logical_op_name") or ""),
+        "source_entry": str(payload.get("source_entry") or ""),
+        "source": "framework_applyback",
+    }
+
+
 def _validated_forge_checkpoint(
     checkpoint: dict | None,
     *,
@@ -3089,6 +3316,161 @@ def _run_loop_via_cli(
     )
 
 
+class RewriteRunOutcome(NamedTuple):
+    """Result and failure evidence from one forge-rewrite-by-flydsl subprocess."""
+
+    result: dict | None
+    output: str
+    error: Exception | None
+    timed_out: bool
+
+
+def _run_rewrite_via_cli(
+    *,
+    source_kernel: str,
+    driver: str,
+    logical_op_name: str,
+    source_entry: str,
+    workspace: str,
+    experiments_dir: Path,
+    result_json: Path,
+    target_functions: list[str] | None,
+    shapes: dict,
+    snr_threshold: float,
+    gpu_target: str,
+    max_iters: int,
+    max_hours: float,
+    branch: str,
+    framework: str,
+    forge_log: Path,
+    timeout_s: int,
+    deadline_unix: float = 0.0,
+) -> RewriteRunOutcome:
+    """Run the source-to-FlyDSL rewrite as an isolated subprocess (CLI mode).
+
+    Shares the forge-loop launcher's containment guarantees -- child env,
+    isolated process group, absolute deadline and escalating termination -- but
+    builds the producer's own argv rather than stripping options off the
+    generic one, and reads only the caller-chosen result file.
+    """
+    if deadline_unix <= 0:
+        deadline_unix = time.time() + timeout_s
+    try:
+        result_json.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not clear stale rewrite result {result_json}: {exc}"
+        ) from exc
+    if result_json.exists():
+        raise RuntimeError(f"stale rewrite result still exists: {result_json}")
+
+    forge_root = _ensure_forge_on_path()
+    env = dict(os.environ)
+    if forge_root:
+        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
+    env["GPU_TARGET"] = gpu_target
+    _apply_fellow_env(env)
+    if "/aiter/" in (source_kernel or ""):
+        env.pop("AITER_REBUILD", None)
+        _ensure_flydsl_aiter_compat()
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        _flydsl_rewrite.REWRITE_COMMAND,
+        "--source-kernel",
+        source_kernel,
+        "--driver",
+        driver,
+        "--logical-op-name",
+        logical_op_name,
+        "--workspace",
+        workspace,
+        "--experiments-dir",
+        str(experiments_dir),
+        "--shapes-json",
+        json.dumps(shapes),
+        "--snr-threshold",
+        str(snr_threshold),
+        "--gpu-target",
+        gpu_target,
+        "--max-iters",
+        str(max_iters),
+        "--max-hours",
+        str(max_hours),
+        "--deadline-unix",
+        str(deadline_unix),
+        "--git-branch",
+        branch,
+        "--result-json",
+        str(result_json),
+    ]
+    if source_entry:
+        cmd += ["--source-entry", source_entry]
+    if target_functions:
+        cmd += ["--target-functions", ",".join(target_functions)]
+    if framework:
+        cmd += ["--framework", framework]
+
+    run_exc: Exception | None = None
+    out = ""
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=workspace,
+            start_new_session=True,
+        )
+        try:
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout, stderr = _terminate_forge_process(proc)
+        out = (stdout or "") + "\n" + (stderr or "")
+        if timed_out:
+            run_exc = RuntimeError(
+                f"forge rewrite exceeded absolute deadline after {timeout_s}s"
+            )
+        if proc.returncode != 0 and run_exc is None:
+            run_exc = RuntimeError(f"forge rewrite exited rc={proc.returncode}")
+    except Exception as exc:  # noqa: BLE001
+        run_exc = exc
+
+    try:
+        with open(forge_log, "a") as handle:
+            handle.write("\n=== forge-rewrite-by-flydsl (cli) stdout ===\n")
+            handle.write(out)
+            if run_exc:
+                handle.write(f"\n=== forge rewrite exception ===\n{run_exc}\n")
+    except OSError:  # noqa: S110
+        pass
+
+    parsed = None
+    try:
+        if result_json.exists():
+            parsed = json.loads(result_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        parsed = None
+    sentinel = _flydsl_rewrite.RESULT_SENTINEL
+    if parsed is None and sentinel in out:
+        try:
+            parsed = json.loads(out.split(sentinel)[1])
+        except (IndexError, json.JSONDecodeError):
+            parsed = None
+    return RewriteRunOutcome(
+        result=parsed if isinstance(parsed, dict) else None,
+        output=out,
+        error=run_exc,
+        timed_out=timed_out,
+    )
+
+
 # Canonical claude/usage token counters (mirrors parse_usage.normalize_usage).
 _FORGE_USAGE_TOKEN_KEYS = (
     "input_tokens",
@@ -3150,6 +3532,151 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     return usage, steps
 
 
+def _run_rewrite_attempt(
+    *,
+    route: object,
+    workspace: str,
+    base_commit: str,
+    source_file: str,
+    implementation_sources: list[str],
+    kernel_kind: str,
+    output_dir: Path,
+    experiments_dir: Path,
+    forge_log: Path,
+    shapes: dict,
+    snr_threshold: float,
+    max_iters: int,
+    max_hours: float,
+    deadline_unix: float,
+    timeout_s: int,
+    started: float,
+) -> tuple[dict, list[str]]:
+    """Run one FlyDSL rewrite attempt and accept only a canonical apply-back.
+
+    Returns:
+        tuple[dict, list[str]]: The backend result dict, and the producer's
+            declared temporary paths -- empty unless an apply-back validated,
+            because reclaiming them is destructive and needs a trusted source.
+    """
+    spec = route.spec
+    outcome = _run_rewrite_via_cli(
+        source_kernel=spec.source_kernel,
+        driver=spec.driver,
+        logical_op_name=spec.logical_operator,
+        source_entry=spec.source_entry,
+        workspace=workspace,
+        experiments_dir=experiments_dir,
+        result_json=output_dir / "forge_rewrite_result.json",
+        target_functions=list(spec.implementation_symbols),
+        shapes=shapes,
+        snr_threshold=snr_threshold,
+        gpu_target=spec.gpu_target,
+        max_iters=max_iters,
+        max_hours=max_hours,
+        branch=spec.branch,
+        framework=spec.framework,
+        forge_log=forge_log,
+        timeout_s=timeout_s,
+        deadline_unix=deadline_unix,
+    )
+    # This route has no schema-1 recovery channel to fall back on: the producer
+    # is never given an experiment id, so it writes no forge-loop checkpoint,
+    # and an interim or working-tree state is never a published apply-back.
+    applyback = _validated_rewrite_applyback_result(
+        outcome.result,
+        workspace=workspace,
+        base_commit=base_commit,
+    )
+    if applyback is None:
+        detail = (
+            "forge rewrite timed out before publishing an apply-back patch"
+            if outcome.timed_out
+            else "forge rewrite returned without a validated apply-back patch"
+        )
+        if outcome.error is not None:
+            detail = f"{detail}: {outcome.error}"
+        failed = _normalized(1, "", detail, time.time() - started)
+        failed["timed_out"] = outcome.timed_out
+        failed["salvaged"] = False
+        failed["output_dir"] = str(output_dir)
+        failed["cli_workspace"] = str(output_dir)
+        failed["flydsl_rewrite"] = route.as_dict()
+        return failed, []
+
+    salvaged = bool(outcome.error)
+    _, changed_files = _export_best_artifacts(
+        workspace,
+        base_commit,
+        spec.source_kernel,
+        source_file,
+        output_dir,
+        best_commit=applyback["best_commit"],
+    )
+    if changed_files:
+        try:
+            (output_dir / "optimized_versions" / "changed_files.txt").write_text(
+                "\n".join(changed_files) + "\n"
+            )
+        except OSError:
+            pass
+    baseline_ms = applyback["baseline_ms"]
+    best_ms = applyback["best_ms"]
+    # The rewrite oracle reports one aggregate timing per implementation, so
+    # their ratio is this route's validated micro gain.
+    micro_speedup = baseline_ms / best_ms
+    _write_report(
+        output_dir,
+        baseline_ms,
+        best_ms,
+        True,
+        mean_case_speedup=micro_speedup,
+        search_start_ms=baseline_ms,
+        improved_during_search=True,
+    )
+    msg = (
+        f"forge rewrite done (cli): baseline={baseline_ms} best={best_ms} "
+        f"micro_speedup={micro_speedup:.4f} "
+        f"commit={applyback['best_commit'][:12]} "
+        f"changed_files={len(applyback['changed_files'])} "
+        f"integration={applyback['integration_validation_status']} "
+        f"salvaged={'yes' if salvaged else 'no'}"
+    )
+    res = _normalized(
+        0,
+        msg + "\n" + (outcome.output or "")[-3000:],
+        "",
+        time.time() - started,
+    )
+    res["cli_workspace"] = str(output_dir)
+    res["output_dir"] = str(output_dir)
+    res["timed_out"] = outcome.timed_out
+    res["salvaged"] = salvaged
+    res["pristine_baseline_ms"] = baseline_ms
+    res["search_start_ms"] = baseline_ms
+    res["best_ms"] = best_ms
+    res["mean_case_speedup"] = micro_speedup
+    res["search_start_mean_case_speedup"] = 1.0
+    res["improved"] = True
+    res["total_improved"] = True
+    res["incremental_improved"] = True
+    res["improved_during_search"] = True
+    res["best_commit"] = applyback["best_commit"]
+    res["canonical_patch_path"] = applyback["canonical_patch_path"]
+    res["canonical_files_root"] = applyback["canonical_files_root"]
+    res["best_manifest"] = applyback["canonical_manifest"]
+    res["changed_files"] = applyback["changed_files"]
+    res["forge_workspace"] = str(Path(workspace).resolve())
+    res["artifacts"] = [applyback["canonical_patch_path"]]
+    res["flydsl_rewrite"] = route.as_dict()
+    res["flydsl_applyback"] = applyback
+    res["logical_operator"] = spec.logical_operator
+    res["source_framework"] = spec.framework
+    res["implementation_sources"] = implementation_sources
+    res["kernel_kind"] = kernel_kind
+    res["target_functions"] = list(spec.implementation_symbols)
+    return res, applyback["temporary_paths"]
+
+
 def _finalize_forge_workspace(
     *,
     inplace: bool,
@@ -3159,8 +3686,14 @@ def _finalize_forge_workspace(
     output_dir: Path,
     branch: str,
     nogit_scratch: bool,
+    temporary_paths: list[str] | None = None,
 ) -> None:
-    """Restore live repos, but retain isolated Forge workspaces for inspection."""
+    """Restore live repos, but retain isolated Forge workspaces for inspection.
+
+    ``temporary_paths`` are scratch files a producer declared in a validated
+    result. They are reclaimed only in place, and only after re-confirming
+    containment, so an unvalidated run never deletes anything it merely guessed.
+    """
     if inplace:
         cleanup_errors: list[str] = []
         campaign_root = Path(workspace) / "forge_experiments"
@@ -3213,6 +3746,28 @@ def _finalize_forge_workspace(
             except OSError as error:
                 cleanup_errors.append(
                     f"failed to remove generated in-place driver: {error}"
+                )
+        workspace_root = Path(workspace).resolve()
+        for raw in temporary_paths or []:
+            declared = Path(str(raw))
+            if not declared.is_absolute() or not _path_is_within(declared, workspace_root):
+                cleanup_errors.append(
+                    f"declared temporary path escapes the workspace: {raw}"
+                )
+                continue
+            if declared.resolve() == workspace_root:
+                cleanup_errors.append(
+                    "declared temporary path is the workspace root itself"
+                )
+                continue
+            try:
+                if declared.is_dir() and not declared.is_symlink():
+                    shutil.rmtree(declared)
+                else:
+                    declared.unlink(missing_ok=True)
+            except OSError as error:
+                cleanup_errors.append(
+                    f"failed to remove producer temporary path {declared}: {error}"
                 )
         try:
             _restore_inplace(restore_info)
@@ -3365,6 +3920,7 @@ def submit(
         return result
 
     driver = ""
+    producer_temporary_paths: list[str] = []
     try:
         # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
         # subprocess, so kernel_agents need not be importable in this process).
@@ -3585,6 +4141,30 @@ def submit(
                 _FORGE_MIN_BUDGET_SEC / 3600.0,
                 timeout_s / 60.0,
             )
+        # The rewrite route consumes a framework apply-back instead of a
+        # forge-loop best, so it runs its own producer command and validator and
+        # leaves the generic recovery channels below completely untouched.
+        if rewrite_route.eligible:
+            rewrite_result, producer_temporary_paths = _run_rewrite_attempt(
+                route=rewrite_route,
+                workspace=workspace,
+                base_commit=base_commit,
+                source_file=source_file,
+                implementation_sources=implementation_sources,
+                kernel_kind=kernel_kind,
+                output_dir=output_dir,
+                experiments_dir=experiments_dir,
+                forge_log=forge_log,
+                shapes=shapes,
+                snr_threshold=snr_threshold,
+                max_iters=max_iters,
+                max_hours=max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0),
+                deadline_unix=max(time.time() + 1.0, started + timeout_s),
+                timeout_s=timeout_s,
+                started=started,
+            )
+            return rewrite_result
+
         loop_outcome = _run_loop_via_cli(
             worktree_kernel=worktree_kernel,
             driver=driver,
@@ -3824,6 +4404,7 @@ def submit(
                 output_dir=output_dir,
                 branch=branch,
                 nogit_scratch=nogit_scratch,
+                temporary_paths=producer_temporary_paths,
             )
         except Exception:
             log.exception("forge workspace finalization failed")
