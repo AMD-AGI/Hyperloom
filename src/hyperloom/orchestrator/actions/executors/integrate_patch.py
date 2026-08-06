@@ -22,7 +22,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_source_file_allowlist
+from ...framework.paths import resolve_session_framework_root, resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -318,7 +318,17 @@ def _resolve_framework_root(
     scope) → first source root whose tree
     actually contains the patch targets (target-aware: a ``vllm/...`` patch must
     apply under the vllm root, not the first allowlist entry which is ``aiter``)
-    → first existing git root → first existing dir. None when nothing resolves.
+    → the tree this session was pointed at → first existing git root → first
+    existing dir. None when nothing resolves.
+
+    The target-aware match is all-or-nothing across the patch set, so one path
+    that does not resolve sends the whole candidate to the next choice. That
+    used to be the head of the allowlist, which is ``aiter`` regardless of what
+    the session is optimising — patches naming the real tree's files then failed
+    to apply and the candidate was written off as ``rejected_apply_fail`` with no
+    hint that it had been aimed at an unrelated repository. Asking the session
+    which tree it is optimising keeps the failure honest: the patch is then
+    rejected by the tree it was written against, which is a fact about the patch.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
@@ -362,6 +372,15 @@ def _resolve_framework_root(
         for p in roots:
             if p.is_dir() and _root_contains_patch_targets(p, patch_paths):
                 return p
+    session_root = resolve_session_framework_root()
+    if session_root and Path(session_root).is_dir():
+        if patch_paths:
+            log.warning(
+                "integrate_patch: no source root holds every patch target; "
+                "applying against the session's framework tree %s",
+                session_root,
+            )
+        return Path(session_root)
     for p in roots:
         if p.is_dir() and (p / ".git").exists():
             return p

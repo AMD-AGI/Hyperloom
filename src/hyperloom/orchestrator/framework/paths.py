@@ -407,6 +407,28 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
     )
 
 
+def resolve_session_framework_root() -> str:
+    """The one source tree this session was explicitly pointed at, or ``""``.
+
+    :func:`resolve_source_file_allowlist` answers "may this be edited", and its
+    order is an artefact of how the roots were discovered — ``/sgl-workspace/aiter/``
+    heads the static defaults, so it comes first whatever the session is
+    optimising. Anything that needs to name *the* tree under optimisation must
+    ask for it, not read position 0 of a permission set: a session that picked
+    the head of the allowlist got an aiter checkout, and every patch naming a
+    file in the real tree failed to apply against it.
+
+    Only the explicitly-named checkout counts. Discovery by import or by
+    globbing site-packages finds whatever the image happens to ship, which is
+    the same guess with more steps.
+
+    Returns:
+        str: The normalised checkout root, or ``""`` when the session named none.
+    """
+    roots = _discover_scriptable_repo_roots() or _discover_explicit_framework_root()
+    return roots[0] if roots else ""
+
+
 def resolve_patch_target_roots() -> tuple[str, ...]:
     """Roots for substring matching in patch apply + kernel classifiers.
 
@@ -474,6 +496,7 @@ __all__ = [
     "probe_framework_source_roots_for_env",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
+    "resolve_session_framework_root",
     "resolve_source_file_allowlist",
     "summarise_framework_root_discovery",
 ]
