@@ -2600,26 +2600,27 @@ def _mean_case_result_fields(
     }
 
 
-def _validated_forge_best_result(
-    payload: dict | None,
+def _validated_commit_lineage_and_timing(
+    payload: dict,
     *,
     workspace: str,
     base_commit: str,
-) -> dict | None:
-    """Return normalized evidence only for a published, correctness-passed best.
+) -> tuple[str, float, float] | None:
+    """Confirm a manifest names a real descendant of this run's base.
 
-    Forge publishes this file only after a KEEP whose validation passed and whose
-    commit is already in the workspace history, so it is the authoritative record
-    of what to keep. Re-verify the commit lineage and the speedup here anyway --
-    the file is written by another process and may be stale from an earlier run
-    against a different base.
+    A manifest is written by another process and may be stale from an earlier
+    run against a different base, so the commit it names is re-checked against
+    the workspace history and its wall timings must be usable numbers.
+
+    Args:
+        payload: A manifest carrying ``commit_hash`` and both wall timings.
+        workspace: The git workspace the commit must live in.
+        base_commit: The commit this attempt started from.
+
+    Returns:
+        tuple[str, float, float] | None: ``(commit, baseline_ms, best_ms)``, or
+            ``None`` when the lineage or the timings do not hold up.
     """
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("schema_version") != 1:
-        return None
-    if payload.get("correctness_passed") is not True:
-        return None
     best_commit = str(payload.get("commit_hash") or "").strip()
     if not best_commit or best_commit == base_commit:
         return None
@@ -2643,15 +2644,46 @@ def _validated_forge_best_result(
     )
     if ancestor.returncode != 0:
         return None
-    score_fields = _mean_case_result_fields(payload)
-    if score_fields is None:
-        return None
     try:
         baseline_ms = float(payload.get("baseline_wall_ms"))
         best_ms = float(payload.get("best_wall_ms"))
     except (TypeError, ValueError):
         return None
     if baseline_ms <= 0 or best_ms <= 0:
+        return None
+    return best_commit, baseline_ms, best_ms
+
+
+def _validated_forge_best_result(
+    payload: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+) -> dict | None:
+    """Return normalized evidence only for a published, correctness-passed best.
+
+    Forge publishes this file only after a KEEP whose validation passed and whose
+    commit is already in the workspace history, so it is the authoritative record
+    of what to keep. Re-verify the commit lineage and the speedup here anyway --
+    the file is written by another process and may be stale from an earlier run
+    against a different base.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 1:
+        return None
+    if payload.get("correctness_passed") is not True:
+        return None
+    lineage = _validated_commit_lineage_and_timing(
+        payload,
+        workspace=workspace,
+        base_commit=base_commit,
+    )
+    if lineage is None:
+        return None
+    best_commit, baseline_ms, best_ms = lineage
+    score_fields = _mean_case_result_fields(payload)
+    if score_fields is None:
         return None
     return {
         "best_commit": best_commit,
