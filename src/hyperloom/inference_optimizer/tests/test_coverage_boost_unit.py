@@ -73,7 +73,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
 
-    monkeypatch.setattr(kb_writeback, "KB_ROOT", tmp_path / "fa")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "fa"))
     path = await kb_writeback.write_framework_record(
         pr_url="https://x/pr/1",
         pr_sha="abc",
