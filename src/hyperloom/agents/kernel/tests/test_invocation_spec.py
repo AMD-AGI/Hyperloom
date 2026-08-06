@@ -749,3 +749,186 @@ def test_native_operation_key_normalizes_graph_wrapped_mangled_symbols():
     assert native_operation_key(
         "hipGraphLaunch->_ZN5aiter24add_rmsnorm_quant_kernelIDF16bEEv.kd"
     ) == "aiter::add_rmsnorm_quant_kernel"
+
+
+def _rewrite_candidate(rows: list[dict], **extra) -> dict:
+    candidate = {
+        "name": "fused_gemm",
+        "operation": "vllm::fused_gemm",
+        "source_symbol": "matmul",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k001",
+            "kernel_ids": [row["kernel_id"] for row in rows],
+            "rows": rows,
+        },
+    }
+    candidate.update(extra)
+    return candidate
+
+
+def test_rewrite_driver_contract_describes_every_traced_case():
+    contract = invocation_spec.build_rewrite_driver_contract(
+        _rewrite_candidate(
+            [
+                {
+                    "kernel_id": "k001",
+                    "operation": "aten::matmul",
+                    "input_shapes": [{"shape": "(256,128) bf16<br>(128,512) bf16"}],
+                    "input_dtypes": ["bf16", "bf16"],
+                },
+                {
+                    "kernel_id": "k002",
+                    "operation": "aten::matmul",
+                    "input_shapes": [{"shape": "(1024,128) bf16<br>(128,512) bf16"}],
+                    "input_dtypes": ["bf16", "bf16"],
+                },
+            ]
+        )
+    )
+
+    assert contract["contract_version"] == invocation_spec.REWRITE_DRIVER_CONTRACT_VERSION
+    assert contract["operator_family"] == invocation_spec.REWRITE_FAMILY_GEMM
+    assert contract["logical_operator"] == "vllm::fused_gemm"
+    assert contract["case_selector_key"] == "CASE_ID"
+    # The curated symbol leads; family hints only widen the search afterwards.
+    assert contract["entry_symbols"][0] == "matmul"
+    assert [case["case_id"] for case in contract["cases"]] == ["case_001", "case_002"]
+    assert contract["cases"][0]["inputs"] == [
+        {"shape": [256, 128], "dtype": "bf16"},
+        {"shape": [128, 512], "dtype": "bf16"},
+    ]
+    assert contract["cases"][1]["inputs"][0] == {"shape": [1024, 128], "dtype": "bf16"}
+
+
+def test_rewrite_driver_contract_accepts_matching_elementwise_operands():
+    contract = invocation_spec.build_rewrite_driver_contract(
+        _rewrite_candidate(
+            [
+                {
+                    "kernel_id": "k001",
+                    "operation": "vllm::silu_and_mul",
+                    "input_shapes": [{"shape": "(4096,8192) fp16<br>(4096,8192) fp16"}],
+                    "input_dtypes": ["fp16", "fp16"],
+                }
+            ]
+        )
+    )
+
+    assert contract["operator_family"] == invocation_spec.REWRITE_FAMILY_ELEMENTWISE
+    assert contract["cases"][0]["inputs"] == [
+        {"shape": [4096, 8192], "dtype": "fp16"},
+        {"shape": [4096, 8192], "dtype": "fp16"},
+    ]
+
+
+def test_rewrite_driver_contract_rejects_families_the_trace_cannot_rebuild():
+    attention = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "vllm::unified_attention",
+                "input_shapes": [{"shape": "(4096,32,128) bf16<br>(4096,8,128) bf16<br>(4096,8,128) bf16"}],
+                "input_dtypes": ["bf16", "bf16", "bf16"],
+            }
+        ]
+    )
+    moe = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "vllm::fused_moe",
+                "input_shapes": [{"shape": "(512,1024) bf16<br>(8,2048,1024) bf16<br>(8,1024,1024) bf16"}],
+                "input_dtypes": ["bf16", "bf16", "bf16"],
+            }
+        ]
+    )
+    unrelated_shapes = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "vllm::scatter_gather",
+                "input_shapes": [{"shape": "(512,64) bf16<br>(31,7) bf16<br>(9,3) bf16"}],
+                "input_dtypes": ["bf16", "bf16", "bf16"],
+            }
+        ]
+    )
+
+    assert invocation_spec.build_rewrite_driver_contract(attention) == {}
+    assert invocation_spec.build_rewrite_driver_contract(moe) == {}
+    assert invocation_spec.build_rewrite_driver_contract(unrelated_shapes) == {}
+
+
+def test_rewrite_driver_contract_rejects_arguments_it_cannot_materialize():
+    quantized = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "aten::matmul",
+                "input_shapes": [{"shape": "(256,128) fp8<br>(128,512) fp8"}],
+                "input_dtypes": ["fp8", "fp8"],
+            }
+        ]
+    )
+    untyped = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "aten::matmul",
+                "input_shapes": [{"shape": "(256,128)<br>(128,512)"}],
+                "input_dtypes": [],
+            }
+        ]
+    )
+    unshaped = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "aten::matmul",
+                "input_shapes": [{"shape": "dynamic"}],
+                "input_dtypes": ["bf16"],
+            }
+        ]
+    )
+
+    assert invocation_spec.build_rewrite_driver_contract(quantized) == {}
+    assert invocation_spec.build_rewrite_driver_contract(untyped) == {}
+    assert invocation_spec.build_rewrite_driver_contract(unshaped) == {}
+
+
+def test_rewrite_driver_contract_rejects_a_group_that_changes_family():
+    mixed = _rewrite_candidate(
+        [
+            {
+                "kernel_id": "k001",
+                "operation": "aten::matmul",
+                "input_shapes": [{"shape": "(256,128) bf16<br>(128,512) bf16"}],
+                "input_dtypes": ["bf16", "bf16"],
+            },
+            {
+                "kernel_id": "k002",
+                "operation": "vllm::silu_and_mul",
+                "input_shapes": [{"shape": "(64,32) bf16<br>(64,32) bf16"}],
+                "input_dtypes": ["bf16", "bf16"],
+            },
+        ]
+    )
+
+    assert invocation_spec.build_rewrite_driver_contract(mixed) == {}
+
+
+def test_invocation_spec_publishes_the_rewrite_driver_contract(tmp_path):
+    candidate = _candidate(tmp_path)
+    candidate["input_shapes"] = [{"shape": "(256,128) bf16<br>(128,512) bf16"}]
+    candidate["input_dtypes"] = ["bf16", "bf16"]
+    candidate.pop("task_group", None)
+
+    spec = invocation_spec.build_invocation_spec(
+        candidate,
+        source_file=candidate["source_file"],
+        test_command="",
+    )
+
+    contract = spec["tests"]["rewrite_driver_contract"]
+    assert contract["operator_family"] == invocation_spec.REWRITE_FAMILY_GEMM
+    assert contract["cases"][0]["case_id"] == "case_001"
