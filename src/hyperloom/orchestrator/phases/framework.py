@@ -805,28 +805,11 @@ class FrameworkPhase(PhaseHandler):
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        notes_lines = [
-            "FRAMEWORK AUTHORING TASK.",
-            "",
-            "A candidate upstream PR was discovered as a lead for this gap.",
-            "Study it as INSPIRATION, then deliver the BEST win for this model /",
-            "hardware / workload. You are NOT limited to copying the PR's diff — go",
-            "beyond it where the live source + profile evidence justify a",
-            "stronger or more targeted change. If, after reading the source,",
-            "the upstream change is already optimal, you may reproduce its",
-            "essential edit, but prefer a change tailored to this model /",
-            "hardware / workload.",
-            "",
-            f"- PR title: {title or '(none)'}",
-            f"- PR url: {pr_url or '(none)'}",
-            f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
-        ]
-        notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
-        # Cross-framework port: the specialist REWRITES the equivalent logic
-        # against this session's (target) framework source.
         is_cross_framework = isinstance(audit, dict) and str(audit.get("layer") or "") == "cross_framework"
         cf_src_framework = ""
         cf_dst_framework = ""
+        notes_lines: list[str] = []
+        notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
         if is_cross_framework:
             _cf_metrics = audit.get("metrics") if isinstance(audit.get("metrics"), dict) else {}
             cf_src_framework = str(_cf_metrics.get("src_framework") or candidate.get("framework") or "").strip().lower()
@@ -863,24 +846,11 @@ class FrameworkPhase(PhaseHandler):
                     "  ledger records the cross-framework outcome.",
                 ]
             )
-        notes_lines.extend(
-            [
-                "",
-                "Deliverable — EITHER is valid (pick what actually moves throughput):",
-                "- a unified-diff source patch in your worktree (``patches_written``), OR",
-                "- when the PR's benefit is reachable via serving flags / env vars on",
-                "  this build (e.g. an MTP toggle), a ``proposal_set`` entry carrying",
-                "  ``extra_args`` / ``extra_envs``.",
-                "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
-                "not benchmark. A config-lever deliverable is a full result, not empty.",
-            ]
-        )
         if critic_feedback:
             req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
             fb_lines = [
                 "",
-                "PRIOR CRITIC FEEDBACK (re-author round — your last deliverable was",
-                "sent back as needs_review; supply the evidence below this round):",
+                "PRIOR CRITIC FEEDBACK (re-author round — supply the evidence below this round):",
             ]
             fb_lines.extend(f"  • required evidence: {ev}" for ev in req_ev[:10])
             advice = str(critic_feedback.get("advice_text") or "").strip()
@@ -890,7 +860,7 @@ class FrameworkPhase(PhaseHandler):
             if risks:
                 fb_lines.append("- risks: " + "; ".join(risks[:6]))
             notes_lines.extend(fb_lines)
-        notes = "\n".join(notes_lines)
+        notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
             # Cross-framework ports route to a dedicated rewrite domain.
             "domain": ("cross_framework_rewrite_specialist" if is_cross_framework else "serving_specialist"),
@@ -898,6 +868,8 @@ class FrameworkPhase(PhaseHandler):
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
+            "task_kind": "framework_authoring",
+            "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
             # Provenance markers for the dispatcher-side authored-patch bridge.
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,
@@ -1069,18 +1041,19 @@ class FrameworkPhase(PhaseHandler):
         """Build enablement-specialist params from a captured launch failure.
 
         Classifies the failure (advisory ``kind`` only — see Q1 hardening),
-        plans bridging discovery, runs a **best-effort** candidate-PR enumeration
-        (network; fully exception-guarded, degrades to repos-only), and renders
-        the authoring mandate via
-        ``framework_agent.enablement_ops.build_mandate`` (the single source
-        of the enablement prompt). Returns ``None`` **only** when the launch log
-        is blank (nothing to act on); a non-blank log always yields params, even
-        when it classifies as ``UNKNOWN`` — the LLM specialist repairs from the
-        raw log so a brand-new gap type never wedges the run.
+        plans bridging discovery, and runs a **best-effort** candidate-PR
+        enumeration (network; fully exception-guarded, degrades to repos-only).
+        The mandate itself is rendered downstream by
+        ``_section_enablement_playbook`` from the structured ``enablement_*``
+        params emitted here, so the prompt text is built once, at the point of
+        use. Returns ``None`` **only** when the launch log is blank (nothing to
+        act on); a non-blank log always yields params, even when it classifies
+        as ``UNKNOWN`` — the LLM specialist repairs from the raw log so a
+        brand-new gap type never wedges the run.
 
         On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
-        different bridging PR leads, and the mandate notes flag that prior
-        attempts reverted — steering the sub-agent toward a different bridge.
+        different bridging PR leads, and the notes flag that prior attempts
+        reverted — steering the sub-agent toward a different bridge.
 
         Args:
             launch_log: Captured launch / traceback text.
@@ -1095,7 +1068,7 @@ class FrameworkPhase(PhaseHandler):
         if not text:
             return None
         from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
-        from hyperloom.agents.framework.enablement_ops import build_mandate, build_search_plan
+        from hyperloom.agents.framework.enablement_ops import build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -1129,12 +1102,6 @@ class FrameworkPhase(PhaseHandler):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        mandate = build_mandate(
-            req,
-            signature=signature,
-            candidate_refs=candidate_refs,
-            source_context=source_context,
-        )
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
@@ -1145,7 +1112,9 @@ class FrameworkPhase(PhaseHandler):
         # transformers-major skew) and environment/build acquisition is owned by
         # the isolated targeted-build path + the specialist's own setup_commands.
         base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
-        notes = mandate.task_description
+        # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
+        # notes carries only per-dispatch dynamic context that §1b cannot provide.
+        notes = ""
         if base_patches or base_setup:
             progress_bits = []
             if base_patches:
@@ -1156,13 +1125,13 @@ class FrameworkPhase(PhaseHandler):
                 "STACKED ENABLEMENT (progress so far): the following already "
                 "cleared earlier boot crashes and WILL be re-applied/re-run as a "
                 "base before your changes — do NOT redo them; fix only the CURRENT "
-                "(deeper) failure, composing on top. " + "; ".join(progress_bits) + "\n\n" + notes
+                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
             )
         elif attempt:
             notes = (
                 f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
                 f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
-                f"bridging approach / candidate than before.\n\n" + notes
+                f"bridging approach / candidate than before."
             )
         gap_cid = f"gap.enablement.{signature.kind}"
         from hyperloom.agents.framework.enablement import CapabilityGap
@@ -1205,6 +1174,10 @@ class FrameworkPhase(PhaseHandler):
             # CapabilityGap projection: marks resource_constraint as not actionable.
             "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
+            # Source lines near the offending site, plus (on a weight-init
+            # failure) the checkpoint's per-layer weight inventory. Rendered
+            # into the mandate by _section_enablement_playbook.
+            "enablement_source_context": source_context,
             # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
             # Allowlisted setup commands from prior rounds, replayed before boot.
@@ -2057,13 +2030,7 @@ class FrameworkPhase(PhaseHandler):
                 pass
         if not gap_cid:
             gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
-        notes_lines = [
-            "EXPLORE AUTHORING RETRY TASK.",
-            "",
-            "A previous patch you authored failed to apply against the live source tree.",
-            "Your task is to study the apply errors below and produce a corrected patch.",
-        ]
-        notes_lines.extend(feedback_lines)
+        notes_lines: list[str] = list(feedback_lines)
         if critic_feedback:
             req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
             if req_ev:
@@ -2073,13 +2040,14 @@ class FrameworkPhase(PhaseHandler):
             advice = str(critic_feedback.get("advice_text") or "").strip()
             if advice:
                 notes_lines.append(f"- advice: {advice}")
-        notes = "\n".join(notes_lines)
+        notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "gap_canonical_id": gap_cid,
             "gap_symptom": gap_symptom or f"Retry apply-failed patch for {gap_cid}",
             "gap_layer": "perf_explore",
             "framework": framework_name,
+            "task_kind": "explore_apply_retry",
             "source": "coordinator_internal",
             "readonly": False,
             "notes": notes,
@@ -2375,7 +2343,7 @@ class FrameworkPhase(PhaseHandler):
             "framework": str(getattr(self.shared_state, "framework", "") or "").strip().lower(),
             "gap_description": gap,
             "gap_keywords": keywords,
-            "gap_canonical_id": "local_explore",
+            "gap_canonical_id": f"gap.framework.local_explore.{cand_id}",
         }
 
     async def _maybe_dispatch_local_explore(self, *, reason: str) -> bool:
@@ -2426,46 +2394,33 @@ class FrameworkPhase(PhaseHandler):
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
-        notes_lines = [
-            "FRAMEWORK LOCAL-EXPLORATION TASK (no upstream PR lead).",
-            "",
-            "PR discovery surfaced nothing worth integrating, so author the best",
-            "throughput win for THIS model / hardware / workload directly from the",
-            "live source + profiling evidence. You are NOT starting from a PR diff.",
-            "",
-            f"- target bottleneck / gap: {gap or '(compose from the profile + workload)'}",
-            f"- framework: {framework or '(session framework)'}",
-            "",
-            "How to work:",
-            "- Read installed package source (your framework_source_roots) and the",
-            "  latest profiling breakdown to locate the serving hot path",
-            "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
-            "- You MAY use WebSearch / WebFetch to compare the live tree against the",
-            "  LATEST upstream code (e.g. the framework's main branch) and port a",
-            "  newer optimisation when the local checkout is behind.",
-            "- You MAY inspect and patch installed package source. State expected",
-            "  reload, JIT, or rebuild behavior in the deliverable.",
-            "",
-            "Deliverable — EITHER is valid (pick what actually moves throughput):",
-            "- a unified-diff source patch in your worktree (``patches_written``), OR",
-            "- when the win is reachable via serving flags / env vars, a",
-            "  ``proposal_set`` entry carrying ``extra_args`` / ``extra_envs``.",
-            "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
-            "not benchmark. A config-lever deliverable is a full result, not empty.",
-        ]
         try:
-            mem_block = self._render_framework_memory_for_prompt(self._build_framework_working_memory())
-        except Exception:  # noqa: BLE001 — advisory only
-            mem_block = ""
-        if mem_block:
-            notes_lines.extend(["", mem_block])
-        notes = "\n".join(notes_lines)
+            state.upsert_gap({
+                "canonical_id": gap_cid,
+                "symptom": gap or "Author a throughput patch from live source + profiling evidence",
+                "layer": "framework",
+                "severity": "medium",
+                "domain_hint": "serving_specialist",
+                "source": "coordinator_internal",
+            })
+        except Exception:  # noqa: BLE001
+            log.debug("FRAMEWORK local-explore: upsert_gap failed", exc_info=True)
+        prior_attempts: list[dict[str, Any]] = []
+        try:
+            memory = self._build_framework_working_memory()
+            for t in (memory.get("tried_and_why") or []):
+                if isinstance(t, dict) and str(t.get("ref") or "").strip():
+                    prior_attempts.append(t)
+        except Exception:  # noqa: BLE001
+            pass
         params: dict[str, Any] = {
             "domain": "serving_specialist",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
             "framework": framework,
+            "task_kind": "framework_local_explore",
+            "prior_attempts": prior_attempts,
             # Same provenance markers as the PR-authoring track so the
             # autosubmit -> integrate_patch -> authored-outcome bridge applies.
             "framework_agent_authoring": True,
@@ -2475,7 +2430,6 @@ class FrameworkPhase(PhaseHandler):
             "framework_local_explore": True,
             "source": "coordinator_internal",
             "readonly": False,
-            "notes": notes,
             **self._framework_gpu_params(),
         }
         try:
@@ -2571,6 +2525,9 @@ class FrameworkPhase(PhaseHandler):
         """
         import json as _json
 
+        from hyperloom.common.llm_config import astream_chat_completion_text
+        from hyperloom.orchestrator.prompts.framework_ranker_prompt import build_framework_ranker_prompt
+
         client = self._framework_agent_ranker_client()
         if client is None:
             return None
@@ -2578,24 +2535,10 @@ class FrameworkPhase(PhaseHandler):
         if not model:
             return None
         state = self.shared_state
-        # Workload context.
-        ctx_lines = [
-            "You are selecting ONE upstream PR to integrate next, to maximize "
-            "LLM serving throughput (tokens/s) for this exact workload:",
-            f"- model: {getattr(state, 'model', '') or getattr(state, 'model_path', '')}",
-            f"- framework: {getattr(state, 'framework', '')}",
-            f"- gpu_type: {getattr(state, 'gpu_type', '')}",
-            f"- precision: {getattr(state, 'precision', '')}",
-            f"- tensor_parallel: {getattr(state, 'tp', '')}",
-        ]
         best = getattr(state, "best_throughput", None) or getattr(state, "baseline_throughput", None)
-        if best:
-            ctx_lines.append(f"- current_best_throughput_tok_s: {best}")
-        # Candidate list (cap to keep the prompt bounded).
         cap = 60
         listed = candidates[:cap]
-        ctx_lines.append("")
-        ctx_lines.append("Candidates (choose the ONE most likely to raise throughput):")
+        candidate_rows: list[str] = []
         for i, c in enumerate(listed):
             cid = self._framework_candidate_key(c)
             title = str(c.get("title") or "").strip()
@@ -2603,62 +2546,36 @@ class FrameworkPhase(PhaseHandler):
             audit = c.get("_audit") if isinstance(c.get("_audit"), dict) else None
             appl = str((audit or {}).get("applicability") or "") if audit else ""
             extra = f" [audit_applicability={appl}]" if appl else ""
-            ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
-        if any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed):
-            ctx_lines.append("")
-            ctx_lines.append(
-                "One option above is a LOCAL-EXPLORATION arm (its id starts with "
-                "'local_explore:'): instead of integrating an upstream PR, a "
-                "write-capable specialist authors a patch directly from the live "
-                "source + profiling evidence (it may also compare against the "
-                "latest upstream code via web search). Prefer it when the "
-                "discovered PRs look weak, already-present, or off the current "
-                "bottleneck."
-            )
-        # Step C — soft guidance: fold this session's already-tried / failed
-        # candidates into the prompt as negative samples so the ranker stops
-        # re-picking equivalents. Purely derived from the ledgers (zero extra
-        # LLM cost); best-effort — a build failure must never wedge ranking.
+            candidate_rows.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        has_local_explore = any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed)
+        # Fold already-tried / failed candidates as negative samples (best-effort).
         try:
-            tried_block = self._render_framework_memory_for_prompt(
+            memory_block = self._render_framework_memory_for_prompt(
                 self._build_framework_working_memory(),
             )
         except Exception:  # noqa: BLE001 — advisory only
             log.debug("FRAMEWORK: working-memory render for ranker failed", exc_info=True)
-            tried_block = ""
-        if tried_block:
-            ctx_lines.append("")
-            ctx_lines.append(tried_block)
-        ctx_lines.append("")
-        ctx_lines.append(
-            "Prefer PRs from this session's own framework repo, especially those "
-            "targeting the serving hot path (MoE/FP8/attention/GEMM/KV-cache/scheduling). "
-            "A cross-framework PR is acceptable when it carries transferable high-value "
-            "serving tech worth porting. Always choose exactly ONE candidate; reply "
-            '{"candidate_id": "<id>", "reason": "<short>"}.'
+            memory_block = ""
+        prompt = build_framework_ranker_prompt(
+            model=getattr(state, "model", "") or getattr(state, "model_path", ""),
+            framework=getattr(state, "framework", ""),
+            gpu_type=getattr(state, "gpu_type", ""),
+            precision=getattr(state, "precision", ""),
+            tp=getattr(state, "tp", ""),
+            best_throughput=best,
+            candidate_rows=candidate_rows,
+            has_local_explore=has_local_explore,
+            memory_block=memory_block,
         )
-        prompt = "\n".join(ctx_lines)
 
-        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
-        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted (same
-        # constraint ProposalScorer hit). Stream and accumulate the deltas. The
-        # deadline wraps BOTH stream creation and the chunk loop so a proxy that
-        # opens the stream then stalls mid-body can't hang the ranker.
         async def _read_stream() -> str:
-            parts: list[str] = []
-            stream = await client.chat.completions.create(
+            text, _ = await astream_chat_completion_text(
+                client,
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=400,
-                stream=True,
-                stream_options={"include_usage": True},
             )
-            async for chunk in stream:
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta is not None and delta.content:
-                        parts.append(delta.content)
-            return "".join(parts)
+            return text
 
         try:
             text = (
@@ -5247,31 +5164,14 @@ class FrameworkPhase(PhaseHandler):
             direction=direction,
             direction_pct=direction_pct,
         )
-        notes = "\n".join(
-            [
-                "FRAMEWORK CONFIG-EXPLORATION TASK.",
-                "",
-                "Propose a GRID of runtime config variants to try for this model /",
-                "hardware / workload -- server flags and/or environment variables",
-                "that may raise throughput WITHOUT changing source. Do NOT write",
-                "patches.",
-                "",
-                "Return a ``proposal_set`` where each entry carries:",
-                "  - name: short unique label",
-                "  - extra_args: server CLI flags (string), and/or",
-                "  - extra_envs: {ENV: value} overrides",
-                "  - reason: one line on why it may help.",
-                "The Coordinator benchmarks each variant and decides KEEP/REVERT;",
-                "you do not benchmark. Prefer high-signal, distinct variants.",
-                *context_lines,
-            ]
-        )
+        notes = "\n".join(context_lines).strip()
         params: dict[str, Any] = {
             "domain": domain,
             "gap_canonical_id": gap_cid,
             "gap_symptom": ("Propose runtime config variants (server args / env) for a throughput grid"),
             "gap_layer": "framework",
             "framework": framework,
+            "task_kind": "framework_config_generation",
             # Marker so completion harvest routes the proposal_set into the config
             # subphase (and the mn-explore bridge skips it to avoid double-consume).
             "framework_config_generation": True,

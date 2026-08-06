@@ -50,6 +50,8 @@ class ContextProvider:
     running_tasks_reader: Callable[[], str] | None = None
     # Whitelisted lane-light action runner; ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
+    # On-demand reference documents directory; ``None`` => unavailable.
+    reference_reader: Callable[[str], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable, never letting it crash the reactor.
@@ -204,6 +206,12 @@ class ContextProvider:
             "run_action_now",
         )
 
+    def read_reference(self, name: str = "") -> str:
+        """Return the full text of a named on-demand reference document."""
+        if self.reference_reader is None:
+            return "(read_reference not wired)"
+        return self._safe(lambda: self.reference_reader(name), "read_reference")
+
 
 # Tool descriptors: (tool_name, description, input_schema, provider-method).
 _NO_ARGS_SCHEMA: dict[str, Any] = {
@@ -228,6 +236,12 @@ _RUN_ACTION_SCHEMA: dict[str, Any] = {
         "params": {"type": "object"},
     },
     "required": ["action_name"],
+    "additionalProperties": False,
+}
+_REFERENCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}},
+    "required": ["name"],
     "additionalProperties": False,
 }
 
@@ -334,6 +348,16 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         _RUN_ACTION_SCHEMA,
         "run_action_now",
     ),
+    (
+        "read_reference",
+        "Return the full text of a named on-demand reference document "
+        "listed in the ON-DEMAND REFERENCE INDEX section of this prompt. "
+        "Pass the bare stem from that index (e.g. name='failure_recovery'). "
+        "Use when an action has just failed or you need the detailed "
+        "decision rules for a situation flagged in the index.",
+        _REFERENCE_SCHEMA,
+        "read_reference",
+    ),
 )
 
 
@@ -396,6 +420,8 @@ def _make_handler(
                 kwargs["action_name"] = str(args["action_name"])
             if "params" in args and isinstance(args["params"], dict):
                 kwargs["params"] = args["params"]
+            if "name" in args:
+                kwargs["name"] = str(args["name"])
         try:
             text = method(**kwargs)
         except Exception as exc:  # noqa: BLE001 — never crash a pull

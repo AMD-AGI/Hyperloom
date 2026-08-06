@@ -38,6 +38,24 @@ def test_format_variant_line():
     assert "(no-flag)" in line2
 
 
+def test_format_variant_line_no_measurement_carries_reason():
+    line = SharedState._format_variant_line(
+        {
+            "name": "slow",
+            "reason": "killed_overtime",
+            "wall_clock_ratio_vs_baseline": 2.06,
+        }
+    )
+    assert "no_meas" in line
+    assert "killed_overtime" in line
+    assert "2.06x" in line
+    # A measured row needs no reason: the gain already carries the verdict.
+    measured = SharedState._format_variant_line(
+        {"name": "low", "gain_pct": 0.4, "reason": "gain_below_threshold"},
+    )
+    assert "gain_below_threshold" not in measured
+
+
 def test_enrich_with_tested_gain():
     entry = {"fingerprint": "fp1"}
     tested = {"fp1": {"gain_pct": 3.0, "result": {"output_throughput": 99.0}}}
@@ -63,6 +81,22 @@ def test_format_search_state():
     assert "cursor=3" in out
     assert "accepted:" in out
     assert "rejected (last 15):" in out
+    assert "killed_overtime" not in out
+
+
+def test_format_search_state_head_reports_killed_overtime():
+    search = {
+        "cursor": 8,
+        "tested": {"f1": {}, "f2": {}},
+        "last_round": {"round_id": 3, "killed_overtime": ["f1", "f2"]},
+    }
+    out = SharedState._format_search_state(search)
+    assert "killed_overtime(last_round)=2" in out
+    # A round with no kill must not add noise to the head line.
+    search["last_round"] = {"round_id": 4, "killed_overtime": []}
+    assert "killed_overtime" not in SharedState._format_search_state(search)
+    search["last_round"] = "not-a-dict"
+    assert "killed_overtime" not in SharedState._format_search_state(search)
 
 
 def test_format_optimization_stack():

@@ -23,6 +23,7 @@ from ..state_store import DetectorStateStore
 from .aiter_jit import AiterJitConfig, AiterJitDetector
 from .budget import BudgetConfig, evaluate_budget_signals
 from .cluster_fault import ClusterFaultConfig, evaluate_cluster_fault_signals
+from .conversation_progress import ConversationProgressConfig, evaluate_conversation_progress_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .critic_health import (
     CriticHealthConfig,
@@ -46,6 +47,7 @@ from .kernel_pipeline import (
     evaluate_kernel_pipeline_signals,
 )
 from .local_health import LocalHealthConfig, evaluate_local_health_signals
+from .phase_budget import PhaseBudgetConfig, evaluate_phase_budget_signals
 from .preflight import (
     AmdahlCeilingConfig,
     AmdahlCeilingDetector,
@@ -148,6 +150,20 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         "budget",
         BudgetConfig,
         evaluator=evaluate_budget_signals,
+        needs_source_data=False,
+    ),
+    SignalSpec(
+        "phase_budget",
+        "phase_budget",
+        PhaseBudgetConfig,
+        evaluator=evaluate_phase_budget_signals,
+        needs_source_data=False,
+    ),
+    SignalSpec(
+        "conversation_progress",
+        "conversation_progress",
+        ConversationProgressConfig,
+        evaluator=evaluate_conversation_progress_signals,
         needs_source_data=False,
     ),
     SignalSpec(

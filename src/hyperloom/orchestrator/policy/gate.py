@@ -336,7 +336,6 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
-    "kernel_agent": frozenset(),
     "critic": frozenset(),
     "robustness": frozenset(),
 }
