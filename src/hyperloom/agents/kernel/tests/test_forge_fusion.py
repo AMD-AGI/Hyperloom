@@ -245,6 +245,86 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path, monkeypatch):
     assert result["artifact_files"] == ["foo.py"]
 
 
+def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
+    """`llm_unavailable` means the model was never reached, so it is not a verdict.
+
+    The generic no-KEEP shape would call it ``complete``/``no_improvement``, which
+    records an outage as an optimization result AND satisfies the KERNEL-entry
+    idempotency gate -- one gateway blip would then skip fusion for the whole
+    remaining session.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = {
+        "schema_version": 2,
+        "verdict": "llm_unavailable",
+        "diagnosis": {"is_candidate": True},
+        "fusion": None,
+        "fusion_candidates": [],
+        "fusion_loop": None,
+        "validation": None,
+        "artifacts": None,
+        "error": {
+            "stage": "discovery",
+            "class": "llm_unavailable",
+            "kind": "api_error",
+            "attempts": 4,
+            "message": "Error code: 400 - Bad Request",
+        },
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=3)
+
+    # Shaped like the timeout result: infrastructure failed, nothing was judged.
+    assert result["status"] == "failed"
+    assert result["micro_decision"] == "failed"
+    assert result["decision"] == "REVERT"
+    assert result["kept"] is False
+    assert result["requires_e2e_validation"] is False
+    assert result["error_class"] == "llm_unavailable"
+    assert result["verdict"] == "llm_unavailable"
+    assert "api_error" in result["error"]
+    assert "4 attempt(s)" in result["error"]
+    assert "Error code: 400" in result["error"]
+
+
+def test_an_llm_outage_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
+    """The load-bearing consequence: `status` decides whether fusion runs again.
+
+    ``_fusion_required_before_kernel_opt`` skips fusion once ``last_fusion.status``
+    is one of ok/complete/kept, so an outage must NOT report one of those.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps({"schema_version": 2, "verdict": "llm_unavailable", "error": {}}),
+        encoding="utf-8",
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=3)
+
+    assert result["status"] not in ("ok", "complete", "kept")
+
+
+def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
+    """A run that DID reach the model and found nothing is unchanged: it is a real
+    conclusion, and re-running it in the same session would buy nothing."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps({"schema_version": 2, "verdict": "no_opportunity", "error": None}),
+        encoding="utf-8",
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "complete"
+    assert result["micro_decision"] == "no_improvement"
+    assert result["verdict"] == "no_opportunity"
+    assert "error_class" not in result
+
+
 def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
     """kernel_repo must come from the root forge-fusion exported against (authoritative
     for a non-git pip framework), NOT a git toplevel that would break patch apply."""

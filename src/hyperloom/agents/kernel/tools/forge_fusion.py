@@ -38,6 +38,12 @@ sys.path.pop(0)
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
+
+# forge-fusion's manifest verdict for "discovery never reached the model", added in
+# manifest schema v2 alongside the ``error`` block. It is NOT a statement about the
+# kernel, so it must not be normalized into an optimization outcome -- see
+# _normalize_manifest.
+LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 DEFAULT_TIMEOUT_SEC = 7200
 
 
@@ -258,6 +264,29 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         m = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"fusion_manifest.json parse error: {exc!r}"
+        return result
+
+    if str(m.get("verdict") or "") == LLM_UNAVAILABLE_VERDICT:
+        # forge-fusion never reached the model, so this run holds no opinion about the
+        # kernel. The default no-KEEP shape below would report it as
+        # ``complete``/``no_improvement``, which is wrong twice over: it records an
+        # outage as an optimization result, AND ``complete`` satisfies the KERNEL-entry
+        # idempotency gate (``_fusion_required_before_kernel_opt``), so one gateway
+        # blip would skip fusion for the whole remaining session and the model would
+        # never be fusion-optimized at all. The timeout shape below is the established
+        # way to say "infrastructure failed, this is retryable".
+        # ``result`` still carries its failed/REVERT/not-kept defaults from above, so
+        # only the outage's identity has to be added.
+        detail = m.get("error") if isinstance(m.get("error"), dict) else {}
+        kind = str(detail.get("kind") or "unknown")
+        attempts = detail.get("attempts")
+        tried = f" after {attempts} attempt(s)" if attempts else ""
+        message = str(detail.get("message") or "no detail reported")
+        result.update({
+            "verdict": LLM_UNAVAILABLE_VERDICT,
+            "error_class": LLM_UNAVAILABLE_VERDICT,
+            "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+        })
         return result
 
     loop = m.get("fusion_loop") or {}

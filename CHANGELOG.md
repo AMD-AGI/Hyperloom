@@ -17,6 +17,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `enablement_source_context` / `enablement_candidate_refs` params and are
   folded into the §1b mandate at the point of use.
 
+- **An LLM outage during forge-fusion no longer disables fusion for the rest of the
+  session.** forge-fusion reports `verdict: llm_unavailable` (manifest schema v2)
+  when discovery never reached the model, which is a fact about the gateway and not
+  about the kernel. The wrapper's `_normalize_manifest` had no case for it, so it
+  fell through to the generic no-KEEP shape — `status: complete`,
+  `micro_decision: no_improvement`, `decision: REVERT`. That was wrong twice over.
+  It recorded an outage as an optimization result, and because
+  `_fusion_required_before_kernel_opt` skips fusion once `last_fusion.status` is
+  `ok`/`complete`/`kept`, a single gateway blip marked fusion "done" and the model
+  was never fusion-optimized again in that session.
+
+  It is now shaped like the existing subprocess-timeout result — `status: failed`,
+  `micro_decision: failed`, `kept: false`, `error_class: llm_unavailable`, with the
+  manifest's error kind, attempt count and message carried through — which is how
+  Hyperloom already says "infrastructure failed, this is retryable". A real
+  `no_opportunity` (the model was asked and found nothing) is unchanged and still
+  suppresses a pointless re-run. The verdict is matched tolerantly and only honoured
+  when the manifest reports no KEEP, so it can never discard a validated fusion.
+
 ### Removed
 
 - **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
