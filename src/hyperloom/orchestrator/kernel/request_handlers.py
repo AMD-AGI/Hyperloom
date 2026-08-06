@@ -150,6 +150,43 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     return None
 
 
+def _confirm_sources_imported(
+    source_files: list[str],
+    workspace: str | Path | None,
+) -> tuple[bool | None, dict[str, bool | None]]:
+    """Confirm every file a patch wrote was exercised by the served process.
+
+    A patch can span several files -- a new module, the dispatcher that routes
+    to it, the original source it replaces -- so each is graded on its own with
+    :func:`_confirm_source_imported` and the verdicts are combined:
+
+    * ``True``  — every file shows import evidence.
+    * ``False`` — no file appears in the log at all, which is the unambiguous
+      "the served process never ran any of this" case.
+    * ``None``  — anything mixed. A module can be imported lazily or folded
+      into another, so partial evidence is recorded for audit rather than held
+      against the patch.
+
+    Args:
+        source_files: Paths the patch wrote; duplicates and blanks are ignored.
+        workspace: Re-baseline workspace dir (holds ``server.log``).
+
+    Returns:
+        tuple[bool | None, dict[str, bool | None]]: The aggregate tri-state and
+            the per-file verdicts kept for audit.
+    """
+    ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
+    if not ordered:
+        return None, {}
+    per_file = {path: _confirm_source_imported(path, workspace) for path in ordered}
+    verdicts = list(per_file.values())
+    if all(verdict is True for verdict in verdicts):
+        return True, per_file
+    if all(verdict is False for verdict in verdicts):
+        return False, per_file
+    return None, per_file
+
+
 # Backends whose stdout log we mine for token usage.
 _TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
 
