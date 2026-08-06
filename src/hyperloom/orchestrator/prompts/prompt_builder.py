@@ -1060,7 +1060,7 @@ def default_enabled_actions(
     Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
     ``--no-kernel --no-explore`` run drops both kernel_agent-owned names and the
     ``explore`` grid-runner. ``--no-framework-agent`` is intentionally absent — the
-    ``framework`` action is Coordinator-internal and never appears in the
+    ``framework_agent`` action is Coordinator-internal and never appears in the
     catalogue, so it has nothing to trim.
 
     Args:
