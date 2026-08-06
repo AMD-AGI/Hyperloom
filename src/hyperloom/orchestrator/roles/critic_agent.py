@@ -39,7 +39,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
+from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 
 
@@ -999,8 +999,9 @@ class CriticAgentBackend:
         try:
             resp = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(
+            raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
+                latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
@@ -1051,18 +1052,25 @@ class CriticAgentBackend:
         try:
             resp = await self._client.post("/v1/messages", json=payload)
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(
+            raise self._llm_call_failed(
                 f"Anthropic API call failed (critic-agent reasoning): {exc!r}",
+                latency_ms=int((time.perf_counter() - _t0) * 1000),
             ) from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         status = int(getattr(resp, "status_code", 200) or 200)
         if status >= 400:
             body_txt = str(getattr(resp, "text", ""))[:200]
-            raise BackendError(f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}")
+            raise self._llm_call_failed(
+                f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}",
+                latency_ms=latency_ms,
+            )
         try:
             body = resp.json()
         except ValueError as exc:
-            raise BackendError(f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}") from exc
+            raise self._llm_call_failed(
+                f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}",
+                latency_ms=latency_ms,
+            ) from exc
         self._accumulate_anthropic_usage(usage_acc, body.get("usage") if isinstance(body, dict) else None)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
         text = _anthropic_text_from_content(body.get("content") if isinstance(body, dict) else None)
@@ -1181,6 +1189,47 @@ class CriticAgentBackend:
                 "full-trace: critic llm_call append failed",
                 exc_info=True,
             )
+
+    def _llm_call_failed(
+        self,
+        message: str,
+        *,
+        latency_ms: int | None = None,
+    ) -> LLMCallFailed:
+        """Record a failed review-model call and return the error to raise.
+
+        The critic self-writes its trace rows, so a review call that never
+        returned has to be recorded here — the Coordinator only sees the raised
+        error, and by then the token accounting the success path relies on does
+        not exist. Returning the exception (rather than raising) keeps each call
+        site a single ``raise ... from exc``.
+
+        Args:
+            message: The failure description carried by the raised error.
+            latency_ms: Time spent before failing, when measured.
+
+        Returns:
+            The :class:`LLMCallFailed` for the caller to raise.
+        """
+        error = LLMCallFailed(message)
+        try:
+            record = LLMCallRecord.for_failure(
+                session_id=self.session_dir.name,
+                component="critic",
+                role="critic",
+                error=error,
+                model=self._review_model,
+                tick=self._trace_tick,
+                phase=self._trace_phase,
+                latency_ms=latency_ms,
+            )
+            append_llm_call(session_dir=self.session_dir, record=record)
+        except Exception:  # noqa: BLE001 — trace must never break review
+            log.debug(
+                "full-trace: critic llm_call failure append failed",
+                exc_info=True,
+            )
+        return error
 
     def _record_critic_conversation(
         self,
