@@ -469,6 +469,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
+    # ``--no-eval``: run no accuracy eval anywhere. The baseline anchors on
+    # throughput alone and ``baseline_accuracy`` stays 0, which the candidate
+    # gates already read as "grade on throughput only".
+    eval_disabled: bool = False
     # Standalone baseline-arm roofline ceiling computed right after baseline
     # lands; backs up snapshot ceiling so the frontend has data even when the
     # roofline (profile + trace_analyze) step fails. Empty until baseline runs.

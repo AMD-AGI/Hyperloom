@@ -1398,13 +1398,13 @@ class BaselineExecutor:
         result = await self._run_once(ctx)
         params = ctx.task.params or {}
         # "Already off" only when the operator explicitly disabled eval — via
-        # the param, or an extra_envs RUN_EVAL that is PRESENT and falsey. An
-        # absent RUN_EVAL must NOT count.
+        # ``--no-eval``, the param, or an extra_envs RUN_EVAL that is PRESENT and
+        # falsey. An absent RUN_EVAL must NOT count.
         _extra_envs = params.get("extra_envs") or {}
         _explicit_run_eval = (
             "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
         )
-        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
+        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
             _, evidence = self._eval_failure_evidence(result)
@@ -1472,6 +1472,12 @@ class BaselineExecutor:
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    def _eval_disabled(self, ctx: RunnerContext) -> bool:
+        """Whether ``--no-eval`` turned the accuracy eval off for this session."""
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        return bool(getattr(shared_state, "eval_disabled", False))
 
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run.
@@ -1609,12 +1615,14 @@ class BaselineExecutor:
         workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
         absent, and serving records no accuracy at all, so both are covered.
 
-        There is no opt-out. Disabling the eval (via ``disable_run_eval``, an
-        explicit ``RUN_EVAL=false`` env, or a YAML/reference-env value) does not
-        make a missing accuracy acceptable on a genuine baseline -- it only
+        Incidentally disabling the eval is no opt-out: via ``disable_run_eval``,
+        an explicit ``RUN_EVAL=false`` env, or a YAML/reference-env value it does
+        not make a missing accuracy acceptable on a genuine baseline -- it only
         means the reference was never measured, which is exactly the state this
         guard exists to reject. Synthetic kernel-lane re-baselines that reuse
-        ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``.
+        ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``; the one
+        deliberate opt-out is ``--no-eval``, where no reference was ever asked
+        for and the baseline anchors on throughput alone.
 
         With eval-on-fail enablement active (the default), the result is stamped
         as an eval-failure contract -- ``eval_generation_pathology`` when the
@@ -1630,6 +1638,8 @@ class BaselineExecutor:
             result (dict): The final baseline result dict.
         """
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
+            return
+        if self._eval_disabled(ctx):
             return
         # A failed status must NOT skip straight past the salvage below. An eval
         # that dies mid-run (e.g. the server vanishes while lm_eval is working
@@ -1962,10 +1972,12 @@ class BaselineExecutor:
                 self.session_dir,
                 model_path=resolved_model,
             )
-        # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
-        # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
+        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval``
+        # param and the in-executor eval-failure fallback force ``RUN_EVAL=false``.
+        # Candidates inherit it from this materialized YAML, so the whole session
+        # goes eval-less from here.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        if force_disable_eval or is_truthy(params.get("disable_run_eval")):
+        if force_disable_eval or is_truthy(params.get("disable_run_eval")) or self._eval_disabled(ctx):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
             config_path = materialize_config_with_envs(
