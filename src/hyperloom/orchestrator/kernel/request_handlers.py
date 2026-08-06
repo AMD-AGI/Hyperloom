@@ -212,18 +212,6 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if variant and variant not in seen:
                 seen.add(variant)
                 out.append(variant)
-    # FlyDSL kernel checkout roots for moe_flydsl_* candidates.
-    for env_key in ("DSL2_ROOT", "FLYDSL_ROOT"):
-        val = (os.environ.get(env_key, "") or "").strip()
-        if val:
-            cand = (val.rstrip("/") + "/").lower()
-            if cand not in seen:
-                seen.add(cand)
-                out.append(cand)
-    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
-        if default not in seen:
-            seen.add(default)
-            out.append(default)
     return tuple(out)
 
 
