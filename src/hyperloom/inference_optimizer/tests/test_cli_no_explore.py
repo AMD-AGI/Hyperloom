@@ -38,6 +38,20 @@ def test_shared_state_explore_enabled_defaults_true():
     assert SharedState(session_id="t").explore_enabled is True
 
 
+def test_no_eval_default_false():
+    assert getattr(_parse_optimize([]), "no_eval") is False
+
+
+def test_no_eval_flag_sets_true():
+    assert getattr(_parse_optimize(["--no-eval"]), "no_eval") is True
+
+
+def test_shared_state_eval_disabled_defaults_false():
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    assert SharedState(session_id="t").eval_disabled is False
+
+
 # Pre-EXPLORE guard: a resume may retroactively honour --no-explore only while the
 # persisted phase is still upstream of EXPLORE. The list must include both the legacy
 # "FRAMEWORK" name and the current "FRAMEWORK_AGENT".

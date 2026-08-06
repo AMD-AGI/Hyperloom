@@ -673,6 +673,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "param search. Default: explore enabled.",
     )
     opt.add_argument(
+        "--no-eval",
+        action="store_true",
+        default=False,
+        help="Skip the accuracy eval everywhere. The baseline anchors on "
+        "throughput alone instead of halting on a missing accuracy "
+        "reference, and every candidate is graded on throughput only. "
+        "Useful for CI/CD tuning runs that care about performance and not "
+        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
+    )
+    opt.add_argument(
         "--enable-framework-config-exploration",
         action="store_true",
         default=False,

@@ -88,7 +88,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
-  `--no-explore`.
+  `--no-explore`, `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume`, `--resume-from`, `--force-resume`,
   `--reset-state`.
@@ -109,7 +109,10 @@ In every lane a measured drop beyond the tolerance is a `REVERT`. A missing
 verdict while a positive baseline accuracy is on record drops to
 `NEEDS_REVIEW` — eval should have worked and didn't. No baseline accuracy at
 all degrades to a throughput-only `KEEP` rather than blocking every candidate,
-so eval-less environments still make progress.
+so eval-less environments still make progress. Pass `--no-eval` to turn the
+eval off for the whole run: the baseline anchors on throughput instead of
+halting on a missing accuracy reference, and every candidate then lands on
+that degraded path.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
