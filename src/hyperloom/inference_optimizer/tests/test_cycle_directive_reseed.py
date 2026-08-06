@@ -11,6 +11,7 @@ clobbered. All offline; the prompt rebuild is stubbed.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from hyperloom.orchestrator.phases.explore import ExplorePhase
@@ -19,6 +20,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 def _explore_with_stub_coordinator(
     *,
+    session_dir: Path | None = None,
     macro_cycle: int = 1,
     next_cycle_directive: str = "",
     user_supplied: bool = False,
@@ -27,7 +29,8 @@ def _explore_with_stub_coordinator(
     """Build an ExplorePhase over a minimal coordinator stub.
 
     Returns (phase, coord, rebuild_calls) where rebuild_calls records the kwargs
-    passed to the stubbed prompt rebuilder.
+    passed to the stubbed prompt rebuilder. ``session_dir`` is required by the
+    tests that reseed, which snapshot the scope they install.
     """
     st = SharedState(session_id="t", macro_cycle=macro_cycle)
     st.orchestration_memory = {"next_cycle_directive": next_cycle_directive}
@@ -39,6 +42,7 @@ def _explore_with_stub_coordinator(
 
     coord = SimpleNamespace(
         shared_state=st,
+        session_dir=session_dir,
         system_prompt_overrides={"orchestration": "ORIGINAL"},
         _rebuild_orch_prompt=_rebuild,
         _orch_prompt_is_user_supplied=user_supplied,
@@ -70,8 +74,9 @@ def test_fallback_empty_when_no_focus():
     assert phase._cycle_directive_fallback() == ""
 
 
-def test_reseed_llm_directive_wins():
+def test_reseed_llm_directive_wins(tmp_path):
     phase, coord, calls = _explore_with_stub_coordinator(
+        session_dir=tmp_path,
         macro_cycle=2,
         next_cycle_directive="Attack MoE dispatch; drop config sweeps.",
         plan_focus={"focus": "serving_specialist"},
@@ -85,8 +90,9 @@ def test_reseed_llm_directive_wins():
     assert hist[-1]["cycle"] == 2
 
 
-def test_reseed_uses_deterministic_fallback_when_empty():
+def test_reseed_uses_deterministic_fallback_when_empty(tmp_path):
     phase, coord, calls = _explore_with_stub_coordinator(
+        session_dir=tmp_path,
         macro_cycle=3,
         next_cycle_directive="",
         plan_focus={"focus": "comm_specialist", "rationale": "rccl hot"},
@@ -109,8 +115,9 @@ def test_reseed_skipped_for_user_supplied_prompt():
     assert coord.shared_state.cycle_directive_history == []
 
 
-def test_reseed_history_ring_caps_at_10():
+def test_reseed_history_ring_caps_at_10(tmp_path):
     phase, coord, _ = _explore_with_stub_coordinator(
+        session_dir=tmp_path,
         next_cycle_directive="d",
         plan_focus={"focus": "serving_specialist"},
     )

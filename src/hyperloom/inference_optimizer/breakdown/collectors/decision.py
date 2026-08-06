@@ -44,6 +44,15 @@ _TOKEN_CACHE_CREATE_KEY = "cache_creation_input_tokens"
 _TOKEN_CACHE_READ_KEY = "cache_read_input_tokens"
 
 
+# Terminal-status key + its success value, re-declared for the same reason as the
+# token keys above. A ``status="error"`` row records a call that never returned,
+# so it carries no tokens and must stay out of every spend / call-count rollup.
+_STATUS_KEY = "status"
+
+
+_STATUS_OK = "ok"
+
+
 _TOKEN_KEYS_ALL: tuple[str, ...] = (
     _TOKEN_IN_KEY,
     _TOKEN_OUT_KEY,
@@ -105,12 +114,18 @@ def _load_llm_calls(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every LLM-call row from the trace ledger and ext shards.
+    """Read every *successful* LLM-call row from the trace ledger and ext shards.
 
     Merges ``reports/trace/llm_calls.jsonl`` with every
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
     Best-effort: missing files / dirs yield ``[]``; malformed lines are
     skipped by :func:`_load_jsonl_safe`.
+
+    Rows whose ``status`` is not ``ok`` are dropped: they describe a call that
+    never returned, so counting them would inflate ``calls`` and skew the
+    per-decision spend attribution. Rows predating the ``status`` field have no
+    such key and are kept. Failure visibility is Langfuse's job (the emitter
+    maps them to ``level=ERROR``), not the spend rollup's.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -118,8 +133,8 @@ def _load_llm_calls(
             failures).
 
     Returns:
-        list[dict[str, Any]]: Every well-formed LLM-call row across the ledger
-        and ext shards. Empty when no trace files exist.
+        list[dict[str, Any]]: Every well-formed successful LLM-call row across
+        the ledger and ext shards. Empty when no trace files exist.
     """
     trace_root = session_dir / "reports" / "trace"
     rows: list[dict[str, Any]] = list(_load_jsonl_safe(trace_root / "llm_calls.jsonl", warnings))
@@ -132,7 +147,11 @@ def _load_llm_calls(
             shards = []
         for shard in shards:
             rows.extend(_load_jsonl_safe(shard, warnings))
-    return [r for r in rows if isinstance(r, dict)]
+    return [
+        r
+        for r in rows
+        if isinstance(r, dict) and str(r.get(_STATUS_KEY) or _STATUS_OK).strip().lower() == _STATUS_OK
+    ]
 
 
 def _load_proposal_task_map(

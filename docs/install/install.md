@@ -2,9 +2,9 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, quickstart, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, Install, ROCm"
 ---
-# Hyperloom Quickstart
+# Hyperloom Installation Instructions
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
@@ -12,19 +12,20 @@ dedicated workspace, open that directory in Cursor, Claude Code, or Codex, and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
-## Recommended Path: Install using wheel
+## Pip Install (Recommended)
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Cursor, Claude Code,
 or Codex before running the install command.
 
-> **Recommended run mode: Docker.** Running the demos in the provided ROCm
-> container ships a validated ROCm + framework stack, gives reproducible results,
+> **Recommended run mode: Docker.** Running the demos inside the provided
+> [ROCm container](https://rocm.docs.amd.com/projects/hyperloom/en/latest/compatibility.html#container-images)
+> ships a validated ROCm + framework stack, gives reproducible results,
 > and keeps your host untouched. Bare-metal mode is for advanced users: it
 > depends on your host's existing ROCm/torch and installs framework components
 > into your environment, which can cause environment-specific issues or
-> conflicts. Prefer Docker for a validated, reproducible stack.
+> conflicts. Docker is preferred for a validated, reproducible stack.
 
 ### Prerequisites
 
@@ -85,6 +86,11 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
+
+```note
+If you are performing the Hyperloom setup inside of a Docker container, select
+the "baremetal" option as the run mode during setup.
+```
 
 ## Setup scenarios
 

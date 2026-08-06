@@ -51,7 +51,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     backends: dict[str, Backend] = {}
-    for name in ("orchestration", "kernel_agent", "critic", "robustness"):
+    for name in ("orchestration", "critic", "robustness"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
 
@@ -157,9 +157,9 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 4 agents × 2 ticks × 1 heartbeat = 8 send_message events
+        # 3 agents × 2 ticks × 1 heartbeat = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="heartbeat")
-        assert len(msgs) == 8
+        assert len(msgs) == 6
     finally:
         await c.stop()
 
@@ -184,6 +184,136 @@ class _AlwaysFailingBackend(Backend):
 
         self.calls += 1
         raise BackendError(f"simulated {self.name} subprocess crash #{self.calls}")
+
+
+class _LLMFailingBackend(Backend):
+    """Backend whose provider call fails (raises the ``LLMCallFailed`` marker)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+
+        self.calls += 1
+        raise LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+
+
+def _llm_error_rows(session_dir: Path) -> list[dict]:
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    path = llm_calls_path(session_dir)
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("status") == "error"]
+
+
+@pytest.mark.asyncio
+async def test_plain_backend_error_records_no_llm_error_row(session_dir):
+    """A deterministic local fault must not be counted as a provider failure.
+
+    ``BackendError`` covers unreadable ``emit.json``, a missing ``--review``
+    path, an absent SDK — none of which touched the model. Recording those
+    would make the Langfuse LLM error rate meaningless.
+    """
+    backends = _build_backends({})
+    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        assert _llm_error_rows(session_dir) == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
+    backends = _build_backends({})
+    backends["robustness"] = _LLMFailingBackend("robustness")
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == 2
+        row = rows[0]
+        assert row["component"] == "robustness"
+        assert row["error_type"] == "LLMCallFailed"
+        assert "gateway 400" in row["error_message"]
+        assert row["input_tokens"] is None and row["output_tokens"] is None
+    finally:
+        await c.stop()
+
+
+class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
+    """A self-tracing backend (critic-shaped): writes its own row, then raises.
+
+    Having ``set_trace_context`` is the contract that marks a backend as owning
+    its trace rows, so the Coordinator must not add one of its own.
+    """
+
+    def __init__(self, name: str, session_dir: Path) -> None:
+        super().__init__(name)
+        self._session_dir = session_dir
+        self.trace_ctx_calls = 0
+
+    def set_trace_context(self, *, tick: int | None = None, phase: str | None = None) -> None:
+        self.trace_ctx_calls += 1
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        max_turns: int = 1,
+    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
+        from hyperloom.orchestrator.roles.base import LLMCallFailed
+        from hyperloom.orchestrator.trace.llm_trace import LLMCallRecord, append_llm_call
+
+        self.calls += 1
+        error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
+        append_llm_call(
+            session_dir=self._session_dir,
+            record=LLMCallRecord.for_failure(
+                session_id=self._session_dir.name,
+                component="critic",
+                role="critic",
+                error=error,
+                model="claude-opus-4-7",
+            ),
+        )
+        raise error
+
+
+@pytest.mark.asyncio
+async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
+    """One provider failure must produce one row, not one per writer.
+
+    The critic writes its own error row (carrying the review model) and then
+    raises; if the Coordinator also wrote one, Langfuse would count a single
+    critic failure twice, with disagreeing model/latency on the two rows.
+    """
+    backends = _build_backends({})
+    backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        await c.tick(2)
+        rows = _llm_error_rows(session_dir)
+        assert len(rows) == backends["critic"].calls
+        # The surviving row is the backend's richer one (real review model).
+        assert {r["model"] for r in rows} == {"claude-opus-4-7"}
+        assert {r["component"] for r in rows} == {"critic"}
+    finally:
+        await c.stop()
 
 
 class _AlwaysCrashingBackend(Backend):
@@ -479,41 +609,39 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
 
 @pytest.mark.asyncio
 async def test_coordinator_response_routes_back_to_requester(session_dir):
+    """Programmatic handler emits RESPONSE to orchestration without an LLM turn."""
+    from unittest.mock import patch
+    from hyperloom.orchestrator.kernel import request_handlers as krh
+
     req = Intent(
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
             "kind": "trace_analyze",
+            "params": {"trace_input": "/tmp/trace.json.gz"},
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
-        assert kernel_inbox, "no request mirrored to kernel"
-        request_msg_id = kernel_inbox[0].msg_id
 
-        await c._handle_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.RESPONSE,
-                payload={
-                    "in_reply_to": request_msg_id,
-                    "kind": "trace_analyze_done",
-                    "status": "ok",
-                    "result": {"chosen": ["k1", "k2"]},
-                },
-            ),
-        )
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert responses
-        assert responses[0].payload["status"] == "ok"
-    finally:
-        await c.stop()
+    async def _fake_handler(payload, *, session_dir, **_kw):
+        return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": _fake_handler}):
+        try:
+            c.shared_state.baseline_tput = 100.0
+            c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
+            c.shared_state.kernel_enabled = True
+            c.shared_state.save(session_dir)
+            await c.tick(1)
+            kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+            assert kernel_inbox, "no request mirrored to kernel"
+            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            assert responses
+            assert responses[0].payload["status"] == "ok"
+            assert responses[0].payload["source"] == "programmatic_handler"
+        finally:
+            await c.stop()
 
 
 @pytest.mark.asyncio
@@ -721,7 +849,6 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="o"),
-        "kernel_agent": MockBackend(silent, name="k"),
         "critic": MockBackend(silent, name="c"),
         "robustness": MockBackend(silent, name="r"),
     }

@@ -214,6 +214,9 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
             inbox=list(reactor_ctx.inbox),
             now_unix=reactor_ctx.now_unix,
             parse_warnings=list(reactor_ctx.parse_warnings),
+            phase=reactor_ctx.phase,
+            phase_budget=list(reactor_ctx.phase_budget),
+            conversation_progress=reactor_ctx.conversation_progress,
         )
 
     bundle = build_reactor_components(config, session_id=session_id)

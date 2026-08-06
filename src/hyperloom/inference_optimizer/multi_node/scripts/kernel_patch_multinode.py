@@ -36,6 +36,9 @@ from patch_path_safety import (  # noqa: E402
     assert_backup_dir_allowed,
     assert_revert_paths_allowed,
     assert_target_path_allowed,
+    finalize_patch_records,
+    invalidate_aiter_jit_build,
+    restore_aiter_jit_build,
 )
 
 
@@ -69,6 +72,7 @@ def _apply_remote(
     patch_b64: str,
     backup_dir: str,
     kernel_id: str,
+    jit_build_dir: str = "",
 ) -> dict:
     """Apply a single patch on this pod; raises on any error (surfaced via ``ray.get``).
 
@@ -106,16 +110,22 @@ def _apply_remote(
     except Exception as exc:
         raise ValueError(f"patch_b64 not valid base64: {exc!r}") from exc
 
-    atomic_write_bytes(target, data)
+    jit_backup = invalidate_aiter_jit_build(
+        Path(jit_build_dir) if jit_build_dir else None,
+        bdir,
+        f"{_safe_name(kernel_id or target.stem)}_{host}_{int(time.time())}",
+    )
 
     compile_result: dict[str, Any] = {"status": "skipped", "reason": "non-py target"}
-    if target.suffix.lower() == ".py":
-        try:
+    try:
+        atomic_write_bytes(target, data)
+        if target.suffix.lower() == ".py":
             py_compile.compile(str(target), doraise=True)
             compile_result = {"status": "ok"}
-        except py_compile.PyCompileError as exc:
-            shutil.copy2(backup_path, target)
-            raise ValueError(f"py_compile failed on {target} (auto-reverted): {exc.msg}") from exc
+    except Exception:
+        shutil.copy2(backup_path, target)
+        restore_aiter_jit_build(jit_backup)
+        raise
 
     return {
         "host": host,
@@ -123,43 +133,52 @@ def _apply_remote(
         "backup_path": str(backup_path),
         "wrote_bytes": len(data),
         "compile": compile_result,
+        "jit_backup": jit_backup,
     }
 
 
-def _revert_remote(
-    target_path: str,
-    backup_path: str,
-) -> dict:
-    """Restore ``target_path`` from ``backup_path`` on this pod; noop when the backup is missing.
+def _revert_remote(records: list[dict]) -> dict:
+    """Restore every source and JIT backup recorded for one pod.
 
     Args:
-        target_path: Absolute path of the file to restore on the pod.
-        backup_path: Path of the saved pre-patch backup.
+        records: Apply records for all files patched on this pod.
 
     Returns:
         dict: Per-host result with ``status`` of ``restored`` or
         ``noop_missing_backup``.
     """
     host = socket.gethostname()
-    target = Path(target_path)
-    backup = Path(backup_path)
-    if not backup.is_file():
-        _log(f"revert noop on {host}: backup missing at {backup}")
-        return {
-            "host": host,
-            "target_path": str(target),
-            "backup_path": str(backup),
-            "status": "noop_missing_backup",
-        }
-    assert_revert_paths_allowed(target, backup)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup, target)
+    restored: list[str] = []
+    jit_records: list[dict] = []
+    for record in reversed(records):
+        target = Path(str(record.get("target_path") or ""))
+        backup = Path(str(record.get("backup_path") or ""))
+        if not backup.is_file():
+            raise FileNotFoundError(f"backup missing on {host}: {backup}")
+        assert_revert_paths_allowed(target, backup)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, target)
+        restored.append(str(target))
+        jit_record = record.get("jit_backup")
+        if isinstance(jit_record, dict) and jit_record.get("status") in {"ok", "clean"}:
+            jit_records.append(jit_record)
+    jit_restore = {"status": "skipped", "reason": "no JIT backup"}
+    if jit_records:
+        first = jit_records[0]
+        if any(record != first for record in jit_records[1:]):
+            raise ValueError("conflicting JIT backup records for one pod")
+        jit_restore = restore_aiter_jit_build(first)
     return {
         "host": host,
-        "target_path": str(target),
-        "backup_path": str(backup),
         "status": "restored",
+        "restored_targets": restored,
+        "jit_restore": jit_restore,
     }
+
+
+def _finalize_remote(records: list[dict]) -> dict:
+    """Delete backups for an accepted transaction on one pod."""
+    return {"host": socket.gethostname(), **finalize_patch_records(records)}
 
 
 def _alive_nodes(min_gpu: int = 0) -> list[dict]:
@@ -223,19 +242,51 @@ def _do_apply(args: argparse.Namespace) -> int:
             args.patch_b64,
             args.backup_dir,
             args.kernel_id,
+            args.jit_build_dir,
         )
-        refs.append((node_id[:16], ref))
+        refs.append((node_id, ref))
 
     per_node: list[dict] = []
     failures: list[dict] = []
-    for short_id, ref in refs:
+    successful_nodes: list[tuple[str, dict]] = []
+    for node_id, ref in refs:
+        short_id = node_id[:16]
         try:
             res = ray.get(ref, timeout=args.timeout_sec)
             per_node.append({"node_id": short_id, **res})
+            successful_nodes.append((node_id, res))
         except Exception as exc:  # noqa: BLE001
             _log(f"node {short_id}: apply FAILED: {type(exc).__name__}: {exc}")
             failures.append({"node_id": short_id, "error": str(exc), "error_class": type(exc).__name__})
 
+    rollback: list[dict] = []
+    if failures and successful_nodes:
+        RevertActor = ray.remote(num_cpus=0, num_gpus=0)(_revert_remote)
+        rollback_refs = [
+            (
+                node_id,
+                RevertActor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=node_id,
+                        soft=False,
+                    )
+                ).remote([record]),
+            )
+            for node_id, record in successful_nodes
+        ]
+        for node_id, ref in rollback_refs:
+            try:
+                rollback.append(
+                    {"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)}
+                )
+            except Exception as exc:  # noqa: BLE001
+                rollback.append(
+                    {
+                        "node_id": node_id[:16],
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
     payload = {
         "command": "apply",
         "target_path": args.target_path,
@@ -243,6 +294,7 @@ def _do_apply(args: argparse.Namespace) -> int:
         "backup_dir": args.backup_dir,
         "per_node": per_node,
         "failures": failures,
+        "rollback": rollback,
         "status": "ok" if not failures else "partial",
     }
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
@@ -262,14 +314,43 @@ def _do_revert(args: argparse.Namespace) -> int:
         ``1`` (including when ``backup_map_json`` is empty).
     """
     ray.init(ignore_reinit_error=True, log_to_driver=True)
-    backup_map: dict[str, str] = json.loads(args.backup_map_json or "{}")
-    if not backup_map:
+    try:
+        records_by_host: dict[str, list[dict]] = json.loads(
+            args.records_json or "{}"
+        )
+        backup_map: dict[str, str] = json.loads(
+            args.backup_map_json or "{}"
+        )
+    except json.JSONDecodeError as exc:
         sys.stdout.write(
             json.dumps(
                 {
                     "command": "revert",
                     "status": "failed",
-                    "error": "empty backup_map_json (expected {hostname: backup_path})",
+                    "error": f"revert records JSON is invalid: {exc}",
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        return 1
+    if not records_by_host and backup_map:
+        records_by_host = {
+            host: [
+                {
+                    "target_path": args.target_path,
+                    "backup_path": backup_path,
+                }
+            ]
+            for host, backup_path in backup_map.items()
+        }
+    if not records_by_host:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "revert",
+                    "status": "failed",
+                    "error": "empty records_json",
                 },
                 indent=2,
             )
@@ -283,25 +364,32 @@ def _do_revert(args: argparse.Namespace) -> int:
         host = (n.get("NodeManagerHostname") or "").strip()
         if host:
             by_host[host] = n["NodeID"]
-    _log(f"revert: alive nodes={len(nodes)} target={args.target_path} backups={len(backup_map)}")
+    _log(f"revert: alive nodes={len(nodes)} hosts={len(records_by_host)}")
 
     RevertActor = ray.remote(num_cpus=0, num_gpus=0)(_revert_remote)
     refs = []
-    for host, backup_path in backup_map.items():
+    failures: list[dict] = []
+    for host, records in records_by_host.items():
         node_id = by_host.get(host)
         if not node_id:
             _log(f"WARN host {host} not currently alive; revert skipped for this host")
+            failures.append(
+                {
+                    "host": host,
+                    "error": "host is not currently alive",
+                    "error_class": "HostUnavailable",
+                }
+            )
             continue
         ref = RevertActor.options(
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=node_id,
                 soft=False,
             ),
-        ).remote(args.target_path, backup_path)
+        ).remote(records)
         refs.append((host, ref))
 
     per_node: list[dict] = []
-    failures: list[dict] = []
     for host, ref in refs:
         try:
             res = ray.get(ref, timeout=args.timeout_sec)
@@ -319,6 +407,63 @@ def _do_revert(args: argparse.Namespace) -> int:
     }
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     sys.stdout.flush()
+    return 0 if not failures else 1
+
+
+def _do_finalize(args: argparse.Namespace) -> int:
+    """Finalize accepted patch transactions on every recorded host."""
+    try:
+        records_by_host: dict[str, list[dict]] = json.loads(
+            args.records_json or "{}"
+        )
+    except json.JSONDecodeError as exc:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "command": "finalize",
+                    "status": "failed",
+                    "error": f"records JSON is invalid: {exc}",
+                }
+            )
+            + "\n"
+        )
+        return 1
+    ray.init(ignore_reinit_error=True, log_to_driver=True)
+    by_host = {
+        str(node.get("NodeManagerHostname") or ""): node["NodeID"]
+        for node in _alive_nodes()
+        if node.get("NodeManagerHostname")
+    }
+    FinalizeActor = ray.remote(num_cpus=0, num_gpus=0)(_finalize_remote)
+    refs = []
+    failures = []
+    for host, records in records_by_host.items():
+        node_id = by_host.get(host)
+        if not node_id:
+            failures.append({"host": host, "error": "host is not alive"})
+            continue
+        ref = FinalizeActor.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node_id,
+                soft=False,
+            )
+        ).remote(records)
+        refs.append((host, ref))
+    per_node = []
+    for host, ref in refs:
+        try:
+            per_node.append(
+                {"host": host, **ray.get(ref, timeout=args.timeout_sec)}
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"host": host, "error": str(exc)})
+    payload = {
+        "command": "finalize",
+        "per_node": per_node,
+        "failures": failures,
+        "status": "ok" if not failures else "partial",
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     return 0 if not failures else 1
 
 
@@ -349,18 +494,26 @@ def main() -> int:
     ap.add_argument("--patch-b64", required=True, help="base64-encoded new file contents")
     ap.add_argument("--backup-dir", required=True, help="directory on each pod where the pre-patch original is saved")
     ap.add_argument("--kernel-id", default="", help="optional id used to construct backup filename")
+    ap.add_argument("--jit-build-dir", default="")
     ap.add_argument("--timeout-sec", type=int, default=120, help="per-actor timeout (default 120s)")
 
     rp = sub.add_parser("revert", help="restore target_path from per-pod backup")
-    rp.add_argument("--target-path", required=True)
-    rp.add_argument("--backup-map-json", required=True, help="JSON object mapping pod hostname -> backup file path")
+    rp.add_argument("--target-path", default="")
+    rp.add_argument("--records-json", default="")
+    rp.add_argument("--backup-map-json", default="", help="legacy hostname -> backup path map")
     rp.add_argument("--timeout-sec", type=int, default=60)
+
+    fp = sub.add_parser("finalize", help="delete backups for accepted patches")
+    fp.add_argument("--records-json", required=True)
+    fp.add_argument("--timeout-sec", type=int, default=60)
 
     args = p.parse_args()
     if args.command == "apply":
         return _do_apply(args)
     if args.command == "revert":
         return _do_revert(args)
+    if args.command == "finalize":
+        return _do_finalize(args)
     p.print_help(sys.stderr)
     return 2
 

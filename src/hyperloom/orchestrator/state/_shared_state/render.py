@@ -680,7 +680,8 @@ class _RenderMixin:
 
         Args:
             entry (dict[str, Any]): A search-variant entry (name, gain_pct,
-                tput, extra args / envs).
+                tput, extra args / envs, and — for rejected rows —
+                ``error_class`` / ``reason`` / ``wall_clock_ratio_vs_baseline``).
 
         Returns:
             str: A single fixed-width line summarizing the variant.
@@ -698,9 +699,16 @@ class _RenderMixin:
         if error_class:
             parts.append(f"err={error_class}")
         reason = str(entry.get("reason") or "").strip()
-        # Threshold rejections are already conveyed by the gain column.
+        # Threshold rejections are already conveyed by the gain column. Every other
+        # reason must survive: a bare ``no_meas`` is indistinguishable from a
+        # measured zero gain, so an overtime kill would otherwise read as "the
+        # variant helped nothing" instead of "the variant ran too long to be
+        # judged" — opposite follow-up moves. The wall-clock ratio qualifies the
+        # reason, so it rides alongside it whenever the executor recorded one.
         if reason and reason not in ("not_keep", "gain_below_threshold"):
-            parts.append(f"reason={reason[:120]}")
+            ratio = entry.get("wall_clock_ratio_vs_baseline")
+            ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
+            parts.append(f"reason={reason[:120]}{ratio_s}")
         suffix = "  " + " ".join(parts) if parts else ""
         return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}"
 
@@ -736,7 +744,7 @@ class _RenderMixin:
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show last 5 per bucket.
+        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show the last 5 accepted / 15 rejected.
 
         Args:
             search (dict[str, Any] | None): The search ledger to render.
@@ -750,10 +758,14 @@ class _RenderMixin:
         rejected = list(search.get("rejected") or [])
         tested = search.get("tested") or {}
         cursor = search.get("cursor", 0)
-        out: list[str] = [
-            "",
-            f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}",
-        ]
+        head = f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}"
+        # Surfaced on the head line because the per-variant bodies are capped,
+        # which can hide a whole round reaped by the overtime gate.
+        last_round = search.get("last_round")
+        n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
+        if n_killed:
+            head += f"  killed_overtime(last_round)={n_killed}"
+        out: list[str] = ["", head]
         if accepted:
             out.append("    accepted:")
             for entry in accepted[-5:]:

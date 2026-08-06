@@ -86,6 +86,22 @@ class BackendError(RuntimeError):
     """Backend invocation failed (network, schema, etc.)."""
 
 
+class LLMCallFailed(BackendError):
+    """The model request itself failed — no usable response came back.
+
+    A :class:`BackendError` covers everything a backend can get wrong, most of
+    which never touches the provider: a missing ``--review`` path, an
+    unreadable ``emit.json``, an unsupported runtime phase, an absent SDK. Only
+    the subset raised around an actual provider call belongs in the LLM error
+    rate, so those sites raise this instead and the trace layer records an
+    ``error`` row for it alone. Counting every ``BackendError`` would let
+    deterministic local faults masquerade as provider failures.
+
+    Subclasses :class:`BackendError` so existing ``except BackendError``
+    handlers (retry, error-streak accounting) are unaffected.
+    """
+
+
 @dataclass(frozen=True)
 class RetryPolicy:
     """Bounded exponential-backoff policy for transient LLM call failures.
@@ -283,6 +299,7 @@ __all__ = [
     "Backend",
     "BackendError",
     "BackendTurnResult",
+    "LLMCallFailed",
     "RetryPolicy",
     "build_chat_messages",
     "parse_call_timeout_env",

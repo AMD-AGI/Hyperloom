@@ -38,7 +38,7 @@ def _silent_plan() -> ScriptedPlan:
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        for name in ("orchestration", "critic", "robustness")
     }
 
 

@@ -31,7 +31,7 @@ def _heartbeat() -> Intent:
 
 def _build_backends() -> dict[str, Backend]:
     plan = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {name: MockBackend(plan, name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")}
+    return {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
 
 
 @pytest.fixture

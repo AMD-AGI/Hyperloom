@@ -21,15 +21,19 @@ from hyperloom.common.timeutil import now_iso
 # threshold.
 DEFAULT_CHECKPOINT_EVERY_TICKS: int = 20
 DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
-# Char budget forcing a checkpoint regardless of cadence; fallback signal for
-# backends that do not report token usage.
+# Prompt+reply chars forcing a checkpoint regardless of cadence.
 DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
 
-# Context-token guardrail (usage = input + cache_read + cache_creation tokens).
-# Soft trigger compacts proactively.
+# Context-token guardrail, as a fraction of the model's window. The compared
+# quantity is one request's input side, never a per-call sum over the internal
+# agentic turns (that sum can exceed the window itself).
 DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
+# Minimum ticks between two token-triggered compactions, so a re-seeded
+# conversation is not compacted again before it reports a fresh level.
+DEFAULT_CHECKPOINT_MIN_TICK_GAP: int = 3
 # Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
+# Keys must be lower-case with ``-`` separators; lookups are folded to that form.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-8": 200_000,
     "claude-opus-4-7": 200_000,
@@ -43,13 +47,16 @@ def context_window_for_model(model: str) -> int:
     """Context-window size (tokens) for a model id; conservative fallback if unknown.
 
     Args:
-        model: The model id (e.g. ``"claude-opus-4-8"``); blank/unknown ids fall
-            back to :data:`DEFAULT_MODEL_CONTEXT_WINDOW`.
+        model: The model id (e.g. ``"claude-opus-4-8"``); matched
+            case-insensitively with ``.`` / ``_`` folded to ``-``, so gateway
+            spellings such as ``"Claude-Opus-4.8"`` resolve. Blank/unknown ids
+            fall back to :data:`DEFAULT_MODEL_CONTEXT_WINDOW`.
 
     Returns:
         The window size in tokens.
     """
-    return MODEL_CONTEXT_WINDOWS.get((model or "").strip(), DEFAULT_MODEL_CONTEXT_WINDOW)
+    key = (model or "").strip().lower().replace(".", "-").replace("_", "-")
+    return MODEL_CONTEXT_WINDOWS.get(key, DEFAULT_MODEL_CONTEXT_WINDOW)
 
 
 # List threads that carry forward when a checkpoint reply omits them
@@ -70,6 +77,8 @@ class CheckpointPolicy:
     char_budget: int = DEFAULT_CHECKPOINT_CHAR_BUDGET
     # Context-token soft budget (absolute token count; 0 disables).
     context_token_soft: int = 0
+    # Anti-thrash floor on the token trigger only (0 disables).
+    min_tick_gap: int = DEFAULT_CHECKPOINT_MIN_TICK_GAP
     # Always checkpoint on a phase boundary.
     on_phase_boundary: bool = True
 
@@ -84,19 +93,23 @@ class CheckpointPolicy:
     ) -> bool:
         """Decide whether a checkpoint is due under this policy.
 
+        Only the token trigger is gated by :attr:`min_tick_gap`; the cadence
+        triggers are unaffected by that floor.
+
         Args:
             ticks_since_last: Ticks elapsed since the last checkpoint.
             minutes_since_last: Minutes elapsed since the last checkpoint.
             chars_since_last: Characters accumulated since the last checkpoint.
             phase_changed: Whether a phase boundary was just crossed.
-            context_tokens_now: Authoritative current context size in tokens
-                (input + cache_read + cache_creation); 0 when unavailable.
+            context_tokens_now: Current size of a single request's input side in
+                tokens; 0 when unavailable.
 
         Returns:
             ``True`` when any enabled trigger (context-token budget, phase
             boundary, tick, time, or char budget) is met.
         """
-        if self.context_token_soft > 0 and context_tokens_now >= self.context_token_soft:
+        token_trigger_allowed = self.min_tick_gap <= 0 or ticks_since_last >= self.min_tick_gap
+        if token_trigger_allowed and self.context_token_soft > 0 and context_tokens_now >= self.context_token_soft:
             return True
         if phase_changed and self.on_phase_boundary:
             return True
@@ -367,7 +380,7 @@ class CheckpointTracker:
     last_minute_mark: float = 0.0
     chars_since_last: int = 0
     last_phase: str = ""
-    # Current context size (tokens) from the latest backend turn: an absolute
+    # Largest single request (tokens) in the latest backend turn: an absolute
     # water level, set each turn, never accumulated.
     context_tokens_now: int = 0
 
@@ -390,9 +403,8 @@ class CheckpointTracker:
     def reset(self, *, tick: int, minute_mark: float, phase: str) -> None:
         """Reset the tracker after a checkpoint lands.
 
-        ``context_tokens_now`` is intentionally NOT cleared: it is an absolute
-        water level overwritten by the next turn's reported usage (which drops
-        naturally once the conversation is reset and re-seeded).
+        Clears the water level too: the compacted conversation no longer holds
+        the context that reading described.
 
         Args:
             tick: Current tick to record as the last checkpoint tick.
@@ -403,6 +415,7 @@ class CheckpointTracker:
         self.last_minute_mark = float(minute_mark)
         self.chars_since_last = 0
         self.last_phase = phase
+        self.context_tokens_now = 0
 
 
 __all__ = [
@@ -412,6 +425,7 @@ __all__ = [
     "DEFAULT_CHECKPOINT_CHAR_BUDGET",
     "DEFAULT_CHECKPOINT_EVERY_MINUTES",
     "DEFAULT_CHECKPOINT_EVERY_TICKS",
+    "DEFAULT_CHECKPOINT_MIN_TICK_GAP",
     "DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION",
     "DEFAULT_MODEL_CONTEXT_WINDOW",
     "MODEL_CONTEXT_WINDOWS",

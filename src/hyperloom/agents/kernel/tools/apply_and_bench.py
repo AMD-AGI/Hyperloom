@@ -801,7 +801,13 @@ def apply_and_bench(
         )
         _log(out, f"deploy {Path(target).name} <- {Path(src_path).name} status={res.get('status')}")
         applied.append(
-            {"target": target, "source": src_path, "status": res.get("status"), "manifest": res.get("manifest_path")}
+            {
+                "target": target,
+                "source": src_path,
+                "status": res.get("status"),
+                "manifest": res.get("manifest_path"),
+                "rebuild": res.get("rebuild"),
+            }
         )
         if res.get("status") == "ok" and res.get("manifest_path"):
             manifests.append(res["manifest_path"])

@@ -11,14 +11,13 @@ Each :class:`AgentRole` binds:
     * which intent types the role is allowed to emit
     * permission flags consumed by :class:`PolicyGate`
 
-The four persistent agent roles and their permitted intents::
+Three persistent LLM agent roles and their permitted intents::
 
     ┌──────────────┬──────────┬─────────────────────────────────────────┐
     │ name         │ backend  │ allowed intents (high level)            │
     ├──────────────┼──────────┼─────────────────────────────────────────┤
     │ orchestration│ Claude   │ propose_action / delegate / request /   │
     │              │          │ update_state / kill_task / ...          │
-    │ kernel       │ Claude   │ response (only) / send_message / alert  │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
     │              │ no-tools │ alert                                   │
     │ robustness   │ Claude   │ alert / kill_task / prune_branch /      │
@@ -26,15 +25,15 @@ The four persistent agent roles and their permitted intents::
     │              │          │ + always-on tick                        │
     └──────────────┴──────────┴─────────────────────────────────────────┘
 
-The roster is exactly these four roles. Framework-agent work runs as the
-Coordinator-owned FRAMEWORK_AGENT phase, not an agent role.
+Kernel work is handled by programmatic Python handlers, not an LLM role.
+Framework-agent work runs as the Coordinator-owned FRAMEWORK_AGENT phase, not
+an agent role.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
@@ -78,15 +77,6 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Kernel-agent — responder-only; never initiates RPC, never proposes / delegates.
-_KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
-    {
-        IntentType.RESPONSE,
-        IntentType.UPDATE_STATE,  # only its own action's metric fields
-    }
-)
-
-
 # Critic — review verdicts only.
 _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
@@ -124,6 +114,7 @@ class AgentRole:
     can_mutate_core_state: bool = False
     no_tools: bool = False  # Codex roles
     system_prompt_filename: str = ""
+    prompt_driven: bool = True  # False = deterministic role; no system prompt is loaded
 
     @property
     def system_prompt_path(self) -> Path:
@@ -147,11 +138,10 @@ class AgentRole:
 
 
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical 4-agent role registry.
+    """Return the canonical 3-agent role registry.
 
-    Builds fresh :class:`AgentRole` records for orchestration, kernel,
-    critic, and robustness with their default backends, models, and
-    permission flags.
+    Builds fresh :class:`AgentRole` records for orchestration, critic, and
+    robustness with their default backends, models, and permission flags.
 
     Returns:
         dict[str, AgentRole]: Mapping of role name to its static record.
@@ -164,16 +154,6 @@ def default_role_registry() -> dict[str, AgentRole]:
             api_key_env=DEFAULT_CLAUDE_API_KEY_ENV,
             allowed_intents=_ORCHESTRATION_INTENTS,
             can_delegate_side_effects=True,
-            can_mutate_core_state=False,
-            no_tools=False,
-        ),
-        "kernel_agent": AgentRole(
-            name="kernel_agent",
-            backend_type=BackendType.CLAUDE,
-            model=DEFAULT_CLAUDE_MODEL,
-            api_key_env=DEFAULT_CLAUDE_API_KEY_ENV,
-            allowed_intents=_KERNEL_INTENTS,
-            can_delegate_side_effects=False,  # responder-only
             can_mutate_core_state=False,
             no_tools=False,
         ),
@@ -196,20 +176,9 @@ def default_role_registry() -> dict[str, AgentRole]:
             can_delegate_side_effects=True,  # only handle actions per Policy
             can_mutate_core_state=False,
             no_tools=False,
+            prompt_driven=False,
         ),
     }
-
-
-@lru_cache(maxsize=1)
-def roles_for_run() -> tuple[str, ...]:
-    """Stable, deterministic ordering for reactor loop iteration.
-
-    Cached so every caller observes the same tuple instance.
-
-    Returns:
-        tuple[str, ...]: Role names in fixed reactor-iteration order.
-    """
-    return ("orchestration", "kernel_agent", "critic", "robustness")
 
 
 __all__ = [
@@ -220,5 +189,4 @@ __all__ = [
     "DEFAULT_CODEX_API_KEY_ENV",
     "DEFAULT_CODEX_MODEL",
     "default_role_registry",
-    "roles_for_run",
 ]

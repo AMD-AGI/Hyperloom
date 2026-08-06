@@ -26,15 +26,17 @@ def _seed_state(
     baseline_tput: float = 0.0,
     baseline_config_path: str = "",
     current_best_args: str = "",
+    current_best_envs: dict[str, str] | None = None,
 ) -> SharedState:
     state = SharedState.load_or_init(session_dir)
     state.baseline_tput = baseline_tput
     state.baseline_config_path = baseline_config_path
-    if current_best_args:
+    if current_best_args or current_best_envs:
         state.current_best = {
             "action": "kernel_opt",
             "tput": 900.0,
             "extra_server_args": current_best_args,
+            "extra_envs": dict(current_best_envs or {}),
         }
     state.save(session_dir)
     return state
@@ -94,6 +96,32 @@ class TestFillIntegrateDefaultsFromState:
         )
 
         assert out["extra_server_args"] == "--from-payload"
+
+    def test_current_best_envs_are_preserved_and_payload_wins(self, session_dir):
+        _seed_state(
+            session_dir,
+            current_best_envs={
+                "VLLM_ROCM_USE_AITER": "1",
+                "SHARED": "state",
+            },
+        )
+
+        out = krh._fill_integrate_defaults_from_state(
+            {
+                "kernel_id": "k_abc",
+                "extra_envs": {
+                    "CANDIDATE_ONLY": "1",
+                    "SHARED": "candidate",
+                },
+            },
+            session_dir=session_dir,
+        )
+
+        assert out["extra_envs"] == {
+            "VLLM_ROCM_USE_AITER": "1",
+            "CANDIDATE_ONLY": "1",
+            "SHARED": "candidate",
+        }
 
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
@@ -174,6 +202,56 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 800.0
 
 
+class TestIntegrateRebaselineTimeout:
+    def test_explicit_budget_wins(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
+
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {
+                    "config_path": str(config),
+                    "budget_minutes": 15,
+                },
+                default_timeout_sec=7800,
+            )
+            == 900
+        )
+
+    def test_benchmark_contract_replaces_legacy_cap(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
+
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {"config_path": str(config)},
+                default_timeout_sec=7800,
+            )
+            == 7200
+        )
+
+    def test_shorter_benchmark_contract_is_preserved(self, tmp_path):
+        config = tmp_path / "config.yaml"
+        config.write_text("benchmark:\n  timeout_seconds: 2400\n")
+
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {"config_path": str(config)},
+                default_timeout_sec=7800,
+            )
+            == 2400
+        )
+
+    def test_executor_default_is_preserved(self):
+        assert (
+            krh._integrate_rebaseline_timeout_sec(
+                {},
+                default_timeout_sec=7800,
+            )
+            == 7800
+        )
+
+
 class TestIntegrateHandlerHonoursStateDefault:
     @pytest.mark.asyncio
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
@@ -215,15 +293,17 @@ class TestIntegrateHandlerHonoursStateDefault:
         _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
         captured: dict[str, object] = {}
 
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
         class FakeBaselineExecutor:
+            default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
             def __init__(self, *, session_dir):
                 self.session_dir = session_dir
 
             async def __call__(self, ctx):
                 captured["params"] = dict(ctx.task.params)
                 return {"output_throughput": 1100.0, "completed_requests": 10}
-
-        from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
         monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
 
@@ -243,3 +323,5 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert result["decision"] == "KEEP"
         assert result["new_tput"] == 1100.0
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
+        assert captured["params"]["defer_accuracy_until_after_measure"] is True
+        assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
