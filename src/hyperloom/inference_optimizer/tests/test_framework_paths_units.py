@@ -36,6 +36,9 @@ def _clean_framework_env(monkeypatch):
         "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
         "VIRTUAL_ENV",
         "VLLM_VENV_ROOT",
+        "DSL2_ROOT",
+        "FLYDSL_ROOT",
+        "FLYDSL_EXTRA_SOURCE_DIRS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -145,6 +148,23 @@ class TestResolvePatchTargetRoots:
         roots = fp.resolve_patch_target_roots()
         assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
         assert "/aiter_meta/csrc/" in roots
+
+    def test_includes_flydsl_roots(self):
+        assert "/opt/flydsl/" in fp.resolve_patch_target_roots()
+
+    @pytest.mark.parametrize("env_key", ["DSL2_ROOT", "FLYDSL_ROOT"])
+    def test_honours_flydsl_root_env(self, monkeypatch, env_key):
+        monkeypatch.setenv(env_key, "/checkouts/FlyDSL")
+        roots = fp.resolve_patch_target_roots()
+        # Both variants: the apply gate matches a lower-cased path verbatim,
+        # while a path-resolving consumer needs the real case.
+        assert "/checkouts/FlyDSL/" in roots
+        assert "/checkouts/flydsl/" in roots
+
+    def test_source_file_allowlist_excludes_flydsl(self, monkeypatch):
+        monkeypatch.setenv("FLYDSL_ROOT", "/checkouts/flydsl")
+        allowlist = fp.resolve_source_file_allowlist()
+        assert not any("flydsl" in root.lower() for root in allowlist)
 
 
 class TestProbeFrameworkSourceRootsForEnv:
