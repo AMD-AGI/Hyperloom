@@ -17,6 +17,7 @@ from _io_utils import atomic_write_json
 from _task_group_contract import (
     CASE_SELECTOR_KEY,
     logical_operator_name,
+    named_dimensions,
     task_group_shape_cases,
 )
 
@@ -713,6 +714,139 @@ def _task_group_contract(
     }
 
 
+REWRITE_DRIVER_CONTRACT_VERSION = 1
+# Operator families whose traced positional tensor arguments map straight onto
+# the source callable, so a rewrite driver can rebuild the exact invocation.
+REWRITE_FAMILY_GEMM = "gemm"
+REWRITE_FAMILY_ELEMENTWISE = "elementwise"
+# Dimension names named_dimensions() assigns per family; attention and MoE
+# invocations carry router/KV-cache arguments the traced shapes do not describe.
+_ATTENTION_DIMENSION_KEYS = frozenset({"QTOKENS", "QHEADS", "KVHEADS", "HEADSIZE"})
+_MOE_DIMENSION_KEYS = frozenset({"E", "TOPK"})
+_GEMM_DIMENSION_KEYS = frozenset({"M", "N", "K"})
+# Random initialization is only meaningful for real-valued tensors; index,
+# mask and fp8 arguments need domain knowledge the trace does not carry.
+REWRITE_BUILDABLE_DTYPES = frozenset({"bf16", "fp16", "fp32", "fp64"})
+_REWRITE_ENTRY_HINTS: dict[str, tuple[str, ...]] = {
+    REWRITE_FAMILY_GEMM: ("matmul", "gemm", "mm", "linear", "forward", "run"),
+    REWRITE_FAMILY_ELEMENTWISE: (
+        "silu_and_mul",
+        "act_and_mul",
+        "gelu_and_mul",
+        "silu",
+        "gelu",
+        "relu",
+        "forward",
+        "run",
+    ),
+}
+
+
+def _rewrite_case_inputs(arguments: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Reduce argument records to buildable tensor descriptors, else ``None``."""
+    inputs: list[dict[str, Any]] = []
+    for record in arguments:
+        shape = record.get("shape")
+        dtype = str(record.get("dtype") or "")
+        if not isinstance(shape, list) or not shape:
+            return None
+        if not all(isinstance(dim, int) and dim > 0 for dim in shape):
+            return None
+        if dtype not in REWRITE_BUILDABLE_DTYPES:
+            return None
+        inputs.append({"shape": [int(dim) for dim in shape], "dtype": dtype})
+    return inputs or None
+
+
+def _rewrite_operator_family(
+    selector: dict[str, Any],
+    inputs: list[dict[str, Any]],
+) -> str:
+    """Classify one case from the dimensions named_dimensions() already derived."""
+    dimensions = {str(key) for key in selector if str(key) != CASE_SELECTOR_KEY}
+    if dimensions & _ATTENTION_DIMENSION_KEYS or dimensions & _MOE_DIMENSION_KEYS:
+        return ""
+    if _GEMM_DIMENSION_KEYS <= dimensions:
+        return REWRITE_FAMILY_GEMM
+    shapes = [tuple(entry["shape"]) for entry in inputs]
+    # An operation name the dimension classifier does not know still resolves
+    # structurally: two matrices sharing a contraction dimension, or a set of
+    # operands the kernel maps element for element.
+    if len(shapes) == 2 and all(len(shape) == 2 for shape in shapes) and shapes[0][1] == shapes[1][0]:
+        return REWRITE_FAMILY_GEMM
+    return REWRITE_FAMILY_ELEMENTWISE if len(set(shapes)) == 1 else ""
+
+
+def _rewrite_entry_symbols(candidate: dict[str, Any], family: str) -> list[str]:
+    """Order the callables a rewrite driver should try on the source module."""
+    symbols: list[str] = []
+    for key in ("source_symbol", "target_functions"):
+        value = candidate.get(key)
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            name = str(item or "").strip()
+            if name and name.isidentifier() and name not in symbols:
+                symbols.append(name)
+    for hint in _REWRITE_ENTRY_HINTS.get(family, ()):
+        if hint not in symbols:
+            symbols.append(hint)
+    return symbols
+
+
+def build_rewrite_driver_contract(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Describe how a rewrite driver rebuilds this operator's real invocation.
+
+    Args:
+        candidate: The TraceLens candidate carrying shapes, dtypes and symbols.
+
+    Returns:
+        dict[str, Any]: The contract, or ``{}`` when the operator family or the
+            traced evidence cannot produce a faithful invocation.
+    """
+    normalized_cases = task_group_shape_cases(candidate) or [
+        {
+            "case_id": "case_001",
+            "selector": {CASE_SELECTOR_KEY: "case_001", **named_dimensions(candidate)},
+            "input_shapes": candidate.get("input_shapes") or [],
+            "input_dtypes": candidate.get("input_dtypes") or candidate.get("dtypes") or [],
+        }
+    ]
+    family = ""
+    cases: list[dict[str, Any]] = []
+    for index, normalized in enumerate(normalized_cases, start=1):
+        selector = dict(normalized.get("selector") or {})
+        inputs = _rewrite_case_inputs(
+            _argument_records(
+                normalized.get("input_shapes") or [],
+                normalized.get("input_dtypes") or [],
+                root="args",
+            )
+        )
+        if inputs is None:
+            return {}
+        case_family = _rewrite_operator_family(selector, inputs)
+        if not case_family or (family and case_family != family):
+            return {}
+        family = case_family
+        case_id = str(normalized.get("case_id") or "") or f"case_{index:03d}"
+        cases.append(
+            {
+                "case_id": case_id,
+                "selector": selector or {CASE_SELECTOR_KEY: case_id},
+                "inputs": inputs,
+            }
+        )
+    if not cases:
+        return {}
+    return {
+        "contract_version": REWRITE_DRIVER_CONTRACT_VERSION,
+        "operator_family": family,
+        "logical_operator": _logical_operator(candidate),
+        "entry_symbols": _rewrite_entry_symbols(candidate, family),
+        "case_selector_key": CASE_SELECTOR_KEY,
+        "cases": cases,
+    }
+
+
 def _driver_contract(task_group: dict[str, Any]) -> dict[str, Any]:
     """Describe the shape-selection behavior required from a Forge driver."""
     cases = task_group.get("cases")
@@ -990,6 +1124,7 @@ def build_invocation_spec(
                 base_dir=repo_root,
             ),
             "driver_contract": _driver_contract(task_group_contract),
+            "rewrite_driver_contract": build_rewrite_driver_contract(candidate),
         },
         "workload": {
             "call_count": candidate.get("call_count"),
