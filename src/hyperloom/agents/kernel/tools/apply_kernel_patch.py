@@ -590,8 +590,10 @@ def _contained_dest(
     if deploy_roots is not None:
         allowed = [Path(path).resolve() for path in deploy_roots]
         if not any(_within_root(dest, allowed_root) for allowed_root in allowed):
+            roots_text = ", ".join(str(path) for path in allowed) or "<none>"
             raise ValueError(
-                f"patch path is outside authorized deploy roots: {rel_path}"
+                "patch path is outside authorized deploy roots: "
+                f"{rel_path}; authorized roots: {roots_text}"
             )
     return dest
 
@@ -627,8 +629,8 @@ def apply_snapshot(
     descriptors: list[dict[str, Any]],
     snapshot_dir: str | Path,
     repo_root: str | Path,
-    deploy_roots: Iterable[str | Path],
     backup_dir: str | Path,
+    deploy_roots: Iterable[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Apply a content-addressed snapshot atomically (all-or-nothing).
 
@@ -646,10 +648,11 @@ def apply_snapshot(
         snapshot_dir (str | Path): Directory holding byte-exact final contents
             for every ``write`` path (mirrored at the same relative path).
         repo_root (str | Path): Framework repo root the targets live under.
-        deploy_roots (Iterable[str | Path]): Authorized framework roots under
-            which every write/delete destination must remain.
         backup_dir (str | Path): Where per-path backups + the revert manifest
             are written.
+        deploy_roots (Iterable[str | Path] | None): Authorized framework roots
+            under which every write/delete destination must remain. ``None``
+            preserves the legacy coordinate-root-only contract.
 
     Returns:
         dict[str, Any]: ``status="ok"`` with ``source_backups`` (the revert
@@ -657,7 +660,12 @@ def apply_snapshot(
             an ``error`` and the offending path.
     """
     root = Path(repo_root)
-    allowed_roots = [Path(path) for path in deploy_roots]
+    allowed_roots = (
+        None
+        if deploy_roots is None
+        else [Path(path) for path in deploy_roots]
+    )
+    symlink_roots = [root] if allowed_roots is None else allowed_roots
     snap = Path(snapshot_dir)
     backups: list[dict[str, Any]] = []
 
@@ -688,7 +696,7 @@ def apply_snapshot(
                     ).resolve()
                     if not any(
                         _within_root(resolved_link, allowed_root)
-                        for allowed_root in allowed_roots
+                        for allowed_root in symlink_roots
                     ):
                         return {
                             "status": "failed",
@@ -938,8 +946,14 @@ def _invalidate_aiter_jit_build(
         (authoritative cache absent/empty), ``skipped``, or ``failed`` and
         supporting fields.
     """
-    if not _target_is_in_aiter_csrc(target_file):
-        return {"status": "skipped", "reason": "target not under aiter/csrc/"}
+    if jit_build_dir is None and not _target_is_in_aiter_csrc(target_file):
+        return {
+            "status": "skipped",
+            "reason": (
+                "target is outside aiter csrc and no runtime-JIT build dir "
+                "was supplied"
+            ),
+        }
     jit_build = jit_build_dir or _aiter_jit_build_dir()
     if jit_build is None:
         return {"status": "skipped", "reason": "aiter package not importable"}
@@ -997,10 +1011,9 @@ def _trusted_installed_aiter_jit_build_dir(path: Path) -> bool:
         or resolved != (runtime_root / "aiter" / "jit" / "build").resolve()
     ):
         return False
-    return any(
-        Path(raw.rstrip("/")).is_absolute()
-        and _within_root(resolved, Path(raw.rstrip("/")))
-        for raw in known_target_roots()
+    return (
+        (runtime_root / "aiter" / "__init__.py").is_file()
+        and (runtime_root / "aiter" / "jit" / "__init__.py").is_file()
     )
 
 
@@ -1008,6 +1021,7 @@ def _restore_aiter_jit_build(
     jit_build_backup: dict[str, Any],
     *,
     expected_jit_build_dir: str | Path | None = None,
+    backup_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Restore an aiter ``jit/build`` backup, reversing the invalidation.
 
@@ -1018,6 +1032,8 @@ def _restore_aiter_jit_build(
             :func:`_invalidate_aiter_jit_build`.
         expected_jit_build_dir: Apply-time strategy path. Runtime-JIT restores
             use this instead of rediscovering aiter from the current process.
+        backup_root: Apply manifest's backup directory. The recorded backup
+            must remain contained under this root.
 
     Returns:
         A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
@@ -1030,14 +1046,22 @@ def _restore_aiter_jit_build(
         return {"status": "skipped", "reason": "incomplete backup record"}
     src = Path(src_raw)
     backup_path = Path(backup_raw)
+    if backup_root is not None and not _within_root(
+        backup_path,
+        Path(backup_root),
+    ):
+        return {
+            "status": "failed",
+            "error": f"untrusted jit/build backup path: {backup_path}",
+        }
     # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
     # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
     expected_raw = str(expected_jit_build_dir or "").strip()
     expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
     if expected_raw and not _trusted_installed_aiter_jit_build_dir(expected):
         return {
-            "status": "skipped",
-            "reason": f"untrusted strategy jit/build dir: {expected}",
+            "status": "failed",
+            "error": f"untrusted strategy jit/build dir: {expected}",
         }
     if expected is None or src.resolve() != expected.resolve():
         log.warning(
@@ -1048,13 +1072,13 @@ def _restore_aiter_jit_build(
             expected,
         )
         return {
-            "status": "skipped",
-            "reason": f"jit/build src {src} is not the importable aiter jit/build dir",
+            "status": "failed",
+            "error": f"jit/build src {src} does not match expected dir {expected}",
         }
     if not backup_path.exists():
         return {
-            "status": "skipped",
-            "reason": f"backup path missing: {backup_path}",
+            "status": "failed",
+            "error": f"backup path missing: {backup_path}",
         }
     if src.exists():
         try:
@@ -1398,7 +1422,9 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
     target = str(target_file)
     lower = target.lower()
     roots = known_target_roots()
-    if not allow_unknown_target and not any(root in lower for root in roots):
+    if not allow_unknown_target and not any(
+        str(root).lower() in lower for root in roots
+    ):
         raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
 
     suffix = target_file.suffix.lower()
@@ -1464,9 +1490,7 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         rebuild_command = []
         artifact_roots = []
         jit_build_dir = ""
-    if root is None:
-        root = target_file.parent
-    if not deploy_roots:
+    if not deploy_roots and root is not None:
         deploy_roots = [root]
 
     return {
@@ -1645,6 +1669,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     backup_root = manifest_file.resolve().parent
     restored: list[str] = []
     skipped_untrusted_backups: list[dict[str, str]] = []
+    revert_issues: list[dict[str, Any]] = []
     for item in manifest.get("artifacts", []):
         src = Path(item["backup_path"])
         dst = Path(item["path"])
@@ -1716,8 +1741,10 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
 
     # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
+    jit_build_restore: dict[str, Any] = {}
     if jit_build_backup.get("status") == "ok":
         strategy = manifest.get("strategy") or {}
+        # Singular key is retained for manifests created by earlier releases.
         expected_jit_build_dir = str(
             strategy.get("jit_build_dir") or ""
         ).strip()
@@ -1728,10 +1755,18 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         jit_build_restore = _restore_aiter_jit_build(
             jit_build_backup,
             expected_jit_build_dir=expected_jit_build_dir or None,
+            backup_root=backup_root,
         )
         manifest["jit_build_restore"] = jit_build_restore
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
+        elif jit_build_restore.get("status") != "ok":
+            revert_issues.append(
+                {
+                    "kind": "jit_build_restore",
+                    **jit_build_restore,
+                }
+            )
 
     # Restore the aiter cpp_itfs runtime cache moved aside during apply.
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
@@ -1757,22 +1792,29 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                 mn_revert = {"status": "failed", "error": str(exc)}
 
     reverted_at = utc_now()
-    manifest["status"] = "reverted_partial" if skipped_untrusted_backups else "reverted"
+    partial = bool(skipped_untrusted_backups or revert_issues)
+    manifest["status"] = "reverted_partial" if partial else "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
     if skipped_untrusted_backups:
         manifest["skipped_untrusted_backups"] = skipped_untrusted_backups
+    if revert_issues:
+        manifest["revert_issues"] = revert_issues
     if mn_revert:
         manifest["multinode_revert"] = mn_revert
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
-        "status": "partial" if skipped_untrusted_backups else "ok",
+        "status": "partial" if partial else "ok",
         "manifest_path": str(manifest_file),
         "restored_paths": restored,
         "reverted_at": reverted_at,
     }
+    if jit_build_restore:
+        result["jit_build_restore"] = jit_build_restore
     if skipped_untrusted_backups:
         result["skipped_untrusted_backups"] = skipped_untrusted_backups
+    if revert_issues:
+        result["revert_issues"] = revert_issues
     # Only attach multinode_revert when fan-out actually ran.
     if mn_revert:
         result["multinode_revert"] = mn_revert

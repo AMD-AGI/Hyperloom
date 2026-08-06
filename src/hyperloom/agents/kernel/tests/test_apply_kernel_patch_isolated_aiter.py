@@ -34,6 +34,8 @@ def _make_isolated_aiter(tmp_path: Path) -> tuple[Path, Path]:
     (aiter_pkg / "jit" / "build").mkdir(parents=True)
     (aiter_pkg / "csrc" / "kernels").mkdir(parents=True)
     (aiter_pkg / "ops" / "triton").mkdir(parents=True)
+    (aiter_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (aiter_pkg / "jit" / "__init__.py").write_text("", encoding="utf-8")
     (site / "aiter_meta" / "csrc" / "kernels").mkdir(parents=True)
     return venv_root, aiter_pkg
 
@@ -199,6 +201,133 @@ def test_rebuild_strategy_uses_target_parent_for_legacy_strategy(
     }
 
 
+def test_unknown_snapshot_layout_keeps_fail_fast_root(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    framework_root = tmp_path / "app" / "ATOM" / "atom"
+    target = framework_root / "kernels" / "foo.cu"
+    target.parent.mkdir(parents=True)
+    original = 'extern "C" void kernel() {}\n'
+    optimized = 'extern "C" void kernel() { int x = 2; }\n'
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(framework_root) + "/",),
+    )
+    strategy = akp._detect_strategy(
+        target,
+        allow_unknown_target=False,
+    )
+    assert strategy["root"] == ""
+    assert strategy["deploy_roots"] == []
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/kernels/foo.cu b/kernels/foo.cu\n"
+        "--- a/kernels/foo.cu\n"
+        "+++ b/kernels/foo.cu\n"
+        "@@ -1 +1 @@\n"
+        '-extern "C" void kernel() {}\n'
+        '+extern "C" void kernel() { int x = 2; }\n',
+        encoding="utf-8",
+    )
+    snapshot_target = tmp_path / "snapshot" / "kernels" / "foo.cu"
+    snapshot_target.parent.mkdir(parents=True)
+    snapshot_target.write_text(optimized, encoding="utf-8")
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=tmp_path / "snapshot",
+        kernel_id="k-unknown-layout",
+    )
+
+    assert result["status"] == "failed"
+    assert "snapshot mode requires a known repo root" in result["error"]
+    assert target.read_text(encoding="utf-8") == original
+    assert not (target.parent / "kernels" / "foo.cu").exists()
+
+
+def test_apply_snapshot_keeps_legacy_optional_deploy_roots(
+    akp,
+    tmp_path,
+):
+    repo_root = tmp_path / "repo"
+    target = repo_root / "kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = akp.apply_snapshot(
+        descriptors=[
+            {
+                "op": "write",
+                "path": "kernel.py",
+                "mode": "",
+                "binary": False,
+                "is_new": False,
+            }
+        ],
+        snapshot_dir=snapshot,
+        repo_root=repo_root,
+        backup_dir=tmp_path / "backups",
+    )
+
+    assert result["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "aiter/jit/hostcall.cpp",
+        "aiter_meta/3rdparty/composable_kernel/include/tile.hpp",
+    ),
+)
+def test_runtime_jit_invalidates_for_compiled_sources_outside_csrc(
+    akp,
+    tmp_path,
+    monkeypatch,
+    relative,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    target = site / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "inline int kernel_entry() { return 1; }\n"
+    optimized = "inline int kernel_entry() { return 2; }\n"
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / f"v1_forge{target.suffix}"
+    patch.write_text(optimized, encoding="utf-8")
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k-outside-csrc",
+    )
+
+    assert result["status"] == "ok", result
+    assert result["rebuild"]["status"] == "deferred"
+    assert result["jit_build_backup"]["status"] == "ok"
+    assert not (aiter_pkg / "jit" / "build").exists()
+    assert target.read_text(encoding="utf-8") == optimized
+
+
 def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     akp,
     tmp_path,
@@ -249,9 +378,15 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
         str(aiter_pkg / "jit" / "build")
     ]
 
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        ("/unrelated/static/root/",),
+    )
     revert = akp.revert_kernel_patch(result["manifest_path"])
 
     assert revert["status"] == "ok"
+    assert revert["jit_build_restore"]["status"] == "ok"
     assert target.read_text(encoding="utf-8").endswith("int x = 1; }\n")
     assert (aiter_pkg / "jit" / "build" / "stale.so").is_file()
 
@@ -314,6 +449,58 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
         str(site / "aiter_meta"),
     ]
     assert snapshot_manifest["strategy"]["rebuild_modes"] == ["runtime_jit"]
+
+
+def test_revert_exposes_runtime_jit_restore_failure(
+    akp,
+    tmp_path,
+    monkeypatch,
+):
+    _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+    site = aiter_pkg.parent
+    monkeypatch.setattr(
+        akp,
+        "_CACHED_KNOWN_TARGET_ROOTS",
+        (str(site) + "/",),
+    )
+    target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "v1_forge.cu"
+    patch.write_text(
+        '#include <hip/hip_runtime.h>\n'
+        'extern "C" void kernel() { int x = 2; }\n',
+        encoding="utf-8",
+    )
+    (aiter_pkg / "jit" / "build" / "stale.so").write_text(
+        "stale",
+        encoding="utf-8",
+    )
+    applied = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="k003",
+    )
+    assert applied["status"] == "ok", applied
+    monkeypatch.setattr(
+        akp,
+        "_restore_aiter_jit_build",
+        lambda *args, **kwargs: {
+            "status": "failed",
+            "error": "simulated restore failure",
+        },
+    )
+
+    reverted = akp.revert_kernel_patch(applied["manifest_path"])
+
+    assert reverted["status"] == "partial"
+    assert reverted["jit_build_restore"] == {
+        "status": "failed",
+        "error": "simulated restore failure",
+    }
+    assert reverted["revert_issues"][0]["kind"] == "jit_build_restore"
+    assert target.read_text(encoding="utf-8") == original
 
 
 def test_installed_snapshot_can_span_aiter_and_vllm(
