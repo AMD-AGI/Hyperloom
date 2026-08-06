@@ -799,7 +799,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry.
-        _CANONICAL_ORDER = ("orchestration", "kernel_agent", "critic", "robustness")
+        _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Action registry — yaml catalogue mapping action_name -> metadata.
@@ -887,6 +887,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_explore_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
         "_on_phase_entered": "phase_machine",
+        "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
         "_internal_analysis_kind": "phase_prelude",
         "_warm_recipe_proven_items": "phase_prelude",
@@ -1833,19 +1834,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        # Context-token water level: the persistent conversation's true size is
-        # the backend's reported input usage; fall back to a char count when the
-        # backend reports no usage.
+        # Context-token water level. Only a per-request figure is comparable to
+        # the window; a backend reporting none leaves the level at 0 and the
+        # char ledger carries the growth signal alone.
         if agent_name == "orchestration" and self._orchestration_conversational():
             try:
                 md = getattr(result, "metadata", None) or {}
-                it = md.get("input_tokens")
-                cr = md.get("cache_read_input_tokens")
-                cc = md.get("cache_creation_input_tokens")
-                if it is not None or cr is not None or cc is not None:
-                    self._checkpoint_tracker.set_context_tokens(int(it or 0) + int(cr or 0) + int(cc or 0))
-                else:
-                    self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
+                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
+                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
             except Exception:  # noqa: BLE001 — accounting must never break routing
                 pass
         # Completed orchestration turn means SEED delivered; later turns send DELTA.

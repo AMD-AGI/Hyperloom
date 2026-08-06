@@ -5,6 +5,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Enablement dispatch evidence reaches the specialist again**: the Coordinator
+  computes the source lines near the offending site — and, on a weight-init
+  failure, the checkpoint's per-layer weight inventory — plus a ranked list of
+  bridging PR refs, but since the mandate stopped being passed as free-text
+  `notes` none of it was delivered: the mandate was re-rendered downstream from
+  a bare request, so the agent was told to find a bridge while the candidates
+  already discovered for it were withheld. Both now travel as structured
+  `enablement_source_context` / `enablement_candidate_refs` params and are
+  folded into the §1b mandate at the point of use.
+
+### Removed
+
+- **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
+  removed from the role registry. All kernel work was already handled by
+  programmatic Python handlers in `orchestrator/kernel/request_handlers.py`; the
+  LLM role was a no-op heartbeat responder. The following CLI flags and env vars
+  are removed:
+  - `--kernel-prompt` — overriding the kernel system prompt is no longer meaningful.
+  - `--kernel-codex` / `--kernel-claude` — there is no kernel LLM backend to select.
+  - `INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS` — no kernel LLM backend.
+  - `INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL` — no kernel LLM backend.
+  
+  `--no-kernel` continues to work: it sets `shared_state.kernel_enabled=False`,
+  which causes the Coordinator's request router to auto-reject kernel REQUESTs
+  with `agent_disabled`.
+
+  The Slurm launcher's `HL_KERNEL_BACKEND` (`codex|claude`) selected the retired
+  LLM backend and is removed with it. Use `KERNEL_OPT_BACKEND_ORDER`
+  (`geak|forge`) to steer the kernel-opt rewrite ladder; the launcher forwards it
+  into the container and every carrier defaults it to `geak`.
+
+  `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been partially
+  superseded by `docs/conceptual/kernel-execution-path.md`, which documents the
+  programmatic dispatch flow and artifact layout. Operator sections from the
+  original (Credentials, Ray head, Recovery, TraceLens Requirements, Proposal
+  Rules) are not carried over; refer to the individual reference docs for those.
+
 ## [v1.0.0a3] - 2026-08-05
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

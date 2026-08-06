@@ -9,7 +9,7 @@ myst:
 A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/kernel/SKILL.md),
+[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/kernel-execution-path.md),
 [`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
 [`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
 

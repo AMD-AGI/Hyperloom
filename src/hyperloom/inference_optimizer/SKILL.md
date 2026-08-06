@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel: responder path for `trace_analyze`, `run_optimization`, `integrate`.
+- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 - Robustness: default `--robustness-agent` — drives the
@@ -156,10 +156,11 @@ foreign serving PIDs and ≲ 500 MiB VRAM in use**. A leftover
 run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
-> Inside a running session, the equivalent guard is Kernel-agent IR-4
-> (`kill_server` + `check_gpu_memory` before every server (re)start —
-> see `src/hyperloom/orchestrator/prompts/kernel_agent.md`). IR-1 above is the
-> *outer* gate that fires before the optimizer process exists.
+> Inside a running session, the equivalent guard is enforced in
+> `orchestrator/kernel/request_handlers.py`: `restart_server_for_round` and
+> `apply_and_bench.py` run `kill_server` + `check_gpu_memory` before every
+> server restart. IR-1 above is the *outer* gate that fires before the
+> optimizer process exists.
 
 ### IR-2 — install.sh MUST succeed before every launch
 
@@ -578,8 +579,8 @@ the catalog probe is the sole gate; see
 critic-agent runtime probe (`## Critic Backend Selection`).
 
 Don't manually pip-install SDKs, start Ray,
-or `curl /v1/models` — `_preflight()` owns these. See `src/hyperloom/agents/kernel/SKILL.md`
-for the chained installer truth.
+or `curl /v1/models` — `_preflight()` owns these. See `docs/conceptual/kernel-execution-path.md`
+for the kernel dispatch and artifact layout.
 
 ### Recovery
 
@@ -766,7 +767,7 @@ Default is overridable per pod via
 | `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
 | `CRITIC_KB_CLIENT_MODE` | `inmemory` keeps KB writes / reads off the wire. `live` requires `KB_BASE_URL`. | `inmemory` |
 | `KB_BASE_URL` | KB service URL when `CRITIC_KB_CLIENT_MODE=live`. | unset (live mode aborts at start if absent) |
-| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `src/hyperloom/agents/critic/AGENTS.md`. | runtime defaults |
+| `KB_TIMEOUT_MS` / `KB_RETRY_MAX` / `KB_DEAD_LETTER_DIR` | Forwarded to the runtime; see `src/hyperloom/agents/critic/README.md`. | runtime defaults |
 | `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session decisions / reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
 | `WORKSPACE_PATH` | Skill root the critic-agent runtime resolves prompt assets against. | `$REPO_ROOT` (auto-set). |
 
@@ -1216,7 +1217,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 | Symptom | Fix |
 |---|---|
 | `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
-| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/AGENTS.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
+| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
 | `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | KB stuck. If `CRITIC_KB_CLIENT_MODE=live`, drop to `inmemory`. Reproducing in `inmemory` is a bug — that path must not block on I/O. |
 | All verdicts `('needs_review','critic_unavailable')` + `kb_skipped=missing_critical_context` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 

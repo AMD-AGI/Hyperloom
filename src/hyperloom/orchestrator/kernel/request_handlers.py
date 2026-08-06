@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-side handlers for Kernel-agent REQUEST kinds.
-
-A request is served by an LLM responder or a programmatic handler.
+"""Coordinator-side programmatic handlers for kernel REQUEST kinds.
 
 Handler signature::
 

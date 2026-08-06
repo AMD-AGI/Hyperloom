@@ -1144,15 +1144,19 @@ def test_framework_audit_llm_refine_fallbacks(monkeypatch: pytest.MonkeyPatch) -
     assert out["layer"] == "static"
     assert "missing SAFE_API_KEY" in out["risks"][-1]
 
-    class _Message:
+    class _Delta:
         content = '{"semantic_status":"partially_present","applicability":"needs_rewrite","confidence":0.77,"recommended_next_step":"author_via_specialist","note":"drift"}'
 
     class _Choice:
-        message = _Message()
+        delta = _Delta()
+
+    class _Chunk:
+        usage = None
+        choices = [_Choice()]
 
     class _Completions:
         def create(self, **_kwargs):
-            return SimpleNamespace(choices=[_Choice()])
+            return iter([_Chunk()])
 
     class _OpenAI:
         def __init__(self, **_kwargs):
