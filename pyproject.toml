@@ -184,6 +184,7 @@ hyperloom = [
 # former agent skill file was replaced by docs/conceptual/kernel-execution-path.md.
 "hyperloom.agents.kernel" = [
     "scripts/*.sh",
+    "skills/origami-gemm/SKILL.md",
     "skills/unittest/SKILL.md",
 ]
 # Non-Python data file the kernel tools read at runtime.

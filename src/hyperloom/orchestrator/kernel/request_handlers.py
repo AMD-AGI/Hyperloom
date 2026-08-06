@@ -3087,6 +3087,176 @@ async def _capture_vllm_tunableop_shapes(
     }
 
 
+def _origami_gemm_fallback_enabled() -> bool:
+    """Return whether the optional Origami pre-tuner is explicitly enabled."""
+    return env_bool("HYPERLOOM_ORIGAMI_GEMM_FALLBACK", False)
+
+
+def _with_gemm_pre_tuning_env(cmd: list[str], payload: dict) -> list[str]:
+    """Prefix a tuner command with validated Origami baseline environment."""
+    if not _origami_gemm_fallback_enabled():
+        return cmd
+    raw = payload.get("_origami_pre_tuning_envs")
+    if not isinstance(raw, dict):
+        return cmd
+    value = str(raw.get("AITER_CONFIG_GEMM_A8W8_BLOCKSCALE") or "").strip()
+    if not value or not Path(value).is_file():
+        return cmd
+    assignment = f"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE={value}"
+    if cmd and cmd[0] == "env":
+        return ["env", assignment, *cmd[1:]]
+    return ["env", assignment, *cmd]
+
+
+async def _run_origami_gemm_fallback(
+    payload: dict,
+    *,
+    session_dir: Path,
+) -> HandlerResult:
+    """Build an Origami pre-tuning baseline for observed AITER blockscale misses.
+
+    This is a fail-soft pre-tuner. It runs only for plain FP8 blockscale,
+    delegates provenance and ranking to a fresh subprocess, and returns a
+    complete CSV environment that the configured GEAK/Forge tuner inherits.
+    """
+    if not _origami_gemm_fallback_enabled():
+        return {"status": "skipped", "reason": "disabled", "candidate": False}
+
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+    quant_key = str(quant_type or "").strip().lower()
+    if precision != "fp8" or quant_key not in {
+        "blockscale",
+        "block_scale",
+        "a8w8_blockscale",
+        "fp8_blockscale",
+    }:
+        return {
+            "status": "skipped",
+            "reason": "not_plain_fp8_blockscale",
+            "candidate": False,
+            "precision": precision,
+            "quant_type": quant_type,
+        }
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir) / "origami"
+    workspace.mkdir(parents=True, exist_ok=True)
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
+    if not shapes_json:
+        shapes_json = _resolve_forge_shapes(
+            state,
+            session_dir,
+            require_fresh_profile=True,
+        )
+    if not shapes_json:
+        return {
+            "status": "skipped",
+            "reason": "no_profile_shapes",
+            "candidate": False,
+            "workspace": str(workspace),
+        }
+
+    current_best = state.current_best if isinstance(state.current_best, dict) else {}
+    current_envs = (
+        current_best.get("extra_envs")
+        if isinstance(current_best.get("extra_envs"), dict)
+        else {}
+    )
+    tuned_csv = str(
+        payload.get("tuned_csv")
+        or current_envs.get("AITER_CONFIG_GEMM_A8W8_BLOCKSCALE")
+        or os.environ.get("AITER_CONFIG_GEMM_A8W8_BLOCKSCALE")
+        or ""
+    ).strip()
+    input_payload = {
+        "shapes_json": shapes_json,
+        "tuned_csv": tuned_csv,
+        "output_dir": str(workspace),
+        "aiter_root": _resolve_aiter_root_for_forge(),
+        "device_index": int(payload.get("device_index") or 0),
+        "occupancy": 2,
+        "benchmark_warmup": (
+            payload.get("benchmark_warmup")
+            or os.environ.get("HYPERLOOM_ORIGAMI_BENCHMARK_WARMUP")
+            or 3
+        ),
+        "benchmark_iterations": (
+            payload.get("benchmark_iterations")
+            or os.environ.get("HYPERLOOM_ORIGAMI_BENCHMARK_ITERATIONS")
+            or 10
+        ),
+        "benchmark_rounds": (
+            payload.get("benchmark_rounds")
+            or os.environ.get("HYPERLOOM_ORIGAMI_BENCHMARK_ROUNDS")
+            or 5
+        ),
+        "benchmark_min_speedup": (
+            payload.get("benchmark_min_speedup")
+            or os.environ.get("HYPERLOOM_ORIGAMI_BENCHMARK_MIN_SPEEDUP")
+            or 1.0
+        ),
+    }
+    input_json = workspace / "origami_gemm_input.json"
+    input_json.write_text(
+        json.dumps(input_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    try:
+        tool_path = _kernel_agent_tool_path("origami_gemm_select.py")
+    except RuntimeError as exc:
+        return {
+            "status": "skipped",
+            "candidate": False,
+            "reason": "selector_tool_unavailable",
+            "error": str(exc),
+            "workspace": str(workspace),
+        }
+    cmd = ["python3", str(tool_path), "--input-json", str(input_json)]
+    try:
+        timeout = max(
+            60,
+            int(
+                payload.get("origami_timeout_sec")
+                or os.environ.get("HYPERLOOM_ORIGAMI_GEMM_TIMEOUT_SEC")
+                or 3600
+            ),
+        )
+    except (TypeError, ValueError):
+        timeout = 3600
+    try:
+        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
+        selected = _shape_tool_result(rc, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        selected = {
+            "status": "skipped",
+            "candidate": False,
+            "reason": "selector_timeout",
+        }
+
+    selected.setdefault("selector", "origami")
+    selected.setdefault("workspace", str(workspace))
+    selected.setdefault("precision", precision)
+    selected.setdefault("quant_type", quant_type)
+    if not selected.get("candidate") or not selected.get("env_value"):
+        return selected
+
+    env_var = str(
+        selected.get("env_var") or "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+    )
+    env_value = str(selected["env_value"])
+    selected.update(
+        {
+            "status": "ok",
+            "pre_tuning_seed": True,
+            "env_var": env_var,
+            "env_value": env_value,
+        }
+    )
+    return selected
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -3282,6 +3452,7 @@ async def _run_forge_gemm_tuning(
     aiter_root = _resolve_aiter_root_for_forge()
     if aiter_root:
         cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
+    cmd = _with_gemm_pre_tuning_env(cmd, payload)
 
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
@@ -3540,6 +3711,7 @@ async def _run_geak_gemm_tuning(
         "--input-json",
         str(input_json),
     ]
+    cmd = _with_gemm_pre_tuning_env(cmd, payload)
 
     _gemm_timeout = _gemm_tuning_timeout_sec(payload)
     try:
@@ -3567,11 +3739,17 @@ async def run_gemm_tuning_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEMM tuning via GEAK, or forge only when explicitly enabled.
+    """Optionally seed true AITER misses with Origami, then run GEAK/Forge.
 
     Backend selection:
     1. Exact ``KERNEL_OPT_BACKEND_ORDER=forge`` -> forge.
     2. Everything else -> GEAK.
+
+    The Origami selector runs only when
+    ``HYPERLOOM_ORIGAMI_GEMM_FALLBACK=1``. When disabled, this handler goes
+    directly to the selected backend without touching any Origami path. When
+    enabled, Origami only supplies the inherited AITER fallback config; it never
+    replaces the selected backend or its measured tuning result.
 
     Args:
         payload: The GEMM-tuning request payload.
@@ -3592,10 +3770,66 @@ async def run_gemm_tuning_handler(
     except Exception:  # noqa: BLE001
         log.debug("gemm v4 start recording failed", exc_info=True)
 
+    origami_enabled = _origami_gemm_fallback_enabled()
+    origami_result: HandlerResult | None = None
+    backend_payload = payload
+    if origami_enabled:
+        try:
+            origami_result = await _run_origami_gemm_fallback(
+                payload,
+                session_dir=session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional pre-tuner must fail soft
+            log.warning("run_gemm_tuning: Origami fallback selector skipped: %s", exc)
+            origami_result = {
+                "status": "skipped",
+                "candidate": False,
+                "reason": "selector_error",
+                "error": repr(exc),
+            }
+        backend_payload = dict(payload)
+        if origami_result.get("candidate") and origami_result.get("env_value"):
+            backend_payload["_origami_pre_tuning_envs"] = {
+                str(
+                    origami_result.get("env_var")
+                    or "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+                ): str(origami_result["env_value"])
+            }
+            log.info(
+                "run_gemm_tuning: seeding %s fallback shape(s) with Origami before %s",
+                origami_result.get("selected_shapes", 0),
+                backend,
+            )
     if backend == "forge":
-        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+        result = await _run_forge_gemm_tuning(
+            backend_payload,
+            session_dir=session_dir,
+        )
     else:
-        result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+        result = await _run_geak_gemm_tuning(
+            backend_payload,
+            session_dir=session_dir,
+        )
+    if origami_enabled and origami_result is not None:
+        result.setdefault(
+            "origami_fallback",
+            {
+                key: origami_result.get(key)
+                for key in (
+                    "status",
+                    "reason",
+                    "candidate",
+                    "selected_shapes",
+                    "report_path",
+                    "env_var",
+                    "env_value",
+                )
+                if origami_result.get(key) not in (None, "")
+            },
+        )
+        if origami_result.get("candidate"):
+            result["origami_fallback"]["applied_before_backend"] = True
+            result["origami_fallback"]["authoritative_backend"] = backend
     result.setdefault("task_id", payload.get("task_id"))
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
