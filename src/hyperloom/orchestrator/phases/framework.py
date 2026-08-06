@@ -3483,6 +3483,9 @@ class FrameworkPhase(PhaseHandler):
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(getattr(state, "baseline_accuracy", 0.0) or 0.0),
+            # The lane templates from the shipped default config, which
+            # materializes RUN_EVAL=true and would override the session's choice.
+            "disable_run_eval": bool(getattr(state, "eval_disabled", False)),
         }
         cand_id = self._framework_candidate_key(candidate)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
