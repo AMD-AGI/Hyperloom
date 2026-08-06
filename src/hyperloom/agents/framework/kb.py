@@ -38,6 +38,13 @@ KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 #: the ``fa`` CLI runs standalone and must not depend on inference_optimizer.
 _DEFAULT_WORKSPACE_ROOT: str = "/workspace/hyperloom"
 
+#: Withdrawn override. Only the reader honoured it, so setting it split the KB
+#: in two; a run that still sets it is failed rather than silently redirected.
+#: ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where this skill
+#: is installed", is used for other purposes, and never reached the reader
+#: anyway because no installer exports it.
+_REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
+
 
 def path_for_framework(framework: str) -> Path:
     """Resolve the KB sub-partition path for a per-framework finding bag.
@@ -132,13 +139,20 @@ def _resolve_kb_root() -> Path:
 
     Returns:
         The resolved KB root path.
+
+    Raises:
+        RuntimeError: If ``FRAMEWORK_AGENT_KB_DIR`` is set. It only ever
+            redirected the reader, so honouring it is what let the two halves
+            of the KB drift apart; failing here makes the migration visible
+            instead of quietly writing somewhere the reader will not look.
     """
-    explicit = os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    root = os.environ.get("FRAMEWORK_AGENT_ROOT", "").strip()
-    if root:
-        return Path(root).expanduser() / "kb"
+    removed = os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip()
+    if removed:
+        raise RuntimeError(
+            f"{_REMOVED_KB_ROOT_ENV} is no longer honoured because it redirected only the "
+            f"reader, leaving writes behind in the previous location. "
+            f"Set {KB_ROOT_ENV} instead; it moves both halves of the KB together."
+        )
     return mutable_kb_root()
 
 

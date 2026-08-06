@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""
+"""Tests for hyperloom.agents.framework.kb and the `fa kb <op>` CLI surface. Hermetic - redirects the KB root via INFERENCE_OPTIMIZER_FA_KB_PATH."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from hyperloom.agents.framework.models import Finding
 @pytest.fixture
 def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point KB resolution at a clean tmp_path for every test."""
-    monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path))
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
+    monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
     return tmp_path
 
 
@@ -30,26 +30,41 @@ def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestResolveKbRoot:
-    """_resolve_kb_root precedence rules."""
-
-    def test_env_override_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """FRAMEWORK_AGENT_KB_DIR beats FRAMEWORK_AGENT_ROOT/kb fallback."""
-        monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "explicit"))
-        monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "root"))
-        assert kb._resolve_kb_root() == tmp_path / "explicit"
-
-    def test_uses_framework_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Fallback to FRAMEWORK_AGENT_ROOT/kb when explicit env is unset."""
-        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
-        monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "root"))
-        assert kb._resolve_kb_root() == tmp_path / "root" / "kb"
+    """_resolve_kb_root, which has exactly one override and no fallback chain."""
 
     def test_io_override_matches_writeback_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The fa reader honours IO's KB override so write/read paths match."""
+        """The fa reader honours the KB override so write/read paths match."""
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
-        monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
+
+    def test_defaults_to_the_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With no override the KB lives under the operator workspace."""
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+        assert kb._resolve_kb_root() == tmp_path / "workspace" / "kb"
+
+    def test_withdrawn_override_fails_loudly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A run still setting the reader-only override is stopped, not redirected.
+
+        Honouring it moved reads without moving writes, which is how the
+        ledger came to be written in one place and read from another. A start-up
+        failure naming the replacement is recoverable; a silent split is not.
+        """
+        monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
+        with pytest.raises(RuntimeError, match="INFERENCE_OPTIMIZER_FA_KB_PATH"):
+            kb._resolve_kb_root()
+
+    def test_framework_agent_root_is_not_a_kb_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """That variable means "where the skill is installed" and must not raise."""
+        monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+        monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path / "skill"))
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+        assert kb._resolve_kb_root() == tmp_path / "workspace" / "kb"
 
 
 class TestListAndMatch:
