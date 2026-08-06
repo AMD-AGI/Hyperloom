@@ -52,6 +52,15 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "SAFE_API_KEY",
 )
 
+_ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
+)
+
 
 def _resolve_dotenv_file() -> Path | None:
     """Resolve the trusted repo ``.env`` file without trusting arbitrary cwd."""
@@ -93,10 +102,19 @@ def _provider_only_mode_before_fallback() -> str:
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
-    """Undo stale cross-provider credentials loaded from installer env fallback."""
-    if provider_mode != "anthropic":
+    """Undo stale cross-provider credentials loaded from installer env fallback.
+
+    Symmetric: a single-provider run keeps the other side exactly as the caller
+    had it, so a stale installer env file cannot turn it into a mispaired
+    configuration.
+    """
+    if provider_mode == "anthropic":
+        keys: tuple[str, ...] = _PROVIDER_FALLBACK_KEYS
+    elif provider_mode == "openai":
+        keys = _ANTHROPIC_FALLBACK_KEYS
+    else:
         return
-    for key in _PROVIDER_FALLBACK_KEYS:
+    for key in keys:
         original = snapshot.get(key)
         if original is None:
             os.environ.pop(key, None)
@@ -1242,7 +1260,9 @@ def _preflight(
     # Capture explicit single-provider intent before the installer env fallbacks
     # run, then undo any cross-provider credentials they inject.
     provider_mode = _provider_only_mode_before_fallback()
-    provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
+    provider_snapshot = {
+        key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)
+    }
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
     _derive_runtime_paths()
@@ -1252,18 +1272,19 @@ def _preflight(
     _validate_credentials()
 
     # --- Auth alias export (internal GEAK / LLM aliases only) ---
-    # An explicitly set alias is kept. The per-provider primary keys are never
-    # cross-filled.
-    provider_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    if provider_key:
+    # These aliases feed OpenAI-protocol consumers, so they come from the
+    # OpenAI-side key. An explicitly set alias is kept, and the per-provider
+    # primary keys are never cross-filled.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if openai_key:
         for alias in (
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
         ):
             if not os.environ.get(alias):
-                os.environ[alias] = provider_key
-                print(f"Preflight: filled {alias} from the provider key")
+                os.environ[alias] = openai_key
+                print(f"Preflight: filled {alias} from OPENAI_API_KEY")
     # --- Resolve install interpreters ---
     # Resolve the ACTIVE benchmark backend first so a bypass-only environment
     # (no Magpie / no /opt/venv) never routes installs through Magpie's

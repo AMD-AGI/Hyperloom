@@ -408,6 +408,64 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
         assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
 
 
+def test_kernel_install_geak_routing_is_openai_side_only():
+    """GEAK speaks the OpenAI protocol, so its endpoint/key aliases resolve from
+    the OpenAI side and never from the Anthropic / DeepSeek side."""
+    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("GEAK_BASE_URL_VAL=")
+    end = script_text.index("\n", script_text.index("GEAK_API_KEY_VAL="))
+    routing = script_text[start:end]
+
+    assert "OPENAI_BASE_URL" in routing
+    assert "OPENAI_API_KEY" in routing
+    for foreign in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK"):
+        assert foreign not in routing, foreign
+    # The endpoint-pairing helper existed only for the cross-provider fallback.
+    assert "_key_for_endpoint" not in script_text
+
+
+def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI
+    preflight and the other two installers."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "cross-provider-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { echo \"$*\" >&2; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                credential_functions,
+                # OpenAI-side gateway URL paired with only an Anthropic key.
+                "OPENAI_BASE_URL=https://gw.example.com/v1",
+                "ANTHROPIC_API_KEY=sk-ant-real",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode != 0, "mispaired credentials were accepted"
+    assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
+
+
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")

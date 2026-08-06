@@ -235,10 +235,55 @@ def test_preflight_keeps_explicit_provider_keys(
     # Explicit provider keys are preserved.
     assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "openai-user-token"
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-user-token"
-    # Internal GEAK alias is gap-filled from the provider key (ANTHROPIC-first).
-    assert cli.os.environ["_".join(("GEAK", "API", "KEY"))] == "anthropic-user-token"
+    # GEAK speaks the OpenAI protocol, so its alias comes from the OpenAI key.
+    assert cli.os.environ["_".join(("GEAK", "API", "KEY"))] == "openai-user-token"
     # The Anthropic auth-token alias is never cross-filled from another key.
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
+
+
+def test_preflight_anthropic_only_leaves_openai_protocol_aliases_unset(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """GEAK / LLM aliases feed OpenAI-protocol consumers, so an Anthropic-only
+    deploy leaves them unset rather than handing them the Anthropic key."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
+
+    cli_preflight._preflight()
+
+    for name in (
+        "_".join(("GEAK", "API", "KEY")),
+        "_".join(("LLM", "API", "KEY")),
+        "_".join(("AMD_LLM", "API", "KEY")),
+    ):
+        assert name not in cli.os.environ, name
+
+
+def test_preflight_openai_only_drops_anthropic_creds_from_installer_env(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    """A stale installer env file must not inject an Anthropic-side key into an
+    OpenAI-only run: that would turn a valid config into a rejected one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
+
+    def _stale_kernel_env_loader():
+        monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "stale-anthropic-key")
+
+    monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
+
+    resolved = cli_preflight._preflight()
+
+    assert resolved == ("", "https://gateway.example/v1")
+    assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
 
 
 def test_preflight_claude_config_uses_explicit_anthropic_key(
