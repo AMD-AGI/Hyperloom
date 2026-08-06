@@ -221,15 +221,14 @@ def _rerank_by_prefer(
 
 @dataclass
 class RecipeKB:
-    """Local-write / remote-read-with-fallback dispatcher.
+    """Selected-store dispatcher with a legacy remote-read fallback.
 
     Args:
-        local: Authoritative local store. REQUIRED — there is no
-            "remote-only" mode under this design (writes must
-            always have somewhere to land).
-        remote: Optional read-side central kb-service client.
+        local: Store selected by ``mode``. In exclusive remote mode this is the
+            direct GBrain store; in local mode it is the filesystem store.
+        remote: Optional legacy read-side central kb-service client.
             ``None`` (or a client with ``enabled=False``) makes
-            reads short-circuit to the local store.
+            reads use only the selected store.
         on_remote_failure: Callback invoked when a read against
             the central kb-service fails and the dispatcher falls
             back to local. Receives ``(method_name, exception)``.
@@ -766,10 +765,23 @@ class RecipeKB:
             except InvalidCanonicalIdError as exc:
                 log.warning("get_recipe: %s; local-only read", exc)
                 resolution = "remote_error"
-        local_row = self.local.get_recipe(
-            canonical_id=canonical_id,
-            version=version,
-        )
+        try:
+            local_row = self.local.get_recipe(
+                canonical_id=canonical_id,
+                version=version,
+            )
+        except RemoteRecipeClientError as exc:
+            # Exclusive remote mode stores its GBrain backend in ``local``;
+            # preserve degradation/audit behavior even though ``remote`` is None.
+            self._note_failure("get_recipe", exc)
+            resolution = "remote_error" if self.mode == "remote" else "local_error"
+            local_row = None
+        except Exception as exc:  # noqa: BLE001 - remote reads must degrade safely
+            if self.mode != "remote":
+                raise
+            self._note_failure("get_recipe", exc)
+            resolution = "remote_error"
+            local_row = None
         self._emit_audit(
             self._read_audit_event(
                 method="get_recipe",
@@ -848,13 +860,24 @@ class RecipeKB:
             except RemoteRecipeClientError as exc:
                 self._note_failure("search", exc)
                 resolution = "remote_error"
-        local_rows = self.local.search(
-            label_match=label_match,
-            metric_filters=metric_filters,
-            updated_since=updated_since,
-            order_by=order_by,
-            limit=limit,
-        )
+        try:
+            local_rows = self.local.search(
+                label_match=label_match,
+                metric_filters=metric_filters,
+                updated_since=updated_since,
+                order_by=order_by,
+                limit=limit,
+            )
+        except RemoteRecipeClientError as exc:
+            self._note_failure("search", exc)
+            resolution = "remote_error" if self.mode == "remote" else "local_error"
+            local_rows = []
+        except Exception as exc:  # noqa: BLE001 - remote reads must degrade safely
+            if self.mode != "remote":
+                raise
+            self._note_failure("search", exc)
+            resolution = "remote_error"
+            local_rows = []
         ranked_local = _rerank_by_prefer(local_rows, prefer)
         self._emit_audit(
             self._read_audit_event(
@@ -869,14 +892,19 @@ class RecipeKB:
 
     # Lifecycle
     def close(self) -> None:
-        """Release the remote client's HTTP transport (no-op for the local
-        store). Idempotent; safe to call from a CLI atexit handler.
-        """
-        if self.remote is not None:
+        """Release selected and legacy backend transports, at most once each."""
+        seen: set[int] = set()
+        for backend in (self.local, self.remote):
+            if backend is None or id(backend) in seen:
+                continue
+            seen.add(id(backend))
+            close = getattr(backend, "close", None)
+            if not callable(close):
+                continue
             try:
-                self.remote.close()
+                close()
             except Exception:  # noqa: BLE001
-                log.exception("recipe_kb: remote.close raised")
+                log.exception("recipe_kb: backend close raised")
 
 
 __all__ = [
