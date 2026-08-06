@@ -24,13 +24,18 @@ _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# Hard model allowlist: orchestration MUST resolve to Opus 4-8 (preferred) or a
+# Hard model allowlist: orchestration MUST resolve to Opus 5 (preferred) or a
 # known-good fallback before Coordinator boots.
-_CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
+_CLAUDE_PREFERRED_MODEL = "claude-opus-5"
 
 _CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
 
-_CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
+_CLAUDE_ALLOWED_MODELS = (
+    _CLAUDE_PREFERRED_MODEL,
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    _CLAUDE_FALLBACK_MODEL,
+)
 
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.

@@ -31,6 +31,7 @@ DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
 # Conservative fallback window for an unknown model id.
 DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-5": 200_000,
     "claude-opus-4-8": 200_000,
     "claude-opus-4-7": 200_000,
     "claude-opus-4-6": 200_000,
