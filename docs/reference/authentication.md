@@ -24,12 +24,12 @@ Hyperloom needs at most two classes of configuration:
    (writable artifact root; default `/workspace/hyperloom`); setup writes the
    runtime env files and updates `.env`.
 
-In the single-gateway setup, GEAK keys and Anthropic / OpenAI
-aliases are derived from `OPENAI_API_KEY` and
-`OPENAI_BASE_URL` by `src/hyperloom/agents/kernel/scripts/install.sh` and
-the inference optimizer CLI preflight. You normally do not set those
-aliases by hand. Split-gateway and GEAK gateway endpoint overrides are the
-exceptions (see below).
+In the single-gateway setup, the Anthropic-side base URL and key are derived
+from `OPENAI_BASE_URL` / `OPENAI_API_KEY` by
+`src/hyperloom/agents/kernel/scripts/install.sh`, and the internal GEAK / LLM
+aliases are filled from the provider key by the inference optimizer CLI
+preflight. You normally do not set those by hand. Split-gateway and GEAK
+gateway endpoint overrides are the exceptions (see below).
 
 ---
 
@@ -78,16 +78,20 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 `OPENAI_API_KEY` is the single gateway credential used by all downstream
 tooling:
 
-* GEAK and kernel tools inherit the resolved gateway credential from preflight.
-* Orchestration LLM → `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (auto-aliased).
+* GEAK and kernel tools inherit the resolved gateway credential from preflight
+  (`GEAK_API_KEY` / `LLM_API_KEY` / `AMD_LLM_API_KEY`).
+* Orchestration Claude uses the Anthropic-side base URL + key, which the
+  single-gateway `install.sh` derives from `OPENAI_BASE_URL` / `OPENAI_API_KEY`
+  (the generated `~/.claude/config.json` primary key also falls back to it).
 * Robustness-agent uses it for the optional LLM RCA engine.
 * Critic-agent uses it for KB summary / synthesis calls.
 
-You *never* need to copy `OPENAI_API_KEY` into separate
-provider-specific slots in `.env`.
-If those variables are unset, install and preflight fill them from
-`OPENAI_API_KEY` at process-launch time. An explicitly set provider key is
-never overwritten by `OPENAI_API_KEY`.
+You *never* need to copy `OPENAI_API_KEY` into the internal GEAK / LLM slots in
+`.env`; preflight fills those from the provider key. The single-gateway
+`install.sh` also derives `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` from the
+OpenAI gateway. Preflight does **not** cross-fill the per-provider primary keys
+(`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`), and an
+explicitly set provider key is never overwritten.
 
 The recommended setup, run once per shell:
 
@@ -213,7 +217,8 @@ At preflight, the inference optimizer CLI:
   Anthropic-side base URL, and `primaryApiKey` to the Anthropic-side key
   (explicit `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` wins, else
   `OPENAI_API_KEY`).
-- Fills the provider credentials needed by child processes.
+- Fills the internal GEAK / LLM aliases from the provider key for child
+  processes; the per-provider primary keys are not cross-filled.
 
 **401 recovery:**
 
@@ -259,8 +264,8 @@ Yes, in split-entrypoint mode: set `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`
 
 **Q: Where do provider-specific API keys come from?**
 
-In single-gateway mode they are derived from `OPENAI_API_KEY` by
-`install.sh` and preflight. In split mode each side uses its own key.
+In single-gateway mode the Anthropic-side key is derived from `OPENAI_API_KEY`
+by `install.sh`. In split mode each side uses its own key.
 
 **Q: My organization rotates the LLM gateway key weekly. How?**
 
