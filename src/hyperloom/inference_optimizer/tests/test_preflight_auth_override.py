@@ -1007,6 +1007,23 @@ def test_validate_claude_model_custom_explicitly_disabled_still_hard_gates(monke
     assert "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1" in err
 
 
+def test_validate_claude_model_opus_5_in_catalog_keeps_choice(monkeypatch, capsys):
+    """The new default passes the gateway gate; the gateway spelling also resolves."""
+    # The AMD gateway lists it as "Claude-Opus-5"; the probe folds that form.
+    assert cli._catalog_compare_model_id("Claude-Opus-5") == "claude-opus-5"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-5", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-5"
+    assert "confirmed in gateway catalog" in capsys.readouterr().out
+
+
 def test_validate_claude_model_4_7_in_catalog_keeps_choice(monkeypatch, capsys):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
     monkeypatch.setattr(
@@ -1153,6 +1170,41 @@ def test_validate_claude_model_4_7_missing_falls_back_to_4_6(monkeypatch, capsys
     assert "claude-opus-4-6" in out
 
 
+def test_validate_claude_model_opus_5_missing_falls_back_to_next_rung(monkeypatch, capsys):
+    """A gateway that predates opus-5 must land on 4-8, not skip to the last rung.
+
+    This is the common transition-period catalog: every older allowlist entry is
+    present but the new default is not.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-4-8"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "falling back" in out
+
+
+def test_validate_claude_model_fallback_walks_the_allowlist_order(monkeypatch, capsys):
+    """The ladder skips rungs the gateway lacks and stops at the first it serves."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(
+        cli,
+        "_probe_llm_catalog",
+        lambda **kw: {"claude-opus-4-7", "claude-opus-4-6", "gpt-5.4"},
+    )
+    args = _make_args(claude_model="claude-opus-5")
+    cli._validate_and_resolve_claude_model(args, None)
+
+    assert args.claude_model == "claude-opus-4-7"
+
+
 def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
     """Catalog missing all allowed Claude models -> sys.exit(2)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
@@ -1167,6 +1219,7 @@ def test_validate_claude_model_neither_in_catalog_aborts(monkeypatch, capsys):
         cli._validate_and_resolve_claude_model(args, None)
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
+    assert "claude-opus-5" in err
     assert "claude-opus-4-8" in err
     assert "claude-opus-4-7" in err
     assert "claude-opus-4-6" in err
@@ -1389,6 +1442,82 @@ def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "confirmed in gateway catalog" in out
     assert "WARNING" not in out
+
+
+def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
+    """A gateway that predates the default Codex model degrades at preflight.
+
+    The Codex side is WARN-only, so without a ladder this would sail past
+    preflight and fail on the first Codex turn instead.
+    """
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.5"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "falling back" in out
+
+
+def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.4"
+
+
+def test_smoke_test_codex_model_leaves_custom_ids_alone(monkeypatch, capsys):
+    """An operator-chosen id outside the ladder is reported, never rewritten."""
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    args = _make_args(codex_model="my-org/custom-gpt", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "my-org/custom-gpt"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    # The warning names known-good ids so the operator has something to pass.
+    assert "gpt-5.6-sol" in out
+
+
+def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkeypatch, capsys):
+    """OpenAI-only: CODEX_MODEL also drives orchestration, so its ladder must run first.
+
+    Otherwise ``args.claude_model`` is derived from a codex id the gateway does
+    not serve, and the Claude gate hard-aborts on a model the operator never
+    chose -- with the Codex ladder never getting a turn.
+    """
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    # A gateway that has not picked up the new default yet.
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+
+    assert cli._claude_model_should_follow_codex() is True
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
+    cli._resolve_models_for_run(args, None)
+
+    assert args.codex_model == "gpt-5.5"
+    assert args.claude_model == "gpt-5.5"
+
+
+def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
+    """The ladder cannot be gated on the critic here: codex_model drives orchestration."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
+
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
+    cli._resolve_models_for_run(args, None)
+
+    assert args.codex_model == "gpt-5.4"
+    assert args.claude_model == "gpt-5.4"
 
 
 def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):

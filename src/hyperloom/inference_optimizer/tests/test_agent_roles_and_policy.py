@@ -36,6 +36,23 @@ from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 # agent_role
+def test_default_claude_model_is_opus_5():
+    """The default orchestration model must stay in sync with the allowlist head."""
+    from hyperloom.inference_optimizer.cli.credentials import (
+        _CLAUDE_ALLOWED_MODELS,
+        _CLAUDE_PREFERRED_MODEL,
+    )
+
+    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5"
+    assert _CLAUDE_PREFERRED_MODEL == DEFAULT_CLAUDE_MODEL
+    assert _CLAUDE_ALLOWED_MODELS == (
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+    )
+
+
 def test_default_role_registry_has_3_agents():
     reg = default_role_registry()
     assert set(reg.keys()) == {"orchestration", "critic", "robustness"}

@@ -412,7 +412,7 @@ def _maybe_llm_refine(
 
     import hyperloom.common.llm_config as _llm_cfg
 
-    model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.4").strip()
+    model = str(request.get("model") or os.environ.get("FRAMEWORK_AGENT_AUDIT_MODEL") or "gpt-5.6-sol").strip()
 
     env_override: dict[str, str] = {}
     req_key = str(request.get("api_key") or "").strip()
