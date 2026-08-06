@@ -594,7 +594,7 @@ def test_repeated_identical_arguments_become_a_memoize_candidate():
 def test_setup_phase_work_is_marked_and_demoted():
     """One-time weight loading must not outrank per-step work.
 
-    The numbers here are the real ones from an 8-rank WorldPlay run, because the
+    The numbers here are the real ones from an 8-rank scriptable run, because the
     obvious version of this discriminator failed on exactly this shape. Weight
     loading took 580s of a 644s process, so the generation phase spanned under 10%
     of wall clock; a "must span enough of the run" floor therefore marked *every*
@@ -789,7 +789,7 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
                     {
                         # Five calls, spanning most of the leg: phase barriers.
                         "api": "torch.distributed.barrier",
-                        "site": "hyvideo/pipelines/worldplay_video_pipeline.py:1900:__call__",
+                        "site": "mypkg/pipelines/pipeline.py:1900:__call__",
                         "count": 5,
                         "wall_s": 120.0,
                         "bytes": 0,
@@ -802,7 +802,7 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
                         # Weight loading: more wall time than the hot-path finding,
                         # which is why it has to be demoted rather than out-ranked.
                         "api": "torch.Tensor.to",
-                        "site": "hyvideo/pipelines/worldplay_video_pipeline.py:2106:create_pipeline",
+                        "site": "mypkg/pipelines/pipeline.py:2106:create_pipeline",
                         "count": 218,
                         "wall_s": 29.7,
                         "bytes": 5 * 1024**3,
@@ -817,7 +817,7 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
     )
     by_site = {row["site"]: row for row in document["candidates"]}
     hot = by_site["hyvideo/utils/communications.py:53:_all_to_all_4D"]
-    setup = by_site["hyvideo/pipelines/worldplay_video_pipeline.py:2106:create_pipeline"]
+    setup = by_site["mypkg/pipelines/pipeline.py:2106:create_pipeline"]
 
     # The hot loop itself, which the tail must not demote.
     assert not hot.get("setup_phase")
@@ -831,7 +831,7 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
     # made this bug so easy to miss. It still lands in the merged table, and under
     # the old anchor five calls were enough to redefine "the end of activity" and
     # demote everything else.
-    assert "hyvideo/pipelines/worldplay_video_pipeline.py:1900:__call__" not in by_site
+    assert "mypkg/pipelines/pipeline.py:1900:__call__" not in by_site
 
 
 def test_a_flat_call_distribution_demotes_nothing():
@@ -929,7 +929,7 @@ def test_reallocated_invariant_arguments_become_a_hoist_enabler():
             _report(
                 framework_calls=[
                     {
-                        "function": "models/worldplay_transformer.py:301:_expand_geometry",
+                        "function": "mypkg/transformer.py:301:_expand_geometry",
                         "count": 1000,
                         "wall_s": 20.0,
                         "arg_samples": 256,
@@ -990,7 +990,7 @@ def test_a_mixed_site_is_a_hoist_candidate_but_not_a_pure_enabler():
             _report(
                 framework_calls=[
                     {
-                        "function": "models/transformer.py:301:_expand_geometry",
+                        "function": "mypkg/transformer.py:301:_expand_geometry",
                         "count": 1600,
                         "wall_s": 20.0,
                         "arg_samples": 160,
@@ -1327,7 +1327,7 @@ def _write_profile_config(path: Path, envs: dict[str, Any] | None = None) -> Non
     import yaml
 
     path.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "worldplay", "envs": dict(envs or {})}}),
+        yaml.safe_dump({"benchmark": {"framework": "custom", "envs": dict(envs or {})}}),
         encoding="utf-8",
     )
 
@@ -1481,7 +1481,7 @@ def test_gap_carries_the_host_side_bottleneck(tmp_path):
     path.write_text(json.dumps(document), encoding="utf-8")
 
     gap, keywords = compose_gap(
-        framework="worldplay",
+        framework="custom",
         gpu_type="mi355x",
         precision="bf16",
         rewrite_evidence_path=path,
@@ -1506,6 +1506,6 @@ def test_gap_tolerates_a_missing_evidence_file(tmp_path):
     """A stale path degrades to the manifest-only gap rather than raising."""
     from hyperloom.orchestrator.actions.executors._framework_gap_composer import compose_gap
 
-    gap, keywords = compose_gap(framework="worldplay", rewrite_evidence_path=tmp_path / "absent.json")
-    assert gap == "improve worldplay throughput"
-    assert keywords == ["worldplay"]
+    gap, keywords = compose_gap(framework="custom", rewrite_evidence_path=tmp_path / "absent.json")
+    assert gap == "improve custom throughput"
+    assert keywords == ["custom"]

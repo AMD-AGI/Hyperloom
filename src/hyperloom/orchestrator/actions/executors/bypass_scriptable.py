@@ -13,7 +13,7 @@ Script resolution (bypass owns its choice; it does NOT depend on Magpie being
 importable):
   1. ``$HYPERLOOM_BYPASS_SCRIPTS_DIR`` (operator override / vendored dir),
   2. the package's bundled ``assets/benchmark_scripts`` (frameworks whose
-     entrypoint ships with Hyperloom, e.g. worldplay / worldmirror),
+     entrypoint is supplied by the operator),
   3. Magpie's ``scripts/benchmark`` via ``$MAGPIE_PATH`` (reuse when present),
   4. ``<inferencex>/benchmarks`` (staged copies).
 """

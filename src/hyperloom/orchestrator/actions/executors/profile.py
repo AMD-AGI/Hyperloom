@@ -496,10 +496,6 @@ def _default_profile_config() -> Path:
         name = "profile_xdit.yaml"
     elif fw == "hunyuan_image3":
         name = "profile_hunyuan_image3.yaml"
-    elif fw == "worldplay":
-        name = "profile_worldplay.yaml"
-    elif fw == "worldmirror":
-        name = "profile_worldmirror.yaml"
     elif fw == "custom":
         name = "profile_custom.yaml"
     else:

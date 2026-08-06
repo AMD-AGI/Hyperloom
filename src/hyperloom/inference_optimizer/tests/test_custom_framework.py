@@ -39,7 +39,7 @@ class TestRegistryEntry:
 
     def test_shipped_frameworks_keep_their_units(self):
         """The new entry must not perturb how existing sessions report."""
-        assert fr.throughput_unit("worldplay") == "fps"
+        assert fr.throughput_unit("xdit") == "img/s"
         assert fr.throughput_unit("sglang") == "tok/s"
 
 
@@ -208,7 +208,7 @@ class TestEntrypointAndCheckout:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50"}')
         envs: dict = {}
         we.apply_scriptable_runtime_defaults(
-            {"framework": "worldmirror"}, envs, gpu_type="mi355x", explicit_benchmark_script=False
+            {"framework": "xdit"}, envs, gpu_type="mi355x", explicit_benchmark_script=False
         )
         assert "MYFW_STEPS" not in envs
 
@@ -220,7 +220,7 @@ class TestEntrypointAndCheckout:
         (scripts / "custom_mi355x.sh").write_text("#!/bin/sh\n")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
 
-        bench = {"framework": "worldmirror"}
+        bench = {"framework": "xdit"}
         envs: dict = {}
         we.apply_scriptable_runtime_defaults(
             bench, envs, gpu_type="mi355x", explicit_benchmark_script=False
@@ -286,11 +286,15 @@ class TestMeasurementContract:
         assert dropped == []
 
     def test_a_shipped_framework_keeps_flipping_its_pinned_defaults(self):
-        """worldplay pins USE_TORCH_COMPILE=0 so explore can turn it on."""
+        """A shipped baseline pins knobs at their off value for explore to flip.
+
+        Reading a pin as a lock would drop exactly the A/B legs those pins were
+        written to enable, so the guard has to stay off the shipped configs.
+        """
         from hyperloom.inference_optimizer.session.paths import asset_root
 
-        cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_worldplay.yaml").read_text())
-        assert "WORLDPLAY_USE_TORCH_COMPILE" in cfg["benchmark"]["envs"]
+        cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_xdit.yaml").read_text())
+        assert cfg["benchmark"]["envs"], "a shipped baseline pins envs explore may still flip"
 
         import inspect
 
@@ -356,7 +360,7 @@ class TestLaunchValidation:
 
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
-        _apply_operator_supplied_paths(self._args(), "worldplay")
+        _apply_operator_supplied_paths(self._args(), "xdit")
 
     def test_an_exported_env_outranks_the_flag(self, monkeypatch, tmp_path):
         """Matches every other path override in the loop."""

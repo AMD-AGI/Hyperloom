@@ -2396,7 +2396,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload.
 
-        Delegates to the framework registry (xDiT = img/s, WorldPlay = fps,
+        Delegates to the framework registry (xDiT = img/s,
         text-gen = tok/s, …). The numeric ``*_tok_per_sec`` fields keep their
         names for wire stability; this unit tells consumers how to render them.
         """

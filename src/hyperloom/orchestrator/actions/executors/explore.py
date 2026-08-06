@@ -60,8 +60,6 @@ from ._grid_runner import (
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
-    worldplay_blacklist_reason,
-    worldplay_server_args_reason,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
@@ -496,82 +494,6 @@ def _xdit_default_grid(
     return variants
 
 
-def _worldplay_default_grid(
-    *,
-    model_class: str,
-    conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
-) -> list[GridVariant]:
-    """HY-WorldPlay (AR video) EXPLORE default grid, BF16-locked.
-
-    Only BF16-safe knobs the customer bench-kit recognizes are emitted; a
-    precision change is a different model and is enforced OFF by the vendored
-    body + ``worldplay_blacklist_reason`` in ``_grid_runner.py``. The baseline
-    already runs ``WORLDPLAY_OFFLOADING=0`` (the known WorldPlay winner), so the
-    grid probes the remaining scriptable levers: resident AR rollout,
-    torch.compile (quality-risky — the self-calibrating gate is the guard),
-    group-offloading, and a couple of directionally-safe ROCm env knobs. Variant
-    names are ``worldplay_``-prefixed for cross-session disambiguation.
-
-    Args:
-        model_class: Model-class label (reserved for future gating).
-        conc: Live concurrency (unused for video; signature parity).
-        isl: Input sequence length (unused; signature parity).
-        osl: Output sequence length (unused; signature parity).
-
-    Returns:
-        The curated list of WorldPlay ``GridVariant`` seeds.
-    """
-    variants: list[GridVariant] = []
-
-    def _add(name: str, *, envs: dict[str, str]) -> None:
-        """Append a ``default_grid``-provenance env-only variant.
-
-        Args:
-            name (str): Unique variant name (``worldplay_`` prefixed).
-            envs (dict[str, str]): The per-variant env overrides.
-
-        Returns:
-            None: Appends to the enclosing ``variants`` list.
-        """
-        gv = GridVariant(
-            name=name,
-            extra_server_args="",
-            extra_envs=dict(envs),
-            note="default_grid",
-        )
-        gv.provenance = "default_grid"  # type: ignore[attr-defined]
-        variants.append(gv)
-
-    # Keep the transformer resident across AR chunks (avoids re-materialization).
-    _add("worldplay_resident_ar", envs={"WORLDPLAY_TRANSFORMER_RESIDENT": "1"})
-    # torch.compile: quality-risky on this AR pipeline (a prior campaign saw
-    # SSIM 0.746) — expose it so the self-calibrating gate can accept/reject it.
-    _add("worldplay_torch_compile", envs={"WORLDPLAY_USE_TORCH_COMPILE": "1"})
-    # Group-offloading (block-wise) as an alternative memory/compute trade.
-    _add("worldplay_group_offload_block", envs={"WORLDPLAY_GROUP_OFFLOADING": "block_level"})
-    # AMD buffer load/store instructions — directionally correct, BF16-safe.
-    _add("worldplay_buffer_ops", envs={"AMDGCN_USE_BUFFER_OPS": "1"})
-    # Scratch-reclaim contrast: measured ±25% on some MI355X nodes (KB).
-    _add("worldplay_scratch_reclaim_off", envs={"HSA_NO_SCRATCH_RECLAIM": "0"})
-    # ---- B-layer runtime/system env knobs (injected AROUND the unchanged
-    # customer scripts — this is where single-GPU gains beyond the customer's
-    # own A-layer knobs live; all BF16-safe, numerics-preserving). ----
-    # NOTE: PyTorch TunableOp is deliberately absent. It looks like a free GEMM
-    # win, but session 20260730T135601Z faulted the GPU with it on this exact
-    # pipeline; both TunableOp keys are in `_WORLDPLAY_ENV_BLACKLIST`.
-    # Fewer HW queues trims dispatch overhead on a single-stream AR rollout.
-    _add("worldplay_hw_queues_2", envs={"GPU_MAX_HW_QUEUES": "2"})
-    # MIOpen fast find-mode: skips exhaustive conv search (find-db misses are
-    # benign on this node) — lower per-chunk launch latency, same numerics.
-    _add("worldplay_miopen_fast", envs={"MIOPEN_FIND_MODE": "2"})
-    return variants
-
-
-# Provenance of the same-harness rebench enqueued by
-# ``_enqueue_internal_stack_rebench``: a byte-for-byte replay of a config that
-# another component already measured, never a new proposal.
 _CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
 
 
@@ -599,11 +521,10 @@ def filter_operator_pinned_envs(
     exploration is for, so only overwrites are refused.
 
     This is for ``custom`` alone. A shipped framework's pinned value does not
-    mean "locked": ``baseline_worldplay.yaml`` pins
-    ``WORLDPLAY_USE_TORCH_COMPILE=0`` precisely so explore can flip it, and
-    those frameworks declare what is genuinely immutable in their own blacklist.
-    An operator has no blacklist to write in, so their pins carry the stricter
-    reading — it is the one place they can say "this must not move".
+    mean "locked" — several pin a knob at its off value precisely so explore can
+    flip it — and those frameworks declare what is genuinely immutable in their
+    own blacklist. An operator has no blacklist to write in, so their pins carry
+    the stricter reading; it is the one place they can say "this must not move".
 
     Args:
         grid: Candidate variants for this round.
@@ -640,67 +561,6 @@ def filter_operator_pinned_envs(
     return kept, dropped
 
 
-def filter_worldplay_grid(
-    grid: list[GridVariant],
-    *,
-    model_class: str = "",
-) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop off-spec WorldPlay variants; fall through to the seed grid if empty.
-
-    This is the ONLY production enforcement of the locked WorldPlay workload
-    spec on the live explore dispatch path (``apply_compatibility_filter`` is
-    test-only). LLM/specialist proposers routinely emit variants the customer
-    ``bench_fps.py`` rejects or that violate the spec (step-distillation
-    ``WORLDPLAY_NUM_STEPS``/``WORLDPLAY_FEW_STEP``, fp8/fp4/sageattn, resolution
-    or frame-count changes, or the model's native HunyuanVideo CLI). Each is
-    dropped via :func:`worldplay_blacklist_reason` (env-carried locks) and
-    :func:`worldplay_server_args_reason` (CLI-carried locks + unknown flags)
-    BEFORE dedup/dispatch, so no compute is spent and a 4-step distilled leg can
-    never accidentally KEEP against the 50-step spec.
-
-    If EVERY proposed variant is dropped, this returns the curated BF16-safe
-    seed grid (:func:`_worldplay_default_grid`) instead of an empty list, so the
-    round still measures legitimate knobs rather than stalling on rejected
-    proposals.
-
-    Args:
-        grid: Candidate variants assembled from ``params.grid`` / seed.
-        model_class: Model-class label forwarded to the seed grid on fallthrough.
-
-    Returns:
-        A ``(kept, dropped)`` tuple where ``kept`` is the surviving variants
-        (or the seed grid on full-drop fallthrough) and ``dropped`` is a list of
-        ``(variant_name, reason)`` pairs for logging/telemetry.
-    """
-    def _reason_for(gv: GridVariant) -> str | None:
-        """Return the spec-violation reason for one variant, else ``None``.
-
-        Args:
-            gv (GridVariant): Candidate variant to screen.
-
-        Returns:
-            str | None: Drop reason, or ``None`` when the variant is on-spec.
-        """
-        return worldplay_blacklist_reason(
-            getattr(gv, "extra_envs", None)
-        ) or worldplay_server_args_reason(getattr(gv, "extra_server_args", None))
-
-    kept: list[GridVariant] = []
-    dropped: list[tuple[str, str]] = []
-    for gv in grid:
-        reason = _reason_for(gv)
-        if reason:
-            dropped.append((str(getattr(gv, "name", "?")), reason))
-        else:
-            kept.append(gv)
-    if not kept and dropped:
-        # Screen the seed grid too: it is curated, but a seed entry that drifts
-        # into blacklisted territory would otherwise reach dispatch through this
-        # fallthrough without ever being filtered.
-        kept = [gv for gv in _worldplay_default_grid(model_class=model_class) if not _reason_for(gv)]
-    return kept, dropped
-
-
 def _default_grid_for_framework(
     framework: str,
     *,
@@ -711,7 +571,7 @@ def _default_grid_for_framework(
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch.
 
-    Atom, xDiT and WorldPlay return curated seed grids; sglang / vllm / unknown
+    Atom and xDiT return curated seed grids; sglang / vllm / unknown
     return ``[]`` ("no programmatic seed") and rely on LLM-emitted
     ``default_grid`` variants.
 
@@ -735,13 +595,6 @@ def _default_grid_for_framework(
         )
     if fw == "xdit":
         return _xdit_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
-    if fw == "worldplay":
-        return _worldplay_default_grid(
             model_class=model_class,
             conc=conc,
             isl=isl,
@@ -1087,47 +940,6 @@ class ExploreExecutor:
         # `apply_compatibility_filter` is only exercised in tests; the live
         # explore dispatch path assembles `grid` here from LLM/specialist
         # proposals (params.grid) or the programmatic seed and never re-runs it.
-        # For worldplay this is the ONLY line of defence that enforces the
-        # locked workload spec: LLM/specialist proposers routinely emit
-        # off-spec variants (step-distillation `WORLDPLAY_NUM_STEPS=4` /
-        # `WORLDPLAY_FEW_STEP=1` / distilled `WORLDPLAY_ACTION_CKPT`, fp8/fp4/
-        # sageattn, resolution or frame-count changes, or the model's native
-        # HunyuanVideo CLI which the customer wrapper rejects). Drop them
-        # BEFORE dedup/dispatch so no compute is spent and — critically — so a
-        # 4-step distilled leg can never accidentally KEEP against the 50-step
-        # spec. Env-carried locks (worldplay_blacklist_reason) and CLI-carried
-        # locks / unknown flags (worldplay_server_args_reason) are both checked.
-        if framework == "worldplay":
-            _seed_mc = (
-                str(params.get("model_class") or "").strip()
-                or os.environ.get("MODEL_CLASS", "").strip()
-            )
-            # A same-harness revalidation replays a config another component
-            # already validated, so it carries the workload spec verbatim
-            # (height/width/frames/steps at their baseline values). The filter
-            # reads those keys as an attempt to move the spec and drops the
-            # variant, which silently strands the win it was meant to confirm.
-            # Exempt it: it proposes nothing, it reproduces.
-            _replay = [v for v in grid if _is_config_replay_variant(v)]
-            _proposed = [v for v in grid if not _is_config_replay_variant(v)]
-            _n_before = len(_proposed)
-            _proposed, _wp_dropped = filter_worldplay_grid(_proposed, model_class=_seed_mc)
-            grid = _replay + _proposed
-            for _nm, _reason in _wp_dropped:
-                log.warning(
-                    "explore: dropping off-spec worldplay variant %s (%s)",
-                    _nm,
-                    _reason,
-                )
-            if _wp_dropped and grid and len(grid) != (_n_before - len(_wp_dropped)):
-                log.warning(
-                    "explore: all %d worldplay proposals were off-spec; "
-                    "fell through to %d curated default_grid seed variants "
-                    "so the round still measures legit knobs",
-                    len(_wp_dropped),
-                    len(grid),
-                )
-
         if framework == "custom":
             grid, _mc_dropped = filter_operator_pinned_envs(grid, _yaml_envs)
             for _nm, _reason in _mc_dropped:

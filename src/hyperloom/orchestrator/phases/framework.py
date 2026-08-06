@@ -3121,7 +3121,7 @@ class FrameworkPhase(PhaseHandler):
         normalized = (repo_url or "").strip().rstrip("/").lower()
         if not normalized:
             return ""
-        for fw in ("sglang", "vllm", "atom", "xdit", "worldplay", "worldmirror"):
+        for fw in ("sglang", "vllm", "atom", "xdit"):
             fw_url = (_fa_client.repo_url_for_framework(fw) or "").strip().rstrip("/").lower()
             if fw_url and fw_url == normalized:
                 return fw

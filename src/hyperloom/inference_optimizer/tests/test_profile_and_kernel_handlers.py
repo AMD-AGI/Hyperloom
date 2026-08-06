@@ -1101,8 +1101,8 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
 def test_default_profile_config_tracks_framework(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     assert _default_profile_config().name == "profile_vllm.yaml"
-    monkeypatch.setenv("FRAMEWORK", "worldmirror")
-    assert _default_profile_config().name == "profile_worldmirror.yaml"
+    monkeypatch.setenv("FRAMEWORK", "custom")
+    assert _default_profile_config().name == "profile_custom.yaml"
     monkeypatch.setenv("FRAMEWORK", "sglang")
     assert _default_profile_config().name == "profile_sglang.yaml"
 

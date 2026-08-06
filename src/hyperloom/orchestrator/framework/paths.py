@@ -270,7 +270,7 @@ def _scriptable_frameworks() -> tuple[str, ...]:
 def _framework_repo_dirname(framework: str) -> str:
     """Return the checkout directory name implied by a framework's repo URL.
 
-    ``HY-WorldPlay.git`` -> ``HY-WorldPlay``. Used so a checkout whose directory
+    ``my-framework.git`` -> ``my-framework``. Used so a checkout whose directory
     name differs from the framework name still registers as discovered.
 
     Args:
@@ -295,7 +295,7 @@ def _framework_repo_dirname(framework: str) -> str:
 def _discover_scriptable_repo_roots() -> tuple[str, ...]:
     """Discover git-checkout roots for scriptable frameworks.
 
-    Scriptable frameworks (worldplay / worldmirror) run out of a repo checkout
+    A scriptable framework runs out of a repo checkout
     instead of a pip-installed package, so importlib spec origins and the
     site-packages globs never see them. Materialization exports the resolved
     checkout as ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``; without those
@@ -441,7 +441,7 @@ def probe_framework_source_roots_for_env() -> str:
 
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
-_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "worldplay", "worldmirror")
+_FRAMEWORK_BUCKETS: tuple[str, ...] = ("atom", "vllm", "sglang", "aiter", "xdit", "custom")
 
 
 def summarise_framework_root_discovery(roots: str) -> str:
@@ -460,8 +460,8 @@ def summarise_framework_root_discovery(roots: str) -> str:
     parts: list[str] = []
     items = [p.strip().lower() for p in (roots or "").split(":") if p.strip()]
     for fw in _FRAMEWORK_BUCKETS:
-        # A checkout directory rarely matches the framework name (worldplay lives
-        # in HY-WorldPlay), so accept the repo dirname the registry implies too.
+        # A checkout directory rarely matches the framework name, so accept the
+        # repo dirname the registry implies too.
         tokens = [f"/{fw}/"]
         dirname = _framework_repo_dirname(fw)
         if dirname:
