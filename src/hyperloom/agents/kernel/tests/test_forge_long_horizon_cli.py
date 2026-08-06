@@ -2566,11 +2566,44 @@ def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
     assert result["best_ms"] == 2.0
     assert result["mean_case_speedup"] == 2.0
     assert result["salvaged"] is False
-    exported = tmp_path / "results" / "rewrite-route" / "optimized_versions"
+    output_dir = tmp_path / "results" / "rewrite-route"
+    exported = output_dir / "optimized_versions"
     assert sorted(path.name for path in (exported / "files").iterdir()) == [
         "flydsl_kernel.py",
         "kernel.py",
     ]
+    # The micro gate stays readable by the only report scanner in the repo,
+    # while the integration verdict is stated separately.
+    report = (output_dir / "optimization_report.md").read_text()
+    assert "[correctness] pass" in report
+    assert "[integration_validation] pending" in report
+
+
+def test_reexported_patch_is_binary_safe(tmp_path, monkeypatch):
+    repo, kernel = _make_repo(tmp_path)
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "weights.bin").write_bytes(bytes(range(256)))
+    kernel.write_text("OPTIMIZED\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "binary artifact")
+    best_commit = _git(repo, "rev-parse", "HEAD")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    _, changed = forge_submit._export_best_artifacts(
+        str(repo),
+        base_commit,
+        str(kernel),
+        str(kernel),
+        output_dir,
+        best_commit=best_commit,
+    )
+
+    assert sorted(changed) == ["kernel.py", "weights.bin"]
+    patch = (output_dir / "optimized_versions" / "forge.patch").read_text()
+    # Without --binary git emits a "Binary files differ" stub that cannot apply.
+    assert "GIT binary patch" in patch
+    assert "Binary files" not in patch
 
 
 def test_submit_salvages_an_applyback_published_before_a_hard_kill(tmp_path, monkeypatch):
