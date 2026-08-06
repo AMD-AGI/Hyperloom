@@ -15,9 +15,9 @@ subtrees:
 - caption: Install
   entries:
   - file: install/install.md
-    title: Quickstart — Docker and Bare metal
+    title: Install on Docker or Bare metal
   - file: install/slurm.md
-    title: Quickstart — Slurm
+    title: Install for Slurm
 
 - caption: Overview
   entries:
@@ -37,6 +37,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/kernel-execution-path.md
+    title: Kernel optimization execution path
 
 - caption: How to
   entries:

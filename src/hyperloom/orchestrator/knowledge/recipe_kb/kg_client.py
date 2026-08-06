@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Knowledge-Graph query client over the gbrain page store.
+"""Knowledge-Graph query client over local or GBrain page stores.
 
 The kb-mirror drivers embed a ``## Facts`` fence in every consumable page
 body (recipe / framework_patch / kernel / gemm_tune / arch_family). Each
@@ -35,15 +35,19 @@ warm-start that would otherwise succeed from the local store.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from ..config import KnowledgeConfig, KnowledgeStoreMode
 from .gbrain_remote_client import GbrainRemoteError, _GbrainMcp
+from .local_graph_store import LocalGraphStore
 
 log = logging.getLogger(__name__)
 
@@ -73,8 +77,33 @@ def _entity(value: Any) -> str:
     Returns:
         Lowercased slug (spaces/slashes to underscores), or ``""``.
     """
-    s = str(value or "").strip().replace(" ", "_").replace("/", "_")
-    return s.lower()
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    slug = re.sub(r"[^a-z0-9._+-]+", "_", raw)
+    if not slug or not any(character.isalnum() for character in slug):
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return f"entity_{digest}"
+    if not slug[0].isalnum():
+        slug = f"entity_{slug}"
+    if len(slug) > 128:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        slug = f"{slug[:115]}-{digest}"
+    return slug
+
+
+def _legacy_entity(value: Any) -> str:
+    """Return the pre-Phase-1 entity slug used by existing remote KG nodes."""
+    return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()
+
+
+def _entity_aliases(value: Any) -> tuple[str, ...]:
+    """Return current and legacy slugs, preserving order and uniqueness."""
+    aliases: list[str] = []
+    for candidate in (_entity(value), _legacy_entity(value)):
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+    return tuple(aliases)
 
 
 def _as_set(value: Any) -> set[str]:
@@ -98,7 +127,12 @@ def _as_set(value: Any) -> set[str]:
         items = value
     else:
         items = [value]
-    return {_entity(item) for item in items if str(item or "").strip()}
+    return {
+        alias
+        for item in items
+        if str(item or "").strip()
+        for alias in _entity_aliases(item)
+    }
 
 
 def _parse_props(raw: str | None) -> dict[str, str]:
@@ -360,18 +394,20 @@ def _conditions_match(fact: Fact, conditions: dict[str, Any] | None) -> bool:
 
 
 class KGClient:
-    """Knowledge-graph query surface over the gbrain page store.
+    """Knowledge-graph query surface over a local or GBrain page store.
 
     Simulates graph queries client-side via ``search`` + fence parsing, or
-    delegates to native gbrain KG tools when ``use_native_kg`` is set.
+    delegates to native graph tools when ``use_native_kg`` is set.
     """
 
     def __init__(self, mcp: Any, *, use_native_kg: bool = False, search_limit: int = 100) -> None:
         """Initialize the client.
 
         Args:
-            mcp: A duck-typed MCP client exposing ``call(tool, arguments)``.
-            use_native_kg: Delegate to native gbrain KG tools when ``True``.
+            mcp: A duck-typed backend adapter exposing
+                ``call(tool, arguments)``. The remote implementation uses MCP;
+                the local implementation is an in-process filesystem adapter.
+            use_native_kg: Delegate to native graph tools when ``True``.
             search_limit: Default page fan-out per ``query_facts`` search.
         """
         self._mcp = mcp
@@ -495,13 +531,13 @@ class KGClient:
         """Return outgoing edges for ``slug`` (best-effort)."""
         if self._mcp is None or not slug:
             return []
-        return self._as_edges(self._mcp.call("get_links", {"slug": _entity(slug)}))
+        return self._as_edges(self._mcp.call("get_links", {"slug": slug}))
 
     def _get_backlinks(self, slug: str) -> list[dict[str, Any]]:
         """Return incoming edges for ``slug`` (best-effort)."""
         if self._mcp is None or not slug:
             return []
-        return self._as_edges(self._mcp.call("get_backlinks", {"slug": _entity(slug)}))
+        return self._as_edges(self._mcp.call("get_backlinks", {"slug": slug}))
 
     def _node_exists(self, slug: str) -> bool:
         """Return ``True`` when a page for ``slug`` exists."""
@@ -747,25 +783,39 @@ class KGClient:
         start = _entity(start_entity)
         pred_set = _as_set(predicate_filter)
 
-        edges = self._as_edges(
-            self._mcp.call("traverse_graph", {"slug": start, "depth": depth, "direction": native_dir})
-        )
+        edges = [
+            edge
+            for alias in _entity_aliases(start_entity)
+            for edge in self._as_edges(
+                self._mcp.call(
+                    "traverse_graph",
+                    {"slug": alias, "depth": depth, "direction": native_dir},
+                )
+            )
+        ]
 
         out: list[GraphNode] = []
         seen: set[tuple[str, str, int]] = set()
-        for edge in edges:
+        discovered = {start}
+        for edge in sorted(edges, key=lambda row: int(row.get("depth", 1))):
             fact = _edge_to_fact(edge)
             if pred_set and _entity(fact.predicate) not in pred_set:
                 continue
             if native_dir == "in":
                 nxt = fact.subject
             elif native_dir == "both":
-                nxt = fact.object if fact.subject == start else fact.subject
+                if fact.subject in discovered and fact.object not in discovered:
+                    nxt = fact.object
+                elif fact.object in discovered and fact.subject not in discovered:
+                    nxt = fact.subject
+                else:
+                    nxt = fact.object if fact.subject == start else fact.subject
             else:
                 nxt = fact.object
             if not nxt or nxt == start:
                 continue
             hop = int(edge.get("depth", 1))
+            discovered.add(nxt)
             key = (nxt, fact.predicate, hop)
             if key in seen:
                 continue
@@ -1286,19 +1336,23 @@ def generate_warmstart_donor_graph_guided(
 
 
 def build_kg_client_from_env() -> KGClient | None:
-    """Construct a :class:`KGClient` from ``GBRAIN_*`` env vars.
+    """Construct a :class:`KGClient` from the shared ``KnowledgeConfig``.
 
-    Reuses the same endpoint/token as the gbrain recipe remote. Returns
-    ``None`` when the env is not configured so callers degrade silently.
+    Local mode is the default and always uses an in-process
+    :class:`LocalGraphStore` rooted at
+    ``$KNOWLEDGE_LOCAL_ROOT/hyperloom/kg``. Ambient GBrain credentials are
+    deliberately ignored in local mode. Remote mode preserves the prior
+    GBrain transport and ``GBRAIN_KG_NATIVE`` compatibility.
 
     Returns:
-        A configured client, or ``None`` when ``GBRAIN_BASE_URL`` /
-        ``GBRAIN_TOKEN`` are unset.
+        A configured local or remote client. ``None`` is retained in the type
+        for source compatibility, although validated modes always construct.
     """
-    base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
-    token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
-    if not base_url or not token:
-        return None
+    config = KnowledgeConfig.from_env()
+    if config.mode is KnowledgeStoreMode.LOCAL:
+        graph_root = Path(config.local_root) / "hyperloom" / "kg"
+        return KGClient(LocalGraphStore(graph_root), use_native_kg=True)
+
     timeout_env = os.environ.get("GBRAIN_HTTP_TIMEOUT_SEC")
     timeout_sec = 2.0
     if timeout_env:
@@ -1307,7 +1361,7 @@ def build_kg_client_from_env() -> KGClient | None:
         except ValueError:
             timeout_sec = 2.0
     use_native = (os.environ.get("GBRAIN_KG_NATIVE", "") or "").strip().lower() in ("1", "true", "yes")
-    mcp = _GbrainMcp(base_url, token, timeout_sec)
+    mcp = _GbrainMcp(config.gbrain_base_url, config.gbrain_token, timeout_sec)
     return KGClient(mcp, use_native_kg=use_native)
 
 
@@ -1318,15 +1372,20 @@ _CLIENT_RESOLVED = False
 def get_kg_client() -> KGClient | None:
     """Return a process-wide :class:`KGClient` (lazily built from env).
 
-    The result (including ``None`` when unconfigured) is cached after the
-    first call. Use :func:`reset_kg_client` in tests to clear it.
+    The selected local or remote client is cached after the first call. Use
+    :func:`reset_kg_client` in tests after changing knowledge configuration.
 
     Returns:
-        The cached client, or ``None`` when KG is not configured.
+        The cached client. ``None`` remains possible only for an injected
+        compatibility factory.
     """
     global _CACHED_CLIENT, _CLIENT_RESOLVED
     if not _CLIENT_RESOLVED:
-        _CACHED_CLIENT = build_kg_client_from_env()
+        try:
+            _CACHED_CLIENT = build_kg_client_from_env()
+        except Exception as exc:  # noqa: BLE001 - KG enhancement is optional
+            _CACHED_CLIENT = None
+            log.warning("knowledge graph is unavailable for this process: %s", exc)
         _CLIENT_RESOLVED = True
     return _CACHED_CLIENT
 

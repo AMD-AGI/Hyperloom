@@ -359,6 +359,28 @@ def test_no_remote_means_local_only_for_reads(local_store: LocalRecipeStore) -> 
     assert out["model"] == "local-marker"
 
 
+def test_remote_authority_miss_uses_exact_method_only() -> None:
+    class ExactAuthorityStore:
+        def __init__(self) -> None:
+            self.exact_calls = 0
+
+        def get_recipe_exact(self, **_kwargs: Any) -> None:
+            self.exact_calls += 1
+            return None
+
+        def get_recipe(self, **_kwargs: Any) -> None:
+            raise AssertionError("authority read used broad get_recipe")
+
+        def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("authority read searched")
+
+    store = ExactAuthorityStore()
+    kb = RecipeKB(local=store, mode="remote", backend_name="gbrain")
+
+    assert kb.get_authoritative_recipe(canonical_id=_cid()) is None
+    assert store.exact_calls == 1
+
+
 def test_disabled_remote_treated_as_no_remote(local_store: LocalRecipeStore) -> None:
     """A ``remote.enabled=False`` client behaves identically to ``remote=None``."""
     disabled = GbrainRemoteRecipeClient(search_rows=[{"canonical_id": "x"}])

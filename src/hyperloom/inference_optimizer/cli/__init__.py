@@ -200,6 +200,7 @@ def _build_orchestration_prompt(
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    phase: str = "",
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -213,6 +214,8 @@ def _build_orchestration_prompt(
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
+        phase (str): Current pipeline phase; omits the prompt modules whose
+            behaviour that phase cannot reach. Empty renders every module.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -234,6 +237,7 @@ def _build_orchestration_prompt(
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
+        phase=phase,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -246,32 +250,6 @@ def _load_critic_prompt() -> str:
         str: The contents of ``critic.md``.
     """
     return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
-
-
-_DEFAULT_KERNEL_PROMPT = (
-    "You are the Kernel-agent — responder-only. You receive `request`\n"
-    "events from Orchestration in your inbox.\n\n"
-    "For every un-answered request, emit ONE `response` intent in reply.\n"
-    "Schema:\n"
-    "  intent_type: response\n"
-    "  payload: {\n"
-    "    in_reply_to: <request msg_id>,\n"
-    "    kind:        '<request.kind>_done',\n"
-    "    status:      'ok' | 'failed' | 'needs_review',\n"
-    "    result:      { /* whatever the request asked for */ }\n"
-    "  }\n\n"
-    "Native-only rule: run_optimization must refuse runtime-generated\n"
-    "torch.compile/Inductor/Triton cache kernels. Only reusable framework\n"
-    "sources under stable repos (aiter/sglang/vllm source trees) are valid\n"
-    "kernel-opt targets; otherwise return status='failed' with a clear reason.\n\n"
-    "SESSION_DIR contract: every path you emit in result.* must be either\n"
-    "verbatim from the request payload, prefixed by SESSION_DIR (injected\n"
-    "per tick), or under one of `/sgl-workspace/aiter/`, `/sgl-workspace/\n"
-    "sglang/`, `/sgl-workspace/vllm/` (the framework source allowlists).\n"
-    "PolicyGate rejects responses whose path fields escape this set.\n\n"
-    "If your inbox has no requests, emit one send_message{topic='heartbeat',\n"
-    "body_md='ok'}. You may NOT propose, delegate, or initiate REQUESTs."
-)
 
 
 # Per-attempt read timeout for the gateway /models catalog probe. Operator
@@ -860,16 +838,14 @@ def _smoke_test_codex_model(
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``codex_model`` / ``critic_backend`` / ``kernel_codex`` /
-            ``no_kernel``).
+            ``codex_model`` / ``critic_backend``).
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
-    # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
     if _codex_model_should_follow_claude():
         return
     critic_uses_codex = args.critic_backend == "agent"
-    needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
+    needs_codex = critic_uses_codex
     if not needs_codex:
         return
 
@@ -898,7 +874,7 @@ def _smoke_test_codex_model(
         f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
-        f"value in the catalog or use --critic-mock / --kernel-claude to "
+        f"value in the catalog or use --critic-mock to "
         f"avoid the Codex path entirely."
     )
 
@@ -1659,15 +1635,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             manifest=manifest,
             resume=True,
         )
-        # KnowledgePlane facade (PR Monitor MCP); None when --degraded-pr.
-        knowledge_plane = (
-            None
-            if not getattr(args, "pr_monitor_enabled", True)
-            else _bootstrap_knowledge_plane(
-                args,
-                recipe_kb_client=recipe_kb_client,
-                session_dir=session_dir,
-            )
+        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+        knowledge_plane = _bootstrap_knowledge_plane(
+            args,
+            recipe_kb_client=recipe_kb_client,
+            session_dir=session_dir,
         )
         # No resume backfill needed for roofline (roofline_snapshots restored by SharedState.from_dict).
     else:
@@ -1848,15 +1820,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             manifest=manifest,
             resume=False,
         )
-        # KnowledgePlane facade for specialists (PR Monitor MCP); None when --degraded-pr.
-        knowledge_plane = (
-            None
-            if not getattr(args, "pr_monitor_enabled", True)
-            else _bootstrap_knowledge_plane(
-                args,
-                recipe_kb_client=recipe_kb_client,
-                session_dir=session_dir,
-            )
+        # KnowledgePlane owns Recipe KB even when PR Monitor is degraded.
+        knowledge_plane = _bootstrap_knowledge_plane(
+            args,
+            recipe_kb_client=recipe_kb_client,
+            session_dir=session_dir,
         )
 
     from ..multi_node.state_paths import bind_state_file_to_session
@@ -1983,7 +1951,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     backends = _build_backends(
         claude_model=args.claude_model,
         codex_model=args.codex_model,
-        kernel_codex=args.kernel_codex,
         critic_choice=critic_choice,
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
@@ -1991,7 +1958,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_choice=robustness_choice,
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
-        no_kernel=no_kernel,
         codex_follows_claude=codex_follows_claude,
     )
     # Expose active session_dir to in-process executors via the canonical pin
@@ -2016,17 +1982,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
-    # When kernel is disabled, strip it from the role registry (no tick / no backend expectation).
-    role_registry = None
-    if no_kernel:
-        from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-        role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
-
     coordinator = Coordinator(
         session_dir,
         backends=backends,
-        role_registry=role_registry,
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         recipe_kb=recipe_kb_client,
         phase_budget_pct=phase_budget_pct or None,
@@ -2074,6 +2032,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         or ""
     )
+    # A fresh session has no phase recorded yet and always begins at PRELUDE;
+    # the Coordinator re-scopes the prompt at every later phase seam.
+    from hyperloom.orchestrator.phases.machine_state import PHASE_PRELUDE as _PHASE_PRELUDE
+
+    _initial_phase = coordinator.shared_state.phase or _PHASE_PRELUDE
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
@@ -2085,11 +2048,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             max_minutes=max_minutes_for_prompt,
             macro_cycle=_initial_macro_cycle,
             cycle_directive=_initial_directive,
+            phase=_initial_phase,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
-    if not no_kernel:
-        prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
     # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the
     # orchestration prompt without reaching back into argparse. A user-supplied
@@ -2134,7 +2096,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         specialist_executor=specialist_executor,
     )
     # Persist effective system prompts for resume / drift inspection.
-    _snapshot_system_prompts(session_dir, prompts=prompts)
+    _snapshot_system_prompts(session_dir, prompts=prompts, orchestration_phase=_initial_phase)
 
     def _backend_kind(role: str) -> str:
         backend = backends.get(role)
@@ -2152,7 +2114,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if _backend_kind("orchestration") == "Claude"
         else f"{_backend_kind('orchestration')}({args.codex_model})"
     )
-    kernel_str = "DISABLED" if no_kernel else _backend_kind("kernel_agent")
+    kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":
         critic_str = "mock"
     elif _backend_kind("critic") == "Claude":
@@ -2337,7 +2299,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "optimize":
         # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "critic_prompt", "kernel_prompt"):
+        for attr in ("orch_prompt", "critic_prompt"):
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))

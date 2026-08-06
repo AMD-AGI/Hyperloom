@@ -7,10 +7,15 @@ Wraps the ``orchestration.md`` rules fragment with generated sections
 (mission, session context, pipeline/budget, phase contract, action catalogue,
 decision framework, cycle directive, optional kernel-opt reference, rules).
 Deterministic for given inputs; the only IO is reading the rules fragment.
+
+Sections are scoped by the ``phase`` argument: a module whose behaviour the
+phase cannot reach is omitted, so the agent is never handed a payload contract
+PolicyGate would deny. A blank phase renders every module.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -49,6 +54,28 @@ _PHASE_HEADERS: dict[str, str] = {
     "finalize": "Finalize — write the final report.",
     "support": "Support — invoke only when triggered (plateau / crash / re-exploration).",
 }
+
+
+# Phases each scoped prompt module belongs to.
+_KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
+_EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"EXPLORE"})
+_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
+
+# ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
+_PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
+
+
+def _renders_in(phase: str, phases: frozenset[str]) -> bool:
+    """Whether a phase-scoped module renders for ``phase``.
+
+    Args:
+        phase (str): Normalised current phase; ``""`` disables scoping.
+        phases (frozenset[str]): Phases the module belongs to.
+
+    Returns:
+        bool: ``True`` when the module should render.
+    """
+    return not phase or phase in phases
 
 
 def _section_mission() -> list[str]:
@@ -438,9 +465,11 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
             "Variants run serially; each KEEP triggers an inlined stack "
             "rebench. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode) — rename alone does NOT "
-            "bypass dedup. Use remove_args/unset_envs to ablate harmful "
-            "base flags; args_mode='replace' to drop inherited server args. "
+            "remove_args+unset_envs+args_mode); only exact duplicates within "
+            "the same submitted grid are collapsed, so any prior fingerprint "
+            "may be re-proposed. "
+            "Use remove_args/unset_envs to ablate harmful base flags; "
+            "args_mode='replace' to drop inherited server args. "
             "provenance values: 'llm_direct', 'default_grid', "
             "'specialist:<domain-or-tag>' (audit/advisory, not a gate)."
         )
@@ -453,30 +482,36 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
+def _section_action_catalogue(actions: list[ActionMetadata], *, phase: str = "") -> list[str]:
     """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
 
-    Each entry lists cost, gain, risks, family, the emit hint, and any
-    grid-injection hint.
+    Every enabled action keeps its description and cost/gain/risk line in every
+    phase, so a ``skip_to_*`` decision can still compare what later phases do.
+    Only the payload contracts (``EMIT:`` template and grid schema) are scoped.
 
     Args:
         actions (list[ActionMetadata]): The actions enabled for this run.
+        phase (str): Normalised current pipeline phase; ``""`` renders every
+            payload contract.
 
     Returns:
         list[str]: Markdown lines for the action catalogue.
     """
+    from ..phases.machine_state import llm_proposable_actions_for
+
+    proposable = frozenset(llm_proposable_actions_for(phase)) if phase else frozenset()
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
         "",
         "Catalogue is filtered to the actions enabled for this run. Each entry",
         "carries: phase / typical wall-clock / expected gain range / accuracy_risk /",
-        "crash_risk / one-line description / how to emit.",
+        "crash_risk / one-line description / how to emit it in its own phase.",
         "",
     ]
     by_phase = _phase_eta_summary(actions)
     name_to_meta = {a.name: a for a in actions}
-    for phase, _eta, names in by_phase:
-        lines.append(f"### {phase}")
+    for action_phase, _eta, names in by_phase:
+        lines.append(f"### {action_phase}")
         lines.append("")
         for name in names:
             meta = name_to_meta[name]
@@ -492,6 +527,9 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
                 f"crash_risk={meta.crash_risk:.2f}  "
                 f"family={meta.family}"
             )
+            if phase and name not in proposable:
+                lines.append(f"    (not proposable in {phase} — see PHASE CONTRACT for its phase)")
+                continue
             lines.append(f"    EMIT: {_format_emit_hint(meta)}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
@@ -500,15 +538,17 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     return lines
 
 
-def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
+def _section_decision_framework(*, kernel_enabled: bool, phase: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
-    Covers the per-tick selection order, failure-recovery rules (F1–F4), and
-    idea-generation guidance.
+    Covers the per-tick selection order, FAILURE RECOVERY, and the
+    EXPLORE-scoped IDEA GENERATION block.
 
     Args:
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
             run.
+        phase (str): Normalised current pipeline phase; ``""`` renders every
+            phase-scoped block.
 
     Returns:
         list[str]: Markdown lines for the decision framework.
@@ -576,117 +616,99 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "If you cannot move forward, emit",
             "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
             "Robustness escalate. NEVER stay silent.",
-            "",
-            "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
-            "",
-            "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
-            "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-            "action with the same params. Coordinator stamps an audit trail on every",
-            "attempt; consult these three SharedState surfaces in order:",
-            "",
-            "1. **`last_<action>`** (snapshot of the latest attempt) and",
-            "   **`<action>_attempts`** (capped per-action history, newest last).",
-            "   Each entry carries `status` / `decision` / `error_class` /",
-            "   `error_excerpt` / `workspace` / `raw_result_path` /",
-            "   `extras.fingerprint`. The fingerprint is the canonical hash of",
-            "   the eight params fields that determine baseline behavior:",
-            "   `benchmark_script` / `result_dir` / `extra_server_args` /",
-            "   `extra_envs` / `model_path` / `gpu_type` / `config_path` /",
-            "   `disable_run_eval`. Those eight are the WHOLE fingerprint —",
-            "   any other key you add to `params` (a tag, a note, a counter) is",
-            "   invisible to it and does NOT make the proposal distinct.",
-            "   Coordinator keys task idempotency on that same fingerprint, so a",
-            "   proposal matching a queued or running task is dropped before it",
-            "   ever reaches the executor.",
-            "   A baseline may also come back `status='succeeded'` with",
-            "   `decision='no_promote'` and `extras.anchor_kept_tput`: it ran fine",
-            "   but measured below the established anchor, so the anchor was kept.",
-            "   That is a completed measurement, NOT a failure — do not retry it.",
-            "2. **`last_action_failures`** (global rolling log capped at the last",
-            "   10 unpromotable results across ALL kinds, including kernel_agent-owned).",
-            "   Use this when the per-action history doesn't carry the kind you",
-            "   need (e.g. `integrate` failure visible here but `<action>_attempts`",
-            "   only covers the six explore/validate kinds).",
-            "3. **`baseline_failure_streak`** (consecutive failed baselines).",
-            "   Once this hits 3, Coordinator sets `stop_reason='baseline_failed'`",
-            "   and the run terminates; you must recover BEFORE the third failure.",
-            "",
-            "Three decision rules apply in order:",
-            "",
-            "* **RULE F1 — same fingerprint, twice failed → change at least one",
-            "  of the eight fingerprint fields.** Because you run as a persistent",
-            "  conversation you remember the attempts you already made this",
-            "  session — do not re-propose a baseline whose params fingerprint",
-            "  matches a recent failure; it will fail the same way. Changing a",
-            "  field OUTSIDE the eight does not count and does not get you a new",
-            "  attempt: the proposal is dropped as a duplicate and you have burned",
-            "  a tick. Bump at least one of: `params.benchmark_script`",
-            "  (a sanitized `*.sh` file name that MUST match THIS run's framework —",
-            "  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a",
-            "  cross-framework script boots the wrong engine and is rejected),",
-            "  `params.result_dir`, `params.extra_server_args`, or",
-            "  `params.extra_envs`.",
-            "* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`",
-            "  warning ⇒ leak salvage missed.** The script wrote results outside the",
-            "  workspace and outside the configured leak destinations. Override",
-            "  `params.benchmark_script` to a script that respects `$RESULT_DIR`",
-            "  (Coordinator already exports `RESULT_DIR=<workspace>` by default), or",
-            "  set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` via `update_state` so the next",
-            "  attempt salvages the leak.",
-            "* **RULE F3 — `error_class='subprocess_nonzero'` with same fingerprint",
-            "  ⇒ stop retrying.** Heartbeat with `body_md='blocked: subprocess",
-            "  repeatedly nonzero <action>'` and let Robustness intervene. Do NOT",
-            "  switch action families just to dodge the failure; Robustness'",
-            "  escalation policy needs the heartbeat to fire its RCA.",
-            "* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The",
-            "  `why_denied` context tool (and the `Recent policy denials` block on a",
-            "  seed turn) shows repeated (action, rule) collisions. The system no",
-            "  longer reacts to the streak — there is NO auto-prune at streak≥5 and",
-            "  NO `policy_loop` stop at streak≥10; the run continues until the",
-            "  wall-clock deadline or another stop_reason fires. So the streak is",
-            "  purely a signal for YOU: the same params keep colliding with the same",
-            "  invariant, so change something substantive — a new `params.grid`",
-            "  variant, a different `benchmark_script`, or a sibling action family.",
-            "  Re-emitting the identical denied intent just wastes a tick.",
-            "",
-            "Example (baseline failed twice with `error_class='no_report'`):",
-            "",
-            "    # Prefer RESULT_DIR rescue first; only override benchmark_script",
-            "    # when you have verified a same-framework script-specific bug.",
-            "    propose_action{action_name='baseline',",
-            "        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},",
-            "        predicted_gain_pct: 0,",
-            "        notes: 'recover from no_report streak by redirecting RESULT_DIR",
-            "                to the observed leak location'}",
-            "",
-            "### IDEA GENERATION (apply after EVERY explore round)",
-            "",
-            "Compose the next `explore` grid from `explore_search` (winners +",
-            "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
-            "",
-            "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
-            "   sweep a winning boolean's related `*_AITER_*` family.",
-            "2. **Synergy** — combine last round's winners via",
-            "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
-            "3. **Retry rejects** — for each `explore_search.rejected` variant,",
-            "   change the value or pair it with a winner (a `-2%` reject is a",
-            "   dead flag; `-0.3%` just needs a different value).",
-            "4. **Mine flags** — when winners are empty, pull untested boolean",
-            "   toggles from `discovered_flags.<framework>.backend_flags`.",
-            "5. **Ablate harmful base config** — when a user/base flag or env may",
-            "   be slowing the workload, emit a variant with `remove_args` and/or",
-            "   `unset_envs` instead of only adding more knobs.",
-            "",
-            "Variant identity is content-based (args+envs+remove_args+",
-            "unset_envs+args_mode) — rename alone does NOT bypass dedup.",
-            "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
-            "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
-            "",
-            "An explore round that produces zero new ideas is a bug — heartbeat",
-            "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        ]
+    )
+    lines.extend(_failure_recovery_lines(phase=phase))
+    if _renders_in(phase, _EXPLORE_GRID_PHASES):
+        lines.extend(_idea_generation_lines())
+    return lines
+
+
+def _failure_recovery_lines(*, phase: str) -> list[str]:
+    """Build the FAILURE RECOVERY block.
+
+    Always-on trigger and F3/F4 rules are inlined; the detailed diagnostic
+    surfaces, fingerprint semantics, and worked examples live in the
+    ``failure_recovery`` reference document (pull with ``read_reference``).
+
+    Args:
+        phase (str): Normalised current pipeline phase.
+
+    Returns:
+        list[str]: Markdown lines for the failure-recovery block.
+    """
+    baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    lines = [
+        "",
+        "### FAILURE RECOVERY (apply BEFORE re-proposing an action that just failed)",
+        "",
+        "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
+        "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
+        "action with the same params. Consult `last_<action>` / `<action>_attempts`",
+        "/ `last_action_failures` for the error detail. Full diagnostic surfaces,",
+        "fingerprint semantics, and examples: ``read_reference('failure_recovery')``.",
+        "",
+        "Rules (apply in order):",
+        "",
+    ]
+    if baseline_scoped:
+        lines.extend(
+            [
+                "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
+                " change at least one of the eight fingerprint fields.",
+                "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
+                " `rescued_from_leaked_path:*` → redirect RESULT_DIR or set"
+                " INFERENCE_OPTIMIZER_RESCUE_PATHS.",
+            ]
+        )
+    lines.extend(
+        [
+            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
+            " → stop retrying baseline; heartbeat 'blocked: …' and let Robustness"
+            " intervene. Explore variants may be re-proposed; read the failure log first.",
+            "* **RULE F4** — `policy_denial_streak` is information only."
+            " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
     )
     return lines
+
+
+def _idea_generation_lines() -> list[str]:
+    """Build the EXPLORE-scoped IDEA GENERATION block.
+
+    Returns:
+        list[str]: Markdown lines describing how to compose the next
+        ``explore`` grid.
+    """
+    return [
+        "",
+        "### IDEA GENERATION (apply after EVERY explore round)",
+        "",
+        "Compose the next `explore` grid from `explore_search` (winners +",
+        "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
+        "",
+        "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
+        "   sweep a winning boolean's related `*_AITER_*` family.",
+        "2. **Synergy** — combine last round's winners via",
+        "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
+        "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
+        "   whether the failure is stale, fixable, or ruled out; re-propose the",
+        "   same config to revalidate or change the value (a `-2%` reject is a",
+        "   dead flag; `-0.3%` may clear the bar once patched).",
+        "4. **Mine flags** — when winners are empty, pull untested boolean",
+        "   toggles from `discovered_flags.<framework>.backend_flags`.",
+        "5. **Ablate harmful base config** — when a user/base flag or env may",
+        "   be slowing the workload, emit a variant with `remove_args` and/or",
+        "   `unset_envs` instead of only adding more knobs.",
+        "",
+        "Variant identity is content-based (args+envs+remove_args+",
+        "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
+        "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
+        "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
+        "",
+        "An explore round that produces zero new ideas is a bug — heartbeat",
+        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+    ]
 
 
 _KERNEL_OPT_PIPELINE_BODY: str = """\
@@ -777,17 +799,59 @@ Only rewrite reusable native sources in the trace. NEVER optimize
 kernels — they're tied to one compile cache and not reusable."""
 
 
-def _section_rules(rules_md: str) -> list[str]:
+def _filter_rules_fragment(rules_md: str, *, phase: str = "") -> str:
+    """Drop rules-fragment ``### `` blocks that do not belong to ``phase``.
+
+    A ``<!-- phase: A, B -->`` comment scopes the ``### `` heading that follows
+    it, up to the next ``### `` / ``## `` heading. Untagged blocks always render,
+    so a section added without a tag stays always-on. The tag comments and the
+    fragment's leading maintainer blockquote are never emitted.
+
+    Args:
+        rules_md (str): Raw rules-fragment markdown.
+        phase (str): Normalised current pipeline phase; ``""`` keeps everything.
+
+    Returns:
+        str: The fragment with out-of-phase blocks removed.
+    """
+    kept: list[str] = []
+    pending: frozenset[str] | None = None
+    active: frozenset[str] | None = None
+    in_header = True
+    for line in rules_md.splitlines():
+        if in_header:
+            if not line.strip() or line.lstrip().startswith(">"):
+                continue
+            in_header = False
+        tag = _PHASE_TAG_RE.match(line.strip())
+        if tag is not None:
+            pending = frozenset(p.strip().upper() for p in tag.group("phases").split(",") if p.strip())
+            continue
+        if line.startswith("### "):
+            active = pending
+            pending = None
+        elif line.startswith("## "):
+            active = None
+            pending = None
+        if active is not None and not _renders_in(phase, active):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _section_rules(rules_md: str, *, phase: str = "") -> list[str]:
     """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
 
     Args:
         rules_md (str): The raw rules-fragment markdown; a placeholder is used
             when empty.
+        phase (str): Normalised current pipeline phase; scopes the fragment's
+            phase-tagged blocks.
 
     Returns:
         list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
     """
-    body = rules_md.strip() or (
+    body = _filter_rules_fragment(rules_md, phase=phase) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
@@ -820,14 +884,64 @@ def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "")
         lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
         lines.append(cycle_directive.strip())
     else:
-        lines.extend([
-            "Default arc (no per-cycle directive yet):",
-            "- Early cycles (≈0-2): cast WIDE — many cheap config/env levers and"
-            "  several specialists in parallel to map the space fast.",
-            "- Later cycles: FEWER, DEEPER, longer-running specialist tasks —"
-            "  spend the amplified budget on autotune / kernel / profiling-driven"
-            "  work that needs a long measure→edit→measure loop.",
-        ])
+        lines.extend(
+            [
+                "Default arc (no per-cycle directive yet):",
+                "- Early cycles (≈0-2): cast WIDE — many cheap config/env levers and"
+                "  several specialists in parallel to map the space fast.",
+                "- Later cycles: FEWER, DEEPER, longer-running specialist tasks —"
+                "  spend the amplified budget on autotune / kernel / profiling-driven"
+                "  work that needs a long measure→edit→measure loop.",
+            ]
+        )
+    return lines
+
+
+_WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
+
+
+def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
+    """Build ``## 8.`` from the reference docs that apply to *phase*.
+
+    Args:
+        references_dir: Directory containing the reference markdown files.
+        phase: Normalised current pipeline phase; ``""`` includes all entries.
+
+    Returns:
+        Markdown lines, or ``[]`` when the directory is absent or empty.
+    """
+    if not references_dir.is_dir():
+        return []
+    entries: list[tuple[str, str]] = []
+    for path in sorted(references_dir.glob("*.md")):
+        when_text = ""
+        file_phases: frozenset[str] = frozenset()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(">"):
+                continue
+            when_m = _WHEN_TAG_RE.match(stripped)
+            if when_m:
+                when_text = when_m.group("when")
+                continue
+            phase_m = _PHASE_TAG_RE.match(stripped)
+            if phase_m:
+                file_phases = frozenset(p.strip().upper() for p in phase_m.group("phases").split(",") if p.strip())
+                continue
+            break
+        if file_phases and not _renders_in(phase, file_phases):
+            continue
+        entries.append((path.stem, when_text or "see document"))
+    if not entries:
+        return []
+    lines: list[str] = [
+        "## 8. ON-DEMAND REFERENCE INDEX",
+        "",
+        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        "",
+    ]
+    for stem, when in entries:
+        lines.append(f"- **{stem}** — {when}")
     return lines
 
 
@@ -844,8 +958,10 @@ def build_orchestration_prompt(
     max_minutes: int = 0,
     macro_cycle: int = 0,
     cycle_directive: str = "",
+    phase: str = "",
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
+    references_dir: Path | None = None,
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -870,10 +986,15 @@ def build_orchestration_prompt(
         cycle_directive: optional LLM-authored focus text for this cycle
             (from ``orchestration_memory.next_cycle_directive``); empty string
             renders the standing breadth→depth default.
+        phase: current pipeline phase; omits the modules whose behaviour it
+            cannot reach. Empty renders every module. The Coordinator rebuilds
+            the prompt at each phase seam.
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
         framework_source_roots: optional framework source roots passed through
             to the session-context section.
+        references_dir: directory of on-demand reference documents; defaults
+            to ``asset_prompt_references_dir()`` when ``None``.
 
     Returns:
         The composed Orchestration system prompt text.
@@ -885,6 +1006,12 @@ def build_orchestration_prompt(
         kernel_enabled,
         rules_fragment_path,
     )
+    phase_norm = (phase or "").strip().upper()
+
+    if references_dir is None:
+        from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
+
+        references_dir = asset_prompt_references_dir()
 
     sections: list[list[str]] = [
         _section_mission(),
@@ -904,13 +1031,20 @@ def build_orchestration_prompt(
             explore_enabled=explore_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
-        _section_action_catalogue(actions),
-        _section_decision_framework(kernel_enabled=kernel_enabled),
+        _section_action_catalogue(actions, phase=phase_norm),
+        _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm),
         _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]
-    if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
+    if (
+        kernel_enabled
+        and any(a.name == "kernel_opt" for a in actions)
+        and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
+    ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    sections.append(_section_rules(rules_md))
+    ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
+    if ref_index:
+        sections.append(ref_index)
+    sections.append(_section_rules(rules_md, phase=phase_norm))
 
     return join_sections(sections)
 

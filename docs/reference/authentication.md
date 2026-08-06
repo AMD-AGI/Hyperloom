@@ -9,7 +9,7 @@ myst:
 This is the single authoritative reference for credentials and
 environment configuration in Hyperloom. If any other document
 (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`,
-`src/hyperloom/agents/kernel/SKILL.md`,
+`docs/conceptual/kernel-execution-path.md`,
 `src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 

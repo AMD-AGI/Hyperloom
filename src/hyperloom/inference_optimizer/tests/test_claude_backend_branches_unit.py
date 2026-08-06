@@ -312,6 +312,57 @@ async def test_run_raw_completion_headroom():
     assert b.calls[-1]["max_turns"] >= 8
 
 
+# ---- per-request context water level -------------------------------------
+@dataclass
+class _ResultMsg(_Msg):
+    num_turns: int = 0
+
+
+async def test_context_peak_prefers_the_largest_single_request():
+    # Three internal turns, then the terminal cumulative summary.
+    stream = [
+        _Msg(usage={"input_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 90}),
+        _Msg(usage={"input_tokens": 5, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 45}),
+        _Msg(
+            content=[TextBlock("done")],
+            usage={"input_tokens": 5, "cache_read_input_tokens": 150, "cache_creation_input_tokens": 20},
+        ),
+        _ResultMsg(
+            result="done",
+            num_turns=3,
+            usage={"input_tokens": 20, "cache_read_input_tokens": 250, "cache_creation_input_tokens": 155},
+        ),
+    ]
+    b = _backend()
+    b.sdk_query_factory = _query(stream)
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["context_tokens_peak"] == 175
+    # The cumulative counters are still reported verbatim for cost accounting.
+    assert res.metadata["cache_read_input_tokens"] == 250
+
+
+async def test_context_peak_falls_back_to_a_per_turn_estimate():
+    # Only the terminal cumulative usage is available: divide by the turn count.
+    stream = [
+        _ResultMsg(
+            result="done",
+            num_turns=4,
+            usage={"input_tokens": 0, "cache_read_input_tokens": 300_000, "cache_creation_input_tokens": 100_000},
+        ),
+    ]
+    b = _backend()
+    b.sdk_query_factory = _query(stream)
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["context_tokens_peak"] == 100_000
+
+
+async def test_context_peak_is_zero_without_any_usage():
+    b = _backend()
+    b.sdk_query_factory = _query([_Msg(content=[TextBlock("hi")], result="hi")])
+    res = await b.run("hi", allow_no_intent=True)
+    assert res.metadata["context_tokens_peak"] == 0
+
+
 def test_parse_tool_use_block_invalid_returns_none():
     b = _backend()
     bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input={"intent_type": "not_a_real_type", "payload": {}})

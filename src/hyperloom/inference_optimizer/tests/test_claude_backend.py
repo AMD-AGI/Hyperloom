@@ -9,6 +9,7 @@ All tests use SDK test seams so no real Claude API calls are made and no
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,7 +22,7 @@ from hyperloom.orchestrator.roles import (
     build_emit_intent_server,
     validate_emit_intent_input,
 )
-from hyperloom.orchestrator.roles.base import BackendError
+from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
@@ -78,6 +79,49 @@ def _make_query_factory(messages: list[Any]):
             yield m
 
     return _q
+
+
+def _make_raising_query_factory(exc: BaseException):
+    async def _q(*, prompt, options):
+        raise exc
+        yield  # pragma: no cover — keeps this an async generator
+
+    return _q
+
+
+@pytest.mark.asyncio
+async def test_stream_api_error_is_marked_as_llm_call_failed():
+    """A non-timeout gateway error must be countable, not just a timeout.
+
+    The failure that motivated this telemetry is a gateway 400
+    (``litellm.BadRequestError: AnthropicException``) surfacing out of the SDK
+    stream. Left unmarked it reaches the Coordinator's "unexpected crash" path
+    and no error row is written, so the LLM error rate silently misses exactly
+    the case it was added for.
+    """
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_raising_query_factory(
+            RuntimeError("litellm.BadRequestError: AnthropicException")
+        ),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+    with pytest.raises(LLMCallFailed, match="Claude backend call failed"):
+        await backend.run("hello")
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_not_marked_as_an_llm_failure():
+    """Cancellation is a BaseException and must pass through untouched."""
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_raising_query_factory(asyncio.CancelledError()),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        retry_policy=RetryPolicy(max_attempts=1),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await backend.run("hello")
 
 
 @pytest.mark.parametrize(

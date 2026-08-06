@@ -104,7 +104,6 @@ def coord(tmp_path: Path):
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel_agent": object()}
     return c
 
 
@@ -232,6 +231,8 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
         return {"status": revert_status}
 
     class _FakeBaselineExecutor:
+        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+
         def __init__(self, *, session_dir):
             self.session_dir = session_dir
 
@@ -519,7 +520,6 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.role_registry = {"kernel_agent": object()}
     # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
         c.shared_state.record_kernel_integrate_result(
@@ -778,6 +778,25 @@ async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_internal_sweep_task_carries_the_arg_mode_controls(coord):
+    """A ``replace`` current_best reaches the sweep, which assembles variants from it.
+
+    ``_build_grid`` honours ``base_args_mode`` / ``base_remove_args``, so omitting
+    them made the sweep append onto flags the champion had deliberately replaced.
+    """
+    coord.shared_state.current_best = {
+        "tput": 1000.0,
+        "extra_server_args": "--mla 1",
+        "remove_args": ["--chunked-prefill-size"],
+        "args_mode": "replace",
+    }
+    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
+    assert task.params["base_extra_args"] == "--mla 1"
+    assert task.params["base_remove_args"] == ["--chunked-prefill-size"]
+    assert task.params["base_args_mode"] == "replace"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_internal_sweep_task_recipe_kb_recipe_propagates(coord):
     """Recipe-driven grid surfaces as source='recipe_kb' on the task."""
     coord.shared_state.warm_start_recipe = {
@@ -966,7 +985,6 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "kernel_agent": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
@@ -1021,11 +1039,10 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         "critic": MockBackend(idle_plan),
         "robustness": MockBackend(idle_plan),
     }
-    role_registry = {k: v for k, v in default_role_registry().items() if k != "kernel_agent"}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=role_registry,
+        role_registry=default_role_registry(),
         recipe_kb=None,
         knowledge_plane=None,
     )

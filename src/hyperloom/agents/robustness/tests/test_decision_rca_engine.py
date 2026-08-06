@@ -16,6 +16,7 @@ from hyperloom.agents.robustness.decision.rca_engine import (
     NoopRcaEngine,
     RcaThrottle,
     RcaThrottleConfig,
+    load_rca_system_prompt,
 )
 from hyperloom.agents.robustness.signals import Symptom, SymptomSeverity
 
@@ -440,3 +441,54 @@ async def test_llm_engine_skips_when_credentials_missing():
     finally:
         await client.aclose()
     assert text == ""
+
+
+# System prompt asset
+
+
+def test_load_rca_system_prompt_reads_package_asset():
+    prompt = load_rca_system_prompt()
+    assert "insufficient evidence" in prompt
+    assert "symptom" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_llm_engine_sends_asset_as_system_message():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured["system_msg"] = body["messages"][0]["content"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    engine = _engine(handler)
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+    finally:
+        await engine.aclose()
+    assert captured["system_msg"] == load_rca_system_prompt()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_engine_sends_asset_as_system_field():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        captured["system"] = body.get("system")
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com")
+    engine = AnthropicRcaEngine(
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        client=client,
+        throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
+    )
+    try:
+        engine.set_tick(1)
+        await engine.summarize(_sym())
+    finally:
+        await client.aclose()
+    assert captured["system"] == load_rca_system_prompt()

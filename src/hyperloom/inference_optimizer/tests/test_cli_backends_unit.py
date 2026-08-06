@@ -38,7 +38,6 @@ def _build(**over):
     kwargs = dict(
         claude_model="claude-x",
         codex_model="codex-y",
-        kernel_codex=False,
         critic_choice="mock",
         session_dir=Path("/tmp/s"),
     )
@@ -46,21 +45,11 @@ def _build(**over):
     return clib._build_backends(**kwargs)
 
 
-def test_build_backends_mock_defaults_with_kernel_claude() -> None:
+def test_build_backends_mock_defaults() -> None:
     b = _build()
     assert b["orchestration"][0] == "claude"
     assert b["critic"] == ("mock_critic",)
     assert b["robustness"] == ("mock_rob",)
-    assert b["kernel_agent"][0] == "claude"
-
-
-def test_build_backends_kernel_codex() -> None:
-    b = _build(kernel_codex=True)
-    assert b["kernel_agent"][0] == "codex"
-
-
-def test_build_backends_no_kernel() -> None:
-    b = _build(no_kernel=True)
     assert "kernel_agent" not in b
 
 
@@ -99,14 +88,13 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
-        kernel_codex=True,
     )
     assert b["orchestration"][0] == "claude"
     # Provider-only keeps the critic-agent on the native Anthropic protocol.
     assert b["critic"][0] == "critic_agent"
     assert b["critic"][1]["protocol"] == "anthropic"
     assert b["critic"][1]["claude_model"] == "claude-x"
-    assert b["kernel_agent"][0] == "claude"
+    assert "kernel_agent" not in b
 
 
 def test_build_backends_anthropic_only_degrades_to_claude_without_root(monkeypatch) -> None:
@@ -159,17 +147,16 @@ def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
     assert captured["base_url"] == "https://gw.example/openai/v2"
 
 
-def test_build_backends_openai_only_uses_codex_for_orchestration_and_kernel(monkeypatch) -> None:
+def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
-        kernel_codex=False,
     )
     assert b["orchestration"][0] == "codex"
     assert b["critic"][0] == "critic_agent"
-    assert b["kernel_agent"][0] == "codex"
+    assert "kernel_agent" not in b
 
 
 def test_build_backends_invalid_robustness_choice() -> None:
@@ -343,24 +330,3 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
     assert opts["workload_uid"] == "ray-42"
 
 
-def test_kernel_agent_max_turns_default(monkeypatch):
-    from hyperloom.inference_optimizer.cli import backends as cb
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", raising=False)
-    assert cb._resolve_kernel_agent_max_turns() == 5
-
-
-def test_kernel_agent_max_turns_env_override(monkeypatch):
-    from hyperloom.inference_optimizer.cli import backends as cb
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "9")
-    assert cb._resolve_kernel_agent_max_turns() == 9
-
-
-def test_kernel_agent_max_turns_invalid_falls_back(monkeypatch):
-    from hyperloom.inference_optimizer.cli import backends as cb
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "not-an-int")
-    assert cb._resolve_kernel_agent_max_turns() == 5
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "0")
-    assert cb._resolve_kernel_agent_max_turns() == 5

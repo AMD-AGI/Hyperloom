@@ -1241,7 +1241,6 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1326,7 +1325,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }

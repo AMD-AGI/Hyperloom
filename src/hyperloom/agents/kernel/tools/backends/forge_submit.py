@@ -23,6 +23,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +43,51 @@ if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
 
 log = logging.getLogger(__name__)
+
+_KNOWLEDGE_CONFIG_CACHE = None
+_KNOWLEDGE_CONFIG_RESOLVED = False
+_KNOWLEDGE_CONFIG_LOCK = threading.Lock()
+
+
+def _reset_knowledge_config_cache() -> None:
+    """Clear Forge's prevalidated knowledge configuration (tests only)."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    _KNOWLEDGE_CONFIG_CACHE = None
+    _KNOWLEDGE_CONFIG_RESOLVED = False
+
+
+def _knowledge_config_for_forge():
+    """Resolve process-level knowledge configuration once."""
+
+    global _KNOWLEDGE_CONFIG_CACHE, _KNOWLEDGE_CONFIG_RESOLVED
+    if _KNOWLEDGE_CONFIG_RESOLVED:
+        return _KNOWLEDGE_CONFIG_CACHE
+
+    with _KNOWLEDGE_CONFIG_LOCK:
+        if _KNOWLEDGE_CONFIG_RESOLVED:
+            return _KNOWLEDGE_CONFIG_CACHE
+
+        from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+
+        source = dict(os.environ)
+        try:
+            config = KnowledgeConfig.from_env(source)
+        except Exception as exc:  # noqa: BLE001 - submit hot paths must remain available
+            log.warning(
+                "Forge knowledge configuration is invalid (%s); disabling remote "
+                "knowledge for this process. Validate KNOWLEDGE_STORE_MODE and "
+                "GBRAIN credentials during startup.",
+                exc,
+            )
+            fallback = dict(source)
+            fallback["KNOWLEDGE_STORE_MODE"] = "local"
+            fallback.pop("GBRAIN_BASE_URL", None)
+            fallback.pop("GBRAIN_TOKEN", None)
+            config = KnowledgeConfig.from_env(fallback)
+        _KNOWLEDGE_CONFIG_CACHE = config
+        _KNOWLEDGE_CONFIG_RESOLVED = True
+        return config
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
@@ -87,6 +133,10 @@ class ForgeLoopOutcome(NamedTuple):
     search_start_ms: float | None = None
     improved_during_search: bool = False
     structured_result: dict | None = None
+    mean_case_speedup: float | None = None
+    search_start_mean_case_speedup: float | None = None
+    total_improved: bool = False
+    incremental_improved: bool = False
 
 
 class _WorktreePreparationError(RuntimeError):
@@ -1758,27 +1808,29 @@ def _write_report(
     best_ms: float | None,
     improved: bool,
     *,
+    mean_case_speedup: float | None = None,
     search_start_ms: float | None = None,
     improved_during_search: bool = False,
 ) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
-    Only claims a KEEP-worthy result when the loop actually kept a validated
-    kernel strictly faster than baseline (improved=True). Otherwise emits no
-    speedup and [correctness] fail, so build_verification never KEEPs a kernel
-    that wasn't really optimized/validated.
+    Only claims a KEEP-worthy result when Forge reports a validated
+    ``mean_case_speedup > 1``. Raw aggregate timings are diagnostic and may
+    regress because they are not the optimization objective.
     """
     lines = ["# Forge optimization report", ""]
-    if improved and baseline_ms and best_ms and best_ms > 0:
-        speedup = baseline_ms / best_ms
-        lines.append(f"[micro_speedup] {speedup:.4f}x")
-        lines.append(
-            f"pristine_baseline_ms={baseline_ms:.4f} best_ms={best_ms:.4f}"
-        )
+    if improved and mean_case_speedup and mean_case_speedup > 1.0:
+        lines.append(f"[micro_speedup] {mean_case_speedup:.4f}x")
+        lines.append(f"mean_case_speedup={mean_case_speedup:.6f}")
         if search_start_ms:
             lines.append(
                 f"search_start_ms={search_start_ms:.4f} "
                 f"improved_during_search={str(improved_during_search).lower()}"
+            )
+        if baseline_ms and best_ms and best_ms > 0:
+            lines.append(
+                "# diagnostic raw means (not monotonic): "
+                f"baseline_ms={baseline_ms:.4f} selected_ms={best_ms:.4f}"
             )
         lines.append("[correctness] pass")
     else:
@@ -1791,7 +1843,7 @@ def _write_report(
         if baseline_ms and best_ms and best_ms > 0:
             lines.append(
                 f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
-                f"best_ms={best_ms:.4f} ratio={baseline_ms / best_ms:.4f}"
+                f"selected_ms={best_ms:.4f}"
             )
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
@@ -2037,26 +2089,15 @@ def _apply_fellow_env(env: dict) -> None:
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
-    # Forward gbrain credentials so the Forge loop's program.md generator can
-    # inject cross-KB kernel knowledge. setdefault keeps operator overrides
-    # authoritative.
-    _gbrain_url = env.get("GBRAIN_BASE_URL", "").strip()
-    _gbrain_token = env.get("GBRAIN_TOKEN", "").strip()
-    if _gbrain_url and _gbrain_token:
-        env.setdefault("KERNELFORGE_GBRAIN_ENABLED", "true")
-        env.setdefault("GBRAIN_BASE_URL", _gbrain_url)
-        env.setdefault("GBRAIN_TOKEN", _gbrain_token)
-    else:
-        # Surface when the gbrain kernel KB is disabled (either GBRAIN_BASE_URL
-        # or GBRAIN_TOKEN absent) so operators can tell forge ran without
-        # cross-KB kernel knowledge.
-        import sys as _sys
+    # Shared KnowledgePlane contract. KernelForge remains responsible for its
+    # own local knowledge implementation and remote kernel-experience behavior.
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
 
-        _sys.stderr.write(
-            "[forge_submit] gbrain KB disabled (forge runs without cross-KB "
-            f"knowledge): GBRAIN_BASE_URL={'set' if _gbrain_url else 'MISSING'} "
-            f"GBRAIN_TOKEN={'set' if _gbrain_token else 'MISSING'}\n"
-        )
+    # The process-level configuration was validated at startup/first use and is
+    # cached. A malformed child mapping therefore cannot fail every submission.
+    KernelExperienceBridge(_knowledge_config_for_forge()).configure_child_env(env)
 
     # Auth fallback: seed ANTHROPIC_API_KEY from the claude CLI's config.json
     # primaryApiKey when it is not already exported.
@@ -2355,6 +2396,200 @@ def _read_forge_best_result(workspace: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _path_within(root: Path, relative: str) -> Path | None:
+    """Resolve a manifest-relative path without allowing root escape."""
+    if not relative:
+        return None
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    root = root.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _canonical_forge_artifacts(
+    workspace: str,
+    published: dict | None,
+) -> dict[str, object]:
+    """Normalize KernelForge's immutable best bundle for downstream deploy.
+
+    KernelForge schema-v1 paths are relative to the campaign root
+    (``<workspace>/forge_experiments``), not to ``best/manifest.json``.
+    Preserve changed paths as repo-relative POSIX paths and expose absolute
+    artifact locations only after containment validation.
+    """
+    if not isinstance(published, dict):
+        log.warning(
+            "canonical Forge bundle unavailable: published manifest payload "
+            "is missing or invalid; compatibility artifact fallback may be used"
+        )
+        return {}
+    campaign_root = (Path(workspace) / "forge_experiments").resolve()
+    manifest_path = campaign_root / "best" / "manifest.json"
+    artifact_relative = str(published.get("artifact_dir") or "")
+    artifact_dir = _path_within(
+        campaign_root,
+        artifact_relative,
+    )
+    patch_relative = str(published.get("patch_path") or "")
+    patch_path = _path_within(
+        campaign_root,
+        patch_relative,
+    )
+    changed_files: list[str] = []
+    for raw in published.get("changed_files") or []:
+        rel = Path(str(raw))
+        if rel.is_absolute() or ".." in rel.parts:
+            log.warning(
+                "canonical Forge bundle unavailable: changed file path escapes "
+                "the campaign root (%s); compatibility artifact fallback may "
+                "be used",
+                raw,
+            )
+            return {}
+        changed_files.append(rel.as_posix())
+    if not manifest_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: best manifest does not exist "
+            "at %s; compatibility artifact fallback may be used",
+            manifest_path,
+        )
+        return {}
+    if artifact_dir is None:
+        log.warning(
+            "canonical Forge bundle unavailable: artifact_dir %r is not a "
+            "safe campaign-relative path under %s; compatibility artifact "
+            "fallback may be used",
+            artifact_relative,
+            campaign_root,
+        )
+        return {}
+    if patch_path is None or not patch_path.is_file():
+        log.warning(
+            "canonical Forge bundle unavailable: patch_path %r did not resolve "
+            "to a file under %s; compatibility artifact fallback may be used",
+            patch_relative,
+            campaign_root,
+        )
+        return {}
+    files_root = artifact_dir / "files"
+    if not files_root.is_dir():
+        log.warning(
+            "canonical Forge bundle unavailable: expected files directory does "
+            "not exist at %s (artifact_dir=%s); compatibility artifact fallback "
+            "may be used",
+            files_root,
+            artifact_dir,
+        )
+        return {}
+    try:
+        resolved_files_root = files_root.resolve(strict=True)
+    except OSError as error:
+        log.warning(
+            "canonical Forge bundle unavailable: files directory could not be "
+            "resolved at %s (%s); compatibility artifact fallback may be used",
+            files_root,
+            error,
+        )
+        return {}
+    if not _path_is_within(resolved_files_root, campaign_root):
+        log.warning(
+            "canonical Forge bundle unavailable: files directory resolves "
+            "outside the campaign root (%s -> %s, root=%s); compatibility "
+            "artifact fallback may be used",
+            files_root,
+            resolved_files_root,
+            campaign_root,
+        )
+        return {}
+    if not changed_files:
+        log.warning(
+            "canonical Forge bundle unavailable: manifest changed_files is "
+            "empty; compatibility artifact fallback may be used"
+        )
+        return {}
+    return {
+        "best_manifest": str(manifest_path),
+        "canonical_patch_path": str(patch_path),
+        "canonical_files_root": str(resolved_files_root),
+        "changed_files": changed_files,
+        "forge_workspace": str(Path(workspace).resolve()),
+    }
+
+
+def _observed_mean_case_result_fields(
+    payload: dict,
+) -> tuple[float | None, float | None, bool, bool]:
+    """Parse measured Forge scores without conflating regressions with missing data."""
+    try:
+        mean_case_speedup = float(payload.get("mean_case_speedup"))
+    except (TypeError, ValueError):
+        mean_case_speedup = None
+    if (
+        mean_case_speedup is not None
+        and (
+            not math.isfinite(mean_case_speedup)
+            or mean_case_speedup <= 0.0
+        )
+    ):
+        mean_case_speedup = None
+    try:
+        search_start = float(payload.get("search_start_mean_case_speedup"))
+    except (TypeError, ValueError):
+        search_start = None
+    if (
+        search_start is not None
+        and (not math.isfinite(search_start) or search_start <= 0.0)
+    ):
+        search_start = None
+    total_improved = bool(
+        mean_case_speedup is not None and mean_case_speedup > 1.0
+    )
+    incremental = bool(
+        payload.get(
+            "incremental_improved",
+            payload.get(
+                "improved_during_search",
+                mean_case_speedup is not None
+                and search_start is not None
+                and mean_case_speedup > search_start,
+            ),
+        )
+    )
+    return mean_case_speedup, search_start, total_improved, incremental
+
+
+def _mean_case_result_fields(
+    payload: dict,
+) -> dict | None:
+    """Normalize an improving, fully anchored Forge recovery result."""
+    (
+        mean_case_speedup,
+        search_start,
+        total_improved,
+        incremental,
+    ) = _observed_mean_case_result_fields(payload)
+    if (
+        mean_case_speedup is None
+        or search_start is None
+        or not total_improved
+    ):
+        return None
+    return {
+        "mean_case_speedup": mean_case_speedup,
+        "search_start_mean_case_speedup": search_start,
+        "total_improved": total_improved,
+        "incremental_improved": incremental,
+        "improved": True,
+        "improved_during_search": incremental,
+    }
+
+
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -2398,18 +2633,21 @@ def _validated_forge_best_result(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(payload)
+    if score_fields is None:
+        return None
     try:
         baseline_ms = float(payload.get("baseline_wall_ms"))
         best_ms = float(payload.get("best_wall_ms"))
     except (TypeError, ValueError):
         return None
-    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+    if baseline_ms <= 0 or best_ms <= 0:
         return None
     return {
         "best_commit": best_commit,
         "baseline_ms": baseline_ms,
         "best_ms": best_ms,
-        "improved": True,
+        **score_fields,
         "iteration": payload.get("iteration"),
         "snr_db": payload.get("snr_db"),
         "source": "best_result.json",
@@ -2460,12 +2698,15 @@ def _validated_forge_checkpoint(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(checkpoint)
+    if score_fields is None:
+        return None
     try:
         baseline_ms = float(checkpoint.get("baseline_ms"))
         best_ms = float(checkpoint.get("best_ms"))
     except (TypeError, ValueError):
         return None
-    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+    if baseline_ms <= 0 or best_ms <= 0:
         return None
     expected_coverage = list(shapes.get("validation") or [])
     if not expected_coverage:
@@ -2483,7 +2724,7 @@ def _validated_forge_checkpoint(
     normalized["best_commit"] = best_commit
     normalized["baseline_ms"] = baseline_ms
     normalized["best_ms"] = best_ms
-    normalized["improved"] = True
+    normalized.update(score_fields)
     return normalized
 
 
@@ -2549,6 +2790,9 @@ def _validated_warm_start_result(
     )
     if ancestor.returncode != 0:
         return None
+    score_fields = _mean_case_result_fields(result)
+    if score_fields is None:
+        return None
     try:
         pristine_ms = float(
             result.get("pristine_baseline_ms")
@@ -2564,13 +2808,13 @@ def _validated_warm_start_result(
         )
     except (TypeError, ValueError):
         return None
-    if pristine_ms <= 0 or best_ms <= 0 or best_ms >= pristine_ms:
+    if pristine_ms <= 0 or best_ms <= 0:
         return None
     return {
         "best_commit": best_commit,
         "baseline_ms": pristine_ms,
         "best_ms": best_ms,
-        "improved": True,
+        **score_fields,
         "source": "kb_warm_start",
         "kb_experience": kb_experience,
     }
@@ -2745,8 +2989,11 @@ def _run_loop_via_cli(
     # Parse the result: prefer the JSON sidecar, else the sentinel line.
     baseline_ms = best_ms = None
     pristine_baseline_ms = search_start_ms = None
+    mean_case_speedup = search_start_mean_case_speedup = None
     improved = False
     improved_during_search = False
+    total_improved = False
+    incremental_improved = False
     parsed = None
     try:
         if result_json.exists():
@@ -2762,18 +3009,18 @@ def _run_loop_via_cli(
     if parsed:
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
-        improved = bool(parsed.get("improved"))
         pristine_baseline_ms = parsed.get("pristine_baseline_ms", baseline_ms)
         search_start_ms = parsed.get("search_start_ms", baseline_ms)
-        improved_during_search = bool(
-            parsed.get(
-                "improved_during_search",
-                parsed.get(
-                    "incremental_improved",
-                    search_start_ms and best_ms and best_ms < search_start_ms,
-                ),
-            )
+        (
+            mean_case_speedup,
+            search_start_mean_case_speedup,
+            total_improved,
+            incremental_improved,
+        ) = _observed_mean_case_result_fields(
+            parsed
         )
+        improved = total_improved
+        improved_during_search = incremental_improved
         if parsed.get("deadline_expired"):
             timed_out = True
             if loop_exc is None:
@@ -2793,6 +3040,10 @@ def _run_loop_via_cli(
         search_start_ms=search_start_ms,
         improved_during_search=improved_during_search,
         structured_result=parsed if isinstance(parsed, dict) else None,
+        mean_case_speedup=mean_case_speedup,
+        search_start_mean_case_speedup=search_start_mean_case_speedup,
+        total_improved=total_improved,
+        incremental_improved=incremental_improved,
     )
 
 
@@ -2960,6 +3211,11 @@ def submit(
     optimization_report.md under output_dir.
     """
     started = time.time()
+    from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
+        KernelExperienceBridge,
+    )
+
+    knowledge_bridge = KernelExperienceBridge(_knowledge_config_for_forge())
     candidate = candidate or {}
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3278,8 +3534,9 @@ def submit(
         #      --experiments-dir and only as fresh as the last KEEP callback.
         #   3. the final-result sidecar / stdout sentinel -- only produced on a
         #      graceful return, and never sufficient on its own after a kill.
+        raw_published = _read_forge_best_result(workspace)
         published = _validated_forge_best_result(
-            _read_forge_best_result(workspace),
+            raw_published,
             workspace=workspace,
             base_commit=base_commit,
         )
@@ -3327,22 +3584,23 @@ def submit(
             else loop_outcome.baseline_ms
         )
         best_ms = loop_outcome.best_ms
-        improved = bool(
-            baseline_ms
-            and best_ms
-            and float(best_ms) < float(baseline_ms)
+        mean_case_speedup = loop_outcome.mean_case_speedup
+        search_start_mean_case_speedup = (
+            loop_outcome.search_start_mean_case_speedup
         )
-        improved_during_search = loop_outcome.improved_during_search
+        improved = loop_outcome.total_improved
+        improved_during_search = loop_outcome.incremental_improved
         best_commit = ""
         if recovery is not None:
             if loop_outcome.pristine_baseline_ms is None:
                 baseline_ms = recovery["baseline_ms"]
             best_ms = recovery["best_ms"]
-            improved = bool(
-                baseline_ms
-                and best_ms
-                and float(best_ms) < float(baseline_ms)
-            )
+            mean_case_speedup = recovery["mean_case_speedup"]
+            search_start_mean_case_speedup = recovery[
+                "search_start_mean_case_speedup"
+            ]
+            improved = recovery["total_improved"]
+            improved_during_search = recovery["incremental_improved"]
             best_commit = recovery["best_commit"]
         salvaged = bool(loop_outcome.error and recovery is not None)
         if published is not None and checkpoint_recovery is not None:
@@ -3375,18 +3633,18 @@ def submit(
             baseline_ms,
             best_ms,
             improved,
+            mean_case_speedup=mean_case_speedup,
             search_start_ms=search_start_ms,
             improved_during_search=improved_during_search,
         )
-        gbrain_active = bool(
-            os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
-        )
+        knowledge_status = knowledge_bridge.status
         msg = (
             f"forge done (cli): pristine_baseline={baseline_ms} "
             f"search_start={search_start_ms} best={best_ms} "
-            f"improved={improved} improved_during_search={improved_during_search} "
+            f"mean_case_speedup={mean_case_speedup} improved={improved} "
+            f"improved_during_search={improved_during_search} "
             f"fellow={fellow} gpu={gpu_target} "
-            f"gbrain={'on' if gbrain_active else 'off'} "
+            f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )
         # Surface the run's LLM token spend + key-step timeline from the CLI
@@ -3418,13 +3676,40 @@ def submit(
         res["pristine_baseline_ms"] = baseline_ms
         res["search_start_ms"] = search_start_ms
         res["best_ms"] = best_ms
+        res["mean_case_speedup"] = mean_case_speedup
+        res["search_start_mean_case_speedup"] = (
+            search_start_mean_case_speedup
+        )
         res["improved"] = improved
+        res["total_improved"] = improved
+        res["incremental_improved"] = improved_during_search
         res["improved_during_search"] = improved_during_search
+        canonical_artifacts = _canonical_forge_artifacts(
+            workspace,
+            raw_published if published is not None else None,
+        )
+        if canonical_artifacts:
+            res.update(canonical_artifacts)
+            res["artifacts"] = [
+                str(canonical_artifacts["canonical_patch_path"])
+            ]
         if loop_outcome.structured_result is not None:
             res["forge_result"] = loop_outcome.structured_result
             kb_experience = loop_outcome.structured_result.get("kb_experience")
             if isinstance(kb_experience, dict):
                 res["kb_experience"] = kb_experience
+        kernel_experience = knowledge_bridge.collect_result(loop_outcome.structured_result)
+        res["kernel_experience"] = kernel_experience
+        res["knowledge_audit"] = [
+            {
+                "op": "kernel_experience_passthrough",
+                "mode": knowledge_status.mode,
+                "backend": knowledge_status.backend,
+                "resolution": "collected" if kernel_experience["result_present"] else "not_reported",
+                "success": True,
+                "provenance": kernel_experience["provenance"],
+            }
+        ]
         res["logical_operator"] = logical_operator
         res["source_framework"] = source_framework
         res["implementation_sources"] = implementation_sources

@@ -314,10 +314,12 @@ The following variables configure the Critic, Robustness, and knowledge base com
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`             | `$USER_DATA_PATH/kb`   | Filesystem root for the local recipe-snapshot KB store (always the write target). Overridden by `--local-kb-root`. See [Integrate Recipe knowledge base in Hyperloom](integrate-kb.md).             |
-| `GBRAIN_BASE_URL`                     | Unset                  | Base URL of the remote recipe-snapshot page store — the **read** side of the recipe KB. When unset, recipe reads are local-only.       |
-| `GBRAIN_TOKEN`                        | Unset                  | Bearer token for `GBRAIN_BASE_URL`.                                                                                                   |
-| `RECIPE_KB_MIRROR_MODE`               | `external`             | `external` (default): a separate ingest process mirrors the local store into the remote recipe KB. `inline`: best-effort mirror each local write into the remote store in-process (local write stays authoritative). |
+| `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe/KG backend: `local` or `remote`. Ambient GBrain credentials do not select remote mode. |
+| `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Shared knowledge root. Remote mode uses only `.remote-locks/recipes` beneath it. |
+| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
+| `GBRAIN_BASE_URL`                     | Unset                  | GBrain endpoint; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
+| `GBRAIN_TOKEN`                        | Unset                  | GBrain bearer token; required with `KNOWLEDGE_STORE_MODE=remote` and ignored in local mode. |
+| `RECIPE_KB_MIRROR_MODE`               | Obsolete               | Ignored. Remove it and select `KNOWLEDGE_STORE_MODE=local` or `remote`. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
 | `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |

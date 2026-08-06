@@ -324,6 +324,19 @@ def _materialized_run_eval_disabled(config_path: Path) -> bool:
     return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
+def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
+    """Set the effective eval mode after lifecycle eligibility is known."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    benchmark = cfg.setdefault("benchmark", {})
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
+        "true" if enabled else "false"
+    )
+    config_path.write_text(
+        yaml.safe_dump(cfg, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
 def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
     """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it.
 
@@ -1965,6 +1978,9 @@ class BaselineExecutor:
         # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
         # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
+        defer_accuracy_until_after_measure = is_truthy(
+            params.get("defer_accuracy_until_after_measure")
+        )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
@@ -2039,7 +2055,6 @@ class BaselineExecutor:
         # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
         # never salvaging a prior attempt's stale ``results*.json`` from the
         # reused per-round slot.
-        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))
@@ -2059,6 +2074,17 @@ class BaselineExecutor:
             ctx_extra=extra,
         )
         double_run = double_run_requested and lifecycle["eligible"]
+        if defer_accuracy_until_after_measure and double_run:
+            # Only the lifecycle path can reuse the hot server for a staged
+            # accuracy round. A single-round fallback must retain the original
+            # eval contract so a throughput winner still carries accuracy.
+            _set_materialized_run_eval(
+                materialized_config_path,
+                enabled=False,
+            )
+        run_eval_disabled = _materialized_run_eval_disabled(
+            materialized_config_path
+        )
 
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +
@@ -2148,18 +2174,15 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             #
-            # No accuracy eval here: accuracy is a property of the model and its
-            # config, not of cold-vs-hot timing, so round 1 already measured the
-            # value round 2 would re-measure identically. Running it twice cost
-            # minutes per baseline and, worse, doubled the window in which a
-            # server death could take the eval down with it -- which is exactly
-            # how a run was lost. Round 1 keeps eval on and remains the accuracy
-            # source; round 2 only needs the hot throughput number.
+            # No accuracy eval here: ordinary baselines already measured it in
+            # round 1, while staged kernel integration intentionally defers it
+            # until after this hot-throughput gate. In both cases round 2 only
+            # needs the steady-state throughput number.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
                 measure_dir,
-                cleanup=True,
+                cleanup=not defer_accuracy_until_after_measure,
                 pid_dir=pid_dir,
                 port=port,
                 run_eval=False,
@@ -2204,6 +2227,74 @@ class BaselineExecutor:
                     _cold,
                     ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
                 )
+                if defer_accuracy_until_after_measure:
+                    try:
+                        min_tput = float(
+                            params.get(
+                                "post_measure_accuracy_min_tput",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        min_tput = 0.0
+                    if float(_hot or 0.0) >= min_tput:
+                        accuracy_dir = output_dir / "accuracy_round"
+                        accuracy_cfg = self._write_lifecycle_config(
+                            materialized_config_path,
+                            accuracy_dir,
+                            cleanup=True,
+                            pid_dir=pid_dir,
+                            port=port,
+                            run_eval=True,
+                        )
+                        try:
+                            accuracy_timeout_sec = int(
+                                params.get("accuracy_timeout_sec")
+                                or timeout_sec
+                            )
+                        except (TypeError, ValueError):
+                            accuracy_timeout_sec = timeout_sec
+                        accuracy_result = await self._run_single_benchmark(
+                            config_path=accuracy_cfg,
+                            output_dir=accuracy_dir,
+                            **{
+                                **common,
+                                "timeout_sec": max(
+                                    1,
+                                    accuracy_timeout_sec,
+                                ),
+                                "run_eval_disabled": False,
+                            },
+                        )
+                        result["accuracy_stage"] = {
+                            "status": accuracy_result.get("status"),
+                            "error_class": accuracy_result.get(
+                                "error_class"
+                            ),
+                            "workspace": accuracy_result.get("workspace"),
+                        }
+                        if accuracy_result.get("status") == "succeeded":
+                            for key in (
+                                "accuracy",
+                                "accuracy_task",
+                                "accuracy_metric",
+                                "accuracy_source",
+                            ):
+                                if accuracy_result.get(key) is not None:
+                                    result[key] = accuracy_result[key]
+                        else:
+                            result.setdefault("nonfatal_warnings", [])
+                            result["nonfatal_warnings"].append(
+                                "post_measure_accuracy_failed"
+                            )
+                    else:
+                        result["accuracy_stage"] = {
+                            "status": "skipped",
+                            "reason": "throughput_below_threshold",
+                            "minimum_tput": min_tput,
+                            "observed_tput": float(_hot or 0.0),
+                        }
             return result
         finally:
             # Defensive teardown so no persistent server leaks. Idempotent.
@@ -2283,13 +2374,12 @@ class BaselineExecutor:
         cleanup: bool,
         pid_dir: Path,
         port: int,
-        run_eval: bool = True,
+        run_eval: bool | None = None,
     ) -> Path:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
-        ``cleanup`` and ``run_eval`` differ (round 1 persists the server and
-        keeps lm-eval on; round 2 tears down and runs throughput-only).
+        ``cleanup`` and ``run_eval`` can differ between rounds.
 
         Args:
             base_config_path: Source materialized YAML to clone and patch.
@@ -2298,8 +2388,8 @@ class BaselineExecutor:
             pid_dir: Shared pid/metadata directory keying the persistent
                 server across both rounds.
             port: Server port shared across both rounds.
-            run_eval: When False, forces ``RUN_EVAL=false`` into the round's
-                ``benchmark.envs`` so accuracy is not measured a second time.
+            run_eval: Explicitly forces ``RUN_EVAL`` when set; ``None`` keeps
+                the materialized benchmark contract unchanged.
 
         Returns:
             Path to the written per-round lifecycle YAML.
@@ -2313,8 +2403,10 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             port=port,
         )
-        if not run_eval:
-            bench.setdefault("envs", {})["RUN_EVAL"] = "false"
+        if run_eval is not None:
+            bench.setdefault("envs", {})["RUN_EVAL"] = (
+                "true" if run_eval else "false"
+            )
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:

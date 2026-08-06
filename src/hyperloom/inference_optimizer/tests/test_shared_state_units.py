@@ -11,6 +11,7 @@ from hyperloom.orchestrator.state.shared_state import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
+    inject_stack_base_params,
     resolve_grading_anchor_tput,
 )
 
@@ -39,6 +40,73 @@ class TestResolveGradingAnchorTput:
 
     def test_zero_when_nothing_established(self):
         assert resolve_grading_anchor_tput(SharedState()) == 0.0
+
+
+class TestInjectStackBaseParams:
+    @staticmethod
+    def _state():
+        s = SharedState()
+        s.baseline_tput = 800.0
+        s.current_best = {
+            "tput": 1000.0,
+            "extra_server_args": "--live-layer 1",
+            "extra_envs": {"LIVE_ENV": "1"},
+            "remove_args": "--dropped",
+            "args_mode": "replace",
+        }
+        return s
+
+    def test_seeds_the_anchor_together_with_its_config(self):
+        params: dict = {}
+        inject_stack_base_params(params, self._state(), anchor=True)
+        assert params == {
+            "base_tput": 1000.0,
+            "base_extra_args": "--live-layer 1",
+            "base_extra_envs": {"LIVE_ENV": "1"},
+            "base_remove_args": ["--dropped"],
+            "base_args_mode": "replace",
+        }
+
+    def test_omits_the_anchor_unless_asked(self):
+        params: dict = {}
+        inject_stack_base_params(params, self._state())
+        assert "base_tput" not in params
+        assert params["base_extra_args"] == "--live-layer 1"
+
+    def test_keeps_a_caller_supplied_value(self):
+        params = {"base_extra_args": "--operator-pinned"}
+        inject_stack_base_params(params, self._state(), anchor=True)
+        assert params["base_extra_args"] == "--operator-pinned"
+
+    def test_overwrite_replaces_a_superseded_layer(self):
+        params = {"base_extra_args": "--stale-layer 1", "base_tput": 800.0}
+        state = self._state()
+        state.current_best = {"tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+        inject_stack_base_params(params, state, anchor=True, overwrite=True)
+        assert params["base_tput"] == 1000.0
+        assert params["base_extra_args"] == ""
+        assert params["base_extra_envs"] == {}
+
+    def test_skips_fields_current_best_does_not_carry(self):
+        params: dict = {}
+        state = SharedState()
+        state.baseline_tput = 800.0
+        state.current_best = {"action": "baseline", "tput": 800.0}
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {"base_tput": 800.0}
+
+    def test_falls_back_to_the_baseline_anchor_with_no_stack(self):
+        params: dict = {}
+        state = SharedState()
+        state.baseline_tput = 800.0
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {"base_tput": 800.0}
+
+    @pytest.mark.parametrize("state", [None, object()])
+    def test_tolerates_missing_state(self, state):
+        params: dict = {}
+        inject_stack_base_params(params, state, anchor=True)
+        assert params == {}
 
 
 class TestGridSessionDeadline:
@@ -385,7 +453,7 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert last["decision"] == "no_promote"
     assert last["error_class"] == "no_report"
     assert last["error_excerpt"] is not None
-    assert len(last["error_excerpt"]) == 800
+    assert len(last["error_excerpt"]) == 1200
     assert last["error_excerpt"].startswith("boom!")
     assert last["reported_success"] is False
     assert last["key_metric"] is None
@@ -737,7 +805,7 @@ def test_record_action_failure_truncates_excerpt_and_tails_subprocess():
         },
     )
     entry = s.last_action_failures[0]
-    assert len(entry["error_excerpt"]) == 800
+    assert len(entry["error_excerpt"]) == 1200
     assert entry["stderr_tail"] is not None
     assert len(entry["stderr_tail"]) == 1000
 
@@ -765,10 +833,12 @@ def test_to_prompt_summary_shows_last_three_failures_with_suffix():
         )
     txt = s.to_prompt_summary()
     assert "last_action_failures=" in txt
-    line = next(l for l in txt.splitlines() if l.startswith("last_action_failures="))
-    assert "[baseline/no_report" in line
-    assert "[explore/no_report" in line
-    assert "[+2 earlier]" in line
+    # All 5 fit within the 10-entry window; each renders on its own lines.
+    failures_block = txt[txt.index("last_action_failures="):]
+    assert "[baseline/no_report" in failures_block
+    assert "[explore/no_report" in failures_block
+    # No suffix when all entries fit.
+    assert "[+2 earlier]" not in failures_block
 
 
 def test_save_load_round_trips_failure_log(tmp_path):
@@ -818,3 +888,30 @@ def test_record_action_attempt_kv_cache_oom_captures_stderr_tail():
     assert attempt["error_class"] == "kv_cache_oom"
     assert attempt["stderr_tail"] is not None
     assert "no GPU memory for the KV cache" in attempt["stderr_tail"]
+
+
+def test_record_action_failure_stores_variant_name():
+    s = SharedState()
+    entry = s.record_action_failure(
+        action="explore",
+        task_id="t-v",
+        result={
+            "error_class": "server_init_dead",
+            "error": "mla_gluon requires batch_size=1",
+            "variant_name": "fp8_kv",
+        },
+    )
+    assert entry["variant_name"] == "fp8_kv"
+
+
+def test_record_action_failure_caps_at_new_default():
+    """_DEFAULT_LAST_FAILURES is now 30."""
+    s = SharedState()
+    for i in range(35):
+        s.record_action_failure(
+            action="explore",
+            task_id=f"t-{i}",
+            result={"error_class": "server_init_dead", "error": f"crash {i}"},
+        )
+    assert len(s.last_action_failures) == 30
+    assert s.last_action_failures[-1]["task_id"] == "t-34"

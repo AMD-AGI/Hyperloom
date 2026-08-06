@@ -86,7 +86,12 @@ def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
     assert notes["user_specified_backends"] is False
 
 
-def _attempt(report: Path | None = None, artifact: Path | None = None):
+def _attempt(
+    report: Path | None = None,
+    artifact: Path | None = None,
+    *,
+    backend: str = "generic",
+):
     paths = {}
     if report is not None:
         paths["report"] = str(report)
@@ -102,7 +107,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
     return {
         "status": "completed",
         "attempt_id": "a1",
-        "backend": "forge",
+        "backend": backend,
         "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
@@ -322,12 +327,16 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
 def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     report = tmp_path / "optimization_report.md"
     report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
-    attempt = _attempt(report)
+    attempt = _attempt(report, backend="forge")
     attempt.update(
         {
             "pristine_baseline_ms": 1.0,
             "search_start_ms": 0.8,
-            "best_ms": 0.8,
+            "best_ms": 1.2,
+            "mean_case_speedup": 1.25,
+            "search_start_mean_case_speedup": 1.25,
+            "total_improved": True,
+            "incremental_improved": False,
             "improved": True,
             "improved_during_search": False,
         }
@@ -340,8 +349,48 @@ def test_forge_policy_uses_total_pristine_improvement_not_incremental(tmp_path):
     )
 
     assert verification["micro_speedup"] == 1.25
-    assert verification["micro_speedup_source"] == "forge_pristine_result"
+    assert verification["micro_speedup_source"] == "forge_mean_case_result"
     assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_forge_rejects_ambiguous_report_without_structured_score(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text(
+        "[CORRECTNESS] PASS\n[MICRO_SPEEDUP] 1.30x\n",
+        encoding="utf-8",
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [_attempt(report, backend="forge")],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 1.0
+    assert verification["micro_speedup_source"] == "default_unmeasured"
+    assert ko.make_proposal(verification)["decision"] == "PARTIAL"
+
+
+def test_non_forge_preserves_structured_timing_fallback(tmp_path):
+    report = tmp_path / "optimization_report.md"
+    report.write_text("[CORRECTNESS] PASS\n", encoding="utf-8")
+    attempt = _attempt(report, backend="generic")
+    attempt.update(
+        {
+            "pristine_baseline_ms": 2.0,
+            "best_ms": 1.0,
+            "improved": True,
+        }
+    )
+
+    verification = ko.build_verification(
+        _args(),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    assert verification["micro_speedup"] == 2.0
+    assert verification["micro_speedup_source"] == "structured_timing_result"
 
 
 def test_report_correctness_passes_with_reference_language(tmp_path):
@@ -437,6 +486,22 @@ def test_speedup_just_above_gate_keeps(tmp_path):
         [_attempt(artifact=artifact)],
         benchmark_available=False,
     )
+    assert ko.make_proposal(verification)["decision"] == "KEEP"
+
+
+def test_speedup_at_gate_boundary_keeps(tmp_path):
+    artifact = tmp_path / "optimized.hip"
+    verification = ko.build_verification(
+        _args(
+            correctness_passed=True,
+            micro_speedup=1.10,
+            e2e_gain_pct=0.5,
+            accuracy_passed=True,
+        ),
+        [_attempt(artifact=artifact)],
+        benchmark_available=False,
+    )
+
     assert ko.make_proposal(verification)["decision"] == "KEEP"
 
 
@@ -1001,6 +1066,94 @@ def test_build_patch_snapshot_sources_worktree_and_base(tmp_path):
     assert len(res["descriptors"]) == 2
 
 
+def test_build_patch_snapshot_uses_exported_files_without_kernel_repo(
+    tmp_path,
+):
+    files_root = tmp_path / "files"
+    optimized = files_root / "vllm" / "ops" / "kernel.py"
+    optimized.parent.mkdir(parents=True)
+    optimized.write_text("VALUE = 2\n")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/vllm/ops/kernel.py b/vllm/ops/kernel.py\n"
+        "--- a/vllm/ops/kernel.py\n"
+        "+++ b/vllm/ops/kernel.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+
+    res = ko.build_patch_snapshot(
+        str(patch),
+        worktree=files_root,
+        kernel_repo="",
+        clean_base="",
+        out_dir=tmp_path / "snapshot",
+    )
+
+    assert res is not None
+    assert (
+        Path(res["snapshot_dir"]) / "vllm" / "ops" / "kernel.py"
+    ).read_text() == "VALUE = 2\n"
+
+
+def test_prepare_deploy_patch_drops_python_cache_entries(tmp_path):
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/pkg/__pycache__/kernel.pyc "
+        "b/pkg/__pycache__/kernel.pyc\n"
+        "Binary files a/pkg/__pycache__/kernel.pyc "
+        "and b/pkg/__pycache__/kernel.pyc differ\n"
+        "diff --git a/pkg/kernel.py b/pkg/kernel.py\n"
+        "--- a/pkg/kernel.py\n"
+        "+++ b/pkg/kernel.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+
+    deploy_patch = ko.prepare_deploy_patch(
+        str(patch),
+        output_path=tmp_path / "deploy.patch",
+    )
+    text = Path(deploy_patch).read_text()
+
+    assert "__pycache__" not in text
+    assert "pkg/kernel.py" in text
+
+
+def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
+    deploy_root = tmp_path / "site-packages"
+    source = deploy_root / "vllm" / "model_executor" / "attention.py"
+    changed = (
+        deploy_root
+        / "vllm"
+        / "v1"
+        / "attention"
+        / "ops"
+        / "triton_unified_attention.py"
+    )
+    source.parent.mkdir(parents=True)
+    changed.parent.mkdir(parents=True)
+    source.write_text("def wrapper():\n    return True\n")
+    changed.write_text("def kernel():\n    return 1\n")
+    descriptors = [
+        {
+            "op": "write",
+            "path": (
+                "vllm/v1/attention/ops/"
+                "triton_unified_attention.py"
+            ),
+            "is_new": False,
+        }
+    ]
+
+    assert ko.resolve_deploy_repo_root(
+        str(source),
+        descriptors,
+    ) == str(deploy_root)
+
+
 def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     """If any write path can't be made byte-exact (no worktree file, no base to
     reconstruct from), the attempt is non-deployable -> None (hard fail)."""
@@ -1076,6 +1229,136 @@ def test_verification_uses_forge_patch_for_multifile_bundle(tmp_path):
     bundle = verification["best_artifact_bundle"]
     assert bundle["type"] == "patch_snapshot"
     assert set(bundle["write_paths"]) == {"kernel.py", "helper.py"}
+
+
+def test_verification_deploys_sibling_forge_change_without_kernel_repo(
+    tmp_path,
+):
+    deploy_root = tmp_path / "site-packages"
+    source = deploy_root / "vllm" / "model_executor" / "attention.py"
+    changed = (
+        deploy_root
+        / "vllm"
+        / "v1"
+        / "attention"
+        / "ops"
+        / "triton_unified_attention.py"
+    )
+    source.parent.mkdir(parents=True)
+    changed.parent.mkdir(parents=True)
+    source.write_text("def wrapper():\n    return True\n")
+    changed.write_text("def kernel():\n    return 1\n")
+
+    exported = tmp_path / "canonical-files"
+    exported_changed = (
+        exported
+        / "vllm"
+        / "v1"
+        / "attention"
+        / "ops"
+        / "triton_unified_attention.py"
+    )
+    exported_changed.parent.mkdir(parents=True)
+    exported_changed.write_text("def kernel():\n    return 2\n")
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git "
+        "a/vllm/v1/attention/ops/triton_unified_attention.py "
+        "b/vllm/v1/attention/ops/triton_unified_attention.py\n"
+        "--- a/vllm/v1/attention/ops/triton_unified_attention.py\n"
+        "+++ b/vllm/v1/attention/ops/triton_unified_attention.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def kernel():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+    )
+    primary = tmp_path / "v1_forge.py"
+    primary.write_text(source.read_text())
+    attempt = {
+        "status": "completed",
+        "attempt_id": "forge-sibling",
+        "backend": "forge",
+        "optimized_path": str(primary),
+        "pristine_baseline_ms": 2.0,
+        "best_ms": 1.0,
+        "improved": True,
+        "backend_paths": {
+            "forge_patch": str(patch),
+            "forge_canonical_files_root": str(exported),
+            "forge_best_manifest": str(tmp_path / "manifest.json"),
+        },
+    }
+
+    verification = ko.build_verification(
+        _args(
+            source_file=str(source),
+            kernel_repo="",
+            correctness_passed=True,
+        ),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    bundle = verification["best_artifact_bundle"]
+    assert verification["artifact_valid"] is True
+    assert bundle["type"] == "patch_snapshot"
+    assert bundle["repo_root"] == str(deploy_root)
+    assert bundle["write_paths"] == [
+        "vllm/v1/attention/ops/triton_unified_attention.py"
+    ]
+    assert (
+        Path(bundle["snapshot_dir"])
+        / "vllm"
+        / "v1"
+        / "attention"
+        / "ops"
+        / "triton_unified_attention.py"
+    ).read_text() == "def kernel():\n    return 2\n"
+
+
+def test_verification_does_not_fall_back_when_forge_snapshot_fails(
+    tmp_path,
+):
+    source = tmp_path / "attention.py"
+    source.write_text("def wrapper():\n    return True\n")
+    primary = tmp_path / "v1_forge.py"
+    primary.write_text(source.read_text())
+    patch = tmp_path / "forge.patch"
+    patch.write_text(
+        "diff --git a/vllm/ops/missing.py b/vllm/ops/missing.py\n"
+        "--- a/vllm/ops/missing.py\n"
+        "+++ b/vllm/ops/missing.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    attempt = {
+        "status": "completed",
+        "attempt_id": "forge-nondeployable",
+        "backend": "forge",
+        "optimized_path": str(primary),
+        "pristine_baseline_ms": 2.0,
+        "best_ms": 1.0,
+        "improved": True,
+        "backend_paths": {
+            "forge_patch": str(patch),
+        },
+    }
+
+    verification = ko.build_verification(
+        _args(
+            source_file=str(source),
+            kernel_repo="",
+            correctness_passed=True,
+        ),
+        [attempt],
+        benchmark_available=True,
+    )
+
+    assert verification["artifact_valid"] is False
+    assert verification["best_artifact_bundle"] == {}
+    assert "snapshot" in verification["artifact_error"].lower()
+    assert ko.make_proposal(verification)["decision"] != "KEEP"
 
 
 def test_forge_patch_builds_multifile_deploy_bundle(tmp_path):

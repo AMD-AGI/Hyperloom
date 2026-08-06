@@ -336,7 +336,6 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
     "specialist": (WEB_TOOL_NAMES | PR_MONITOR_TOOL_NAMES),
     # Empty sets listed explicitly so a role-name typo is a key error, not a silent allow.
     "orchestration": frozenset(),
-    "kernel_agent": frozenset(),
     "critic": frozenset(),
     "robustness": frozenset(),
 }
@@ -527,6 +526,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
+        "explore_elapsed_accum_s",
         # Cyclic phase-machine state; Coordinator-only writers. Locked so an LLM
         # update_state cannot forge the macro-cycle counter, budget window, gain
         # anchor / no-gain streak, or bottleneck-switch handoff.
@@ -740,7 +740,7 @@ class PolicyGate:
         skip_baseline_singleton = (
             kind == BASELINE_ACTION_NAME
             and bool(task_id)
-            and str(task_id) == str(getattr(self.shared_state, "enablement_revalidation_task_id", "") or "")
+            and str(task_id) == str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "")
         )
         self._validate_delegate_body(
             role,
@@ -1435,15 +1435,26 @@ class PolicyGate:
             ),
         )
 
-    # ``baseline_phase_singleton``
+    # ``baseline_phase_singleton`` / ``enablement_round_in_flight``
     def _validate_baseline_singleton(
         self,
         payload: dict[str, Any],
     ) -> None:
-        """Deny a repeat baseline once the session has an anchor."""
+        """Deny a baseline proposal when an enablement round is in flight or the anchor is established."""
         ss = getattr(self, "shared_state", None)
         if ss is None:
             return
+        _en = getattr(ss, "enablement", None)
+        inflight_tid = str(getattr(_en, "inflight_task_id", "") or "") if _en is not None else ""
+        if inflight_tid:
+            raise PolicyDenied(
+                f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
+                rule="enablement_round_in_flight",
+                hint=(
+                    "Wait for the enablement specialist to finish and rearm "
+                    "before re-running baseline."
+                ),
+            )
         anchor = getattr(ss, "baseline_tput", 0.0)
         if not isinstance(anchor, (int, float)) or anchor <= 0:
             return

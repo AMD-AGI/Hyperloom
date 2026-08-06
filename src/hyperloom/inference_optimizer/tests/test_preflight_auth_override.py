@@ -847,7 +847,6 @@ def _make_args(**overrides) -> argparse.Namespace:
         claude_model="claude-opus-4-7",
         codex_model="gpt-5.4",
         critic_backend="mock",
-        kernel_codex=True,
         no_kernel=False,
     )
     if "critic_mock" in overrides:
@@ -1343,7 +1342,7 @@ def test_probe_llm_catalog_returns_none_on_401(monkeypatch):
 
 
 def test_smoke_test_codex_model_warns_when_missing(monkeypatch, capsys):
-    args = _make_args(codex_model="gpt-99.9")
+    args = _make_args(codex_model="gpt-99.9", critic_mock=False)
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"claude-opus-4-7", "gpt-5.4", "gpt-4.1"})
     cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
     out = capsys.readouterr().out
@@ -1367,11 +1366,10 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
 
 
 def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
-    """--critic-mock + --kernel-claude → no probe / no warn."""
+    """--critic-mock → no probe / no warn (Codex is only needed for the critic-agent path)."""
     args = _make_args(
         codex_model="gpt-totally-fake",
         critic_mock=True,
-        kernel_codex=False,
     )
 
     def _no_probe(**kw):
@@ -1382,24 +1380,6 @@ def test_smoke_test_codex_model_skipped_when_unused(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "WARNING" not in out
     assert "gpt-totally-fake" not in out
-
-
-def test_smoke_test_codex_model_skipped_when_no_kernel(monkeypatch, capsys):
-    """--no-kernel hides kernel_codex; critic-mock avoids Codex entirely."""
-    args = _make_args(
-        codex_model="gpt-totally-fake",
-        critic_mock=True,
-        kernel_codex=True,
-        no_kernel=True,
-    )
-
-    def _no_probe(**kw):
-        raise AssertionError("probe should not run when Codex is unused")
-
-    monkeypatch.setattr(cli, "_probe_llm_catalog", _no_probe)
-    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
-    out = capsys.readouterr().out
-    assert "WARNING" not in out
 
 
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):

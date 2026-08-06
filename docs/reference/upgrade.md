@@ -185,6 +185,44 @@ training-mode build:
 
 ---
 
+## Required: migrate to exclusive KnowledgePlane modes
+
+KnowledgePlane now selects exactly one Recipe backend. This is a breaking
+change for deployments that previously got remote-first reads merely by
+exporting GBrain credentials:
+
+```diff
+  GBRAIN_BASE_URL=https://gbrain.example
+  GBRAIN_TOKEN=...
++ KNOWLEDGE_STORE_MODE=remote
+```
+
+Without the explicit mode, local/default ignores both credentials. Set
+`KNOWLEDGE_STORE_MODE=local` (or leave it unset) for local-only operation.
+`RECIPE_KB_MIRROR_MODE` is obsolete and ignored; remove it.
+
+The implicit local root changed from `$USER_DATA_PATH/kb` (or
+`/workspace/hyperloom/kb`) to `$USER_DATA_PATH/knowledge` (or
+`~/.cache/hyperloom/knowledge`). Upgrade local deployments in this order:
+
+1. Stop every old Hyperloom process that can write the legacy Recipe KB.
+2. Back up the legacy root, including `recipe.json`, `history/`, and
+   `attempts.ndjson`.
+3. Install the new revision while leaving `KNOWLEDGE_LOCAL_ROOT`,
+   `--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` unset for the first start.
+4. Start one new local-mode process. It migrates the Recipe corpus once,
+   excludes live lock/temp files, preserves unrelated data already under the
+   new knowledge root, and writes a durable marker only after success.
+5. Verify warm-start data, then roll out the remaining new processes.
+
+If the destination already contains Recipes or the completion marker,
+migration is intentionally skipped. A migration error while legacy Recipes
+exist fails startup; restore from the backup or correct permissions and retry.
+Deployments that explicitly keep `--local-kb-root` or
+`HYPERLOOM_LOCAL_KB_ROOT` continue using that path and are not migrated.
+
+---
+
 ## Generic upgrade procedure
 
 For any minor or patch upgrade:
@@ -201,8 +239,9 @@ For any minor or patch upgrade:
    verify `manifest.json` and `state.json` are intact, then run
    `python -m hyperloom.inference_optimizer.cli optimize --resume`.
 
-Upgrades **do not** touch `HYPERLOOM_LOCAL_KB_ROOT` or `$USER_DATA_PATH`.
-Your local KB and historical sessions are preserved.
+Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
+sessions. The one-time implicit Recipe-root migration described above is the
+only automatic storage move.
 
 ---
 
