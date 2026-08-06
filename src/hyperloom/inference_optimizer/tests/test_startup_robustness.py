@@ -54,6 +54,12 @@ def test_validate_credentials_passes_openai_key_with_anthropic_url(clean_creds_e
     cli_credentials._validate_credentials()
 
 
+def test_validate_credentials_passes_anthropic_auth_token_only(clean_creds_env):
+    """ANTHROPIC_AUTH_TOKEN alone satisfies the check, as the failure text claims."""
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "anthropic-fake-token")
+    cli_credentials._validate_credentials()
+
+
 def test_validate_credentials_passes_official_anthropic_key_only(clean_creds_env):
     """Official Anthropic SDK default endpoint works without ANTHROPIC_BASE_URL."""
     clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")

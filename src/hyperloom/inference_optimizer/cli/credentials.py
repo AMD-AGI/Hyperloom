@@ -366,7 +366,9 @@ def _validate_credentials() -> None:
     if not has_usable_endpoint:
         missing.append("a usable endpoint/key pair")
     if not has_key:
-        missing.append("an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
+        missing.append(
+            "an API key (OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY)"
+        )
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
     env_status = "present" if env_file.exists() else "not found"
