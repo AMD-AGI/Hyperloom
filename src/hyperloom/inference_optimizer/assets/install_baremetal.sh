@@ -1184,6 +1184,9 @@ resolve_credentials() {
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
     remove_dotenv_var OPENAI_CUSTOM_HEADERS
+    # Legacy gateway key: never read anymore, but purge a stale value so it does
+    # not linger on disk in a migrating .env.
+    remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
   fi
 }

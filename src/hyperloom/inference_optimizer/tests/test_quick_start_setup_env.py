@@ -59,3 +59,12 @@ def test_setup_env_preserves_sed_replacement_metacharacters(tmp_path: Path) -> N
 
     assert r"OPENAI_BASE_URL=https://gateway.example/v1?team=a&env=b|stage" in text
     assert r"TRACELENS_ROOT=/opt/Trace\Lens" in text
+
+
+def test_setup_env_keeps_existing_key_when_env_unset(tmp_path: Path, monkeypatch) -> None:
+    """An unset OPENAI_API_KEY must not blank the value already in .env."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    text = _run_setup_env_script(tmp_path, {"USER_DATA_PATH": "/workspace/hyperloom"})
+
+    assert "OPENAI_API_KEY=ak-placeholder" in text
