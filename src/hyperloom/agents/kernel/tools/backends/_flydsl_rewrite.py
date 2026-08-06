@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -75,7 +75,6 @@ class RewriteCapabilities:
     reason: str
     detail: str = ""
     frameworks: tuple[str, ...] = ()
-    protocol_versions: tuple[int, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -83,7 +82,6 @@ class RewriteCapabilities:
             "reason": self.reason,
             "detail": self.detail,
             "frameworks": list(self.frameworks),
-            "protocol_versions": list(self.protocol_versions),
         }
 
 
@@ -127,7 +125,7 @@ class RewriteDecision:
     reason: str
     detail: str = ""
     spec: RewriteCandidateSpec | None = None
-    capabilities: RewriteCapabilities | None = field(default=None)
+    capabilities: RewriteCapabilities | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -143,8 +141,6 @@ class RewriteDecision:
 
     def with_driver(self, driver: str) -> "RewriteDecision":
         """Return the decision with the generated driver path recorded."""
-        if self.spec is None:
-            return self
         return replace(self, spec=replace(self.spec, driver=driver))
 
 
@@ -183,15 +179,15 @@ def _decode_capability_payload(stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def _int_versions(payload: Mapping[str, Any], plural_key: str, singular_key: str) -> tuple[int, ...]:
-    """Read a version list, tolerating a producer that reports a single value."""
-    raw = payload.get(plural_key)
-    if raw is None:
-        raw = payload.get(singular_key)
-    values = raw if isinstance(raw, (list, tuple)) else [raw]
+def _int_versions(payload: Mapping[str, Any], key: str) -> tuple[int, ...]:
+    """Read one declared version list, dropping entries that are not integers."""
+    raw = payload.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return ()
     versions: list[int] = []
-    for value in values:
-        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+    for value in raw:
+        # ``True`` would otherwise coerce to a version of 1.
+        if isinstance(value, bool):
             continue
         try:
             versions.append(int(value))
@@ -201,6 +197,7 @@ def _int_versions(payload: Mapping[str, Any], plural_key: str, singular_key: str
 
 
 def _capability_frameworks(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read the apply-back frameworks the producer advertises."""
     raw = payload.get("frameworks")
     values = raw if isinstance(raw, (list, tuple)) else []
     frameworks: list[str] = []
@@ -215,21 +212,21 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
     """Check one capability payload against the versions this consumer reads."""
     if not isinstance(payload, dict):
         return RewriteCapabilities(False, "capability_payload_invalid", "capability output is not a JSON object")
-    protocols = _int_versions(payload, "protocol_versions", "protocol_version")
+    protocols = _int_versions(payload, "protocol_versions")
     if PROTOCOL_VERSION not in protocols:
         return RewriteCapabilities(
             False,
             "capability_protocol_unsupported",
             f"producer protocol versions {list(protocols)} exclude {PROTOCOL_VERSION}",
         )
-    schemas = _int_versions(payload, "artifact_schema_versions", "artifact_schema_version")
+    schemas = _int_versions(payload, "artifact_schema_versions")
     if ARTIFACT_SCHEMA_VERSION not in schemas:
         return RewriteCapabilities(
             False,
             "capability_artifact_schema_unsupported",
             f"producer artifact schemas {list(schemas)} exclude {ARTIFACT_SCHEMA_VERSION}",
         )
-    contracts = _int_versions(payload, "driver_contract_versions", "driver_contract_version")
+    contracts = _int_versions(payload, "driver_contract_versions")
     if DRIVER_CONTRACT_VERSION not in contracts:
         return RewriteCapabilities(
             False,
@@ -250,15 +247,10 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
             "capability_frameworks_missing",
             "producer advertises no apply-back frameworks",
         )
-    return RewriteCapabilities(True, "capability_ok", "", frameworks, protocols)
+    return RewriteCapabilities(True, "capability_ok", "", frameworks)
 
 
-def probe_capabilities(
-    *,
-    forge_root: str = "",
-    timeout_s: int = CAPABILITY_PROBE_TIMEOUT_SEC,
-    env: Mapping[str, str] | None = None,
-) -> RewriteCapabilities:
+def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
     """Ask the installed producer what rewrite contract it speaks.
 
     The answer is cached for the process: it describes the installed
@@ -269,8 +261,6 @@ def probe_capabilities(
     Args:
         forge_root: Directory holding ``kernel_agents``, prepended to the child
             ``PYTHONPATH``; empty relies on an installed package.
-        timeout_s: Hard timeout for the probe subprocess.
-        env: Base environment for the child; defaults to ``os.environ``.
 
     Returns:
         The validated :class:`RewriteCapabilities` for this process.
@@ -280,7 +270,7 @@ def probe_capabilities(
     if cached is not None:
         return cached
 
-    child_env = dict(os.environ if env is None else env)
+    child_env = dict(os.environ)
     if forge_root:
         child_env["PYTHONPATH"] = forge_root + os.pathsep + child_env.get("PYTHONPATH", "")
     cmd = [sys.executable, "-m", "kernel_agents.cli", REWRITE_COMMAND, CAPABILITIES_FLAG]
@@ -290,7 +280,7 @@ def probe_capabilities(
             capture_output=True,
             text=True,
             env=child_env,
-            timeout=timeout_s,
+            timeout=CAPABILITY_PROBE_TIMEOUT_SEC,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         capabilities = RewriteCapabilities(
@@ -665,18 +655,12 @@ def _is_multi_node() -> bool:
 
 def _mapped_into_workspace(paths: Sequence[str], workspace: str) -> str:
     """Return the first path that does not resolve inside ``workspace``."""
-    try:
-        root = Path(workspace).resolve()
-    except (OSError, RuntimeError):
-        return workspace
+    root = Path(workspace).resolve()
     for raw in paths:
         path = str(raw or "").strip()
         if not path:
             continue
-        try:
-            resolved = Path(path).resolve()
-        except (OSError, RuntimeError):
-            return path
+        resolved = Path(path).resolve()
         if resolved != root and not resolved.is_relative_to(root):
             return path
     return ""
