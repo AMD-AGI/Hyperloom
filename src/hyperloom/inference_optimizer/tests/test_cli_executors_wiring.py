@@ -169,3 +169,66 @@ def test_register_executors_registers_optional_specialist():
 
     _register_executors(coord, no_kernel=True, specialist_executor=_spec, session_dir=Path("."))
     assert coord.sub.executor_registry["specialist"] is _spec
+
+
+async def _spec_stub(ctx):  # noqa: ANN001, ANN202 - test stub
+    return {}
+
+
+def _fully_wired_registry() -> dict[str, object]:
+    coord = _fake_coordinator()
+    _register_executors(coord, no_kernel=False, specialist_executor=_spec_stub, session_dir=None)
+    return coord.sub.executor_registry
+
+
+def test_every_coordinator_internal_action_has_an_executor():
+    """Producer/consumer binding for the kinds the Coordinator enqueues itself.
+
+    These actions are never proposed by an agent, so a missing executor
+    surfaces only as a silently failed task at runtime. That is how the
+    FRAMEWORK phase came to enqueue ``framework_agent`` against a registry
+    that only knew ``framework``, failing every discovered PR candidate. The
+    expectation is read off the production vocabulary, so adding an action
+    cannot leave this guard behind.
+    """
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_INTERNAL_ACTIONS,
+    )
+
+    registry = _fully_wired_registry()
+
+    missing = sorted(COORDINATOR_INTERNAL_ACTIONS - set(registry))
+    assert not missing, f"Coordinator-internal kinds with no executor: {missing}"
+
+
+def test_no_executor_is_registered_under_an_unknown_action_name():
+    """The reverse direction: a stale key left behind by a rename.
+
+    A registration whose name is not in the action catalogue can never be
+    enqueued, so it is dead weight that also makes the real gap harder to see.
+    """
+    from hyperloom.orchestrator.actions.registry import ActionRegistry
+
+    registry = _fully_wired_registry()
+    catalogue = {meta.name for meta in ActionRegistry().load().all()}
+
+    phantom = sorted(set(registry) - catalogue)
+    assert not phantom, f"executor keys with no actions/_meta/*.yaml: {phantom}"
+
+
+def test_conditional_registrations_are_exactly_the_documented_exceptions():
+    """Pin which kinds may legitimately be absent, so the exception set cannot drift.
+
+    Only two conditions remove an executor: ``--no-kernel`` drops the
+    kernel-owned stubs, and a zero research-lane capacity drops the
+    specialist. Anything else disappearing is a wiring bug.
+    """
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        KERNEL_AGENT_OWNED_ACTIONS,
+    )
+
+    minimal = _fake_coordinator()
+    _register_executors(minimal, no_kernel=True, specialist_executor=None, session_dir=None)
+
+    optional = set(_fully_wired_registry()) - set(minimal.sub.executor_registry)
+    assert optional == set(KERNEL_AGENT_OWNED_ACTIONS) | {"specialist"}

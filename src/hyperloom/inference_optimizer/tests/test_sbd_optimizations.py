@@ -324,6 +324,44 @@ def test_direct_framework_action_ignores_delayed_completion_phase():
     assert result["entries"][0]["source_method"] == "action_family"
 
 
+def test_framework_stack_label_is_credited_by_both_collectors():
+    """Both readers must credit the exact label the promote path stamps.
+
+    The fixture takes its label from the writer's own constant instead of
+    spelling it out, so renaming one side without the other fails here rather
+    than silently routing FRAMEWORK gain into ``unattributed``. The entry
+    deliberately carries no ``source_phase``: that field lets the optimizations
+    collector resolve the owner without consulting the action label at all, and
+    would therefore hide exactly the mismatch this test exists to catch.
+    """
+    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
+
+    state = {
+        "session_id": "framework-label-contract",
+        "baseline_tput": 100.0,
+        "cumulative_gain_validated": 10.0,
+        "cumulative_gain_validated_stack_len": 1,
+        "optimization_stack": [
+            {
+                "action": _FRAMEWORK_STACK_ACTION,
+                "variant_name": "https://example.com/pull/1",
+                "tput": 110.0,
+                "ts": "1970-01-01T00:00:10+00:00",
+            },
+        ],
+        "gain_per_stack_entry": [10.0],
+    }
+
+    attribution = collect_attribution(state, [], [], [])
+    result = collect_optimizations(state, attribution, [], [], [])
+
+    assert attribution["source_breakdown"]["framework_pct_of_total"] == 10.0
+    assert attribution["source_breakdown"]["unattributed_pct_of_total"] == 0.0
+    assert attribution["phase_breakdown"]["framework"]["total_gain_pct"] == 10.0
+    assert result["entries"][0]["source"] == "framework_agent"
+    assert result["entries"][0]["source_method"] == "action_family"
+
+
 def test_integrate_patch_projects_source_manifest_and_changed_files():
     state = {
         "session_id": "integrate-patch-artifacts",
