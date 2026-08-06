@@ -36,6 +36,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   suppresses a pointless re-run. The verdict is matched tolerantly and only honoured
   when the manifest reports no KEEP, so it can never discard a validated fusion.
 
+- **vLLM roofline runs no longer launch an unbounded torch profiler**: the
+  profile path injects `--profiler-config.delay_iterations/max_iterations` into
+  `EXTRA_VLLM_ARGS`, but three later steps could each drop them — a candidate
+  carrying `args_mode="replace"` (which `writeback` sets automatically as soon as
+  a KEEP needs `remove_args`) overwrote the whole flag string, `extra_envs` could
+  override it outright, and `remove_args` strips flags by name — taking the
+  `--profiler-config.ignore_frontend True` from the profile YAML with them. vLLM
+  reads a missing `max_iterations` as "profile until `stop_profile`", so the
+  worker accumulated every profiler event in host anonymous memory — measured at
+  60 MiB/s with the production option set — until the cgroup OOM-killer took the
+  engine or worker process out mid-roofline, at 107–137 GiB RSS. Because
+  `args_mode` is sticky on `current_best`, one such KEEP turned *every* later
+  roofline in that session into an OOM candidate.
+
+  `materialize_config_with_envs` now re-asserts the profiler flags as the LAST
+  write to `EXTRA_VLLM_ARGS` — after the `extra_server_args`/`extra_envs` merges
+  and after `remove_args`/`unset_envs` — restoring only the flags that went
+  missing, warning about exactly which ones, and re-running the shell-safety
+  guard on the result. `ignore_frontend` is stated alongside the bounds, since the
+  AsyncLLM-side profiler tracks no iterations and would otherwise capture the
+  entire `start_profile`..`stop_profile` range. Candidate flags still win for
+  everything else, and the append path is unchanged apart from no longer relying
+  on the YAML to carry `ignore_frontend`.
+
+  The re-assertion checks flag VALUES, not just flag names, for the two flags that
+  decide whether the capture is bounded at all: `max_iterations` has to parse as a
+  positive integer within the computed serialization-safe cap (vLLM reads 0 as "no
+  limit"), and `ignore_frontend` has to be true. A name-only check accepted
+  `--profiler-config.max_iterations 0` and then logged that it had bounded the
+  profiler — worse than not guarding, since the warning sends the next
+  investigation the wrong way. The injected flags also keep overriding whatever the
+  YAML pins, via the repeated-flag last-wins vLLM's argparse already applies: a
+  hand-written `max_iterations 100000` is unbounded in practice and must not
+  displace the computed budget (`HYPERLOOM_PROFILE_MAX_ITERS` is the override
+  channel for that), and a stale `capture_torch_profiler_dir` must not send this
+  run's traces to a previous session's directory.
+
+  Scope: **vLLM only**. SGLang bounds its capture through `start_step`/`num_steps`
+  inside `PROFILE_EXTRA_BODY`, which is written before the same `extra_envs`
+  merge and is therefore droppable the same way, but it is not re-asserted here —
+  whether a non-positive `num_steps` means "unbounded" or "no capture" needs a
+  SGLang-side answer this layer does not have, and every OOM observed so far was
+  vLLM. The exposure is called out in a comment at that write site.
+
 ### Removed
 
 - **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
