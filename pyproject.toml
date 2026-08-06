@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hyperloom-inference_optimizer"
 version = "1.0.0a3"
-description = "Inference Optimizer — single-mode 4-agent (Orchestration/Kernel/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms."
+description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 639 SPDX expression. The former ``{ text = "MIT" }`` table is deprecated
