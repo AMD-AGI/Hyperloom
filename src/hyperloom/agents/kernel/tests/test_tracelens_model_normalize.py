@@ -36,7 +36,7 @@ def tl_module():
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_env(monkeypatch):
-    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
+    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -46,6 +46,16 @@ def _use_safe_gateway(monkeypatch):
 
 def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
     _use_safe_gateway(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+
+def test_gateway_detected_via_llm_gateway_key(tl_module, monkeypatch):
+    """A gateway whose hostname carries no protocol marker is still detected via
+    LLM_GATEWAY_KEY, so the dot-form model id is normalized (the strict gateway
+    rejects `Claude-Opus-4.7`)."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://internal.example.invalid/api/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-test")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
