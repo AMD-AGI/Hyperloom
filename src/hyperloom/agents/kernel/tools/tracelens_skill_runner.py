@@ -1334,7 +1334,9 @@ def _row_to_candidate(
     args = record.get("args", "").replace("<br>", "\n").strip()
     shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
     kernel_path = record.get("kernel path", "").strip()
-    if kernel_path in {"-", "—"}:
+    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens'
+    # "Not found" cannot survive as a fake source_file (see the constant).
+    if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         kernel_path = ""
     # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
     # list and use the first for matching. Placeholders normalize to "".
@@ -1559,6 +1561,11 @@ _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing.
+# ``not found`` is TraceLens' own sentinel for an unresolved launcher: it lands
+# in ``other_metrics.json`` whenever ``_find_entry_point`` cannot locate the op
+# in the call stack (every Synthetic Op), and the report agent copies it
+# verbatim into the Kernel Path cell. Letting it through makes it a truthy
+# ``source_file`` that silently skips the grep fallback downstream.
 _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
     {
         "",
@@ -1567,6 +1574,9 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
         "–",
         "n/a",
         "none",
+        "not found",
+        "not_found",
+        "notfound",
         "null",
         "tbd",
         "unknown",

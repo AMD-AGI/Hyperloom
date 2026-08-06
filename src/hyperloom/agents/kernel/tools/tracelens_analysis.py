@@ -14,6 +14,7 @@ import asyncio
 import csv
 import functools
 import gzip
+import importlib.util
 import json
 import os
 import re
@@ -46,6 +47,7 @@ except Exception:
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from tracelens_skill_runner import (
+    _LAUNCHER_PATH_PLACEHOLDERS,
     _parse_launcher_path,
     _resolve_launcher_to_abs_source,
     aggregate_by_source_function,
@@ -2108,6 +2110,38 @@ def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
     return _rank_paths(definers) if definers else _rank_paths(hits)
 
 
+# Bare HIP/CUDA launch APIs. TraceLens emits these as standalone rows when it
+# aggregates launches it could not attribute to a device kernel, but they are
+# runtime entry points, not kernels. Grepping them matches wherever the API name
+# merely appears -- e.g. aiter's hipify name-mapping table, which then gets
+# routed to a backend as if it were rewritable kernel source.
+_RUNTIME_API_NAMES: frozenset[str] = frozenset(
+    {
+        "cudagraphlaunch",
+        "cudalaunchcooperativekernel",
+        "cudalaunchkernel",
+        "cudamodulelaunchkernel",
+        "hipextlaunchkernel",
+        "hipgraphlaunch",
+        "hiplaunchcooperativekernel",
+        "hiplaunchkernel",
+        "hipmodulelaunchkernel",
+    }
+)
+
+
+def is_runtime_api_name(name: str) -> bool:
+    """Return whether ``name`` is a bare HIP/CUDA launch API rather than a kernel.
+
+    Args:
+        name (str): Kernel symbol/name, possibly profiler-wrapped.
+
+    Returns:
+        bool: ``True`` when the normalised name is a bare launch API.
+    """
+    return _normalize_profiler_op_name(name).strip().lower() in _RUNTIME_API_NAMES
+
+
 def locate_source_via_grep(name: str) -> str:
     """Locate a kernel source file by grepping known repos.
 
@@ -2119,6 +2153,10 @@ def locate_source_via_grep(name: str) -> str:
     Returns:
         str: The best-ranked matching source path, or ``""`` when none.
     """
+    # A bare launch API has no source of its own; grepping it only yields
+    # incidental mentions (see _RUNTIME_API_NAMES).
+    if is_runtime_api_name(name):
+        return ""
     tried: set[str] = set()
     # Primary pass: keyword extraction + ranking.
     for keyword in _candidate_keywords(name):
@@ -2144,6 +2182,50 @@ def locate_source_via_grep(name: str) -> str:
         if hits:
             return str(_prefer_symbol_definition(keyword, hits)[0])
     return ""
+
+
+def collect_source_candidates_via_grep(name: str, limit: int = 8) -> list[str]:
+    """Shortlist every plausible source for ``name``, ranked, without deciding.
+
+    Where :func:`locate_source_via_grep` commits to the top hit of the first
+    keyword that matches, this widens the net -- every keyword and every trailing
+    sub-window -- and returns the union. It feeds the LLM tier, which needs
+    several options to choose between; on its own it decides nothing.
+
+    Args:
+        name (str): Kernel symbol/name to locate.
+        limit (int): Maximum paths to return.
+
+    Returns:
+        list[str]: Ranked, deduplicated candidate paths (possibly empty).
+    """
+    if is_runtime_api_name(name):
+        return []
+    hits: list[Path] = []
+    seen_keywords: set[str] = set()
+    for keyword in [*_candidate_keywords(name), *_compound_subwindow_keywords(name)]:
+        if not keyword or keyword in seen_keywords:
+            continue
+        seen_keywords.add(keyword)
+        for root in KNOWN_SEARCH_ROOTS:
+            hits.extend(_grep_for_keyword(keyword, Path(root)))
+    if not hits:
+        return []
+    ordered: list[str] = []
+    seen_paths: set[str] = set()
+    # Definition sites first: a file that merely mentions the symbol is the
+    # exact confusion the LLM tier is meant to resolve, not inherit.
+    primary = _candidate_keywords(name)
+    ranked = _prefer_symbol_definition(primary[0], hits) if primary else _rank_paths(hits)
+    for path in ranked:
+        text = str(path)
+        if text in seen_paths:
+            continue
+        seen_paths.add(text)
+        ordered.append(text)
+        if len(ordered) >= max(1, limit):
+            break
+    return ordered
 
 
 def find_repo_root(source_file: str) -> str:
@@ -2775,7 +2857,7 @@ def analyze_trace_files(trace_files: list[Path], top_k: int) -> list[dict[str, A
 
     candidates = sorted(aggregates.values(), key=lambda x: x["duration_us"], reverse=True)
     top = candidates[:top_k]
-    return _finalize_candidates(top, total_dur=total_dur)
+    return _finalize_candidates(top, total_dur=total_dur, trace_files=trace_files)
 
 
 def load_op_category_map(
@@ -3610,8 +3692,47 @@ def recover_other_bucket_candidates(
     return out
 
 
+# A resolved source_file always carries a source extension, whether absolute
+# ("/sgl-workspace/.../fused_moe.py"), package-relative ("sgl_kernel/moe.py"), or
+# TraceLens' frame form ("path.py(124): fn"). Producer placeholders never do --
+# "Not found", "N/A", "AITER (vendor)", "unknown".
+_SOURCE_EXT_RE = re.compile(
+    r"\.(?:py|pyx|cu|cuh|hip|cpp|cxx|cc|hpp|hh|h|s|asm|jinja)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_source_path(value: str) -> bool:
+    """Return whether ``value`` has the shape of a source-file path.
+
+    Args:
+        value (str): Candidate ``source_file`` value.
+
+    Returns:
+        bool: ``True`` when it carries a path separator and a source extension.
+    """
+    text = (value or "").strip()
+    return "/" in text and bool(_SOURCE_EXT_RE.search(text))
+
+
 def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] | None) -> None:
     """Stamp routing, backend, and category metadata onto a finalized candidate."""
+    # Defensive gate against upstream sentinels. A real source_file always looks
+    # like a path (absolute, or package-relative such as "sgl_kernel/moe.py"); a
+    # bare word is a placeholder the producer used for "unresolved". Admitting
+    # one is how classify_patchability ends up reporting the nonsensical "source
+    # not under a reusable framework root: Not found". Keyed on shape rather than
+    # on-disk presence so an analysis host that lacks the serving container's
+    # filesystem still classifies normally.
+    source_file = str(item.get("source_file") or "").strip()
+    if source_file and not looks_like_source_path(source_file):
+        item["source_file_rejected"] = source_file
+        item["source_file"] = ""
+        item["source_resolution_method"] = "rejected_non_path_sentinel"
+    elif source_file and not os.path.isfile(source_file):
+        # Path-shaped but absent: keep it (the resolution may target the serving
+        # container) and leave a breadcrumb for triage.
+        item["source_file_missing_on_disk"] = True
     reusable, skip_reason = classify_patchability(item)
     item["reusable_native_kernel"] = reusable
     item["skip_reason"] = skip_reason
@@ -3630,12 +3751,150 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
+#: A candidate below this GPU share is not worth an LLM round-trip.
+_LLM_FALLBACK_MIN_GPU_PCT = 5.0
+
+
+def _apply_llm_source_fallback(item: dict[str, Any]) -> None:
+    """Last-resort LLM pick for a candidate every deterministic tier missed.
+
+    No-op unless the operator enabled the tier and the candidate is hot enough to
+    justify the call. Mutates ``item`` in place only on an accepted answer.
+    """
+    try:
+        from _llm_source_fallback import llm_fallback_enabled, select_source_via_llm  # noqa: PLC0415
+
+        if not llm_fallback_enabled():
+            return
+        try:
+            gpu_pct = float(item.get("gpu_pct") or 0.0)
+        except (TypeError, ValueError):
+            gpu_pct = 0.0
+        if gpu_pct < _LLM_FALLBACK_MIN_GPU_PCT:
+            return
+        name = str(item.get("name") or "")
+        shortlist = collect_source_candidates_via_grep(name)
+        if not shortlist:
+            return
+        picked, confidence, reason = select_source_via_llm(
+            name,
+            shortlist,
+            framework_roots=tuple(KNOWN_SEARCH_ROOTS),
+        )
+        if picked:
+            item["source_file"] = picked
+            item["source_resolution_method"] = "llm_fallback"
+            item["source_resolution_confidence"] = confidence
+            item["source_resolution_reason"] = reason
+    except Exception:  # noqa: BLE001 - advisory tier, never breaks finalization
+        return
+
+
+@functools.lru_cache(maxsize=64)
+def _package_parent_dir(package: str) -> str:
+    """Directory holding ``package``'s own directory, resolved at runtime.
+
+    Uses ``find_spec`` so the package is located without importing it (the same
+    approach ``_bypass_source_resolver`` takes for aiter). Returns ``""`` when
+    the name is not a package on this interpreter's path.
+    """
+    if not package or not package.isidentifier():
+        return ""
+    try:
+        spec = importlib.util.find_spec(package)
+    except (AttributeError, ImportError, ValueError):
+        return ""
+    if spec is None:
+        return ""
+    for location in list(getattr(spec, "submodule_search_locations", None) or []):
+        parent = os.path.dirname(str(location).rstrip("/"))
+        if parent:
+            return parent
+    origin = str(getattr(spec, "origin", "") or "")
+    return os.path.dirname(os.path.dirname(origin)) if origin else ""
+
+
+def absolutize_launcher_path(path: str) -> str:
+    """Best-effort absolute path for a trace-relative launcher frame.
+
+    torch profiler records a frame path relative to the ``sys.path`` entry the
+    module was imported from (``aiter/dist/x.py``), whereas patchability keys on
+    an absolute framework root. The relative path already starts with the package
+    name, so it joins against each package's *parent*.
+
+    Args:
+        path (str): Launcher path from the trace, absolute or relative.
+
+    Returns:
+        str: The absolutized path when one exists on disk, else ``path``.
+    """
+    if not path or os.path.isabs(path):
+        return path
+    # The relative path starts with the package name ("vllm/models/..."), so
+    # locate that package where it actually lives. A pinned list cannot do this:
+    # the same package sits under /sgl-workspace in the serving image and under
+    # dist-packages on a wheel install, and the Python version moves too.
+    parent = _package_parent_dir(path.split("/", 1)[0])
+    if parent:
+        candidate = os.path.join(parent, path)
+        if os.path.isfile(candidate):
+            return candidate
+    # Fall back to the pinned checkout layouts (editable installs whose package
+    # dir is not importable from this process).
+    for inner_root in _PACKAGE_INNER_ROOTS:
+        candidate = os.path.join(os.path.dirname(inner_root), path)
+        if os.path.isfile(candidate):
+            return candidate
+    return path
+
+
+def _trace_launcher_key(item: dict[str, Any]) -> str:
+    """Device kernel symbol to look this candidate up by in the trace."""
+    name = str(item.get("device_kernel_name") or "").strip()
+    if not name:
+        name = _normalize_profiler_op_name(str(item.get("name") or ""))
+    return name.strip()
+
+
+def _resolve_trace_launchers(
+    candidates: list[dict[str, Any]],
+    trace_files: list[Path] | None,
+) -> dict[str, Any]:
+    """Batch-resolve launcher frames for candidates that still lack a source.
+
+    One trace scan for the whole candidate list; returns ``{}`` when there is
+    nothing to look up or the trace cannot be read, so the grep fallback stays
+    in charge.
+    """
+    if not trace_files:
+        return {}
+    wanted = {
+        key
+        for item in candidates
+        # Shape, not truthiness: an upstream placeholder ("AITER (vendor)",
+        # "Not found") is a non-empty string, and treating it as a resolved
+        # source would skip the very candidates this resolver exists for.
+        if not looks_like_source_path(str(item.get("source_file") or ""))
+        and (key := _trace_launcher_key(item))
+        and not is_runtime_api_name(key)
+    }
+    if not wanted:
+        return {}
+    try:
+        from _trace_launcher_resolver import resolve_launchers_from_trace  # noqa: PLC0415
+
+        return resolve_launchers_from_trace([Path(p) for p in trace_files], wanted)
+    except Exception:  # noqa: BLE001 - advisory resolution, never fatal
+        return {}
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
     total_dur: float | None = None,
     perf_report_csv_dir: Path | str | None = None,
     framework: str | None = None,
+    trace_files: list[Path] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply shared post-processing to parsed candidate rows.
 
@@ -3653,6 +3912,9 @@ def _finalize_candidates(
             dual-framework image routes to the correct container's source. Only
             ``vllm``/``sglang`` steer routing; other values fall back to on-disk
             presence then default ordering.
+        trace_files: Optional raw trace files. When given, a kernel TraceLens
+            could not attribute is resolved to its Python launcher frame
+            directly from the trace, ahead of the name-grep fallback.
 
     Returns:
         The finalized candidate list (the same ``top`` object).
@@ -3662,6 +3924,16 @@ def _finalize_candidates(
     # Dict-first: resolve each op to its editable .cu and expand composite
     # fan-out into one candidate per sub-kernel before finalizing.
     top = _expand_op_fanout(top, framework=framework, op_dominant_kernel=op_dom_map)
+    # Drop upstream placeholders up front. They are non-empty strings, so every
+    # later "did we already resolve this?" check would read them as a resolved
+    # source and skip the resolution tiers entirely.
+    for item in top:
+        if isinstance(item, dict):
+            raw_source = str(item.get("source_file") or "").strip()
+            if raw_source and not looks_like_source_path(raw_source):
+                item["source_file_rejected"] = raw_source
+                item["source_file"] = ""
+    trace_launchers = _resolve_trace_launchers(top, trace_files)
     sum_dur = total_dur if total_dur is not None else sum(it.get("duration_us", 0.0) for it in top)
     sum_dur = sum_dur or 1.0
     # Recover the fused-MoE expert kernel's operand shapes (its trace event carries
@@ -3755,8 +4027,20 @@ def _finalize_candidates(
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
         if res is None or res.status == "unresolved":
+            # Trace-derived launcher first: it carries a line number and cannot
+            # produce grep's false positives (a test file or CPU implementation
+            # that merely mentions the symbol).
+            if not item.get("source_file"):
+                frame = trace_launchers.get(_trace_launcher_key(item))
+                if frame is not None:
+                    item["source_file"] = absolutize_launcher_path(frame.source_file)
+                    item["source_line"] = frame.line
+                    item["source_function"] = frame.function
+                    item["source_resolution_method"] = "trace_python_stack"
             if not item.get("source_file"):
                 item["source_file"] = locate_source_via_grep(item["name"])
+            if not item.get("source_file"):
+                _apply_llm_source_fallback(item)
             # Promote a tiny pybind shim TU to the real device code.
             item["kernel_repo"] = find_repo_root(item.get("source_file", ""))
             item["source_file"] = upgrade_pybind_shim_source(
@@ -4349,8 +4633,8 @@ def deterministic_extract_hot_kernels(
             if not isinstance(eff_pct, (int, float)):
                 eff_pct = 0
 
-            launcher_path = full_op.get("launcher_path", "")
-            if launcher_path in ("\u2014", "-", ""):
+            launcher_path = str(full_op.get("launcher_path", "") or "")
+            if launcher_path.strip().lower() in _LAUNCHER_PATH_PLACEHOLDERS:
                 launcher_path = ""
             source_file = _resolve_source_file_from_kernel_path(launcher_path)
 
@@ -4402,8 +4686,8 @@ def deterministic_extract_hot_kernels(
         # ``launcher_path`` only points at the calling Python wrapper, so it must
         # not be used as the editable source.
         op_name = op.get("name", "") or op.get("operation", "")
-        launcher_path = op.get("launcher_path", "")
-        if launcher_path in ("\u2014", "-"):
+        launcher_path = str(op.get("launcher_path", "") or "")
+        if launcher_path.strip().lower() in _LAUNCHER_PATH_PLACEHOLDERS:
             launcher_path = ""
 
         # Resolve the symbol to its definition site (never falling back to the
@@ -5275,6 +5559,12 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         ("reduce_scatter", "reducescatter"),
         ("all_to_all", "alltoall"),
         ("broadcast",),
+        # aiter's custom all-reduce kernels are named cross_device_reduce_*
+        # (1stage / 2stage / half_butterfly). They implement all-reduce
+        # semantics, so they must be matched before the bare "reduce" tag
+        # below, which maps to a rank-0-only dist.reduce reference and would
+        # make the parity gate meaningless on every other rank.
+        ("cross_device_reduce",),
         ("reduce",),
     )
     _OPMAP = {
@@ -6390,6 +6680,7 @@ def main() -> int:
                             total_dur=total_dur or None,
                             perf_report_csv_dir=(tracelens_dir / "perf_report_csvs"),
                             framework=args.framework or None,
+                            trace_files=trace_files,
                         )
                         append_log(
                             log_path,
@@ -6526,6 +6817,7 @@ def main() -> int:
                             total_dur=total_dur or None,
                             perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
                             framework=args.framework or None,
+                            trace_files=trace_files,
                         )
                         append_log(
                             log_path,
