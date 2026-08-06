@@ -514,7 +514,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
     # The candidate's own flags must still take effect, JSON value unmangled.
     assert "--no-enable-prefix-caching" in extra, extra
     assert '--compilation-config {"cudagraph_capture_sizes":[17,34,1088]}' in extra, extra
-    assert "lost the torch-profiler bounds" in caplog.text
+    assert "lost torch-profiler flags" in caplog.text
 
 
 def test_materialize_profile_bounds_survive_an_extra_envs_override(
@@ -575,6 +575,88 @@ def test_materialize_profile_adds_ignore_frontend_when_yaml_omits_it(
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.ignore_frontend True" in extra, extra
+
+
+def test_materialize_profile_bounds_outlive_remove_args(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """``remove_args`` runs after the merges, so the re-assertion has to be the last write.
+
+    The two arrive together in practice: ``args_mode="replace"`` exists precisely
+    because the KEEP carried ``remove_args`` (profile.py copies both off
+    ``base_*``), so a restore that lands before ``remove_server_args`` can be
+    undone by it -- while still logging that it restored the bounds.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    caplog.set_level("WARNING")
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--no-enable-prefix-caching",
+        args_mode="replace",
+        remove_args=["--profiler-config.max_iterations"],
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "lost torch-profiler flags" in caplog.text
+
+
+def test_materialize_profile_restores_max_iterations_even_when_delay_survives(
+    tmp_path,
+    monkeypatch,
+):
+    """``delay_iterations`` is a bad sentinel: it is ``max_iterations`` that bounds the capture.
+
+    A candidate that happens to carry a delay flag used to satisfy the guard and
+    leave the run with no cap at all -- exactly the unbounded profiler this is
+    meant to prevent.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_server_args="--profiler-config.delay_iterations 0",
+        args_mode="replace",
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--profiler-config.ignore_frontend True" in extra, extra
+    assert "--profiler-config.capture_torch_profiler_dir " in extra, extra
+    # The candidate's own delay value is left alone; only the missing flags return.
+    assert extra.count("--profiler-config.delay_iterations") == 1, extra
+
+
+def test_materialize_profile_restore_does_not_duplicate_surviving_flags(
+    tmp_path,
+    monkeypatch,
+):
+    """The restore re-states only what is missing; vLLM warns on duplicate keys."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={
+            "EXTRA_VLLM_ARGS": "--profiler-config.ignore_frontend True --quantization fp8",
+        },
+    )
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.ignore_frontend True") == 1, extra
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert "--quantization fp8" in extra, extra
 
 
 def test_materialize_profile_window_sglang_skill_formula(

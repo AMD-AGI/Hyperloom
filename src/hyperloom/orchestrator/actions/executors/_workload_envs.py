@@ -671,9 +671,11 @@ def materialize_config_with_envs(
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
     profile_num_prompts: int | None = None
-    # Remembered so the per-task ``extra_server_args``/``extra_envs`` merges below
-    # cannot leave the profiler unbounded; see the re-assertion after those merges.
-    pending_vllm_profiler_args: str = ""
+    # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
+    # this function can restore exactly the profiler flags that some later step
+    # dropped, without re-stating the ones that survived. See that block for why a
+    # dropped ``max_iterations`` is an OOM and not a cosmetic problem.
+    pending_vllm_profiler_flags: list[tuple[str, str]] = []
     if is_profile and not _is_scriptable_profile:
         try:
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
@@ -807,26 +809,29 @@ def materialize_config_with_envs(
             profile_num_prompts = None
         elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
-            profiler_args_parts = [
-                f"--profiler-config.delay_iterations {delay_iters}",
-                f"--profiler-config.max_iterations {max_iters}",
+            profiler_flags = [
+                ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
+                ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
                 # TraceLens-patched vLLM exposes capture_torch_profiler_dir +
                 # detailed_trace_annotation; unpatched vLLM rejects them.
                 capture_dir = output_dir / "capture_traces"
-                profiler_args_parts.append(f"--profiler-config.capture_torch_profiler_dir {capture_dir}")
-                profiler_args_parts.append("--profiler-config.detailed_trace_annotation True")
+                profiler_flags.append(
+                    (
+                        "capture_torch_profiler_dir",
+                        f"--profiler-config.capture_torch_profiler_dir {capture_dir}",
+                    )
+                )
+                profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
             # vLLM's AsyncLLM-side profiler tracks no iterations and captures the
             # whole start_profile..stop_profile range, so it has to stay off
             # wherever we bound the worker-side one. The YAML normally carries the
-            # flag; the restore path below has to re-state it because a replacing
-            # candidate wipes the YAML value too.
-            _ignore_frontend = "--profiler-config.ignore_frontend True"
-            pending_vllm_profiler_args = " ".join([*profiler_args_parts, _ignore_frontend])
-            if "ignore_frontend" not in existing_vllm_args:
-                profiler_args_parts.append(_ignore_frontend)
-            profiler_args = " ".join(profiler_args_parts)
+            # flag, but a replacing candidate wipes the YAML value too, so it
+            # belongs in the set the re-assertion can restore.
+            profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
+            pending_vllm_profiler_flags = profiler_flags
+            profiler_args = " ".join(flag for sentinel, flag in profiler_flags if sentinel not in existing_vllm_args)
             if "delay_iterations" not in existing_vllm_args:
                 envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
         else:
@@ -874,6 +879,14 @@ def materialize_config_with_envs(
                         )
             extra_body["shape_discovery"] = _shape_disc
             extra_body.setdefault("roofline_annotations", True)
+            # NOTE: this write happens before the per-task ``extra_envs`` merge, so
+            # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
+            # start_step/num_steps the way ``args_mode="replace"`` used to drop
+            # vLLM's --profiler-config bounds. The vLLM side is re-asserted at the
+            # end of this function; SGLang is NOT, because deciding whether a
+            # non-positive num_steps means "unbounded" or "no capture" needs a
+            # SGLang-side answer this layer does not have. Every OOM observed so
+            # far was vLLM.
             envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
             if tracelens_patch_ok and _shape_disc:
                 # TraceLens-patched SGLang exposes
@@ -952,29 +965,6 @@ def materialize_config_with_envs(
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
-    if pending_vllm_profiler_args and framework_env == "EXTRA_VLLM_ARGS":
-        # A candidate carrying ``args_mode="replace"`` (or an ``extra_envs``
-        # override of EXTRA_VLLM_ARGS) overwrites the whole flag string, taking
-        # the profiler bounds injected above with it. vLLM reads a missing
-        # max_iterations as "profile forever" and accumulates every event in host
-        # RAM at ~60 MiB/s until the cgroup OOM-killer takes the engine out, so
-        # restore the bounds rather than launching an unbounded profiler.
-        from ._grid_runner import merge_server_args
-
-        _profile_args = str(envs.get(framework_env, "")).strip()
-        if "delay_iterations" not in _profile_args:
-            log.warning(
-                "profile server args lost the torch-profiler bounds during the "
-                "per-task merge (replace_args=%s); restoring %r to keep the "
-                "profiler from running unbounded.",
-                bool(replace_args),
-                pending_vllm_profiler_args,
-            )
-            envs[framework_env] = (
-                merge_server_args(_profile_args, pending_vllm_profiler_args)
-                if _profile_args
-                else pending_vllm_profiler_args
-            )
     # Final dedup after reference/server_args merges: collapse repeated
     # vLLM/atom single-value flags to last-wins so recipe/variant values
     # override earlier ones (no-op for sglang).
@@ -1238,6 +1228,33 @@ def materialize_config_with_envs(
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
             envs[str(key)] = str(extra_envs[key])
+    if pending_vllm_profiler_flags and framework_env == "EXTRA_VLLM_ARGS":
+        # The profile path's iteration bounds have to be the LAST word on this env,
+        # because three separate steps above can drop them: a candidate carrying
+        # ``args_mode="replace"`` (which writeback sets as soon as a KEEP needs
+        # ``remove_args``) overwrites the whole flag string, ``extra_envs`` can
+        # override it outright, and ``remove_args`` itself strips flags by name.
+        # vLLM reads a missing ``max_iterations`` as "profile until stop_profile",
+        # and the worker then accumulates every profiler event in host RAM at
+        # ~60 MiB/s until the cgroup OOM-killer takes it out mid-roofline. No
+        # exploration result is worth that, so the bounds win over all three.
+        from ._grid_runner import merge_server_args
+
+        profile_args = str(envs.get(framework_env, "")).strip()
+        restored = [flag for sentinel, flag in pending_vllm_profiler_flags if sentinel not in profile_args]
+        if restored:
+            log.warning(
+                "profile server args lost torch-profiler flags %r (replace_args=%s); "
+                "restoring them so the profiler cannot run unbounded.",
+                restored,
+                bool(replace_args),
+            )
+            merged = " ".join(restored)
+            if profile_args:
+                merged = merge_server_args(profile_args, merged)
+            # _finalize_framework_server_args already ran, so re-apply the sink-side
+            # guard it ends with rather than shipping an unvalidated string.
+            envs[framework_env] = validate_server_args_shell_safe(merged)
     filtered_envs = filter_benchmark_env_mapping(envs)
     dropped_credentials = sorted(set(envs) - set(filtered_envs))
     if dropped_credentials:
