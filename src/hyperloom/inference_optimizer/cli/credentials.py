@@ -43,6 +43,19 @@ _CLAUDE_ALLOWED_MODELS = (
 # the live ladder is _CLAUDE_ALLOWED_MODELS order.
 _CLAUDE_FALLBACK_MODEL = _CLAUDE_ALLOWED_MODELS[1]
 
+# Codex-side counterpart, also ordered best-first. This is a fallback ladder
+# only, never a gate: the Codex smoke test stays WARN-only, so an id outside
+# this tuple is left untouched and merely reported. It exists because the
+# default Codex model is as new as the default Claude one, and without a ladder
+# a gateway that lags behind would only fail on the first Codex turn.
+_CODEX_PREFERRED_MODEL = "gpt-5.6-sol"
+
+_CODEX_FALLBACK_MODELS = (
+    _CODEX_PREFERRED_MODEL,
+    "gpt-5.5",
+    "gpt-5.4",
+)
+
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
 # the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)

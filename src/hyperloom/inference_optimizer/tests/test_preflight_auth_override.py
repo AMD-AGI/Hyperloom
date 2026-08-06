@@ -1377,6 +1377,43 @@ def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
     assert "WARNING" not in out
 
 
+def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
+    """A gateway that predates the default Codex model degrades at preflight.
+
+    The Codex side is WARN-only, so without a ladder this would sail past
+    preflight and fail on the first Codex turn instead.
+    """
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.5"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "falling back" in out
+
+
+def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
+    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.4"
+
+
+def test_smoke_test_codex_model_leaves_custom_ids_alone(monkeypatch, capsys):
+    """An operator-chosen id outside the ladder is reported, never rewritten."""
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
+    args = _make_args(codex_model="my-org/custom-gpt", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "my-org/custom-gpt"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    # The warning names known-good ids so the operator has something to pass.
+    assert "gpt-5.6-sol" in out
+
+
 def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     """OpenAI-side catalog unreachable → WARN-only (does not block startup)."""
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: None)

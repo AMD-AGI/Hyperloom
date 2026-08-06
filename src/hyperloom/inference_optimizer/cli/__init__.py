@@ -61,6 +61,8 @@ from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
+    _CODEX_PREFERRED_MODEL as _CODEX_PREFERRED_MODEL,
+    _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
@@ -844,15 +846,22 @@ def _smoke_test_codex_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str] | None,
 ) -> None:
-    """WARN-only catalog check for ``--codex-model`` (no hard gate); flags typos before Coordinator starts.
+    """WARN-only catalog check for ``--codex-model``; flags typos and steps down the ladder before Coordinator starts.
 
     Probes the OpenAI-side catalog independently of the Claude check: in a
     split-entrypoint deploy the Claude catalog lives on the Anthropic gateway
     and would not list ``gpt-*``, so reusing it would always false-warn.
 
+    Unlike the Claude gate this never aborts, but it mirrors its ladder: a
+    ``_CODEX_FALLBACK_MODELS`` id the gateway does not serve is rewritten to the
+    newest one it does, so a gateway lagging behind the default degrades at
+    preflight instead of on the first Codex turn. Ids outside that tuple are the
+    operator's own choice and are only reported.
+
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads
-            ``codex_model`` / ``critic_backend``).
+            ``codex_model`` / ``critic_backend``); ``codex_model`` may be
+            mutated to a fallback.
         resolved_urls (tuple[str, str] | None): ``(anthropic_url, openai_url)``
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
@@ -887,11 +896,25 @@ def _smoke_test_codex_model(
     if chosen in catalog_ids:
         print(f"Preflight: Codex model {chosen!r} confirmed in gateway catalog")
         return
+
+    if chosen in _CODEX_FALLBACK_MODELS:
+        for candidate in _CODEX_FALLBACK_MODELS:
+            if candidate == chosen:
+                continue
+            if candidate in catalog_ids:
+                print(
+                    f"Preflight: WARNING — codex model {chosen!r} not in gateway "
+                    f"catalog; falling back to {candidate!r}"
+                )
+                args.codex_model = candidate
+                return
+
     print(
         f"Preflight: WARNING — codex model {chosen!r} not in gateway catalog "
         f"({sorted(m for m in catalog_ids if m.startswith('gpt-'))}); "
         f"CodexBackend will fail at first turn. Pass --codex-model with a "
-        f"value in the catalog or use --critic-mock to "
+        f"value in the catalog (known-good ids, newest first: "
+        f"{list(_CODEX_FALLBACK_MODELS)}) or use --critic-mock to "
         f"avoid the Codex path entirely."
     )
 
