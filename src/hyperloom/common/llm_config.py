@@ -60,25 +60,52 @@ LEGACY_DEEPSEEK_ENV_KEYS: tuple[str, ...] = (
 _DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 _DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com/v1"
 _DEEPSEEK_MODEL = "deepseek-v4-pro"
+
+# Hosts known to serve the Anthropic protocol on ``/anthropic`` and OpenAI
+# chat-completions on ``/v1``. Needed because the generic AMD gateway
+# convention (``/Unified/v1``) does not exist on them.
+_DUAL_PROTOCOL_HOSTS: frozenset[str] = frozenset({"api.deepseek.com"})
+
+# ``ANTHROPIC_API_KEY`` (x-api-key) and ``ANTHROPIC_AUTH_TOKEN`` (bearer) are
+# alternative spellings of one credential, so they are filled or skipped as a
+# unit: filling only one leaves two different secrets on the same request and
+# gateways generally prefer the bearer token.
+_ANTHROPIC_KEY_GROUP: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def _deepseek_endpoint_pair(legacy_base_url: str) -> tuple[str, str]:
-    """Return ``(anthropic_base_url, openai_base_url)`` for a legacy DeepSeek URL.
+def _is_dual_protocol_host(url: str | None) -> bool:
+    """True when ``url`` points at a known ``/anthropic`` + ``/v1`` gateway."""
+    if not url:
+        return False
+    return urlsplit(str(url).strip()).hostname in _DUAL_PROTOCOL_HOSTS
 
-    ``DEEPSEEK_BASE_URL`` historically named the Anthropic-compatible side, but
-    parts of the runtime also fed it to an OpenAI client. Derive the sibling
-    endpoint from whichever side the value points at so both protocols resolve
-    to a route that exists.
+
+def dual_protocol_endpoint_pair(base_url: str) -> tuple[str, str]:
+    """Return ``(anthropic_base_url, openai_base_url)`` for a dual-protocol gateway.
+
+    The input may name either side (or neither). The sibling is derived by
+    swapping the trailing path segment, so both protocols resolve to a route
+    that exists. Matching is case-insensitive because AMD's own gateway spells
+    the segment ``/Anthropic`` (issue #929).
+
+    A bare host on a known dual-protocol gateway gets both segments appended;
+    for an unknown host the value is kept as the Anthropic side, since that is
+    what the caller named it.
     """
-    base = legacy_base_url.strip().rstrip("/")
+    base = base_url.strip().rstrip("/")
     if not base:
         return _DEEPSEEK_ANTHROPIC_BASE_URL, _DEEPSEEK_OPENAI_BASE_URL
     lowered = base.lower()
+    # rsplit rather than a cased suffix strip: it drops the final segment
+    # whatever its casing, which keeps this identical to the shell installers.
     if lowered.endswith("/anthropic"):
-        return base, f"{base[: -len('/anthropic')]}/v1"
+        return base, f"{base.rsplit('/', 1)[0]}/v1"
     if lowered.endswith("/v1"):
-        return f"{base[: -len('/v1')]}/anthropic", base
+        return f"{base.rsplit('/', 1)[0]}/anthropic", base
+    if _is_dual_protocol_host(base):
+        return f"{base}/anthropic", f"{base}/v1"
     return base, f"{base}/v1"
 
 
@@ -93,7 +120,10 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     variables.
 
     Only keys absent from ``env`` are returned, so an explicit operator value
-    always wins and repeated application is a no-op.
+    always wins and repeated application is a no-op. The two Anthropic key
+    spellings are treated as one unit: if either is already set, neither is
+    filled, so a leftover ``DEEPSEEK_API_KEY`` can never end up authenticating
+    alongside an explicitly configured Anthropic credential.
 
     Args:
         env: Environment mapping to read; defaults to ``os.environ``.
@@ -108,7 +138,7 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     if not api_key and not legacy_url:
         return {}
 
-    anthropic_url, openai_url = _deepseek_endpoint_pair(legacy_url)
+    anthropic_url, openai_url = dual_protocol_endpoint_pair(legacy_url)
     model = (source.get("DEEPSEEK_MODEL") or "").strip() or _DEEPSEEK_MODEL
     candidates: dict[str, str] = {
         "ANTHROPIC_BASE_URL": anthropic_url,
@@ -120,9 +150,10 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
         "GEAK_CLAUDE_MODEL": model,
     }
     if api_key:
-        candidates["ANTHROPIC_API_KEY"] = api_key
-        candidates["ANTHROPIC_AUTH_TOKEN"] = api_key
         candidates["OPENAI_API_KEY"] = api_key
+        if not any((source.get(name) or "").strip() for name in _ANTHROPIC_KEY_GROUP):
+            for name in _ANTHROPIC_KEY_GROUP:
+                candidates[name] = api_key
     return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
 
 
@@ -175,12 +206,18 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     The trailing path segment is matched case-insensitively so a capitalized
     ``/Anthropic`` (AMD's default) is still recognized. Unknown Anthropic URLs
     fall back to their original value.
+
+    Hosts in :data:`_DUAL_PROTOCOL_HOSTS` serve plain ``/v1`` instead and have
+    no ``/Unified`` route, so they are resolved before the AMD convention is
+    applied — otherwise a DeepSeek Anthropic endpoint would derive a 404.
     """
     if not anthropic_base_url:
         return None
     base = anthropic_base_url.strip().rstrip("/")
     if not base:
         return None
+    if _is_dual_protocol_host(base):
+        return dual_protocol_endpoint_pair(base)[1]
     parts = urlsplit(base)
     path = parts.path.rstrip("/")
     # Match case-insensitively: AMD's default endpoint uses "/Anthropic" (issue #929).
@@ -319,6 +356,7 @@ __all__ = [
     "claude_sdk_env_options",
     "deepseek_compat_env",
     "derive_openai_base_url",
+    "dual_protocol_endpoint_pair",
     "openai_client_kwargs",
     "parse_custom_headers",
     "resolve_openai_client_config",

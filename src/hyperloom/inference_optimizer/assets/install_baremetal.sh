@@ -1070,17 +1070,30 @@ remove_dotenv_var() {
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
 
-# Set to 1 by migrate_legacy_deepseek_env when the Anthropic and OpenAI sides
-# are two protocols of ONE gateway, so the OpenAI side must survive the
-# "Anthropic-only" .env cleanup below.
+# 1 when the Anthropic and OpenAI sides are two protocols of ONE gateway, so
+# the OpenAI side must survive the otherwise "Anthropic-only" .env cleanup.
+# Decided in resolve_credentials from the resolved URLs, NOT from whether a
+# legacy migration happened, so a hand-written two-sided config counts too.
 DUAL_PROTOCOL_GATEWAY=0
+# 1 once a retired DEEPSEEK_* configuration has been translated, so the legacy
+# keys are dropped from .env only after credential validation passes.
+LEGACY_DEEPSEEK_MIGRATED=0
+
+# Return the authority (host[:port]) of a URL, or the empty string.
+url_authority() {
+  local rest="${1#*://}"
+  printf '%s' "${rest%%/*}"
+}
 
 # Translate a retired DEEPSEEK_* configuration into the standard variables.
 # DeepSeek is a dual-protocol gateway, not a third provider: /anthropic speaks
 # the Anthropic API and /v1 speaks OpenAI chat-completions, both authenticated
-# with the same key. Mirrors hyperloom.common.llm_config.deepseek_compat_env.
+# with the same key. Endpoint and model derivation matches
+# hyperloom.common.llm_config.deepseek_compat_env; ANTHROPIC_AUTH_TOKEN is
+# deliberately not written here because .env only ever persists the API-key
+# spelling (see remove_dotenv_var ANTHROPIC_AUTH_TOKEN below).
 migrate_legacy_deepseek_env() {
-  local key url model base anthropic_url openai_url
+  local key url model base lowered anthropic_url openai_url
   key="${DEEPSEEK_API_KEY:-$(read_dotenv_var DEEPSEEK_API_KEY || true)}"
   url="${DEEPSEEK_BASE_URL:-$(read_dotenv_var DEEPSEEK_BASE_URL || true)}"
   model="${DEEPSEEK_MODEL:-$(read_dotenv_var DEEPSEEK_MODEL || true)}"
@@ -1088,33 +1101,37 @@ migrate_legacy_deepseek_env() {
     return 0
   fi
 
+  # Match the trailing segment case-insensitively (AMD spells it /Anthropic)
+  # and swap it with ${base%/*}, which drops the final segment whatever its
+  # casing. Same algorithm as dual_protocol_endpoint_pair().
   base="${url%/}"
-  case "$base" in
+  lowered="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
     "")           anthropic_url="https://api.deepseek.com/anthropic"; openai_url="https://api.deepseek.com/v1" ;;
-    */anthropic)  anthropic_url="$base"; openai_url="${base%/anthropic}/v1" ;;
-    */v1)         anthropic_url="${base%/v1}/anthropic"; openai_url="$base" ;;
+    */anthropic)  anthropic_url="$base"; openai_url="${base%/*}/v1" ;;
+    */v1)         anthropic_url="${base%/*}/anthropic"; openai_url="$base" ;;
+    https://api.deepseek.com|http://api.deepseek.com)
+                  anthropic_url="${base}/anthropic"; openai_url="${base}/v1" ;;
     *)            anthropic_url="$base"; openai_url="${base}/v1" ;;
   esac
   model="${model:-deepseek-v4-pro}"
 
-  # Explicit operator values always win.
+  # Explicit operator values always win. ANTHROPIC_API_KEY and
+  # ANTHROPIC_AUTH_TOKEN are one credential in two spellings, so they are
+  # filled as a unit: a legacy key must never join an explicit Anthropic one.
   [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
   [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
   if [ -n "$key" ]; then
-    [ -n "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY="$key"
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+      export ANTHROPIC_API_KEY="$key"
+    fi
     [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$key"
   fi
   [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
   [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
   [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$model"
   unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
-  DUAL_PROTOCOL_GATEWAY=1
-
-  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    remove_dotenv_var DEEPSEEK_API_KEY
-    remove_dotenv_var DEEPSEEK_BASE_URL
-    remove_dotenv_var DEEPSEEK_MODEL
-  fi
+  LEGACY_DEEPSEEK_MIGRATED=1
   warn "DEEPSEEK_* is retired; migrated to ANTHROPIC_BASE_URL=${anthropic_url} + OPENAI_BASE_URL=${openai_url}"
 }
 
@@ -1163,6 +1180,31 @@ resolve_credentials() {
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
+
+  # A dual-protocol gateway serves both protocols from ONE host, so its OpenAI
+  # side belongs to the same credential and must survive the Anthropic-only
+  # cleanup below. Decide from the resolved endpoints rather than from whether
+  # a legacy migration ran, so a hand-written two-sided config counts too.
+  local dual_url dual_secret
+  if [ "$LEGACY_DEEPSEEK_MIGRATED" -eq 1 ] || [ "$setup_env_authoritative" -eq 0 ]; then
+    dual_url="${OPENAI_BASE_URL:-$(read_dotenv_var OPENAI_BASE_URL || true)}"
+    dual_secret="${OPENAI_API_KEY:-$(read_dotenv_var OPENAI_API_KEY || true)}"
+  else
+    # .env is the source of truth the operator just confirmed, so an ambient
+    # shell value is not allowed to keep a stale OpenAI side alive.
+    dual_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
+    dual_secret="$(read_dotenv_var OPENAI_API_KEY || true)"
+  fi
+  # Same host but a DIFFERENT path: two protocol routes of one gateway. An
+  # identical URL on both sides is a stale copy, not a second protocol -- the
+  # OpenAI SDK would append /chat/completions to an Anthropic base.
+  DUAL_PROTOCOL_GATEWAY=0
+  if [ -n "$anthropic_url" ] && [ -n "$dual_url" ] && [ "$dual_url" != "$anthropic_url" ] \
+     && [ "$(url_authority "$anthropic_url")" = "$(url_authority "$dual_url")" ]; then
+    DUAL_PROTOCOL_GATEWAY=1
+    export OPENAI_BASE_URL="$dual_url"
+    [ -n "$dual_secret" ] && export OPENAI_API_KEY="$dual_secret"
+  fi
 
   # In the interactive setup flow, .env is the source of truth the user just
   # confirmed. Clear unsupported credential families before downstream scripts
@@ -1216,6 +1258,13 @@ resolve_credentials() {
     else
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
+    fi
+    # Drop the retired keys only now: dropping them inside the migration would
+    # discard the operator's only copy if validation above had bailed out.
+    if [ "$LEGACY_DEEPSEEK_MIGRATED" -eq 1 ]; then
+      remove_dotenv_var DEEPSEEK_API_KEY
+      remove_dotenv_var DEEPSEEK_BASE_URL
+      remove_dotenv_var DEEPSEEK_MODEL
     fi
     remove_dotenv_var SAFE_API_KEY
     remove_dotenv_var LLM_GATEWAY_KEY

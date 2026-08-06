@@ -323,12 +323,159 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
     )
 
 
+def _baremetal_credential_functions() -> str:
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    return script_text[start:end]
+
+
+_CLEAN_PROVIDER_ENV = [
+    "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
+    "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
+    "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
+    "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
+]
+
+
+def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: Path):
+    """The configuration the docs now recommend must survive a setup run.
+
+    Both sides are on one host, so the OpenAI side is part of the same gateway
+    credential rather than a second provider -- and that has to be decided from
+    the URLs, not from whether a legacy DEEPSEEK_* migration happened to run.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+                "ANTHROPIC_API_KEY=deepseek-test-key",
+                "OPENAI_BASE_URL=https://api.deepseek.com/v1",
+                "OPENAI_API_KEY=deepseek-test-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "dual-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                *_CLEAN_PROVIDER_ENV,
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _baremetal_credential_functions(),
+                "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    text = dotenv.read_text(encoding="utf-8")
+    assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in text
+    assert "OPENAI_BASE_URL=https://api.deepseek.com/v1" in text
+    assert "OPENAI_API_KEY=deepseek-test-key" in text
+
+
+def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path):
+    """A different host is a second provider, and is still scrubbed."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "ANTHROPIC_API_KEY=anthropic-test-key",
+                "OPENAI_BASE_URL=https://api.openai.com/v1",
+                "OPENAI_API_KEY=openai-test-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "split-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                *_CLEAN_PROVIDER_ENV,
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _baremetal_credential_functions(),
+                "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    text = dotenv.read_text(encoding="utf-8")
+    assert "ANTHROPIC_BASE_URL=https://api.anthropic.com" in text
+    assert "OPENAI_BASE_URL=" not in text
+    assert "OPENAI_API_KEY=" not in text
+
+
+def test_baremetal_setup_keeps_legacy_env_when_validation_fails(tmp_path: Path):
+    """A failed run must not consume the operator's only copy of the config."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n", encoding="utf-8")
+    runner = tmp_path / "fail-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                *_CLEAN_PROVIDER_ENV,
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _baremetal_credential_functions(),
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 99, f"expected the credential die(), got {proc.returncode}: {proc.stderr}"
+    assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in dotenv.read_text(encoding="utf-8")
+
+
 def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
     script_paths = [
         (
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
-            ["preflight_load_dotenv() { :; }"],
+            # The gate is what's under test here; the legacy shim has its own
+            # coverage and is defined outside the extracted slice.
+            ["preflight_load_dotenv() { :; }", "normalize_legacy_deepseek_env() { :; }"],
         ),
         (
             "kernel",
