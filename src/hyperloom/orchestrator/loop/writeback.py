@@ -2713,10 +2713,25 @@ class WritebackCollaborator:
             # Reset the roofline failure streak on a successful snapshot.
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak = 0
-            # Re-anchor the 10% watermark step on the projected current tput.
-            anchor_tput = self._current_tput_from_validated_gain()
-            if anchor_tput > 0:
-                self.shared_state.last_roofline_tput = float(anchor_tput)
+            # Re-anchor the 10% watermark step on the projected current tput --
+            # but only for a roofline that actually produced an analysis. The
+            # anchor is what stops the watermark firing again until throughput
+            # climbs another 10%, so anchoring on an empty one buys a whole
+            # cycle of silence for a snapshot that says nothing: the specialist
+            # keeps reading "(none)" while the anchor insists a roofline was
+            # taken here. Leaving the anchor alone lets the watermark re-arm and
+            # take a real one.
+            if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
+                anchor_tput = self._current_tput_from_validated_gain()
+                if anchor_tput > 0:
+                    self.shared_state.last_roofline_tput = float(anchor_tput)
+            else:
+                log.warning(
+                    "roofline %s produced no analysis; leaving the watermark "
+                    "anchor at %.4f so a real one can still be taken",
+                    task.task_id if task else "?",
+                    float(self.shared_state.last_roofline_tput or 0.0),
+                )
             changed = True
         else:
             audit_decision = "discarded"
