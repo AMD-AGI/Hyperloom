@@ -896,3 +896,69 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
     cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
     assert cov["graph_launch_count"] == 1
     assert cov["graph_under_recorded"] is False
+
+
+# ---- trace-health: impossible durations + denoise-step inference ----------
+def _write_events(path: Path, events: list[dict]) -> Path:
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    return path
+
+
+def _result_codes(result) -> set[str]:
+    return {w.get("code") for w in (result.get("trace_health_warnings") or [])}
+
+
+def test_impossible_durations_raise_a_warning(tmp_path, capsys):
+    """A kernel overrunning its successor must be surfaced, not ranked silently."""
+    events = list(_TRACE_EVENTS) + [
+        {"cat": "kernel", "ph": "X", "name": "corrupt", "ts": 1500, "dur": 900_000, "pid": 2, "tid": 3},
+        {"cat": "kernel", "ph": "X", "name": "after_a", "ts": 1600, "dur": 100, "pid": 2, "tid": 3},
+        {"cat": "kernel", "ph": "X", "name": "after_b", "ts": 1700, "dur": 100, "pid": 2, "tid": 3},
+    ]
+    trace = _write_events(tmp_path / "corrupt.trace.json", events)
+    _rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert "bypass_impossible_kernel_durations" in _result_codes(result)
+    msg = next(
+        w["message"] for w in result["trace_health_warnings"] if w["code"] == "bypass_impossible_kernel_durations"
+    )
+    assert "corrupt" in msg
+    assert "serial stream" in msg
+
+
+def test_clean_trace_raises_no_duration_warning(tmp_path, capsys):
+    trace = _write_events(tmp_path / "clean.trace.json", list(_TRACE_EVENTS))
+    _rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    assert "bypass_impossible_kernel_durations" not in _result_codes(result)
+
+
+def test_denoise_steps_come_from_profiler_steps_not_annotations(tmp_path, capsys):
+    """Regression: the divisor must be denoise steps, not annotation windows.
+
+    ``annotation_window_count`` counts user_annotation ranges. Under
+    source-level instrumentation there are far more of those than denoise
+    steps, and using them silently scaled every per-step figure.
+    """
+    events = list(_TRACE_EVENTS)
+    # 3 real denoise steps ...
+    for i in range(3):
+        events.append({"cat": "gpu_user_annotation", "ph": "X", "name": f"ProfilerStep#{i}", "ts": 1000 + i, "dur": 1})
+    # ... but many more annotation windows, as dense instrumentation produces.
+    for i in range(25):
+        events.append({"cat": "gpu_user_annotation", "ph": "X", "name": f"block_{i}", "ts": 1000 + i, "dur": 1})
+
+    trace = _write_events(tmp_path / "ann.trace.json", events)
+    _rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+    steps = result.get("num_denoise_steps")
+    assert steps == 3, f"expected the 3 ProfilerStep markers, got {steps}"
+    assert steps != 28, "annotation_window_count must not be used as the step count"
+
+
+def test_explicit_denoise_steps_still_recorded(tmp_path, capsys):
+    events = list(_TRACE_EVENTS) + [
+        {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#0", "ts": 1000, "dur": 1}
+    ]
+    trace = _write_events(tmp_path / "ann2.trace.json", events)
+    _rc, result, _ = _run(_base_argv(tmp_path, str(trace), extra=["--num-denoise-steps", "9"]), capsys)
+    assert result.get("num_denoise_steps") == 9
+    # The 1 inferred step disagrees with the requested 9, which must be flagged.
+    assert "bypass_denoise_steps_mismatch" in _result_codes(result)

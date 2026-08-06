@@ -38,6 +38,13 @@ _GPU_KERNEL_CAT = "kernel"
 _GPU_MEMCPY_CATS = ("gpu_memcpy", "gpu_memset")
 _GPU_CATS = frozenset((_GPU_KERNEL_CAT,) + _GPU_MEMCPY_CATS)
 
+#: Per-pair overlap (us) below this is treated as timestamp rounding, not a
+#: corrupt duration.
+_STREAM_OVERLAP_EPS_US = 1.0
+#: Only report when the total impossible overlap on a stream reaches this
+#: fraction of that stream's wall span, so trivial jitter stays quiet.
+_STREAM_OVERLAP_MIN_SHARE = 0.05
+
 _TRACE_EXTS = (".trace.json.gz", ".pt.trace.json.gz", ".trace.json", ".json.gz", ".json")
 
 _DECODER = json.JSONDecoder()
@@ -271,6 +278,71 @@ def stream_events(fileobj, bufsize: int = 8 * 1024 * 1024) -> Iterator[dict]:
         if pos > bufsize:
             buf = buf[pos:]
             pos = 0
+
+
+def _stream_overlap_health(stream_events: dict[Any, list[tuple[float, float, str]]]) -> dict[str, Any]:
+    """Report device streams whose event durations physically cannot hold.
+
+    Work dispatched to one hardware stream executes serially, so within a
+    ``(pid, tid)`` row an event's end must not run past the next event's start.
+    Where it does, the profiler emitted a corrupt duration -- no amount of real
+    concurrency can produce it, because a serial stream has none.
+
+    The check is pairwise rather than an aggregate sum-vs-span ratio: a single
+    corrupt event also extends the stream's span, which drags any aggregate
+    ratio back toward 1.0 and hides exactly the case worth catching.
+
+    This matters because hot-kernel ranking is by *summed* duration, so a
+    handful of corrupt events can outrank every genuine kernel and point an
+    optimization campaign at a bottleneck that does not exist.
+
+    A corrupt duration on the final event of a stream is not detectable this
+    way -- nothing follows it to contradict the duration.
+
+    Args:
+        stream_events: ``(pid, tid) -> [(ts, end, name), ...]``, unsorted.
+
+    Returns:
+        The worst offending stream as a dict, or ``{}`` when every stream is
+        self-consistent.
+    """
+    worst: dict[str, Any] = {}
+    for key, events in stream_events.items():
+        if len(events) < 2:
+            continue
+        events.sort()
+        span_us = events[-1][1] - events[0][0]
+        for ev in events:  # a long event can still hold the max end
+            span_us = max(span_us, ev[1] - events[0][0])
+        if span_us <= 0:
+            continue
+        excess_us = 0.0
+        overlapping = 0
+        worst_name = ""
+        worst_over = 0.0
+        for i in range(len(events) - 1):
+            _ts, end, name = events[i]
+            over = end - events[i + 1][0]
+            if over <= _STREAM_OVERLAP_EPS_US:
+                continue
+            excess_us += over
+            overlapping += 1
+            if over > worst_over:
+                worst_name, worst_over = name, over
+        if overlapping == 0 or excess_us < _STREAM_OVERLAP_MIN_SHARE * span_us:
+            continue
+        if not worst or excess_us > worst["excess_ms"] * 1000.0:
+            pid, tid = key
+            worst = {
+                "pid": pid,
+                "tid": tid,
+                "overlapping_events": overlapping,
+                "excess_ms": round(excess_us / 1000.0, 4),
+                "span_ms": round(span_us / 1000.0, 4),
+                "worst_event": worst_name,
+                "worst_event_excess_ms": round(worst_over / 1000.0, 4),
+            }
+    return worst
 
 
 def _union_ms(intervals: list[tuple[float, float]]) -> float:
@@ -730,6 +802,9 @@ def analyze_trace(
     # Correlations of CUDA/HIP graph-launch runtime events (no External id), so
     # their replayed kernels are classified graph-attributed, not (unlinked).
     graph_launch_corrs: set[int] = set()
+    # (pid, tid) -> [(ts, end, name), ...], used to check that no event on a
+    # serial device stream runs past the start of the event after it.
+    stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
     event_total = 0
 
     fobj = _open_trace_binary(tf)
@@ -776,6 +851,8 @@ def analyze_trace(
                 ts = float(ev.get("ts", 0) or 0)
                 end = ts + dur
                 name = ev.get("name", "") or ""
+                # Per-stream intervals for the duration-sanity check.
+                stream_intervals.setdefault((ev.get("pid"), ev.get("tid")), []).append((ts, end, name))
                 if cat == _GPU_KERNEL_CAT:
                     kargs = ev.get("args") or {}
                     corr = kargs.get("correlation")
@@ -815,6 +892,9 @@ def analyze_trace(
         corr_to_launch_geom=corr_to_launch_geom,
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
+    stream_overlap = _stream_overlap_health(stream_intervals)
+    if stream_overlap:
+        body["timeline"]["stream_overlap"] = stream_overlap
 
     # Detect (relative to the input dir) whether the selected trace is a
     # CUDA-graph capture shard, so the tool layer can surface a health warning.

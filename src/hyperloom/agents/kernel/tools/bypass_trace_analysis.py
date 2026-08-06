@@ -54,7 +54,7 @@ from _idle_gate import (  # noqa: E402
     build_high_idle_warning,
     resolve_idle_pct_threshold,
 )
-from _denoise_steps import resolve_perstep_divisor  # noqa: E402
+from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: E402
 from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
 
 
@@ -607,12 +607,38 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Warn when the forwarded --num-denoise-steps differs from the count the
-    # reader inferred from ProfilerStep annotations.
+    # A serial device stream cannot book more device time than its own wall
+    # span. Hot-kernel ranking is by summed duration, so a few corrupt
+    # durations can outrank every real kernel and misdirect a campaign.
+    stream_overlap = (analyze.get("timeline") or {}).get("stream_overlap") or {}
+    if stream_overlap:
+        trace_health_warnings.append(
+            {
+                "code": "bypass_impossible_kernel_durations",
+                "severity": "warning",
+                "message": (
+                    f"device stream (pid={stream_overlap.get('pid')}, tid={stream_overlap.get('tid')}): "
+                    f"{stream_overlap.get('overlapping_events')} event(s) run past the start of the "
+                    f"event after them, by {stream_overlap.get('excess_ms')} ms in total across a "
+                    f"{stream_overlap.get('span_ms')} ms span -- impossible on a serial stream, so "
+                    "these durations are corrupt. Worst offender: "
+                    f"'{stream_overlap.get('worst_event')}' overruns by "
+                    f"{stream_overlap.get('worst_event_excess_ms')} ms. Kernel ranking is by summed "
+                    "duration, so treat the hot-kernel table as unreliable until the trace is "
+                    "recaptured or the durations are repaired."
+                ),
+            }
+        )
+
+    # Denoise steps actually present in the analyzed data. The steady window
+    # carries its own step count; otherwise count torch ProfilerStep#N markers.
+    # ``annotation_window_count`` is deliberately NOT a fallback here: it counts
+    # user_annotation ranges (tens of thousands under source-level
+    # instrumentation), not denoise steps, and it fed resolve_perstep_divisor.
     requested_denoise_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
-    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0) or int(
-        (analyze.get("attribution") or {}).get("annotation_window_count", 0) or 0
-    )
+    inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0)
+    if inferred_denoise_steps <= 0:
+        inferred_denoise_steps = count_profiler_steps(str(args.trace_input))
     if requested_denoise_steps > 0 and inferred_denoise_steps > 0 and requested_denoise_steps != inferred_denoise_steps:
         trace_health_warnings.append(
             {
@@ -620,8 +646,8 @@ def main(argv: list[str] | None = None) -> int:
                 "severity": "info",
                 "message": (
                     f"requested --num-denoise-steps={requested_denoise_steps} differs from the "
-                    f"{inferred_denoise_steps} step(s) inferred from the trace annotations; the "
-                    "trace-inferred per-step window is used for kernel shares."
+                    f"{inferred_denoise_steps} step(s) found in the analyzed data; the "
+                    "trace-inferred count is used as the per-step divisor."
                 ),
             }
         )
