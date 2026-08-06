@@ -35,6 +35,8 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
+from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
+from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._forge_kernel_patcher import ENV_ENABLED_PACKS as ENV_FORGE_KERNEL_PACKS
 from ._forge_kernel_patcher import ensure_framework_patched_for_forge_kernels
 from ._forge_kernel_patcher import pack_envs as forge_pack_envs
@@ -1206,6 +1208,14 @@ def materialize_config_with_envs(
                 _fw or "the framework",
                 ENV_FORGE_KERNEL_PACKS,
             )
+    # FlyDSL folds only same-directory helpers into its JIT cache key, so a
+    # patched helper one directory over is silently served from a stale binary.
+    # Naming the kernel roots here folds every .py under them into the key, which
+    # re-compiles exactly the kernels that changed instead of dropping the cache.
+    _flydsl_dirs = flydsl_extra_source_dirs()
+    if _flydsl_dirs:
+        envs[ENV_FLYDSL_EXTRA_SOURCE_DIRS] = _flydsl_dirs
+
     # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
     # with per-channel weight + per-token (dynamic) activation falls into the
     # slow unfused _apply_fallback_scaled_mm in sglang's apply_fp8_linear

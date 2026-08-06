@@ -84,6 +84,34 @@ def resolve_flydsl_source_roots() -> tuple[str, ...]:
     return _merge_roots(tuple(out))
 
 
+#: FlyDSL hashes every ``.py`` under these dirs into its JIT cache key.
+ENV_FLYDSL_EXTRA_SOURCE_DIRS = "FLYDSL_EXTRA_SOURCE_DIRS"
+
+
+def flydsl_extra_source_dirs() -> str:
+    """Value for ``$FLYDSL_EXTRA_SOURCE_DIRS``: the FlyDSL roots that exist.
+
+    FlyDSL's cache key covers the traced function and same-directory helpers
+    only, so an edited helper in a sibling directory does not invalidate it and
+    the stale binary is reused. Listing the roots here folds their sources into
+    the key, re-compiling only the kernels that actually changed.
+
+    Any operator-supplied value is preserved and comes first.
+
+    Returns:
+        str: Existing roots joined by ``:`` (empty when none exist).
+    """
+    found: list[str] = []
+    preset = os.environ.get(ENV_FLYDSL_EXTRA_SOURCE_DIRS, "").strip()
+    if preset:
+        found.extend(p for p in preset.split(":") if p.strip())
+    for root in resolve_flydsl_source_roots():
+        path = Path(root.rstrip("/"))
+        if path.is_dir() and str(path) not in found:
+            found.append(str(path))
+    return ":".join(found)
+
+
 # Minimal static fallbacks when importlib/glob find nothing (image defaults).
 _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
