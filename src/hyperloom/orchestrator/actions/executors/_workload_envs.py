@@ -365,6 +365,52 @@ def default_baseline_config() -> Path:
     return asset_root() / rel
 
 
+_PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
+_TRUTHY_FLAG_VALUES = frozenset({"1", "on", "true", "yes"})
+
+
+def _profiler_flag_value(server_args: str, name: str) -> str | None:
+    """The value vLLM would resolve for ``--profiler-config.<name>``, or None.
+
+    Returns the LAST occurrence, because repeated flags are how this layer overrides
+    earlier ones and vLLM's argparse resolves them last-wins. Accepts both
+    ``--flag value`` and ``--flag=value``. Regex rather than tokenization: this runs
+    after JSON-valued flags have been compacted, and one unbalanced quote must not
+    take the whole guard down with it.
+    """
+    value: str | None = None
+    for match in _PROFILER_FLAG_RE.finditer(server_args or ""):
+        if match.group(1) == name:
+            value = match.group(2)
+    return value
+
+
+def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
+    """Whether the value already present keeps this flag's guarantee.
+
+    Name-only matching is not enough for the two flags that decide whether the
+    capture is bounded at all: vLLM reads ``max_iterations`` of 0 (or absent) as "no
+    limit", and a frontend profiler left on tracks no iterations and captures the
+    entire ``start_profile``..``stop_profile`` range. A guard that accepted those
+    would report success while the run stayed unbounded, which is worse than not
+    guarding -- the warning would send the next investigation the wrong way.
+
+    Every other flag only decides what the trace contains or where it lands, so its
+    presence is the whole contract.
+    """
+    if value is None:
+        return False
+    if name == "max_iterations":
+        try:
+            iterations = int(value)
+        except ValueError:
+            return False
+        return 0 < iterations <= cap
+    if name == "ignore_frontend":
+        return value.strip().lower() in _TRUTHY_FLAG_VALUES
+    return True
+
+
 def _finalize_framework_server_args(
     envs: dict[str, Any],
     bench: dict[str, Any],
@@ -676,6 +722,10 @@ def materialize_config_with_envs(
     # dropped, without re-stating the ones that survived. See that block for why a
     # dropped ``max_iterations`` is an OOM and not a cosmetic problem.
     pending_vllm_profiler_flags: list[tuple[str, str]] = []
+    # The serialization-safe capture cap computed below, so the re-assertion can reject
+    # a max_iterations that is above it (or non-positive, which vLLM reads as no limit)
+    # instead of accepting the flag on its name alone.
+    pending_vllm_profiler_cap: int = 0
     if is_profile and not _is_scriptable_profile:
         try:
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
@@ -831,7 +881,20 @@ def materialize_config_with_envs(
             # belongs in the set the re-assertion can restore.
             profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
             pending_vllm_profiler_flags = profiler_flags
-            profiler_args = " ".join(flag for sentinel, flag in profiler_flags if sentinel not in existing_vllm_args)
+            pending_vllm_profiler_cap = max_iters
+            # Injected unconditionally so the computed cap WINS over anything the YAML
+            # pins, via the repeated-flag last-wins that vLLM's argparse and this
+            # layer both rely on. Filtering out a flag the YAML already carries would
+            # hand the run e.g. a hand-written ``max_iterations 100000`` -- unbounded
+            # in practice -- and quietly discard the serialization-safe budget
+            # computed above; HYPERLOOM_PROFILE_MAX_ITERS is the override channel for
+            # that, not the YAML. ``ignore_frontend`` is the exception: the shipped
+            # profile YAML already sets it, and vLLM warns on duplicate keys.
+            profiler_args = " ".join(
+                flag
+                for sentinel, flag in profiler_flags
+                if sentinel != "ignore_frontend" or "ignore_frontend" not in existing_vllm_args
+            )
             if "delay_iterations" not in existing_vllm_args:
                 envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
         else:
@@ -1241,7 +1304,15 @@ def materialize_config_with_envs(
         from ._grid_runner import merge_server_args
 
         profile_args = str(envs.get(framework_env, "")).strip()
-        restored = [flag for sentinel, flag in pending_vllm_profiler_flags if sentinel not in profile_args]
+        restored = [
+            flag
+            for name, flag in pending_vllm_profiler_flags
+            if not _profiler_bound_holds(
+                name,
+                _profiler_flag_value(profile_args, name),
+                cap=pending_vllm_profiler_cap,
+            )
+        ]
         if restored:
             log.warning(
                 "profile server args lost torch-profiler flags %r (replace_args=%s); "

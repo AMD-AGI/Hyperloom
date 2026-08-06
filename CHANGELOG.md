@@ -54,13 +54,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   write to `EXTRA_VLLM_ARGS` — after the `extra_server_args`/`extra_envs` merges
   and after `remove_args`/`unset_envs` — restoring only the flags that went
   missing, warning about exactly which ones, and re-running the shell-safety
-  guard on the result. `max_iterations` (not `delay_iterations`) is what decides
-  whether the capture is bounded, so that is what is checked. `ignore_frontend`
-  is stated alongside the bounds, since the AsyncLLM-side profiler tracks no
-  iterations and would otherwise capture the entire
-  `start_profile`..`stop_profile` range. Candidate flags still win for everything
-  else, and the append path is unchanged apart from no longer relying on the YAML
-  to carry `ignore_frontend`.
+  guard on the result. `ignore_frontend` is stated alongside the bounds, since the
+  AsyncLLM-side profiler tracks no iterations and would otherwise capture the
+  entire `start_profile`..`stop_profile` range. Candidate flags still win for
+  everything else, and the append path is unchanged apart from no longer relying
+  on the YAML to carry `ignore_frontend`.
+
+  The re-assertion checks flag VALUES, not just flag names, for the two flags that
+  decide whether the capture is bounded at all: `max_iterations` has to parse as a
+  positive integer within the computed serialization-safe cap (vLLM reads 0 as "no
+  limit"), and `ignore_frontend` has to be true. A name-only check accepted
+  `--profiler-config.max_iterations 0` and then logged that it had bounded the
+  profiler — worse than not guarding, since the warning sends the next
+  investigation the wrong way. The injected flags also keep overriding whatever the
+  YAML pins, via the repeated-flag last-wins vLLM's argparse already applies: a
+  hand-written `max_iterations 100000` is unbounded in practice and must not
+  displace the computed budget (`HYPERLOOM_PROFILE_MAX_ITERS` is the override
+  channel for that), and a stale `capture_torch_profiler_dir` must not send this
+  run's traces to a previous session's directory.
 
   Scope: **vLLM only**. SGLang bounds its capture through `start_step`/`num_steps`
   inside `PROFILE_EXTRA_BODY`, which is written before the same `extra_envs`
