@@ -80,7 +80,7 @@ def test_format_search_state():
     out = SharedState._format_search_state(search)
     assert "cursor=3" in out
     assert "accepted:" in out
-    assert "rejected (last 5):" in out
+    assert "rejected (last 15):" in out
     assert "killed_overtime" not in out
 
 
@@ -166,3 +166,52 @@ def test_format_last_sweep():
     out = st._format_last_sweep()
     assert "grid_size=4" in out
     assert "best=b" in out
+
+
+def test_format_last_action_failures_multiline_and_log_path():
+    st = SharedState()
+    st.last_action_failures = [
+        {
+            "action": "explore",
+            "error_class": "server_init_dead",
+            "ts": "2026-01-01T00:00:00+00:00",
+            "error_excerpt": (
+                "RuntimeError: Worker failed with error\n"
+                "  'mla_gluon[bh16bn128] requires batch_size=1, got 512'\n"
+                "Engine core initialization failed.\n"
+            ),
+            "workspace": "/runs/explore/t1/benchmark_sglang_001",
+            "stderr_log_path": "/runs/explore/t1/server.log",
+            "variant_name": "fp8_kv",
+        }
+    ]
+    out = st._format_last_action_failures()
+    assert "mla_gluon" in out
+    assert "log=/runs/explore/t1/server.log" in out
+    assert "variant=fp8_kv" in out
+
+
+def test_format_variant_line_shows_error_class_and_reason():
+    line = SharedState._format_variant_line(
+        {
+            "name": "fp8_kv",
+            "gain_pct": None,
+            "extra_server_args": "--kv-cache-dtype fp8",
+            "error_class": "server_init_dead",
+            "reason": "mla_gluon requires batch_size=1",
+        }
+    )
+    assert "err=server_init_dead" in line
+    assert "reason=mla_gluon" in line
+
+
+def test_format_last_action_failures_suffix_when_over_window():
+    st = SharedState()
+    for i in range(12):
+        st.record_action_failure(
+            action="explore",
+            task_id=f"t-{i}",
+            result={"error_class": "server_init_dead", "error": f"crash {i}"},
+        )
+    out = st._format_last_action_failures()
+    assert "[+2 earlier failures]" in out

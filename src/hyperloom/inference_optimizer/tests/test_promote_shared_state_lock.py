@@ -152,10 +152,8 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
         task=_task("baseline"),
     )
 
-    # Hot-measure contract: baseline_tput/hot from tput, cold from warmup anchor.
+    # Hot-measure contract: baseline_tput is the hot round, not the cold warmup.
     assert s.baseline_tput == 100.0
-    assert s.baseline_hot_tput == 100.0
-    assert s.baseline_cold_tput == 80.0
     assert s.baseline_accuracy == 0.9
     assert s.baseline_runtime_sec == 30.0
     assert s.current_best["action"] == "baseline"
@@ -843,7 +841,7 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
     reval = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-tracked")
-    coord.shared_state.enablement_revalidation_task_id = reval.task_id
+    coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord._drain_queued_baselines(reason="baseline_established") == []
     assert (await coord.tasks.get(reval.task_id)).state == "queued"
@@ -929,3 +927,87 @@ def test_lift_accepts_winner_that_beats_current_best(session_dir):
     assert lifted is True
     assert s.current_best["tput"] == 1100.0
     assert s.optimization_stack[-1]["variant_name"] == "real-win"
+
+
+def test_lift_does_not_double_append_same_fingerprint(session_dir):
+    """A renamed variant with the same content fingerprint must not add a second stack entry."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    fp = "shared_fp_abc123"
+    s.optimization_stack = [
+        {"action": "explore", "variant_name": "original", "fingerprint": fp, "tput": 1100.0}
+    ]
+    s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        1200.0,
+        {"name": "renamed", "fingerprint": fp, "candidate_extra_server_args": "--fast", "extra_envs": {}},
+    )
+
+    # current_best refreshed but stack not duplicated.
+    assert lifted is True
+    assert s.current_best["tput"] == 1200.0
+    assert len(s.optimization_stack) == 1
+    assert s.optimization_stack[0]["variant_name"] == "original"
+
+
+def test_lift_at_or_below_anchor_does_not_modify_stack(session_dir):
+    """An accepted rerun that does not beat the live anchor leaves current_best unchanged."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    fp = "shared_fp_rerun"
+    s.optimization_stack = [
+        {"action": "explore", "variant_name": "prior", "fingerprint": fp, "tput": 1100.0}
+    ]
+    s.current_best = {"action": "explore", "tput": 1100.0, "extra_server_args": "--fast", "extra_envs": {}}
+
+    lifted = coord._lift_to_current_best(
+        "explore",
+        1050.0,  # below current anchor of 1100
+        {"name": "prior_rerun", "fingerprint": fp, "candidate_extra_server_args": "--fast", "extra_envs": {}},
+    )
+
+    assert lifted is False
+    assert s.current_best["tput"] == 1100.0
+    assert len(s.optimization_stack) == 1
+
+
+async def test_integrate_keep_carries_the_stack_env_layer(session_dir):
+    """A kernel integrate publishes args and envs from the same config.
+
+    Writing ``current_best`` without ``extra_envs`` published a config whose args
+    and envs came from different layers, and every dispatch site seeded from it.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {
+        "action": "explore",
+        "tput": 1000.0,
+        "extra_server_args": "--kv-cache-dtype fp8_e4m3",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+
+    await coord.writeback._record_integrate_keep(
+        {"new_tput": 1200.0, "kernel_id": "k001", "integration_id": "i1"},
+    )
+
+    assert s.current_best["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+    assert s.current_best["extra_server_args"] == "--kv-cache-dtype fp8_e4m3"
+
+
+async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
+    """A forge-GEMM KEEP ships ``result['extra_envs']``; it must survive the promote."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {"KEEP_ME": "1", "TUNED": "old"}}
+
+    await coord.writeback._record_integrate_keep(
+        {"new_tput": 1200.0, "kernel_id": "k002", "extra_envs": {"TUNED": "new"}},
+    )
+
+    assert s.current_best["extra_envs"] == {"KEEP_ME": "1", "TUNED": "new"}

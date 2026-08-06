@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Enablement dispatch evidence reaches the specialist again**: the Coordinator
+  computes the source lines near the offending site — and, on a weight-init
+  failure, the checkpoint's per-layer weight inventory — plus a ranked list of
+  bridging PR refs, but since the mandate stopped being passed as free-text
+  `notes` none of it was delivered: the mandate was re-rendered downstream from
+  a bare request, so the agent was told to find a bridge while the candidates
+  already discovered for it were withheld. Both now travel as structured
+  `enablement_source_context` / `enablement_candidate_refs` params and are
+  folded into the §1b mandate at the point of use.
+
 ### Removed
 
 - **Kernel-agent LLM role retired** (breaking): the `kernel_agent` role has been
@@ -24,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `agents/kernel/SKILL.md` (561 lines, never loaded by Python) has been replaced
   by `docs/conceptual/kernel-execution-path.md`, which documents the real
   programmatic dispatch flow.
+
+## [v1.0.0a3] - 2026-08-05
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)
+for the user-facing summary.
 
 ### Added
 
@@ -106,8 +124,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   this release keeps.
 
 ## [v1.0.0a2] - 2026-07-29
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2)
 for the user-facing summary.
 
@@ -169,7 +186,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a2...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0a3...HEAD
+[v1.0.0a3]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3
 [v1.0.0a2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2
 [v1.0.0a1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a1
 [0.8.0]: https://github.com/AMD-AGI/Hyperloom/blob/main/docs/release-notes.md

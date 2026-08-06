@@ -326,13 +326,50 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ss.explore_search = {"winners_history": []}
     gaps = coord._extract_gaps_from_attempts()
     cids = {g["canonical_id"] for g in gaps}
-    # recurring failure folded into one gap with two attempts
-    fail_gap = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]][0]
-    assert len(fail_gap["attempts"]) == 2
+    # distinct variant_names produce separate gaps; each has one attempt
+    fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
+    assert len(fail_gaps) == 2
+    assert all(len(g["attempts"]) == 1 for g in fail_gaps)
     # explore plateau gap fires at streak >= 3; >= 6 escalates it to high
     plateau = [g for g in gaps if g["canonical_id"].endswith("explore_plateau")][0]
     assert plateau["severity"] == "high"
     assert cids
+
+
+def test_extract_gaps_no_variant_collapses(coord: Coordinator) -> None:
+    """Rows without variant_name still collapse into one gap (backward compat)."""
+    ss = coord.shared_state
+    ss.baseline_tput = 100.0
+    ss.last_action_failures = [
+        {"action": "explore", "error_class": "server_init_dead"},
+        {"action": "explore", "error_class": "server_init_dead"},
+    ]
+    ss.params_no_promote_streak = 0
+    ss.explore_search = {}
+    gaps = coord._extract_gaps_from_attempts()
+    fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
+    assert len(fail_gaps) == 1
+    assert len(fail_gaps[0]["attempts"]) == 2
+
+
+def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
+    """Symptom is built from the first non-empty excerpt line when available."""
+    ss = coord.shared_state
+    ss.baseline_tput = 100.0
+    ss.last_action_failures = [
+        {
+            "action": "explore",
+            "error_class": "server_init_dead",
+            "variant_name": "fp8_kv",
+            "error_excerpt": "mla_gluon[bh16bn128] requires batch_size=1, got 512",
+        },
+    ]
+    ss.params_no_promote_streak = 0
+    ss.explore_search = {}
+    gaps = coord._extract_gaps_from_attempts()
+    fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
+    assert fail_gaps
+    assert "mla_gluon" in fail_gaps[0]["symptom"]
 
 
 # -- advisory blocks (empty-guard paths) ----------------------------------

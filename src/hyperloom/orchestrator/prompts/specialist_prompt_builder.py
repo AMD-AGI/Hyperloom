@@ -796,6 +796,11 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
+    # Enablement dispatch evidence, folded into the §1b mandate. Both are empty
+    # for every non-enablement domain, and the mandate degrades gracefully.
+    enablement_source_context: str = ""
+    enablement_candidate_refs: tuple[str, ...] = ()
+
     # Workspace path (for transcript / heartbeat instructions)
     workspace_path: str = ""
 
@@ -2053,7 +2058,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "     under the worktree and list in ``artifacts_written`` as",
         "     ``{source, target, kind, description}``.",
         "   **NEVER** ``git apply`` / ``git commit`` against the shared",
-        f"   ``framework_source_roots`` directly — ``integrate_patch`` is",
+        "   ``framework_source_roots`` directly — ``integrate_patch`` is",
         "   the single integration point.",
         "3. Only ``specialist_done``, ``send_message``, and ``alert`` are",
         "   accepted intents; all others are dropped.",
@@ -2078,6 +2083,12 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     ``framework_agent.enablement_ops.build_mandate``. Kept in the user prompt so
     the cached system prompt stays task-independent.
 
+    The dispatch's own evidence — source lines near the offending site (plus the
+    checkpoint weight inventory on a weight-init failure) and the ranked bridging
+    refs — is folded in from ``enablement_*`` inputs. Without them the mandate
+    renders its generic skeleton, so the agent is told to find a bridge while the
+    candidates already discovered for it are withheld.
+
     Args:
         inp: Assembled prompt inputs for the current dispatch.
 
@@ -2095,7 +2106,11 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
         launch_log=inp.gap_symptom or "",
         gpu_type=(inp.gpu_type or "").strip().lower(),
     )
-    mandate = build_mandate(req)
+    mandate = build_mandate(
+        req,
+        candidate_refs=inp.enablement_candidate_refs,
+        source_context=inp.enablement_source_context,
+    )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.task_description.splitlines())
     return rows

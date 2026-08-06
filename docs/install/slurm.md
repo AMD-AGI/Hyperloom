@@ -4,7 +4,7 @@ myst:
         "description": "Submit Hyperloom optimization jobs to a Slurm cluster on AMD Instinct GPUs. Covers credentials, cluster setup, job submission, monitoring, and troubleshooting."
         "keywords": "Hyperloom, Slurm, cluster, AMD Instinct, MI300X, MI355X, sbatch, SGLang, vLLM, job submission, batch scheduler, ROCm"
 ---
-# Quickstart — Slurm
+# Slurm Installation Instructions
 
 Slurm mode submits Hyperloom optimization jobs to a **Slurm** cluster, where each
 job launches a ROCm serving container (sglang / vllm) on one node and runs the

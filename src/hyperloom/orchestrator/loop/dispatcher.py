@@ -1012,6 +1012,16 @@ class DispatcherCollaborator:
                         task.task_id,
                     )
                 try:
+                    self._record_explore_variant_failures(
+                        task=task,
+                        result=result_dict,
+                    )
+                except Exception:  # noqa: BLE001 — defensive
+                    log.exception(
+                        "explore: per-variant failure recording failed for task=%s",
+                        task.task_id,
+                    )
+                try:
                     await self._refresh_gaps(reason="explore_round")
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(

@@ -586,6 +586,10 @@ class SpecialistRunner:
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
+                enablement_source_context=str(params.get("enablement_source_context") or ""),
+                enablement_candidate_refs=tuple(
+                    str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
+                ),
                 gpu_type=str(params.get("gpu_type") or ""),
                 allocated_gpu_ids=allocated_gpu_ids,
                 tp=int(params.get("tp") or 0),

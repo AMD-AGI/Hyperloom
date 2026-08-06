@@ -859,8 +859,8 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
     _mute_action_scoring(c)
     try:
         c.shared_state.baseline_tput = 1500.0
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
         task = Task(
             task_id="t-reval-1",
             kind="baseline",
@@ -875,7 +875,7 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
         )
         assert c.shared_state.baseline_tput == pytest.approx(1200.0)
         assert c.shared_state.baseline_accuracy == pytest.approx(0.72)
-        assert c.shared_state.enablement_succeeded is True
+        assert c.shared_state.enablement.succeeded is True
         assert c.shared_state.last_baseline["decision"] == "promoted"
     finally:
         await c.stop()
@@ -1066,13 +1066,13 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
             await c._handle_unpromotable_result(_mk_task("baseline", f"t-ev-{i}"), _eval_failed_result())
         assert c.shared_state.baseline_failure_streak == 3
         assert c.shared_state.stop_reason in ("", None)
-        assert c.shared_state.enablement_origin == "eval"
-        assert c.shared_state.enablement_pending is True
-        assert c.shared_state.enablement_accuracy_floor == 0.2
-        assert c.shared_state.enablement_probe_config_path == "/runs/baseline/materialized.yaml"
-        assert c.shared_state.enablement_eval_contract_fingerprint == "abc123"
-        assert c.shared_state.enablement_baseline_eval_kind == "eval_runtime_failure"
-        assert c.shared_state.enablement_launch_log
+        assert c.shared_state.enablement.origin == "eval"
+        assert c.shared_state.enablement.pending is True
+        assert c.shared_state.enablement.accuracy_floor == 0.2
+        assert c.shared_state.enablement.probe_config_path == "/runs/baseline/materialized.yaml"
+        assert c.shared_state.enablement.eval_contract_fingerprint == "abc123"
+        assert c.shared_state.enablement.baseline_eval_kind == "eval_runtime_failure"
+        assert c.shared_state.enablement.launch_log
     finally:
         await c.stop()
 
@@ -1114,8 +1114,8 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
         # An enablement round is on record, but the lane was never admitted, so
         # it must not hold the baseline_failed budget open.
         c.shared_state.enablement_mode = "off"
-        c.shared_state.enablement_attempts = 2
-        c.shared_state.enablement_dispatched = True
+        c.shared_state.enablement.attempts = 2
+        c.shared_state.enablement.inflight_task_id = "spec-off"
         for i in range(3):
             await c._handle_unpromotable_result(
                 _mk_task("baseline", f"t-off-{i}"),
@@ -1131,20 +1131,20 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
         # Set tracked task_id so the gate recognizes this as the revalidation task.
-        c.shared_state.enablement_revalidation_task_id = "t-reval-ok"
+        c.shared_state.enablement.revalidation_task_id = "t-reval-ok"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
             task=_mk_task("baseline", "t-reval-ok"),
         )
         assert c.shared_state.baseline_tput == 1000.0
-        assert c.shared_state.enablement_succeeded is True
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_origin == ""
+        assert c.shared_state.enablement.succeeded is True
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.origin == ""
     finally:
         await c.stop()
 
@@ -1155,10 +1155,10 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.3
-        c.shared_state.enablement_revalidation_task_id = "t-reval-tracked"
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
+        c.shared_state.enablement.revalidation_task_id = "t-reval-tracked"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.42},
@@ -1166,9 +1166,9 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
         )
         assert c.shared_state.baseline_tput == 1000.0
         # Pending state must NOT be consumed by the unrelated baseline.
-        assert c.shared_state.enablement_validation_pending is True
-        assert c.shared_state.enablement_succeeded is False
-        assert c.shared_state.enablement_revalidation_task_id == "t-reval-tracked"
+        assert c.shared_state.enablement.validation_pending is True
+        assert c.shared_state.enablement.succeeded is False
+        assert c.shared_state.enablement.revalidation_task_id == "t-reval-tracked"
     finally:
         await c.stop()
 
@@ -1179,10 +1179,10 @@ async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_origin = "eval"
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_accuracy_floor = 0.8
-        c.shared_state.enablement_revalidation_task_id = "t-reval-subflo"
+        c.shared_state.enablement.origin = "eval"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.8
+        c.shared_state.enablement.revalidation_task_id = "t-reval-subflo"
         await c._promote_to_shared_state(
             "baseline",
             {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.5},
@@ -1190,10 +1190,10 @@ async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
         )
         # Baseline tput anchors normally, but enablement is NOT succeeded.
         assert c.shared_state.baseline_tput == 1000.0
-        assert c.shared_state.enablement_succeeded is False
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
-        assert c.shared_state.enablement_revalidation_task_id == ""
+        assert c.shared_state.enablement.succeeded is False
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
+        assert c.shared_state.enablement.revalidation_task_id == ""
     finally:
         await c.stop()
 
@@ -1204,11 +1204,11 @@ async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir,
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_revalidation_task_id = "t-reval-fail"
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.revalidation_task_id = "t-reval-fail"
         await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
     finally:
         await c.stop()
 
@@ -1243,28 +1243,28 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
     _mute_action_scoring(c)
     try:
         st = c.shared_state
-        st.enablement_baseline_eval_kind = "accuracy_below_floor"
-        st.enablement_observed_accuracy = 0.0
-        st.enablement_observed_task = "gsm8k"
-        st.enablement_observed_metric = "exact_match,strict-match"
-        st.enablement_baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
-        st.enablement_probe_config_path = "/runs/baseline/measured.yaml"
-        st.enablement_eval_contract_fingerprint = "measured-fp"
+        st.enablement.baseline_eval_kind = "accuracy_below_floor"
+        st.enablement.observed_accuracy = 0.0
+        st.enablement.observed_task = "gsm8k"
+        st.enablement.observed_metric = "exact_match,strict-match"
+        st.enablement.baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
+        st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
+        st.enablement.eval_contract_fingerprint = "measured-fp"
 
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-noeval"), _eval_unavailable_result()
         )
 
         # The measured characterization survives...
-        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement_observed_task == "gsm8k"
-        assert st.enablement_observed_metric == "exact_match,strict-match"
-        assert "accuracy=0.0" in st.enablement_baseline_eval_evidence
-        assert st.enablement_probe_config_path == "/runs/baseline/measured.yaml"
-        assert st.enablement_eval_contract_fingerprint == "measured-fp"
+        assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement.observed_task == "gsm8k"
+        assert st.enablement.observed_metric == "exact_match,strict-match"
+        assert "accuracy=0.0" in st.enablement.baseline_eval_evidence
+        assert st.enablement.probe_config_path == "/runs/baseline/measured.yaml"
+        assert st.enablement.eval_contract_fingerprint == "measured-fp"
         # ...while the round still registers as an eval-rooted failure.
-        assert st.enablement_origin == "eval"
-        assert st.enablement_pending is True
+        assert st.enablement.origin == "eval"
+        assert st.enablement.pending is True
     finally:
         await c.stop()
 
@@ -1277,8 +1277,8 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
     _mute_action_scoring(c)
     try:
         st = c.shared_state
-        st.enablement_baseline_eval_kind = "accuracy_unavailable"
-        st.enablement_baseline_eval_evidence = "accuracy=None"
+        st.enablement.baseline_eval_kind = "accuracy_unavailable"
+        st.enablement.baseline_eval_evidence = "accuracy=None"
 
         measured = _eval_unavailable_result()
         measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
@@ -1288,9 +1288,9 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
 
         await c._handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
 
-        assert st.enablement_baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement_observed_task == "gsm8k"
-        assert "measured" in st.enablement_baseline_eval_evidence
+        assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
+        assert st.enablement.observed_task == "gsm8k"
+        assert "measured" in st.enablement.baseline_eval_evidence
     finally:
         await c.stop()
 
@@ -1302,20 +1302,20 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
-        c.shared_state.enablement_validation_pending = True
-        c.shared_state.enablement_revalidation_task_id = "t-reval-boot"
-        c.shared_state.enablement_eval_contract_fingerprint = "frozen-fp"
-        c.shared_state.enablement_accuracy_floor = 0.5
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
+        c.shared_state.enablement.eval_contract_fingerprint = "frozen-fp"
+        c.shared_state.enablement.accuracy_floor = 0.5
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
             {"status": "failed", "error_class": "oom"},
         )
-        assert c.shared_state.enablement_validation_pending is False
-        assert c.shared_state.enablement_stall_streak == 1
-        assert c.shared_state.enablement_revalidation_task_id == ""
+        assert c.shared_state.enablement.validation_pending is False
+        assert c.shared_state.enablement.stall_streak == 1
+        assert c.shared_state.enablement.revalidation_task_id == ""
         # Frozen trigger identity must be preserved.
-        assert c.shared_state.enablement_eval_contract_fingerprint == "frozen-fp"
-        assert c.shared_state.enablement_accuracy_floor == 0.5
+        assert c.shared_state.enablement.eval_contract_fingerprint == "frozen-fp"
+        assert c.shared_state.enablement.accuracy_floor == 0.5
     finally:
         await c.stop()
 

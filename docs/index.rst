@@ -18,8 +18,8 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
   .. grid-item-card:: Install
 
-    * :doc:`Quickstart -- Docker and bare metal </install/install>`
-    * :doc:`Quickstart -- Slurm </install/slurm>`
+    * :doc:`Install on Docker or Bare metal </install/install>`
+    * :doc:`Install for Slurm </install/slurm>`
 
   .. grid-item-card:: Components
 

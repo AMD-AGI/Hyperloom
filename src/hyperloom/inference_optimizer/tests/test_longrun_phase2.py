@@ -200,9 +200,11 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     }
     block = c._acceptance_threshold_advisory_block()
     assert "KEEP>=0.40%" in block
-    assert "v_hi" in block  # >= bar → re-testable
-    assert "v_lo" in block  # < bar → reference only
-    assert "v_keep" not in block  # KEEP'd → never surfaced for re-test
+    # All entries with measured gains appear as evidence regardless of outcome.
+    assert "v_hi" in block  # >= bar
+    assert "v_lo" in block  # < bar
+    assert "v_keep" in block  # KEEP'd result also surfaced as evidence
+    assert "Historical results are evidence only" in block
 
 
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):

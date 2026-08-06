@@ -370,12 +370,69 @@ def test_enablement_accepted_config_path_roundtrips(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
     s = SharedState()
-    s.enablement_accepted_config_path = "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
-    s.enablement_active_runtime = {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+    s.enablement.accepted_config_path = "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    s.enablement.active_runtime = {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
     s.save(sd)
     loaded = SharedState.load_or_init(sd)
-    assert loaded.enablement_accepted_config_path == "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
-    assert loaded.enablement_active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+    assert loaded.enablement.accepted_config_path == "/runs/specialist/t-spec-1/integrate_patch.with_envs.yaml"
+    assert loaded.enablement.active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
+
+
+# 7. EnablementRound v3→v4 migration
+def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
+    """A v3 state.json with flat enablement_* keys loads into a populated EnablementRound."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    v3_state = {
+        "schema_version": 3,
+        "enablement_launch_log": "RuntimeError: Engine core initialization failed.",
+        "enablement_attempts": 2,
+        "enablement_stall_streak": 1,
+        "enablement_kept_patches": ["/p/001.patch"],
+        "enablement_succeeded": False,
+        "enablement_inflight_task_id": "spec-v3",
+        "enablement_mode": "launch",
+    }
+    (sd / "state.json").write_text(json.dumps(v3_state))
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+    assert loaded.enablement.launch_log == "RuntimeError: Engine core initialization failed."
+    assert loaded.enablement.attempts == 2
+    assert loaded.enablement.stall_streak == 1
+    assert loaded.enablement.kept_patches == ["/p/001.patch"]
+    assert loaded.enablement.succeeded is False
+    assert loaded.enablement.inflight_task_id == "spec-v3"
+    # session-scoped field stays top-level
+    assert loaded.enablement_mode == "launch"
+
+
+def test_v4_nested_enablement_roundtrips(tmp_path):
+    """A v4 state.json with nested enablement dict survives save/load_or_init."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    s = SharedState()
+    s.enablement.launch_log = "mla_gluon requires batch_size=1"
+    s.enablement.attempts = 3
+    s.enablement.kept_patches = ["/p/a.patch", "/p/b.patch"]
+    s.save(sd)
+    raw = json.loads((sd / "state.json").read_text())
+    assert isinstance(raw.get("enablement"), dict), "enablement must be nested in state.json"
+    assert raw["enablement"]["launch_log"] == "mla_gluon requires batch_size=1"
+    assert "enablement_launch_log" not in raw, "flat keys must not appear in v4 output"
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.enablement.launch_log == "mla_gluon requires batch_size=1"
+    assert loaded.enablement.attempts == 3
+    assert loaded.enablement.kept_patches == ["/p/a.patch", "/p/b.patch"]
+
+
+def test_to_dict_emits_nested_enablement():
+    """to_dict() produces enablement as a nested dict, not flat keys."""
+    s = SharedState()
+    s.enablement.launch_log = "test"
+    d = s.to_dict()
+    assert isinstance(d.get("enablement"), dict)
+    assert d["enablement"]["launch_log"] == "test"
+    assert "enablement_launch_log" not in d
 
 
 @pytest.mark.parametrize("field_name", ["explore_search"])

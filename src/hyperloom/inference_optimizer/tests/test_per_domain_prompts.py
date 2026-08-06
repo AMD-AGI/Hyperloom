@@ -244,6 +244,44 @@ def test_enablement_book_lives_in_user_not_system_prompt():
     assert "ENABLEMENT METHODOLOGY" in user
 
 
+def test_enablement_mandate_carries_the_dispatch_evidence():
+    """Source context and ranked refs discovered by the Coordinator reach the mandate.
+
+    The Coordinator computes both before dispatch; a mandate rendered without them
+    tells the agent to find a bridge while withholding the candidates already found
+    for it, and drops the checkpoint weight inventory a weight-init retry needs.
+    """
+    domain = get_domain("enablement_specialist")
+    assert domain is not None
+    weights = "CHECKPOINT WEIGHTS: model.layers.0.mlp.gate_up_proj.weight [8192, 4096]"
+    inp = SpecialistPromptInputs(
+        task_id="task-enablement-evidence",
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.weight_init",
+        gap_symptom="KeyError: 'gate_up_proj' while loading weights",
+        gap_layer=domain.layer,
+        gap_evidence={"model": "Qwen/Qwen3-8B"},
+        framework="vllm",
+        enablement_source_context=weights,
+        enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert "SOURCE CONTEXT" in user
+    assert weights in user
+    assert "CANDIDATE BRIDGING" in user
+    assert "ROCm/vllm#123" in user
+    assert "vllm-project/vllm#456" in user
+
+
+def test_enablement_mandate_omits_evidence_headers_when_not_supplied():
+    """No dispatch evidence => no empty scaffolding, and the book still renders."""
+    _system, user = _build_split("enablement_specialist")
+    assert "## 1b. ENABLEMENT PLAYBOOK" in user
+    assert "SOURCE CONTEXT" not in user
+    assert "CANDIDATE BRIDGING" not in user
+
+
 def test_perf_specialist_prompt_unchanged_keeps_perf_context():
     """A perf domain still carries roofline / recipe / KG sections and no ladder book."""
     _system, user = _build_split("serving_specialist")
