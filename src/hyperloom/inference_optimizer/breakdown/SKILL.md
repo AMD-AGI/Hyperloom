@@ -41,7 +41,7 @@ authoritative.
 | `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
-| `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. |
+| `telemetry`          | Paths to `benchmark_report.json` / `torch_trace` / `system_profile` / server logs + aggregated GPU monitor. `telemetry.orchestration_context` carries the compaction-loop health: `seed_prompts`, `delta_prompts`, `compactions`, `degenerate_compactions`, `tick_count`, `compactions_per_tick`, `delta_ratio`, `context_tokens_at_compaction`. See `docs/reference/session-breakdown.md §telemetry.orchestration_context`. |
 | `attribution`        | Per-stack-entry gain ledger + family breakdown (geak / forge / explore / sweep / legacy aliases).        |
 | `warnings`           | Best-effort caveats (missing files, partial sections, reconstructed fields).                             |
 | `source_files`       | Mapping from logical section to relative path under `session_dir`.                                       |
