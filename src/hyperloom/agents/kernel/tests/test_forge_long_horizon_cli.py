@@ -2790,6 +2790,61 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     assert outcome.timed_out is False
 
 
+def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("pass\n")
+    experiments = tmp_path / "attempt" / "forge_experiments"
+    experiments.mkdir(parents=True)
+    result_json = tmp_path / "attempt" / "forge_rewrite_result.json"
+    terminated = {}
+
+    class HangingProcess:
+        pid = 4321
+        returncode = -9
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="forge-rewrite-by-flydsl", timeout=timeout)
+
+    def fake_terminate(proc):
+        terminated["pid"] = proc.pid
+        return "partial stdout", "killed"
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: HangingProcess())
+    monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
+
+    outcome = forge_submit._run_rewrite_via_cli(
+        source_kernel=str(workspace / "kernel.py"),
+        driver=str(workspace / "driver.py"),
+        logical_op_name="vllm::op",
+        source_entry="",
+        workspace=str(workspace),
+        experiments_dir=experiments,
+        result_json=result_json,
+        target_functions=None,
+        shapes={},
+        snr_threshold=30.0,
+        gpu_target="gfx942",
+        max_iters=4,
+        max_hours=1.0,
+        branch="forge/session/op",
+        framework="",
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+        deadline_unix=time.time() + 1.0,
+    )
+
+    # The whole process group is torn down, and a run that published nothing
+    # yields no result for the validator to consider.
+    assert terminated["pid"] == 4321
+    assert outcome.timed_out is True
+    assert outcome.result is None
+    assert "deadline" in str(outcome.error)
+    assert "killed" in outcome.output
+
+
 def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch):
     workspace = tmp_path / "worktree"
     workspace.mkdir()
