@@ -284,7 +284,12 @@ fi
 # API and /v1 speaks OpenAI chat-completions, both with the same key. Endpoint
 # and model derivation matches hyperloom.common.llm_config.deepseek_compat_env.
 # Explicit values always win.
-if [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
+# Adopt the gateway whole or not at all: anything already on the Anthropic side
+# means the retired variables are stale leftovers, and half-adopting them would
+# send an explicit Anthropic credential to DeepSeek's host.
+if { [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; } \
+   && [ -z "${ANTHROPIC_BASE_URL:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+   && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
   _ds_base="${DEEPSEEK_BASE_URL:-}"
   _ds_base="${_ds_base%/}"
   # Case-insensitive match (AMD spells it /Anthropic); ${_ds_base%/*} drops the
@@ -299,22 +304,23 @@ if [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
     *)            _ds_anthropic="$_ds_base"; _ds_openai="${_ds_base}/v1" ;;
   esac
   _ds_model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
-  [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$_ds_anthropic"
-  [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$_ds_openai"
-  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-    # One credential in two spellings: fill as a unit so a legacy key never
-    # joins an explicitly configured Anthropic one.
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
-    fi
-    [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-  fi
+  export ANTHROPIC_BASE_URL="$_ds_anthropic"
+  [ -n "${DEEPSEEK_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY"
   [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$_ds_model"
-  [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$_ds_model"
-  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$_ds_model"
+  # GEAKv4 follows whichever Claude model is actually in effect.
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$_ds_model}"
+  # The OpenAI side is adopted only when it is entirely free; otherwise some
+  # other gateway already runs there and keeps its own key and model.
+  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_BASE_URL="$_ds_openai"
+    [ -n "${DEEPSEEK_API_KEY:-}" ] && export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$_ds_model"
+  fi
   unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
   unset _ds_base _ds_lower _ds_anthropic _ds_openai _ds_model
   echo "[kernel-agent] DEEPSEEK_* is retired; normalized to ANTHROPIC_*/OPENAI_*" >&2
+elif [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
+  echo "[kernel-agent] DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured" >&2
 fi
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py

@@ -1100,6 +1100,15 @@ migrate_legacy_deepseek_env() {
   if [ -z "$key" ] && [ -z "$url" ]; then
     return 0
   fi
+  # Adopt the gateway whole or not at all. Anything already on the Anthropic
+  # side means the retired variables are stale leftovers: half-adopting them
+  # would send an explicit Anthropic credential to DeepSeek's host.
+  if [ -n "${ANTHROPIC_BASE_URL:-$(read_dotenv_var ANTHROPIC_BASE_URL || true)}" ] \
+     || [ -n "${ANTHROPIC_API_KEY:-$(read_dotenv_var ANTHROPIC_API_KEY || true)}" ] \
+     || [ -n "${ANTHROPIC_AUTH_TOKEN:-$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)}" ]; then
+    warn "DEEPSEEK_* is retired and ignored here: the Anthropic side is already configured"
+    return 0
+  fi
 
   # Match the trailing segment case-insensitively (AMD spells it /Anthropic)
   # and swap it with ${base%/*}, which drops the final segment whatever its
@@ -1116,20 +1125,21 @@ migrate_legacy_deepseek_env() {
   esac
   model="${model:-deepseek-v4-pro}"
 
-  # Explicit operator values always win. ANTHROPIC_API_KEY and
-  # ANTHROPIC_AUTH_TOKEN are one credential in two spellings, so they are
-  # filled as a unit: a legacy key must never join an explicit Anthropic one.
-  [ -n "${ANTHROPIC_BASE_URL:-}" ] || export ANTHROPIC_BASE_URL="$anthropic_url"
-  [ -n "${OPENAI_BASE_URL:-}" ] || export OPENAI_BASE_URL="$openai_url"
-  if [ -n "$key" ]; then
-    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-      export ANTHROPIC_API_KEY="$key"
-    fi
-    [ -n "${OPENAI_API_KEY:-}" ] || export OPENAI_API_KEY="$key"
-  fi
+  # The guard above already proved the Anthropic side is free, so these are
+  # unconditional. ANTHROPIC_AUTH_TOKEN is not written: .env only ever persists
+  # the API-key spelling (see remove_dotenv_var ANTHROPIC_AUTH_TOKEN below).
+  export ANTHROPIC_BASE_URL="$anthropic_url"
+  [ -n "$key" ] && export ANTHROPIC_API_KEY="$key"
   [ -n "${CLAUDE_MODEL:-}" ] || export CLAUDE_MODEL="$model"
-  [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
-  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="$model"
+  # GEAKv4 follows whichever Claude model is actually in effect.
+  [ -n "${GEAK_CLAUDE_MODEL:-}" ] || export GEAK_CLAUDE_MODEL="${CLAUDE_MODEL:-$model}"
+  # The OpenAI side is adopted only when it is entirely free; otherwise some
+  # other gateway already runs there and keeps its own key and model.
+  if [ -z "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_BASE_URL="$openai_url"
+    [ -n "$key" ] && export OPENAI_API_KEY="$key"
+    [ -n "${CODEX_MODEL:-}" ] || export CODEX_MODEL="$model"
+  fi
   unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL
   LEGACY_DEEPSEEK_MIGRATED=1
   warn "DEEPSEEK_* is retired; migrated to ANTHROPIC_BASE_URL=${anthropic_url} + OPENAI_BASE_URL=${openai_url}"

@@ -65,11 +65,16 @@ _DEEPSEEK_MODEL = "deepseek-v4-pro"
 # convention (``/Unified/v1``) does not exist on them.
 _DUAL_PROTOCOL_HOSTS: frozenset[str] = frozenset({"api.deepseek.com"})
 
-# ``ANTHROPIC_API_KEY`` (x-api-key) and ``ANTHROPIC_AUTH_TOKEN`` (bearer) are
-# alternative spellings of one credential, so they are filled or skipped as a
-# unit: filling only one leaves two different secrets on the same request and
-# gateways generally prefer the bearer token.
-_ANTHROPIC_KEY_GROUP: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# The retired variables are Anthropic-side shaped, so they are adopted only
+# when that whole side is empty -- and then for BOTH protocols, since they
+# describe one gateway. Adopting them piecemeal next to an existing Anthropic
+# credential would send that credential to DeepSeek's host.
+_ANTHROPIC_SIDE_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+_OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -118,41 +123,51 @@ def deepseek_compat_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     sides and this function is the single place that understands the retired
     variables.
 
-    Only keys absent from ``env`` are returned, so an explicit operator value
-    always wins and repeated application is a no-op. The two Anthropic key
-    spellings are treated as one unit: if either is already set, neither is
-    filled, so a leftover ``DEEPSEEK_API_KEY`` can never end up authenticating
-    alongside an explicitly configured Anthropic credential.
+    The gateway is adopted whole or not at all: when anything on the Anthropic
+    side is already configured the retired variables are stale leftovers and
+    are ignored completely. Half-adopting them would pair an explicit Anthropic
+    credential with DeepSeek's endpoint, or invent an OpenAI side the operator
+    never asked for. Beyond that, only keys absent from ``env`` are returned,
+    so an explicit value always wins and repeated application is a no-op.
 
     Args:
         env: Environment mapping to read; defaults to ``os.environ``.
 
     Returns:
         The ``ANTHROPIC_*`` / ``OPENAI_*`` / model updates to apply, or an empty
-        mapping when no legacy DeepSeek variable is set.
+        mapping when no legacy DeepSeek variable is set or the Anthropic side is
+        already configured.
     """
     source = env if env is not None else os.environ
     api_key = (source.get("DEEPSEEK_API_KEY") or "").strip()
     legacy_url = (source.get("DEEPSEEK_BASE_URL") or "").strip()
     if not api_key and not legacy_url:
         return {}
+    if any((source.get(name) or "").strip() for name in _ANTHROPIC_SIDE_KEYS):
+        return {}
 
     anthropic_url, openai_url = dual_protocol_endpoint_pair(legacy_url)
     model = (source.get("DEEPSEEK_MODEL") or "").strip() or _DEEPSEEK_MODEL
     candidates: dict[str, str] = {
         "ANTHROPIC_BASE_URL": anthropic_url,
-        "OPENAI_BASE_URL": openai_url,
         "CLAUDE_MODEL": model,
-        "CODEX_MODEL": model,
-        # GEAKv4 drives Claude Code with its own model variable; without this it
-        # would fall back to an AMD Claude id the DeepSeek gateway cannot serve.
-        "GEAK_CLAUDE_MODEL": model,
+        # GEAKv4 drives Claude Code with its own model variable, so it follows
+        # whichever Claude model is actually in effect -- an explicit
+        # CLAUDE_MODEL must not be contradicted by the gateway default.
+        "GEAK_CLAUDE_MODEL": (source.get("CLAUDE_MODEL") or "").strip() or model,
     }
     if api_key:
-        candidates["OPENAI_API_KEY"] = api_key
-        if not any((source.get(name) or "").strip() for name in _ANTHROPIC_KEY_GROUP):
-            for name in _ANTHROPIC_KEY_GROUP:
-                candidates[name] = api_key
+        # Two spellings of one credential: x-api-key and bearer.
+        candidates["ANTHROPIC_API_KEY"] = api_key
+        candidates["ANTHROPIC_AUTH_TOKEN"] = api_key
+    # The OpenAI side is adopted only when it is entirely free. Otherwise the
+    # operator already runs some other gateway there, and neither its key nor
+    # its model may be replaced with DeepSeek's.
+    if not any((source.get(name) or "").strip() for name in _OPENAI_SIDE_KEYS):
+        candidates["OPENAI_BASE_URL"] = openai_url
+        candidates["CODEX_MODEL"] = model
+        if api_key:
+            candidates["OPENAI_API_KEY"] = api_key
     return {key: value for key, value in candidates.items() if value and not (source.get(key) or "").strip()}
 
 
