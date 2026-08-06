@@ -808,10 +808,10 @@ class SpecialistPromptInputs:
     # Free-form notes from Orchestration (e.g. previous-round resid_qs)
     notes: str = ""
 
-    # Dispatch profile dials (see orchestrator.specialist_profile) that shape
+    # Dispatch profile dials (see orchestrator.specialists.profile) that shape
     # single-domain / cross-domain / freeform / bench prompting.
     scope: str = "domain"
-    mode: str = "patch"
+    mode: str = MODE_PATCH
     bench: bool = False
     lane: str = "gpu"
     # Free-form task description (only populated when scope == 'freeform').
@@ -844,12 +844,8 @@ class SpecialistPromptInputs:
 
 # Section 1 — Identity & autonomy
 def _authors_patches(inp: SpecialistPromptInputs) -> bool:
-    """Whether this dispatch may author patches.
-
-    Research mode is read-only and the runner leases it no worktree, so every
-    patch-authoring instruction must be withheld from it.
-    """
-    return (inp.mode or MODE_PATCH).lower() == MODE_PATCH
+    """Whether this dispatch may author patches; research mode gets no worktree."""
+    return inp.mode == MODE_PATCH
 
 
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
@@ -877,22 +873,17 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         )
         deliverable_line = "(Section 8) carrying ``proposal_set``. The hard"
     if inp.allocated_gpu_ids:
-        fanout_line = (
-            "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
-            'N candidates of one lever at once, or read several subsystems), you MAY '
-            '``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn, '
-            "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
-            "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
-            "multi-round depth (e.g. coordinate-descent autotune) yourself."
-        )
+        leaf_examples = "bench N candidates of one lever at once, or read several subsystems"
+        leaf_devices = "inherit your VISIBLE_DEVICES (so they share your GPU and cannot oversubscribe), and "
     else:
-        fanout_line = (
-            "Fan-out: to parallelize independent single-shot sub-tasks (e.g. read "
-            'several subsystems at once), you MAY '
-            '``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn and '
-            "cannot fan out further. Use leaves for breadth; do multi-round depth "
-            "yourself."
-        )
+        leaf_examples = "read several subsystems at once"
+        leaf_devices = ""
+    fanout_line = (
+        f"Fan-out: to parallelize independent single-shot sub-tasks (e.g. {leaf_examples}), "
+        'you MAY ``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn, '
+        f"{leaf_devices}cannot fan out further. Use leaves for breadth; do multi-round "
+        "depth (e.g. coordinate-descent autotune) yourself."
+    )
     body: list[str] = [
         "## 1. IDENTITY & AUTONOMY",
         "",
@@ -1113,18 +1104,17 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
 
     # Deliverable line based on scope × mode.
     scope = (inp.scope or "domain").lower()
-    mode = (inp.mode or "patch").lower()
     if scope == "freeform":
         anchor = (inp.task_description.split("\n")[0].strip()[:120] if inp.task_description else "")
         deliverable = "freeform investigation — see task description"
     else:
         anchor = inp.gap_canonical_id or ""
-        if scope == "domains":
-            deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
-        elif mode == "patch":
-            deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
-        else:
+        if not _authors_patches(inp):
             deliverable = "findings and up to 6 ranked config variants (read-only; no patch)"
+        elif scope == "domains":
+            deliverable = "a coupled patch spanning multiple domains + up to 6 ranked config variants"
+        else:
+            deliverable = "a source patch and/or up to 6 ranked config variants addressing the gap below"
 
     rows: list[str] = [
         "## 0. MANDATE",
@@ -1931,18 +1921,15 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  restores the backup on REVERT. A non-diff tuned artifact is a FULL",
             "  result — set ``empty=false`` when ``artifacts_written`` is non-empty.",
         ]
-        empty_rule = [
-            "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
-            "  AND no ``patches_written``/``artifacts_written``; in that case",
-            "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
-        ]
+        no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
         patch_fields = []
-        empty_rule = [
-            "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
-            "  and no findings; in that case ``proposal_set=[]`` and you must put",
-            "  the reason in ``summary``.",
-        ]
+        no_output = "  and no findings; in that case"
+    empty_rule = [
+        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+        no_output,
+        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+    ]
 
     return [
         "## 8. OUTPUT PROTOCOL",
