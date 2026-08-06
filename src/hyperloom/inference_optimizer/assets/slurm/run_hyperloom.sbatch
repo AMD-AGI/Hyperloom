@@ -72,8 +72,7 @@ export HF_TOKEN="${HF_TOKEN:-}"
 
 # --- copy the in-container runner to the shared mount ----------------------
 # run_hyperloom.sbatch runs _incontainer.sh.in inside the container.
-# KERNEL_OPT_BACKEND_ORDER selects the kernel-opt rewrite ladder (default
-# geak); it is forwarded into the container.
+# Kernel-opt rewrite ladder (geak|forge); forwarded into the container.
 export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
 cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"

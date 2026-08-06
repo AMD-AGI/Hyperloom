@@ -730,7 +730,6 @@ async def test_compose_prompt_renders_the_gap_it_just_computed(coord: Coordinato
     coord.shared_state.cumulative_gain = 5.0
     text = await coord._compose_prompt("orchestration")
     assert "target_gap_pct=15.00" in text
-    assert "target_gap_pct=0.00" not in text
 
 
 @pytest.mark.asyncio

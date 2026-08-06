@@ -6,8 +6,7 @@
 # vars exported by the launcher (REPO_ID, MODEL_PATH, FRAMEWORK, GPU_TYPE,
 # BACKEND, TP, PREC, ISL, OSL, CONC, MODEL_CLASS, TARGET_GAIN, MAX_HOURS, ...).
 #
-# The kernel-opt rewrite ladder is selected by KERNEL_OPT_BACKEND_ORDER
-# (geak|forge); every carrier defaults it to geak.
+# KERNEL_OPT_BACKEND_ORDER (geak|forge) selects the kernel-opt rewrite ladder.
 set -euo pipefail
 
 echo "[hl] session=$CLAW_SESSION_ID model=$REPO_ID fw=$FRAMEWORK gpu=$GPU_TYPE tp=$TP backend=$BACKEND"
