@@ -27,6 +27,7 @@ from ..state.task_registry import TERMINAL_STATES
 from ..bus.message_bus import Message
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
+    _MAX_ROOFLINE_FAILURE_RETRIES,
     _resolve_roofline_watermark_ratio,
     _resolve_serving_fidelity,
     _split_env_and_flags,
@@ -2675,7 +2676,8 @@ class KernelPhase(PhaseHandler):
         Returns:
             ``True`` when a fresh roofline is warranted because projected tput
             crossed the watermark ratio; ``False`` otherwise (including the
-            bootstrap and in-flight re-arm guards).
+            bootstrap and in-flight re-arm guards, and once the failure streak
+            has exhausted ``_MAX_ROOFLINE_FAILURE_RETRIES``).
         """
         state = self.shared_state
         try:
@@ -2691,6 +2693,8 @@ class KernelPhase(PhaseHandler):
                 failure_streak = 0
             if failure_streak <= 0:
                 return False
+            if failure_streak > _MAX_ROOFLINE_FAILURE_RETRIES:
+                return False
             try:
                 last_rl = float(state.baseline_tput or 0.0)
             except (TypeError, ValueError):
@@ -2701,6 +2705,31 @@ class KernelPhase(PhaseHandler):
         if cur <= 0:
             return False
         return cur / last_rl >= _resolve_roofline_watermark_ratio()
+
+    async def _release_finished_roofline_gate(self) -> None:
+        """Drop an in-flight marker that names a roofline which already finished.
+
+        ``auto_roofline_pending_task_id`` gates the watermark so two rooflines
+        never run at once, and it is cleared when the task reports back. A task
+        that was deduplicated into an already-finished attempt reports nothing,
+        so the marker it left behind gated the watermark permanently — and it
+        survives into the next process, because the marker is persisted state.
+        Whoever resumed the session inherited a gate that nothing could open.
+        """
+        pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
+        if not pending:
+            return
+        try:
+            task = await self.tasks.get(pending)
+        except Exception:  # noqa: BLE001 — a missing row is itself finished
+            task = None
+        if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
+            return
+        self.shared_state.auto_roofline_pending_task_id = ""
+        log.info(
+            "watermark-roofline: released in-flight gate held by finished task=%s",
+            pending,
+        )
 
     async def _maybe_enqueue_watermark_roofline(
         self,
@@ -2715,6 +2744,7 @@ class KernelPhase(PhaseHandler):
         Returns:
             ``True`` if a roofline task was enqueued, else ``False``.
         """
+        await self._release_finished_roofline_gate()
         if not self._needs_roofline_for_watermark():
             return False
         try:

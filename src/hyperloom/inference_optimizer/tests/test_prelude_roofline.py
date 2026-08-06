@@ -64,6 +64,9 @@ class _StubTaskRegistry:
         self._by_idem[idempotency_key] = task  # type: ignore[assignment]
         return task, False
 
+    async def get(self, task_id: str):
+        return self._tasks[task_id]
+
 
 @pytest.fixture
 def coord(tmp_path: Path, monkeypatch) -> Coordinator:
@@ -152,6 +155,139 @@ async def test_distinct_reasons_produce_distinct_tasks(coord: Coordinator):
     assert prelude.task_id != watermark.task_id
     assert "internal-analysis-prelude_initial" in coord.tasks._by_idem
     assert "internal-analysis-explore_keep_watermark" in coord.tasks._by_idem
+
+
+@pytest.mark.asyncio
+async def test_failed_roofline_does_not_dedup_away_the_retry(coord: Coordinator):
+    """The whole blackout, stated directly.
+
+    ``_needs_roofline_for_watermark`` re-arms once a roofline has failed, so the
+    system asks for a retry on purpose. It used to re-ask under a per-cycle
+    singleton key, so the registry handed back the attempt that had already
+    failed and nothing ran. Four sessions went by with no GPU evidence at all
+    while the log reported "enqueued" each time.
+    """
+    first = await coord._enqueue_internal_analysis_task(
+        reason="integrate_keep_watermark",
+    )
+
+    coord.shared_state.roofline_failure_streak = 1
+    retry = await coord._enqueue_internal_analysis_task(
+        reason="integrate_keep_watermark",
+    )
+
+    assert retry.task_id != first.task_id
+    assert len(coord.tasks._tasks) == 2
+
+
+@pytest.mark.asyncio
+async def test_each_further_failure_earns_its_own_attempt(coord: Coordinator):
+    """Two failures in a row are two distinct retries, not one repeated."""
+    seen = set()
+    for streak in (0, 1, 2):
+        coord.shared_state.roofline_failure_streak = streak
+        task = await coord._enqueue_internal_analysis_task(
+            reason="integrate_keep_watermark",
+        )
+        seen.add(task.task_id)
+
+    assert len(seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_roofline_that_worked_is_never_re_run(coord: Coordinator):
+    """The streak resets to zero on a successful snapshot, so success collapses
+    back onto the original key and stays idempotent across resumes."""
+    coord.shared_state.roofline_failure_streak = 0
+    first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+    second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+
+    assert first.task_id == second.task_id
+    assert first.idempotency_key == "internal-analysis-prelude_initial"
+
+
+@pytest.mark.asyncio
+async def test_profile_kind_keeps_the_plain_key(coord: Coordinator):
+    """Only roofline retries; the profile kind has no failure streak to spend."""
+    coord.shared_state.enable_roofline = False
+    coord.shared_state.roofline_failure_streak = 2
+    task = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
+
+    assert task.kind == "profile"
+    assert task.idempotency_key == "internal-analysis-prelude_initial"
+
+
+@pytest.mark.asyncio
+async def test_watermark_gate_reopens_after_the_roofline_it_names_finished(
+    coord: Coordinator,
+):
+    """A marker left on a finished task gated the watermark forever, and it is
+    persisted state, so resuming the session inherited the wedge."""
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.cumulative_gain_validated = 50.0
+    state.last_roofline_tput = 0.0
+
+    stale = await coord._enqueue_internal_analysis_task(
+        reason="integrate_keep_watermark",
+    )
+    coord.tasks._tasks[stale.task_id].state = "succeeded"
+    state.auto_roofline_pending_task_id = stale.task_id
+    state.roofline_failure_streak = 1  # its trace analysis failed
+    assert coord._needs_roofline_for_watermark() is False
+
+    enqueued = await coord._maybe_enqueue_watermark_roofline(
+        reason="integrate_keep_watermark",
+    )
+
+    assert enqueued is True
+    assert state.auto_roofline_pending_task_id != stale.task_id
+
+
+@pytest.mark.asyncio
+async def test_watermark_gate_holds_while_a_roofline_is_genuinely_running(
+    coord: Coordinator,
+):
+    """The gate exists so two rooflines never run at once; releasing it must
+    depend on the task being finished, not merely on being asked."""
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.cumulative_gain_validated = 50.0
+    state.last_roofline_tput = 0.0
+    state.roofline_failure_streak = 1
+
+    live = await coord._enqueue_internal_analysis_task(
+        reason="integrate_keep_watermark",
+    )
+    coord.tasks._tasks[live.task_id].state = "running"
+    state.auto_roofline_pending_task_id = live.task_id
+
+    enqueued = await coord._maybe_enqueue_watermark_roofline(
+        reason="integrate_keep_watermark",
+    )
+
+    assert enqueued is False
+    assert state.auto_roofline_pending_task_id == live.task_id
+
+
+def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
+    """A roofline leg costs the better part of an hour, so a collector that is
+    broken rather than flaky must not be allowed to spend the session on it."""
+    from hyperloom.orchestrator.loop.coordinator_helpers import (
+        _MAX_ROOFLINE_FAILURE_RETRIES,
+    )
+
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.cumulative_gain_validated = 50.0  # cur = 150, well over the watermark
+    state.last_roofline_tput = 0.0
+    state.auto_roofline_pending_task_id = ""
+
+    state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES
+    assert coord._needs_roofline_for_watermark() is True
+
+    state.roofline_failure_streak = _MAX_ROOFLINE_FAILURE_RETRIES + 1
+    assert coord._needs_roofline_for_watermark() is False
 
 
 def test_watermark_roofline_inherits_current_best_args(coord: Coordinator):
