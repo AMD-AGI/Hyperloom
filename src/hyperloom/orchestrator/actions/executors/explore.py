@@ -585,6 +585,61 @@ def _is_config_replay_variant(variant: Any) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
+def filter_operator_pinned_envs(
+    grid: list[GridVariant],
+    baseline_envs: dict[str, Any] | None,
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that overwrite an env the operator pinned in the baseline.
+
+    A pinned env is part of what the headline number means. Overwriting one does
+    not produce a faster configuration of the same workload, it produces a
+    different measurement wearing the baseline's name — and the quality gate
+    cannot catch it, because changing a repeat count or a warmup depth leaves
+    the output identical. Adding a key the baseline never set is exactly what
+    exploration is for, so only overwrites are refused.
+
+    This is for ``custom`` alone. A shipped framework's pinned value does not
+    mean "locked": ``baseline_worldplay.yaml`` pins
+    ``WORLDPLAY_USE_TORCH_COMPILE=0`` precisely so explore can flip it, and
+    those frameworks declare what is genuinely immutable in their own blacklist.
+    An operator has no blacklist to write in, so their pins carry the stricter
+    reading — it is the one place they can say "this must not move".
+
+    Args:
+        grid: Candidate variants for this round.
+        baseline_envs: ``benchmark.envs`` from the materialized baseline config.
+
+    Returns:
+        A ``(kept, dropped)`` tuple, where ``dropped`` holds
+        ``(variant_name, reason)`` pairs for logging.
+    """
+    pinned = {str(k).strip().upper() for k in (baseline_envs or {}) if str(k).strip()}
+    if not pinned:
+        return list(grid), []
+
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    for gv in grid:
+        clash = sorted(
+            key
+            for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {}))
+            if key in pinned
+        )
+        # A replay reproduces a config another component already measured, so it
+        # carries the pinned values verbatim by construction.
+        if clash and not _is_config_replay_variant(gv):
+            dropped.append(
+                (
+                    str(getattr(gv, "name", "?")),
+                    f"overwrites baseline-pinned env {', '.join(clash)}, which would make "
+                    "its number incomparable to the baseline",
+                )
+            )
+            continue
+        kept.append(gv)
+    return kept, dropped
+
+
 def filter_worldplay_grid(
     grid: list[GridVariant],
     *,
@@ -1072,6 +1127,11 @@ class ExploreExecutor:
                     len(_wp_dropped),
                     len(grid),
                 )
+
+        if framework == "custom":
+            grid, _mc_dropped = filter_operator_pinned_envs(grid, _yaml_envs)
+            for _nm, _reason in _mc_dropped:
+                log.warning("explore: dropping variant %s (%s)", _nm, _reason)
 
         if not grid:
             return {

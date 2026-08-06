@@ -500,6 +500,8 @@ def _default_profile_config() -> Path:
         name = "profile_worldplay.yaml"
     elif fw == "worldmirror":
         name = "profile_worldmirror.yaml"
+    elif fw == "custom":
+        name = "profile_custom.yaml"
     else:
         name = "profile_sglang.yaml"
     return asset_root() / "assets" / "configs" / name

@@ -140,8 +140,11 @@ def prepare_agentx_runtime(
     return None
 
 
-def _worldplay_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
-    """Resolve the WorldPlay benchmark runner suffix."""
+def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
+    """Resolve the runner suffix a scriptable entrypoint is named after.
+
+    Framework-independent: the suffix names the machine, not the workload.
+    """
     return (
         str(gpu_type or "").strip().lower()
         or str(bench.get("runner_type") or "").strip().lower()
@@ -160,15 +163,6 @@ def _worldplay_script_path(runner_type: str) -> Path:
     return scripts_dir / "worldplay_mi355x.sh"
 
 
-def _worldmirror_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
-    """Resolve the WorldMirror benchmark runner suffix."""
-    return (
-        str(gpu_type or "").strip().lower()
-        or str(bench.get("runner_type") or "").strip().lower()
-        or os.environ.get("GPU_TYPE", "").strip().lower()
-        or os.environ.get("RUNNER_TYPE", "").strip().lower()
-        or "mi355x"
-    )
 
 
 def _worldmirror_script_path(runner_type: str) -> Path:
@@ -326,7 +320,7 @@ def _apply_worldplay_runtime_defaults(
     if str(bench.get("framework") or "").strip().lower() != "worldplay":
         return
 
-    runner_type = _worldplay_runner_type(bench, gpu_type)
+    runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
         bench["benchmark_script"] = str(_worldplay_script_path(runner_type))
@@ -371,7 +365,7 @@ def _apply_worldmirror_runtime_defaults(
     if str(bench.get("framework") or "").strip().lower() != "worldmirror":
         return
 
-    runner_type = _worldmirror_runner_type(bench, gpu_type)
+    runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
         bench["benchmark_script"] = str(_worldmirror_script_path(runner_type))
@@ -394,6 +388,58 @@ def _apply_worldmirror_runtime_defaults(
     )
 
 
+def _custom_script_path(runner_type: str) -> str:
+    """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
+
+    Prefers the ``custom_{runner_type}.sh`` convention, then a lone ``.sh`` in
+    the directory, which is what an operator who wrote one script for one
+    machine actually has. Returns ``""`` when neither applies, leaving the
+    resolution chain in ``bypass_scriptable`` to report the miss.
+    """
+    raw = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
+    if not raw:
+        return ""
+    scripts_dir = Path(raw)
+    if not scripts_dir.is_dir():
+        return ""
+    preferred = scripts_dir / f"custom_{runner_type}.sh"
+    if preferred.is_file():
+        return str(preferred)
+    candidates = sorted(p for p in scripts_dir.glob("*.sh") if p.is_file())
+    return str(candidates[0]) if len(candidates) == 1 else ""
+
+
+def _apply_custom_runtime_defaults(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    gpu_type: str | None,
+    explicit_benchmark_script: bool,
+) -> None:
+    """Resolve an operator-supplied workload's checkout and entrypoint.
+
+    The other scriptable helpers know their framework's repo URL and shipped
+    script; here both arrive at launch, so this only wires what was given and
+    leaves anything missing to fail where it is diagnosable.
+    """
+    if str(bench.get("framework") or "").strip().lower() != "custom":
+        return
+
+    runner_type = _scriptable_runner_type(bench, gpu_type)
+    bench["runner_type"] = runner_type
+    if not explicit_benchmark_script:
+        script = _custom_script_path(runner_type)
+        if script:
+            bench["benchmark_script"] = script
+
+    repo_path = _resolve_framework_repo_path(envs, framework="custom")
+    if not repo_path:
+        return
+    envs["CUSTOM_REPO_PATH"] = repo_path
+    envs["CUSTOM_DIR"] = repo_path
+    _publish_scriptable_repo_root("custom", repo_path)
+
+
 def apply_scriptable_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
@@ -408,7 +454,11 @@ def apply_scriptable_runtime_defaults(
     replaces the bundled absolute path. Each per-framework helper is a no-op
     for other frameworks, so a new scriptable framework is added here once.
     """
-    for apply in (_apply_worldplay_runtime_defaults, _apply_worldmirror_runtime_defaults):
+    for apply in (
+        _apply_worldplay_runtime_defaults,
+        _apply_worldmirror_runtime_defaults,
+        _apply_custom_runtime_defaults,
+    ):
         apply(
             bench,
             envs,
@@ -571,6 +621,7 @@ _BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
     "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
     "worldplay": Path("assets/configs/baseline_worldplay.yaml"),
     "worldmirror": Path("assets/configs/baseline_worldmirror.yaml"),
+    "custom": Path("assets/configs/baseline_custom.yaml"),
 }
 _DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
