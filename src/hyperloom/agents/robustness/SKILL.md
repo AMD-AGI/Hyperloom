@@ -121,9 +121,9 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `SESSION_DIR` | no | scan known paths | Path containing `storage/coordinator.db`; the FindingSink writes under `{session_dir}/agents/robustness/findings/{session_id}.jsonl`. |
 | `ROBUSTNESS_SERVER_URL` | no | scan known DNS | M1 primary data source; empty disables the primary path and forces local-only mode. |
 | `OPENAI_BASE_URL` | no | — | LLM endpoint for RCA (used as `llm_base_url`). |
-| `SAFE_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
+| `OPENAI_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
 | `ROBUSTNESS_LLM_MODEL` | no | — | RCA model name; takes precedence over `LLM_MODEL`. |
-| `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.5`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-sonnet-4-5-20250929`. |
+| `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.6-sol`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-opus-5`. |
 | `ROBUSTNESS_LLM_RCA_DISABLED` | no | unset | Set to `1` to forcibly disable the LlmRcaEngine even when credentials are present. |
 
 ## Symptom -> intent mapping (M1 / M1.5)

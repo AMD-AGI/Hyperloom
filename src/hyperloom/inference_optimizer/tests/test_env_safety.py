@@ -5,7 +5,7 @@
 
 ``env_safety`` is the last-mile gate on keys that already entered a forward
 dict: it blocks shell/loader injection vectors (``_DENY_KEYS``) and invalid
-key shapes. Credential exclusion (``*_API_KEY``, ``SAFE_API_KEY``, ``*_BASE_URL``)
+key shapes. Credential exclusion (``*_API_KEY``, ``*_BASE_URL``)
 happens upstream in ``infera._collect_forward_env`` (prefix whitelist) and
 the platform's pod env (operator ``--extra-env`` only); those keys are never placed
 into the forward dict, so they are not SSH-forwarded to inference pods.
@@ -83,7 +83,6 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
             "LD_PRELOAD": "/tmp/agent-provided.so",
             "OPENAI_API_KEY": "secret",
             "PYTHONPATH": "/tmp/agent-provided",
-            "SAFE_API_KEY": "safe-secret",
             "bad key": "nope",
             "": "empty",
         },
@@ -96,7 +95,6 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
         "LD_PRELOAD": "/tmp/agent-provided.so",
         "OPENAI_API_KEY": "secret",
         "PYTHONPATH": "/tmp/agent-provided",
-        "SAFE_API_KEY": "safe-secret",
     }
     assert dropped == {
         "bad key": "invalid_env_key",
@@ -131,7 +129,7 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
 
 def test_redact_secret_values_masks_assignments_and_bearer_tokens():
-    text = "SAFE_API_KEY=ak-sensitive-value Authorization: Bearer sensitive-token"
+    text = "OPENAI_API_KEY=ak-sensitive-value Authorization: Bearer sensitive-token"
 
     redacted = common_env_safety.redact_secret_values(text)
 

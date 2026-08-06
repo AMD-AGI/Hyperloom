@@ -6,7 +6,7 @@ optimizer session. Keep `$USER_DATA_PATH` as the workspace root and learn
 
 ## Setup
 
-Credentials must already be in the shell environment: `SAFE_API_KEY` and
+Credentials must already be in the shell environment: `OPENAI_API_KEY` and
 `OPENAI_BASE_URL`. Optional source-root overrides are local only:
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `TRACELENS_INTERNAL_ROOT`.
 

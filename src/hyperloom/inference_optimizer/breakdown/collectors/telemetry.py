@@ -347,6 +347,86 @@ def _collect_lane_timeline(
     return rows
 
 
+def _collect_orchestration_context(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Summarize the orchestration conversation's compaction loop.
+
+    Joins the SEED/DELTA census on ``state.json`` with the
+    ``orchestration_checkpoint`` events in ``storage/coordinator.db``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+        state (dict[str, Any]): Parsed ``state.json``.
+        warnings (list[str]): Shared warnings list (mutated in place on DB
+            errors).
+
+    Returns:
+        dict[str, Any]: The ``orchestration_context`` section; counts are 0
+        when the session predates the census or the DB is unreadable.
+    """
+    modes = state.get("orchestration_prompt_modes")
+    modes = modes if isinstance(modes, dict) else {}
+    seed = int(modes.get("seed") or 0)
+    delta = int(modes.get("delta") or 0)
+    tick_count = int(state.get("tick") or 0)
+
+    levels: list[int] = []
+    compactions = 0
+    degenerate = 0
+    db_path = session_dir / "storage" / "coordinator.db"
+    if db_path.exists():
+        import sqlite3 as _sqlite3
+
+        try:
+            conn = _sqlite3.connect(f"file:{db_path}?mode=ro", timeout=2.0, uri=True)
+            try:
+                cur = conn.execute(
+                    "SELECT payload FROM events WHERE payload LIKE '%orchestration_checkpoint%'",
+                )
+                for row in cur.fetchall():
+                    try:
+                        payload = json.loads(row[0] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    kind = str(payload.get("kind") or "")
+                    if kind == "orchestration_checkpoint":
+                        compactions += 1
+                        level = payload.get("context_tokens")
+                        if isinstance(level, int) and level > 0:
+                            levels.append(level)
+                    # The repeat-degeneracy advisory re-emits the same kind with
+                    # a severity; count only the first, per-checkpoint one.
+                    elif kind == "orchestration_checkpoint_degraded" and not payload.get("severity"):
+                        degenerate += 1
+            finally:
+                conn.close()
+        except _sqlite3.Error as exc:
+            warnings.append(f"orchestration_context: read {db_path} failed: {exc!r}")
+
+    levels.sort()
+    at_compaction: dict[str, int] = {}
+    if levels:
+        at_compaction = {
+            "min": levels[0],
+            "median": levels[len(levels) // 2],
+            "max": levels[-1],
+        }
+    pushes = seed + delta
+    return {
+        "seed_prompts": seed,
+        "delta_prompts": delta,
+        "compactions": compactions,
+        "degenerate_compactions": degenerate,
+        "tick_count": tick_count,
+        "compactions_per_tick": round(compactions / tick_count, 4) if tick_count else 0.0,
+        "delta_ratio": round(delta / pushes, 4) if pushes else 0.0,
+        "context_tokens_at_compaction": at_compaction,
+    }
+
+
 def collect_telemetry(
     session_dir: Path,
     state: dict[str, Any],
@@ -388,6 +468,8 @@ def collect_telemetry(
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
+        # SEED/DELTA census + compaction rate for the orchestration loop.
+        "orchestration_context": _collect_orchestration_context(session_dir, state, warnings),
     }
 
 

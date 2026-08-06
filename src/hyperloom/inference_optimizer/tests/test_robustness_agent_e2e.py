@@ -88,7 +88,6 @@ async def test_robustness_agent_real_runtime_heartbeat(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }
@@ -139,7 +138,6 @@ async def test_robustness_agent_real_runtime_emits_alert_on_high_crash(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }
@@ -188,7 +186,6 @@ async def test_robustness_agent_workdir_is_per_turn(
             ScriptedPlan(turns=[], default_intent=_heartbeat_intent()),
             name="orchestration",
         ),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat_intent()), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": backend,
     }

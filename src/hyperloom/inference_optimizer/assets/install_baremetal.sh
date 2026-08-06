@@ -33,7 +33,7 @@ ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-https://your-openai-compatible-gateway.example.com/v1}"
-SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
+OPENAI_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
@@ -1211,7 +1211,7 @@ resolve_credentials() {
   # source env with "env wins". A dual-protocol gateway keeps its OpenAI side:
   # both sides are the same gateway, not a second provider.
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-    unset SAFE_API_KEY LLM_GATEWAY_KEY
+    unset LLM_GATEWAY_KEY
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 0 ]; then
       unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
     fi
@@ -1219,6 +1219,28 @@ resolve_credentials() {
 
   if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && is_interactive; then
     read -rsp "[install-baremetal] Enter Anthropic API key (or leave blank if already configured): " anthropic_key; echo >&2
+  fi
+
+  # Reject one provider's base URL paired with only the other provider's key,
+  # matching the CLI preflight.
+  local _x_akey _x_aend _x_conflict=""
+  _x_akey="${anthropic_key:-${anthropic_token:-}}"
+  _x_aend="${anthropic_url:-}"
+  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$_x_akey" ]; then
+    _x_conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
+  elif [ -n "$anthropic_url" ] && [ -z "$_x_akey" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    _x_conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
+  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$_x_akey" ] && [ -z "$_x_aend" ]; then
+    _x_conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
+  elif [ -n "$_x_aend" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
+    _x_conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
+  fi
+  if [ -n "$_x_conflict" ]; then
+    if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      warn "conflicting LLM credentials: ${_x_conflict} (continuing: --check-only / --dry-run)"
+    else
+      die "Conflicting LLM credentials: ${_x_conflict}. Give each side its own base URL and key, or drop the other provider's key."
+    fi
   fi
 
   [ -n "$anthropic_url" ] && has_url=1
@@ -1255,7 +1277,8 @@ resolve_credentials() {
       [ -n "${OPENAI_API_KEY:-}" ] && upsert_dotenv_var OPENAI_API_KEY "$OPENAI_API_KEY"
       [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
       [ -n "${CODEX_MODEL:-}" ] && upsert_dotenv_var CODEX_MODEL "$CODEX_MODEL"
-    else
+    elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
+      # Anthropic-only deployment: scrub the other provider's entries.
       remove_dotenv_var OPENAI_API_KEY
       remove_dotenv_var OPENAI_BASE_URL
     fi
@@ -1266,10 +1289,11 @@ resolve_credentials() {
       remove_dotenv_var DEEPSEEK_BASE_URL
       remove_dotenv_var DEEPSEEK_MODEL
     fi
-    remove_dotenv_var SAFE_API_KEY
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN
     remove_dotenv_var OPENAI_CUSTOM_HEADERS
+    # Legacy gateway key: not read, purged if present.
+    remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
   fi
 }

@@ -107,6 +107,5 @@ and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
 
 ## Design references
 
-The current runtime contract is documented in this directory's `SKILL.md`,
-`AGENTS.md`, and `references/` files. Historical design notes live outside the
-packaged Hyperloom tree.
+The current runtime contract is documented in this directory's `SKILL.md`.
+Historical design notes live outside the packaged Hyperloom tree.

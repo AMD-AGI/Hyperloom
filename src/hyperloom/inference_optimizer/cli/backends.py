@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
-from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -27,8 +26,6 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
-
-_KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
 
 
 def _has_anthropic_side() -> bool:
@@ -72,27 +69,10 @@ def _load_action_verdict_policy() -> dict[str, str]:
         return {}
 
 
-def _resolve_kernel_agent_max_turns() -> int:
-    """Resolve the kernel_agent Claude turn budget.
-
-    Reads ``INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS`` (a positive int);
-    falls back to ``_KERNEL_AGENT_DEFAULT_MAX_TURNS`` on unset/invalid/<=0.
-    """
-    raw = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "").strip()
-    if not raw:
-        return _KERNEL_AGENT_DEFAULT_MAX_TURNS
-    try:
-        val = int(raw)
-    except ValueError:
-        return _KERNEL_AGENT_DEFAULT_MAX_TURNS
-    return val if val >= 1 else _KERNEL_AGENT_DEFAULT_MAX_TURNS
-
-
 def _build_backends(
     *,
     claude_model: str,
     codex_model: str,
-    kernel_codex: bool,
     critic_choice: str,
     session_dir: Path,
     critic_agent_root: Path | None = None,
@@ -100,7 +80,6 @@ def _build_backends(
     robustness_choice: str = "mock",
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
-    no_kernel: bool = False,
     codex_follows_claude: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
@@ -112,9 +91,8 @@ def _build_backends(
     :class:`RobustnessAgentBackend` (requires ``robustness_agent_root``).
 
     Args:
-        claude_model: Claude model id for the orchestration / kernel backends.
-        codex_model: Codex model id for the kernel / critic backends.
-        kernel_codex: Use a Codex backend for the kernel_agent role when ``True``.
+        claude_model: Claude model id for the orchestration backend.
+        codex_model: Codex model id for the critic backend.
         critic_choice: Critic backend selector (``mock`` or ``agent``).
         session_dir: Session directory passed to agent backends.
         critic_agent_root: Critic-agent root, required when
@@ -125,7 +103,6 @@ def _build_backends(
             ``robustness_choice='agent'``.
         robustness_options: Optional ``request.options`` overrides for the
             robustness agent.
-        no_kernel: Skip building the kernel backend when ``True``.
 
     Returns:
         A mapping of role name to its constructed backend.
@@ -201,28 +178,11 @@ def _build_backends(
             capture_turn_diagnostics=True,
         )
 
-    backends: dict[str, Any] = {
+    return {
         "orchestration": orchestration_backend,
         "critic": critic_backend,
         "robustness": robustness_backend,
     }
-    if not no_kernel:
-        if provider_anthropic_only:
-            backends["kernel_agent"] = ClaudeBackend(
-                model=claude_model,
-                max_turns_default=_resolve_kernel_agent_max_turns(),
-            )
-        elif provider_openai_only or kernel_codex:
-            backends["kernel_agent"] = CodexBackend(model=codex_model)
-        else:
-            # Opt-in (default off): resume the kernel Claude session across LLM
-            # turns for prompt-cache continuity.
-            backends["kernel_agent"] = ClaudeBackend(
-                model=claude_model,
-                max_turns_default=_resolve_kernel_agent_max_turns(),
-                conversational=env_bool("INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL", False),
-            )
-    return backends
 
 
 def _build_proposal_scorer(

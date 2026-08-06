@@ -96,6 +96,8 @@ from .canonical_id import (  # noqa: E402
     recipe_canonical_id,
 )
 from .dispatcher import RecipeKB  # noqa: E402
+from .gbrain_store import GbrainRecipeStore  # noqa: E402
+from .local_graph_store import LocalGraphStore, LocalGraphStoreError  # noqa: E402
 from .local_store import (  # noqa: E402
     ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
@@ -118,10 +120,13 @@ __all__ = [
     "DEFAULT_MODEL_SLUG",
     "DEFAULT_PRECISION_SLUG",
     "HISTORY_DIRNAME",
+    "GbrainRecipeStore",
     "InvalidCanonicalIdError",
     "LOCK_FILENAME",
     "LocalRecipeStore",
     "LocalRecipeStoreError",
+    "LocalGraphStore",
+    "LocalGraphStoreError",
     "RECIPE_FILENAME",
     "Recipe",
     "RecipeKB",

@@ -235,7 +235,7 @@ class KernelPhase(PhaseHandler):
         return str(getattr(self.shared_state, "kernel_optimizer", "") or "").strip().lower() == "geak"
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
-        """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
+        """Run deterministic KERNEL-entry setup: FP8 GEMM tuning gate, fusion, re-profile.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -274,8 +274,8 @@ class KernelPhase(PhaseHandler):
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
-            # GEMM tuning and fusion are independently gated. Refresh the
-            # snapshot, run fusion when eligible, then let the LLM drive GEAK.
+            # GEMM tuning and fusion are independently gated; refresh the
+            # snapshot and run fusion when eligible before GEAK runs.
             await self._maybe_reprofile_for_kernel()
             await self._maybe_run_forge_fusion_before_kernel_opt()
             return
@@ -2311,8 +2311,8 @@ class KernelPhase(PhaseHandler):
                 len(reverted),
             )
 
-        # Rewrite the stored result to the E2E-validated outcome so the LLM never
-        # sees the raw combined recommended_env and issues a bundled integrate.
+        # Rewrite the stored result to the E2E-validated outcome so Orchestration
+        # never sees the raw combined recommended_env and issues a bundled integrate.
         result["e2e_results"] = {"kept": kept, "reverted": reverted}
         result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
         result["extra_envs_raw"] = dict(result.get("extra_envs") or {})

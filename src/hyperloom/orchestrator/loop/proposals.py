@@ -77,7 +77,7 @@ class ProposalsCollaborator:
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
-        """Load the authoritative local recipe row for amend/finalize writes.
+        """Load the selected store's exact authority row for writes.
 
         Cached per tick to avoid repeated I/O during multi-variant KEEP batches.
         """
@@ -89,7 +89,7 @@ class ProposalsCollaborator:
             return cache[1]
         try:
             row = (
-                self.recipe_kb.local.get_recipe(
+                self.recipe_kb.get_authoritative_recipe(
                     canonical_id=self._workload_canonical_id(),
                 )
                 or {}
@@ -198,12 +198,13 @@ class ProposalsCollaborator:
             framework_version = detect_framework_version(framework)
         precision = str(getattr(ss, "precision", "") or "")
 
-        # Read the LOCAL authoritative row (bypass remote-first read; else a central row clobbers this session's lessons/pitfalls).
+        # Read the selected store's exact authority row. In remote mode this
+        # bypasses warm-start fallback/search and addresses one canonical slug.
         try:
-            live = self.recipe_kb.local.get_recipe(canonical_id=cid) or {}
+            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001
             log.info(
-                "_kb_amend_recipe: local get_recipe failed (%s); proceeding with empty live",
+                "_kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
                 exc,
             )
             live = {}

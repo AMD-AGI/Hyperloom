@@ -16,7 +16,9 @@ set_env_var() {
     fi
 }
 
-set_env_var "SAFE_API_KEY" "${SAFE_API_KEY}"
+if [ -n "${OPENAI_API_KEY}" ]; then
+    set_env_var "OPENAI_API_KEY" "${OPENAI_API_KEY}"
+fi
 
 if [ -n "${OPENAI_BASE_URL}" ]; then
     set_env_var "OPENAI_BASE_URL" "${OPENAI_BASE_URL}"
