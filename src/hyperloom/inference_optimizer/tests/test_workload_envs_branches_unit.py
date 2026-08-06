@@ -109,7 +109,6 @@ def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path,
             "LLM_GATEWAY_KEY": "gateway-secret",
             "OPENAI_API_KEY": "secret",
             "PYTHONSTARTUP": "/tmp/pwn.py",
-            "SAFE_API_KEY": "safe-secret",
             "SGLANG_USE_AITER": "1",
             "UNKNOWN_VALID_TUNING_KNOB": "enabled",
             "BAD-NAME": "dropped",
@@ -129,7 +128,6 @@ def test_materialize_drops_credentials_but_preserves_workload_env_keys(tmp_path,
     assert "OPENAI_API_KEY" not in envs
     assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
     assert envs["PYTHONPATH"] == "/tmp/evil"
-    assert "SAFE_API_KEY" not in envs
     assert "DEEPSEEK_API_KEY" not in envs
     assert "BAD-NAME" not in envs
     assert "bad key" not in envs

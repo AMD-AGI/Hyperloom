@@ -271,7 +271,6 @@ def test_construct_without_creds_raises_backend_error(monkeypatch):
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "LLM_GATEWAY_KEY",
-        "SAFE_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(BackendError, match="not set"):
@@ -307,13 +306,14 @@ def test_codex_prefers_explicit_openai_key_over_safe_filled_anthropic(monkeypatc
     assert captured["base_url"] == "https://api.openai.com/v1"
 
 
-def test_codex_falls_back_to_anthropic_token_when_no_openai_key(monkeypatch):
-    """Single-gateway: with only ANTHROPIC_AUTH_TOKEN set, Codex still auths."""
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "safe-key")
+def test_codex_refuses_to_auth_with_anthropic_token(monkeypatch):
+    """Codex speaks the OpenAI protocol, so an Anthropic token alone fails to
+    construct it."""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    captured = _construct_real_codex_capturing_kwargs(monkeypatch)
-    assert captured["api_key"] == "safe-key"
+    with pytest.raises(BackendError, match="OPENAI_API_KEY"):
+        _construct_real_codex_capturing_kwargs(monkeypatch)
 
 
 # ---------------------------------------------------------------------------

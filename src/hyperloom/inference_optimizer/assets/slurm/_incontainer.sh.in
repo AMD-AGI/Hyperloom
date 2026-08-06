@@ -21,7 +21,7 @@ fi
 
 # 2) gateway reachability preflight (non-fatal; surfaces misconfig early).
 curl -sS -o /dev/null -w "[hl] gateway /models HTTP=%{http_code}\n" \
-  -H "Authorization: Bearer ${OPENAI_API_KEY:-$SAFE_API_KEY}" \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}" \
   "${OPENAI_BASE_URL}/models" || echo "[hl][warn] gateway preflight failed" >&2
 
 # 3) Hyperloom source. Precedence:

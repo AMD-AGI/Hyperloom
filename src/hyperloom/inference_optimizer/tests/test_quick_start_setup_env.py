@@ -17,7 +17,7 @@ def _run_setup_env_script(tmp_path: Path, env: dict[str, str]) -> str:
     env_file.write_text(
         "\n".join(
             [
-                "SAFE_API_KEY=ak-placeholder",
+                "OPENAI_API_KEY=ak-placeholder",
                 "# OPENAI_BASE_URL=",
                 "# TRACELENS_ROOT=",
                 "USER_DATA_PATH=/workspace/hyperloom",
@@ -50,7 +50,7 @@ def test_setup_env_preserves_sed_replacement_metacharacters(tmp_path: Path) -> N
     text = _run_setup_env_script(
         tmp_path,
         {
-            "SAFE_API_KEY": "ak-safe",
+            "OPENAI_API_KEY": "ak-safe",
             "OPENAI_BASE_URL": r"https://gateway.example/v1?team=a&env=b|stage",
             "TRACELENS_ROOT": r"/opt/Trace\Lens",
             "USER_DATA_PATH": "/workspace/hyperloom",
@@ -59,3 +59,12 @@ def test_setup_env_preserves_sed_replacement_metacharacters(tmp_path: Path) -> N
 
     assert r"OPENAI_BASE_URL=https://gateway.example/v1?team=a&env=b|stage" in text
     assert r"TRACELENS_ROOT=/opt/Trace\Lens" in text
+
+
+def test_setup_env_keeps_existing_key_when_env_unset(tmp_path: Path, monkeypatch) -> None:
+    """An unset OPENAI_API_KEY leaves the value already in .env alone."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    text = _run_setup_env_script(tmp_path, {"USER_DATA_PATH": "/workspace/hyperloom"})
+
+    assert "OPENAI_API_KEY=ak-placeholder" in text
