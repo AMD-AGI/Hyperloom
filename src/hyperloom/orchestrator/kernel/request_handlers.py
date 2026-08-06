@@ -66,6 +66,10 @@ log = logging.getLogger(__name__)
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
+# A patch whose correctness was only established against a reference kernel;
+# serving accuracy is what settles it.
+_FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
+_INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -5980,6 +5984,7 @@ def _grade_integrate_accuracy(
     *,
     session_dir: Path,
     workspace: Path,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
@@ -5998,6 +6003,10 @@ def _grade_integrate_accuracy(
         bench_result: The re-baseline result dict from ``BaselineExecutor``.
         session_dir: Session directory used to resolve ``baseline_accuracy``.
         workspace: The integrate task workspace holding both round slots.
+        strict: Grade an artifact whose correctness has only ever been proven
+            against a reference. This serving run is its first and only
+            end-to-end evidence, so the operator opt-out does not apply and a
+            gate that produced no verdict blocks instead of degrading.
 
     Returns:
         ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
@@ -6042,9 +6051,15 @@ def _grade_integrate_accuracy(
 
     blocked, reason, degraded = accuracy_keep_block(
         accuracy_pass,
-        required=require_kernel_accuracy_default(),
+        required=True if strict else require_kernel_accuracy_default(),
         baseline_accuracy=baseline_accuracy,
     )
+    if strict and degraded:
+        blocked = True
+        reason = (
+            "accuracy gate produced no eval result and this artifact has no "
+            "other end-to-end correctness evidence"
+        )
     log.info(
         "integrate_handler: accuracy gate pass=%s blocked=%s degraded=%s new=%s baseline=%.4f source=%s",
         accuracy_pass,
@@ -6433,12 +6448,20 @@ async def integrate_handler(
     # re-baseline's own eval output, so the verdict costs no extra GPU time.
     # Placed ahead of the optional source-import / paired-A/B passes so a patch
     # that loses accuracy short-circuits before they run.
+    # An apply-back reaching integrate carries only reference correctness, so
+    # this run is the sole end-to-end evidence it will ever get and the gate
+    # cannot be opted out of or degraded away.
+    applyback_pending = (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") == "pending"
+    )
     accuracy_gate: dict[str, Any] | None = None
     if decision == "KEEP":
         accuracy_gate = _grade_integrate_accuracy(
             bench_result,
             session_dir=session_dir,
             workspace=workspace,
+            strict=applyback_pending,
         )
         if accuracy_gate["blocked"]:
             # A measured regression is hard negative evidence -> REVERT. A
@@ -6608,6 +6631,14 @@ async def integrate_handler(
             result["decision_reason"] = (
                 "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
             )
+    if applyback_pending:
+        result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
+        # unstamped: the attempt ledger already distinguishes a rejection from a
+        # retryable fault, and this field must not blur the two.
+        if decision == "KEEP":
+            result["integration_validation_status"] = "passed"
+            result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -6622,7 +6653,7 @@ async def integrate_handler(
             target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
             extra_server_args=extra_args,
             result=result,
-            validation_tier="integrate_e2e",
+            validation_tier=str(result.get("validation_tier") or "integrate_e2e"),
         )
     except Exception:  # noqa: BLE001
         log.debug("kernel integrate v4 result recording failed", exc_info=True)

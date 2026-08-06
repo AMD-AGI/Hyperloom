@@ -692,6 +692,129 @@ async def test_integrate_handler_accuracy_gate_opt_out(session_dir, tmp_path, mo
     assert res["decision"] == "KEEP"
 
 
+def _applyback_payload(base_yaml: Path, target: Path, patch_file: Path, kernel_id: str) -> dict:
+    payload = _accuracy_payload(base_yaml, target, patch_file, kernel_id)
+    payload["artifact_kind"] = "framework_applyback"
+    payload["integration_validation_status"] = "pending"
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_applyback_keep_stamps_the_serving_validation_tier(session_dir, tmp_path):
+    """Serving accuracy is what settles a reference-only artifact."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=0.79),
+    ):
+        res = await krh.integrate_handler(
+            _applyback_payload(base_yaml, target, patch_file, "k_ab_ok"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "KEEP"
+    assert res["accuracy_pass"] is True
+    assert res["artifact_kind"] == "framework_applyback"
+    assert res["integration_validation_status"] == "passed"
+    assert res["validation_tier"] == "integrate_e2e_accuracy"
+
+
+@pytest.mark.asyncio
+async def test_applyback_cannot_opt_out_of_the_accuracy_gate(session_dir, tmp_path, monkeypatch):
+    """The operator opt-out cannot waive the only end-to-end evidence there is."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "0")
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=None),
+    ):
+        res = await krh.integrate_handler(
+            _applyback_payload(base_yaml, target, patch_file, "k_ab_optout"),
+            session_dir=session_dir,
+        )
+
+    assert res["gain_pct"] > 1, "the patch must be a throughput win for this to be a real gate test"
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["decision_reason"] == "accuracy_evidence_missing"
+    assert "integration_validation_status" not in res
+    assert res["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_applyback_without_baseline_accuracy_cannot_degrade_to_throughput(session_dir, tmp_path):
+    """An eval-less setup degrades for a normal patch, but never for this one."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=None),
+    ):
+        res = await krh.integrate_handler(
+            _applyback_payload(base_yaml, target, patch_file, "k_ab_nobase"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "NEEDS_REVIEW"
+    assert res["accuracy_gate"]["degraded"] is True
+    assert res["accuracy_gate"]["blocked"] is True
+    assert res["decision_reason"] == "accuracy_evidence_missing"
+
+
+@pytest.mark.asyncio
+async def test_applyback_accuracy_regression_reuses_the_shared_verdict(session_dir, tmp_path):
+    """A regression keeps the existing reason vocabulary; artifact_kind separates it."""
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=900.0, accuracy=0.60),
+    ):
+        res = await krh.integrate_handler(
+            _applyback_payload(base_yaml, target, patch_file, "k_ab_regress"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "REVERT"
+    assert res["decision_reason"] == "accuracy_regression"
+    assert res["artifact_kind"] == "framework_applyback"
+    assert "integration_validation_status" not in res
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+
+
+@pytest.mark.asyncio
+async def test_applyback_losing_throughput_leaves_the_verdict_unsettled(session_dir, tmp_path):
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    _seed_baseline_accuracy(session_dir, 0.80)
+    target, patch_file = _write_patch_pair(tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=_runner(tput=700.0, accuracy=0.79),
+    ):
+        res = await krh.integrate_handler(
+            _applyback_payload(base_yaml, target, patch_file, "k_ab_slow"),
+            session_dir=session_dir,
+        )
+
+    assert res["decision"] == "REVERT"
+    assert "integration_validation_status" not in res
+    assert "validation_tier" not in res
+
+
 @pytest.mark.asyncio
 async def test_integrate_accuracy_verdict_lands_in_attempt_ledger(session_dir, tmp_path):
     """The attempt ledger must carry the accuracy evidence for post-hoc audit."""
