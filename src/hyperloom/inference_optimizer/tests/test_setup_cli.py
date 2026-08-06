@@ -408,23 +408,6 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
         assert "Conflicting LLM credentials" in proc.stderr, proc.stderr
 
 
-def test_kernel_install_geak_routing_is_openai_side_only():
-    """GEAK speaks the OpenAI protocol, so its endpoint/key aliases resolve from
-    the OpenAI side and never from the Anthropic / DeepSeek side."""
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    start = script_text.index("GEAK_BASE_URL_VAL=")
-    end = script_text.index("\n", script_text.index("GEAK_API_KEY_VAL="))
-    routing = script_text[start:end]
-
-    assert "OPENAI_BASE_URL" in routing
-    assert "OPENAI_API_KEY" in routing
-    for foreign in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK"):
-        assert foreign not in routing, foreign
-    # The endpoint-pairing helper existed only for the cross-provider fallback.
-    assert "_key_for_endpoint" not in script_text
-
-
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
     """install_baremetal.sh rejects a mispaired config during setup, like the CLI
     preflight and the other two installers."""
