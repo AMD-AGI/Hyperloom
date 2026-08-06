@@ -1,6 +1,6 @@
 ---
 name: robustness-agent
-description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / prune_branch / escalate_strategy_change).
+description: Independent guardian daemon for Hyperloom inference optimization. Implements the inference_optimizer "robustness" reactor so the Coordinator can call it as a Backend, plus a standalone loop for dev. Owns continuous health monitoring, RCA, and scheduling-police capabilities (kill_task / prune_branch / delegate).
 ---
 
 # Robustness Agent
@@ -10,13 +10,13 @@ A Python package that ships the `robustness` agent for the
 
 The agent observes shared state, the orchestration agent's inbox, and
 cluster telemetry; classifies symptoms; and emits Coordinator-validated
-intents (alert / escalate_strategy_change / prune_branch / etc.) plus
+intents (alert / prune_branch / kill_task / delegate / etc.) plus
 on-disk findings.
 
 ## Quick start
 
 ```bash
-cd src/hyperloom/agents/robustness
+# from the repo root — the repo is a single distribution
 python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 
 # Reactor mode. Auto-discovers session_dir and probes
@@ -24,7 +24,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[test]"
 .venv/bin/robustness-agent
 ```
 
-## M1 module layout
+This console script is the standalone dev path only; the orchestrator
+drives the same reactor via
+`python -m hyperloom.agents.robustness.runtime.cli`.
+
+## Module layout
 
 ```
 src/hyperloom/agents/robustness/
@@ -34,21 +38,24 @@ src/hyperloom/agents/robustness/
 ├── role/
 │   ├── envelope.py         # IntentType / Intent / build_* helpers (mirror upstream)
 │   ├── prompt_inputs.py    # Coordinator prompt -> ReactorContext
+│   ├── findings.py         # JSONL append sink for Findings
+│   ├── postmortem.py       # session-end postmortem finalizer
 │   └── reactor.py          # Reactor.tick() pipeline driver
 ├── decision/
 │   ├── policy_aware.py     # local PolicyGate-equivalent payload guard
 │   ├── action_ladder.py    # symptom -> intent (+ Finding) translation (async)
-│   └── rca_engine.py       # NoopRcaEngine | LlmRcaEngine + RcaThrottle (M1.5)
-├── signals/
-│   ├── stall.py / crash.py / event.py / health.py / local_health.py (M1.5)
-│   └── classifier.py       # composes the rules and de-duplicates
+│   └── rca_engine.py       # NoopRcaEngine | LlmRcaEngine | AnthropicRcaEngine + RcaThrottle
+├── signals/                # 17 detector modules
+│   ├── classifier.py       # composes the rules and de-duplicates
+│   └── symptom.py          # Symptom / SymptomSeverity dataclasses
 ├── sources/
 │   ├── base.py             # Source / SourceData / DegradeRouter
 │   ├── server_client.py    # robustness-server REST + Source adapter
+│   ├── cluster_decoder.py  # cluster pods/GPU/fault payload decoding
 │   └── local_probe.py      # local fallback (coordinator.db, ps, df, parsed rocm-smi, http probes, log error patterns)
-├── findings/sink.py        # JSONL append sink for Findings
 ├── factory.py              # Config -> ReactorBundle (build_reactor_components)
 ├── config.py               # discovery + tunables
+├── state_store.py          # per-detector state persisted across ticks
 └── main.py                 # standalone reactor CLI
 ```
 
@@ -103,7 +110,7 @@ configuration bug.
 The host-side wrapper that drives this subprocess lives in
 `src/hyperloom/orchestrator/roles/robustness_agent.py:RobustnessAgentBackend`,
 mirroring the layout of `CriticAgentBackend`. End-to-end tests in
-`src/hyperloom/inference_optimizer/tests/test_p2_robustness_agent_e2e.py` and
+`src/hyperloom/inference_optimizer/tests/test_robustness_agent_e2e.py` and
 `src/hyperloom/agents/robustness/tests/test_runtime_cli.py` together cover the full
 host -> subprocess -> envelope -> upstream PolicyGate path.
 
@@ -115,7 +122,8 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | `ROBUSTNESS_SERVER_URL` | no | scan known DNS | M1 primary data source; empty disables the primary path and forces local-only mode. |
 | `OPENAI_BASE_URL` | no | — | LLM endpoint for RCA (used as `llm_base_url`). |
 | `SAFE_API_KEY` | no | — | API key for the LLM proxy (used as `llm_api_key`). |
-| `LLM_MODEL` | no | `claude-opus-4-7` | RCA model name. |
+| `ROBUSTNESS_LLM_MODEL` | no | — | RCA model name; takes precedence over `LLM_MODEL`. |
+| `LLM_MODEL` | no | provider default | RCA model name. With neither override set the chain is `DEEPSEEK_MODEL` / `deepseek-v4-pro` (when DeepSeek env is present), else openai: `OPENAI_MODEL` → `CODEX_MODEL` → `gpt-5.5`, else anthropic: `ANTHROPIC_MODEL` → `CLAUDE_MODEL` → `claude-sonnet-4-5-20250929`. |
 | `ROBUSTNESS_LLM_RCA_DISABLED` | no | unset | Set to `1` to forcibly disable the LlmRcaEngine even when credentials are present. |
 
 ## Symptom -> intent mapping (M1 / M1.5)
@@ -123,21 +131,32 @@ host -> subprocess -> envelope -> upstream PolicyGate path.
 | Symptom | Severity | Intents emitted | Source |
 |---------|----------|-----------------|--------|
 | `agent_stall` (≥ stall_timeout_s) | medium | `alert(medium)` | M1 |
-| `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` + `escalate_strategy_change` | M1 |
+| `agent_stall` (≥ severity_high_after_s) | high | `alert(high)` | M1 |
 | `crash_count_rising` (≥ 2) | medium | `alert(medium)` | M1 |
-| `crash_count_high` (≥ 5) | high | `alert(high)` + `escalate_strategy_change` | M1 |
-| `crash_count_emergency` (≥ 10) | high | `alert(high)` + `escalate_strategy_change` | M1 |
+| `crash_count_high` (≥ 5) | high | `alert(high)` | M1 |
+| `crash_count_emergency` (≥ 10) | high | `alert(high)` | M1 |
 | `repeated_policy_denied` (≥ 3) | medium | `alert(medium)` | M1 |
 | `repeated_failure` (≥ 2 same family) | medium / high (≥ prune threshold) | `alert(medium)`; HIGH tier also emits `prune_branch(family)` | M1 |
 | `pod_not_running` (Failed) | high | `alert(high)` | M1 |
 | `pod_not_running` (other non-Running) | medium | `alert(medium)` | M1 |
 | `pod_no_metrics` (≥ no_metrics_warn_s) | low | `send_message(observation)` | M1 |
 | `local_server_unreachable` (any target down) | medium / high (all down) | `alert(medium)` / `alert(high)` | M1.5 |
-| `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` + `escalate_strategy_change` | M1.5 |
+| `log_error_pattern` (CUDA OOM / NCCL / segfault) | high | `alert(high)` | M1.5 |
 | `log_error_pattern` (RuntimeError / generic) | medium | `alert(medium)` | M1.5 |
 | `gpu_thermal_high` (≥ warn_c) | medium | `alert(medium)` | M1.5 |
-| `gpu_thermal_high` (≥ crit_c) | high | `alert(high)` + `escalate_strategy_change` | M1.5 |
+| `gpu_thermal_high` (≥ crit_c) | high | `alert(high)` | M1.5 |
+| `stale_lease` | high | `alert(high)` + `kill_task(task_id)` | M1 |
+| `gpu_memory_leaked` | high | `alert(high)` + `delegate(recover, force_gpu_cleanup=True)` | M1 |
+| `deadline_warning` / `deadline_imminent` / `deadline_hard_cutoff` / `recover_unsuccessful` | high | `alert(high)` + `delegate(report)` | M1 |
+| `same_payload_loop` / `kernel_opt_no_progress` / `geak_budget_starvation` / `amdahl_kernel_ceiling_low` | high | `alert(high)` + `prune_branch(family)` | M1 |
 | (no symptoms) | — | `send_message(heartbeat)` | M1 |
+
+Every other HIGH symptom is strategic: the recommendation rides the
+alert's `detail.suggestion` field and the ladder never auto-emits
+`escalate_strategy_change` — the intent stays PolicyGate-allowed for
+explicit drives, but Orchestration owns the phase-advance decision.
+`delegate` is constrained to the `ROBUSTNESS_DELEGATE_ACTIONS`
+allowlist (`accuracy_gate` / `recover` / `report` / `server_lifecycle`).
 
 Cooldown: identical `(symptom_name, subject)` keys are silenced for
 `config.cooldown_ticks` ticks (default 5) to avoid inbox flooding.
@@ -148,6 +167,10 @@ Cooldown: identical `(symptom_name, subject)` keys are silenced for
   * `/api/v1/sessions/{id}/pods`
   * `/api/v1/sessions/{id}/events`
   * `/api/v1/sessions/{id}/summary`
+  * `/api/v1/cluster/faults` (on by default)
+  * `/api/v1/cluster/workloads/{id}/hierarchy`
+  * `/api/v1/cluster/pods/{ns}/{name}/metrics` — gated by
+    `Config.enable_cluster_pod_metrics` (default `False`, env-settable)
 * **Fallback:** local probes
   * `coordinator.db` (read-only) for Coordinator events
   * `shutil.disk_usage`, `ps`, parsed `rocm-smi --csv` / `nvidia-smi`
@@ -198,9 +221,9 @@ Each tick that emits a non-heartbeat intent writes one
 Fields: `tick_index`, `timestamp_unix`, `symptom_name`, `severity`,
 `summary`, `intents` (envelope dicts), `evidence`, `rca_text`.
 
-These records are the M5 hand-off point: a future milestone POSTs them
-to the robustness-server for dashboards / alerting; in M1 they remain
-local-only.
+These records are the hand-off point for a future findings publisher
+that POSTs them to the robustness-server for dashboards / alerting;
+today they remain local-only.
 
 ## Session-end postmortem (L1 + L2)
 
@@ -238,15 +261,12 @@ Knobs (env): `CRITIC_ROBUSTNESS_PRIORS_LIMIT` (default 5),
 `CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY` (default `high`),
 `CRITIC_ROBUSTNESS_PRIORS_DISABLED=1` (kill switch).
 
-## Roadmap beyond M1.5
+## Roadmap
 
-* **M2** — robustness-server `/api/v1/cluster/*` proxies (faults / GPU
-  time-series / node info). Agent's `signals/{gpu,disk,health}` start
-  preferring server data; LocalProbe stays as the disconnected fallback.
-* **M3** — multi-cli transport (`inbox.jsonl` / `outbox.jsonl`); same
-  reactor, different adapter.
-* **M4** — scheduling-police hard actions (`prune_branch`,
-  `kill_task`, `delegate{recover|server_lifecycle|accuracy_gate}`),
-  gated behind `ROBUSTNESS_AGENT_ENABLE_HARD_ACTIONS`.
-* **M5** — findings publisher to robustness-server for cross-session
-  reporting and advisory pull-back.
+* **Multi-cli transport** — an `inbox.jsonl` / `outbox.jsonl` adapter
+  feeding the same reactor. Not shipped: the only transport today is the
+  subprocess one above, and `ReactorContext` is only ever built from a
+  rendered Coordinator prompt.
+* **Findings publisher** — POST the on-disk findings to
+  robustness-server for cross-session reporting and advisory pull-back.
+  Nothing ships today; findings stay local-only.

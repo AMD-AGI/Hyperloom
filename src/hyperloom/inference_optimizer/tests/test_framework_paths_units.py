@@ -641,3 +641,134 @@ def test_detect_strategy_accepts_dist_packages_vllm_py(
     )
     strat = apply_tool._detect_strategy(target, allow_unknown_target=False)
     assert strat["compiled"] is False
+
+
+# --- aiter_meta split-wheel rebuild recognition (regression) ---
+# aiter device sources ship in the sibling ``aiter_meta`` package, so hot
+# kernels land under ``.../dist-packages/aiter_meta/csrc/...``. The JIT/cpp_itfs
+# rebuild gates keyed only ``/aiter/csrc/``, so a KEPT aiter_meta .cu deployed
+# but never re-JIT'd -> integrate saw a stale binary and REVERT'd
+# (fault_attempts_exhausted; observed 07.25-07.30 on Qwen3-8B/Llama/Mixtral).
+
+_AITER_META_CU = Path(
+    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu"
+)
+_AITER_META_CPP_ITFS_CU = Path(
+    "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu"
+)
+
+
+def test_target_is_in_aiter_csrc_matches_aiter_meta(apply_tool) -> None:
+    # split-wheel layout must be recognised as an aiter csrc source
+    assert apply_tool._target_is_in_aiter_csrc(_AITER_META_CU) is True
+    # classic layout still recognised
+    assert (
+        apply_tool._target_is_in_aiter_csrc(
+            Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")
+        )
+        is True
+    )
+    # unrelated source stays out
+    assert (
+        apply_tool._target_is_in_aiter_csrc(
+            Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py")
+        )
+        is False
+    )
+
+
+def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta(apply_tool) -> None:
+    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
+    # a non-cpp_itfs aiter_meta source is csrc but NOT cpp_itfs
+    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
+
+
+def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_path) -> None:
+    jit_build = tmp_path / "aiter" / "jit" / "build"
+    jit_build.mkdir(parents=True)
+    (jit_build / "module_aiter_core.so").write_bytes(b"stale")
+    backup_dir = tmp_path / "backup"
+
+    res = apply_tool._invalidate_aiter_jit_build(
+        _AITER_META_CU,
+        backup_dir,
+        jit_build_dir_override=jit_build,
+    )
+
+    assert res["status"] == "ok", res
+    assert not jit_build.exists()  # moved aside so the next import re-JITs
+    assert (backup_dir / "jit_build" / "module_aiter_core.so").is_file()
+
+
+_APPLY_BENCH_PATH = (
+    Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_and_bench.py"
+)
+
+
+@pytest.fixture(scope="module")
+def apply_bench_tool() -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location("_apply_and_bench_test", _APPLY_BENCH_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_apply_and_bench_is_aiter_cu_matches_aiter_meta(apply_bench_tool) -> None:
+    ab = apply_bench_tool
+    assert ab._is_aiter_cu(_AITER_META_CU) is True
+    assert ab._is_aiter_cu(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
+    # non-.cu aiter source and unrelated files stay out
+    assert ab._is_aiter_cu(Path("/x/dist-packages/aiter_meta/csrc/kernels/q.py")) is False
+    assert ab._is_aiter_cu(Path("/x/dist-packages/vllm/model_executor/parameter.py")) is False
+
+
+def test_apply_and_bench_aiter_source_root(apply_bench_tool) -> None:
+    ab = apply_bench_tool
+    assert ab._aiter_source_root(_AITER_META_CU) == Path(
+        "/usr/local/lib/python3.12/dist-packages/aiter_meta"
+    )
+    assert ab._aiter_source_root(
+        Path("/sgl-workspace/aiter/csrc/kernels/q.cu")
+    ) == Path("/sgl-workspace/aiter")
+    assert ab._aiter_source_root(Path("/x/vllm/a.py")) is None
+
+
+def test_reconstruct_sources_from_diff_nongit_repo(apply_bench_tool, tmp_path) -> None:
+    """A unified diff must reconstruct against a NON-git repo_root (the aiter_meta
+    split wheel under dist-packages is not a git repo).
+
+    Previously _reconstruct_sources_from_diff unconditionally ran
+    `git worktree add`, which fails on a non-git tree -> apply_failed, so a
+    diff-shaped aiter_meta kernel patch could never deploy. It now seeds a temp
+    tree from the on-disk base and `git apply`s there.
+    """
+    ab = apply_bench_tool
+    # a NON-git aiter_meta layout with a real base source file
+    repo = tmp_path / "site-packages" / "aiter_meta"
+    src = repo / "csrc" / "kernels" / "quant_kernels.cu"
+    src.parent.mkdir(parents=True)
+    src.write_text("old line\nkeep\n", encoding="utf-8")
+    assert ab._is_git_tree(repo) is False  # precondition: not a git repo
+
+    diff = tmp_path / "forge.patch"
+    diff.write_text(
+        "--- a/csrc/kernels/quant_kernels.cu\n"
+        "+++ b/csrc/kernels/quant_kernels.cu\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-old line\n"
+        "+new line\n"
+        " keep\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    rec = ab._reconstruct_sources_from_diff(diff, repo, out)
+    assert rec["status"] == "ok", rec
+    rel = "csrc/kernels/quant_kernels.cu"
+    assert rel in rec["files"], rec
+    assert Path(rec["files"][rel]).read_text(encoding="utf-8") == "new line\nkeep\n"
+    # the live on-disk base must be untouched (reconstruction is hermetic)
+    assert src.read_text(encoding="utf-8") == "old line\nkeep\n"

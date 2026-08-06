@@ -3,12 +3,18 @@
 
 """Wall-clock budget signals.
 
-Two complementary axes, both gated on no validated gain:
+Two complementary axes:
 
-* Percentage ladder: ``budget_strategy_drift`` (burn_pct >= 0.5),
-  ``budget_burn_no_gain`` (>= 0.70), ``deadline_imminent`` (>= 0.85, emits ``delegate(report)``).
-* Absolute-time: ``deadline_warning`` (remaining <= 30min) and
-  ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH + ``delegate(report)``).
+* Percentage ladder, gated on no validated gain: ``budget_strategy_drift``
+  (burn_pct >= 0.5), ``budget_burn_no_gain`` (>= 0.70), ``deadline_imminent``
+  (>= 0.85, emits ``delegate(report)``).
+* Absolute-time backstop, fires regardless of gain: ``deadline_warning``
+  (remaining <= 30min, downgraded HIGH -> MEDIUM when a validated gain exists)
+  and ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH +
+  ``delegate(report)``).
+
+Both axes are suppressed for sub-``min_budget_minutes`` sessions and during the
+closing phase.
 
 Reads the Coordinator time-budget block via :class:`SharedStateSnapshot`; silent when absent.
 The two axes intentionally overlap; absolute-time is the fallback when the percentage gate is

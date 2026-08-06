@@ -178,7 +178,7 @@ def test_both_routes_share_canonical_spine(tmp_path):
 def test_category_vocabulary_canonical_and_consistent(tmp_path):
     # Category display uses one canonical vocabulary on both routes.
     det_md = _deterministic_md(tmp_path)
-    # deterministic fed raw tracelens_category "gemm" -> must render canonical
+    # deterministic tracelens_category renders through canonical_category
     assert "| GEMM |" in det_md
     assert "| gemm |" not in det_md
     assert "### P0: GEMM kernels" in det_md

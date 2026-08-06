@@ -756,8 +756,9 @@ def _tail_logs(
     Returns the union of (a) primary ``server_log_path`` lines and
     (b) the most recently-modified files matched by
     ``extra_server_log_globs`` under ``session_dir``. Each source is
-    capped at ``max_lines``; the final list is also capped so the
-    pattern scanner stays bounded.
+    capped at ``max_lines``, so the result is bounded by
+    ``max_lines * (1 + max_extra_logs)``; the caller further trims to its
+    own scan window.
 
     Lines from extra logs are tagged ``[<filename>]`` so
     :data:`signals.local_health._log_error_symptoms` can attribute
@@ -866,9 +867,10 @@ async def _probe_local_servers(
 
     Used to detect "process is alive but server is wedged" — a common
     failure mode in single-mode dev where the inference server
-    deadlocks and stops accepting requests.  Connection refused /
-    timeout each carry a distinct ``status`` so signals can act on
-    them.
+    deadlocks and stops accepting requests.  Connection refused, timeout
+    and other transport errors each carry a distinct ``error`` string;
+    ``status`` stays ``error`` for every transport failure and is only set
+    to ``ok`` / ``http_error`` when a response is received.
 
     Args:
         targets (tuple[str, ...]): URLs to probe; empty disables the
@@ -946,10 +948,13 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
             0.5s).
 
     Returns:
-        ``{}`` when ``ray`` is not on ``$PATH`` (silent on smoke-test pods).
+        ``{}`` when ``ray`` is not on ``$PATH`` (silent on smoke-test pods), or
+        when ``ray status`` exits non-zero with a traceback indicating the CLI
+        shim itself crashed (broken install, not a dead head — ``ray_head_dead``
+        is deliberately suppressed).
         ``{"healthy": False, "reason": str, "stderr": str,
           "returncode": int|None}`` when ``ray status`` cannot be run or
-        exits non-zero.
+        exits non-zero for any other reason.
         ``{"healthy": True, "pending_tasks": int, "stdout_head": str,
           "returncode": 0}`` on success.
 
@@ -1175,14 +1180,14 @@ def _sample_decision_audit(
     Returned shape::
 
         {
-            "recent_integrate": [{kernel_id, decision, gain_pct,
+            "recent_integrate": [{kernel_id, task_id, decision, gain_pct,
                                   patch_path, patch_size_bytes,
                                   base_tput, new_tput, dispatched_count,
                                   result_path, mtime}, ...],
             "ci_metrics": {raw json} | {},
             "ci_metrics_path": str | "",
             "oob_attempts": [{kernel_id, backend, report_text,
-                              microbench_speedup, ts}, ...],
+                              microbench_speedup, ts, source_file}, ...],
         }
     """
     if session_dir is None:

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared helper for the ``explore`` executor's grid runs.
+"""Shared value types and helpers for the ``explore`` executor's grid runs.
 
-Takes a base Magpie YAML + a list of (name, extra_server_args, extra_envs)
-variants, runs Magpie once per variant, parses ``benchmark_report.json``,
-returns the winners.
+Holds :class:`GridVariant` / :class:`VariantResult`, the content-fingerprint
+delegate, ``extra_envs`` coercion, the Pareto filter, and the shared Magpie
+cwd / per-variant timeout defaults. The runner that actually invokes Magpie
+and parses ``benchmark_report.json`` lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env_safety import filter_benchmark_env_mapping
 from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
@@ -87,6 +89,10 @@ class GridVariant:
         args_mode (str): ``"append"`` (default) or ``"replace"``.
         note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
             Defaults to ``""``.
+        runtime_override (dict[str, str]): Set on the instance only (not a
+            constructor argument); injected into the materialized YAML's
+            ``benchmark.envs`` by ``_build_variant_yaml`` and folded into
+            :attr:`fingerprint`.
     """
 
     name: str
@@ -123,7 +129,7 @@ class GridVariant:
         """
         self.name = name
         self.extra_server_args = extra_server_args
-        self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
+        self.extra_envs = filter_benchmark_env_mapping(extra_envs)
         self.remove_args = to_str_list(remove_args)
         self.unset_envs = to_str_list(unset_envs)
         mode = str(args_mode or "append").strip().lower()
@@ -225,6 +231,7 @@ class VariantResult:
         duration_seconds (float | None): Benchmark duration in seconds.
         ttft_mean_ms (float | None): Mean time-to-first-token (ms).
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
+        tpot_mean_ms (float | None): Mean time-per-output-token (ms).
         workspace (str | None): Path to the located ``benchmark_*`` workspace.
         report_path (str | None): Path to ``benchmark_report.json`` if present.
         raw_result_path (str | None): Path to the raw result JSON, if salvaged.
@@ -243,6 +250,9 @@ class VariantResult:
             logs when the variant was killed before finishing. Informational
             only — never a real measurement and never used for winner
             selection; ``output_throughput`` stays ``None`` on the kill path.
+        server_log_path (str | None): Absolute path to the variant's
+            ``server.log`` when a server was launched; ``None`` for pre-launch
+            failures where no server ran.
     """
 
     name: str
@@ -274,6 +284,7 @@ class VariantResult:
     # Rough output tok/s salvaged from server.log on the killed_overtime path;
     # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
+    server_log_path: str | None = None
 
     @property
     def fingerprint(self) -> str:

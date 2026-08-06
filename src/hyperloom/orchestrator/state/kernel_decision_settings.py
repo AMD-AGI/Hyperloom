@@ -41,8 +41,10 @@ def resolve_kernel_opt_max_failures() -> int:
 # then reject".
 _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
-# Hot-kernel report gate: reusable hot kernels >= this GPU share need a
-# kernel_opt attempt/rejection before ``report``.
+# Minimum GPU share for a reusable hot kernel to still owe a kernel_opt attempt.
+# Holds KERNEL phase-advance open (kernel_work_pending), filters the dispatch
+# batch queue, and drives the advisory 'untried hot kernels' report annotation.
+# It does NOT block ``report``.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 10.0
 
 # Only the top-N reusable hot kernels are enforced.

@@ -54,6 +54,40 @@ BLOCKED_CHILD_ENV_NAMES: frozenset[str] = frozenset(
     }
 )
 
+BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "AMD_API_KEY",
+        "AMD_LLM_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAW_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEAK_API_KEY",
+        "LLM_API_KEY",
+        "LLM_GATEWAY_KEY",
+        "LLM_PROXY_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_CUSTOM_HEADERS",
+        "SAFE_API_KEY",
+    }
+)
+
+_SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*"
+            r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)"
+            r"[A-Z0-9_]*\s*[=:]\s*)"
+            r"[^\s,;'\"]+"
+        ),
+        r"\1[REDACTED]",
+    ),
+)
+
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -206,13 +240,47 @@ def scrub_child_process_env(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove control-plane credentials from a benchmark environment in place.
+
+    Serving benchmarks target the local model server and do not need LLM-agent
+    credentials. Keeping those values out of the process tree also prevents
+    shell tracing and lm-eval command/result serialization from persisting them.
+    """
+    scrub_child_process_env(env)
+    for name in BENCHMARK_SECRET_ENV_NAMES:
+        env.pop(name, None)
+    return env
+
+
+def filter_benchmark_env_mapping(envs: Mapping[str, object] | None) -> dict[str, str]:
+    """Return benchmark env overrides without control-plane credentials."""
+    return {
+        str(name): str(value)
+        for name, value in (envs or {}).items()
+        if str(name).strip().upper() not in BENCHMARK_SECRET_ENV_NAMES
+    }
+
+
+def redact_secret_values(text: str) -> str:
+    """Mask recognizable credential values before diagnostic text is persisted."""
+    out = str(text or "")
+    for pattern, replacement in _SECRET_REDACTION_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 __all__ = [
+    "BENCHMARK_SECRET_ENV_NAMES",
     "BLOCKED_CHILD_ENV_NAMES",
     "BLOCKED_UNTRUSTED_ENV_NAMES",
+    "filter_benchmark_env_mapping",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_kernel_agent_env_key",
     "is_python_package_root",
+    "redact_secret_values",
+    "scrub_benchmark_process_env",
     "scrub_child_process_env",
     "valid_env_key",
 ]

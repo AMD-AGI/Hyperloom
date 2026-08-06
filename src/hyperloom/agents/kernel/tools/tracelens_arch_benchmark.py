@@ -401,7 +401,9 @@ def populate_gpu_arch_json(
         The arch JSON path, or ``None`` when MAF is supplied at report time.
 
     Raises:
-        RuntimeError: If the platform is empty or the microbenchmark fails.
+        RuntimeError: If the platform is empty, or the microbenchmark fails and
+            no hyperloom in-repo achievable spec exists for the platform to fall
+            back to (the original microbenchmark error is re-raised).
     """
     if internal_extension_enabled:
         existing = resolve_arch_json_path(platform)

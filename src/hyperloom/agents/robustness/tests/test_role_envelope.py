@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :mod:`robustness_agent.role.envelope`: builder round-trips, defensive ValueError on bad args, and static-table invariants matching upstream PolicyGate."""
+"""Unit tests for :mod:`hyperloom.agents.robustness.role.envelope`: builder round-trips, defensive ValueError on bad args, and static-table invariants matching upstream PolicyGate."""
 
 from __future__ import annotations
 

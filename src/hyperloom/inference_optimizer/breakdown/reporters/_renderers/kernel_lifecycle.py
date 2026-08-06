@@ -3,8 +3,9 @@
 
 """Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle.
 
-Columns mirror the MAE dashboard contract. Skipped when no kernels were
-detected (implies the profile phase never ran).
+Columns are built locally in ``render`` and are dynamic: ``bw%`` /
+``compute%`` are omitted when no detected kernel reports them. Skipped when no
+kernels were detected (implies the profile phase never ran).
 """
 
 from __future__ import annotations

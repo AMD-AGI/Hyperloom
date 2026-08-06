@@ -6,8 +6,8 @@
 
 Both modes run two Magpie arms that share the same YAML except for
 ``EXTRA_SGLANG_ARGS`` (arm A = baseline flags, arm B = baseline plus
-``--arm-b-suffix``, default ``--enable-torch-compile --mem-fraction-static 0.6``
-per inference-optimization/actions/baseline.md), then emit a JSON summary.
+``--arm-b-suffix``, default ``--enable-torch-compile --mem-fraction-static
+0.6``), then emit a JSON summary.
 
 ``--mode kernels`` — **kernel hot-list usage** from profile traces.
   Kernel-opt targets **native** sources; traces taken with ``torch.compile``
@@ -25,10 +25,11 @@ per inference-optimization/actions/baseline.md), then emit a JSON summary.
   metric that matters for kernel-agent targeting.
 
 Usage::
-    /opt/venv/bin/python experiments/ab_torch_compile.py --mode kernels \\
-      --out-json /tmp/ab_kernel_usage.json
-    /opt/venv/bin/python experiments/ab_torch_compile.py --mode magpie \\
-      --config experiments/configs/baseline_sglang.yaml \\
+    python -m hyperloom.inference_optimizer.experiments.ab_torch_compile \\
+      --mode kernels --out-json /tmp/ab_kernel_usage.json
+    python -m hyperloom.inference_optimizer.experiments.ab_torch_compile \\
+      --mode magpie \\
+      --config src/hyperloom/inference_optimizer/assets/configs/baseline_sglang.yaml \\
       --out-json /tmp/ab_torch_compile.json
 
 Env: reuse ``ROCR_VISIBLE_DEVICES`` / ``PATH`` like other Magpie scripts.
@@ -74,10 +75,14 @@ else:
 
 
 def _config_dir() -> Path:
-    """Return the bundled config directory next to this script.
+    """Return the ``configs/`` directory next to this script.
+
+    That directory is not present in the tree — the shipped Magpie YAMLs live
+    under ``../assets/configs`` — so the ``--mode`` defaults derived from it
+    always miss and the caller must pass ``--config`` / ``--profile-config``.
 
     Returns:
-        Path: The ``configs/`` directory holding the shipped Magpie YAMLs.
+        Path: ``<script dir>/configs``.
     """
     return Path(__file__).resolve().parent / "configs"
 
@@ -265,9 +270,8 @@ def _jaccard(a: set[str], b: set[str]) -> float | None:
         b (set[str]): Second set of kernel names.
 
     Returns:
-        float | None: Intersection-over-union in [0, 1], ``0.0`` when both are
-        non-empty but disjoint with empty union, or ``None`` when both sets are
-        empty.
+        float | None: Intersection-over-union in [0, 1] (``0.0`` when the sets
+        are disjoint), or ``None`` when both sets are empty.
     """
     if not a and not b:
         return None
@@ -630,14 +634,14 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="kernels: compare profile-trace hot kernels; magpie: compare throughput.",
     )
-    # magpie config flag (default experiments/configs/baseline_sglang.yaml).
+    # magpie config flag (default <script dir>/configs/baseline_sglang.yaml).
     ap.add_argument(
         "--config",
         type=Path,
         default=None,
         help="[--mode magpie] Base benchmark config YAML.",
     )
-    # kernels config flag (default experiments/configs/profile_sglang.yaml).
+    # kernels config flag (default <script dir>/configs/profile_sglang.yaml).
     ap.add_argument(
         "--profile-config",
         type=Path,

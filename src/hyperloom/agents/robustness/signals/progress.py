@@ -148,10 +148,10 @@ class ProgressDetector:
             snap (SharedStateSnapshot): Current shared-state snapshot.
 
         Returns:
-            Symptom | None: A ``gain_plateau`` symptom (HIGH when gain is still
-                zero, MEDIUM when a shippable gain exists), or ``None`` when the
-                window is not full, the stack is empty, or the gain is still
-                moving.
+            Symptom | None: A MEDIUM-severity ``gain_plateau`` symptom (the
+                suggestion text differs depending on whether a shippable gain
+                exists), or ``None`` when the window is not full, the stack is
+                empty, or the gain is still moving.
         """
         cfg = self._config
         if len(self._gain_history) < cfg.gain_window_ticks:
@@ -203,7 +203,7 @@ class ProgressDetector:
             snap (SharedStateSnapshot): Current shared-state snapshot.
 
         Returns:
-            Symptom | None: A HIGH-severity ``no_levers_found`` symptom, or
+            Symptom | None: A MEDIUM-severity ``no_levers_found`` symptom, or
                 ``None`` when any guard condition defers the fire.
         """
         cfg = self._config

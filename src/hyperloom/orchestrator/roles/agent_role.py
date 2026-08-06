@@ -7,7 +7,7 @@ Each :class:`AgentRole` binds:
 
     * a backend type (Claude tool-using vs. Codex no-tools)
     * a model slug + the env var holding the API key
-    * the system prompt loaded from ``system_prompts/<name>.md``
+    * the system prompt loaded from ``orchestrator/prompts/<name>.md``
     * which intent types the role is allowed to emit
     * permission flags consumed by :class:`PolicyGate`
 
@@ -21,7 +21,6 @@ The four persistent agent roles and their permitted intents::
     │ kernel       │ Claude   │ response (only) / send_message / alert  │
     │ critic       │ Codex    │ review_verdict (only) / send_message /  │
     │              │ no-tools │ alert                                   │
-    │              │ + KB Bash│ KB read/write Bash allowlist            │
     │ robustness   │ Claude   │ alert / kill_task / prune_branch /      │
     │              │          │ escalate_strategy_change                │
     │              │          │ + always-on tick                        │
@@ -46,7 +45,7 @@ class BackendType(str, Enum):
     """How a role talks to the LLM."""
 
     CLAUDE = "claude"  # tool-using (emit_intent + Read/Bash/Edit gated by Policy)
-    CODEX = "codex"  # no-tools, validated_json_output only (KB Bash exception)
+    CODEX = "codex"  # no-tools, validated_json_output only
 
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
@@ -186,7 +185,7 @@ def default_role_registry() -> dict[str, AgentRole]:
             allowed_intents=_CRITIC_INTENTS,
             can_delegate_side_effects=False,
             can_mutate_core_state=False,
-            no_tools=True,  # Codex no-tools + KB Bash exception
+            no_tools=True,  # Codex no-tools
         ),
         "robustness": AgentRole(
             name="robustness",

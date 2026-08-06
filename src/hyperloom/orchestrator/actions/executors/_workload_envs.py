@@ -30,6 +30,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
+    filter_benchmark_env_mapping,
     filter_untrusted_env_mapping,
     valid_env_key,
 )
@@ -599,6 +600,17 @@ def _finalize_framework_server_args(
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed.
+
+    1. --context-length cap: sglang sizes max_total_tokens off the model's
+       max_position_embeddings, so a huge native window balloons the aiter
+       workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
+       native window AND to the run's MAX_MODEL_LEN.
+    2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
+       first-request aiter JIT compile survives (the 300s default fires
+       SIGQUIT mid-warmup on a cold aiter cache).
+
+    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale.
 
     ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
     already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
@@ -1285,17 +1297,9 @@ def materialize_config_with_envs(
                     if _sp_existing
                     else f"--block-size {_sparse_bs}"
                 )
-    # sglang server-arg guards, applied at the FINAL framework env so any
-    # operator-pinned flag is honored and never doubled. No-ops for vllm/atom.
-    # Single choke point every benchmark path funnels through.
-    #
-    # 1. --context-length cap: sglang sizes max_total_tokens off the model's
-    #    max_position_embeddings, so a huge native window balloons the aiter
-    #    workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
-    #    native window AND to the run's MAX_MODEL_LEN.
-    # 2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
-    #    first-request aiter JIT compile survives (the 300s default fires
-    #    SIGQUIT mid-warmup on a cold aiter cache).
+    # Single choke point every benchmark path funnels through: the final
+    # server-arg guards, applied at the FINAL framework env so any
+    # operator-pinned flag is honored and never doubled.
     _finalize_framework_server_args(
         envs,
         bench,
@@ -1351,6 +1355,32 @@ def materialize_config_with_envs(
     _eval_limit_env = os.environ.get("MAGPIE_EVAL_LIMIT", "").strip()
     if _eval_limit_env and "MAGPIE_EVAL_LIMIT" not in envs:
         envs["MAGPIE_EVAL_LIMIT"] = _eval_limit_env
+    # PD (router-fronted): lm_eval's default token-id prompts are rejected by the
+    # sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
+    # accuracy eval. Force string prompts so the gate works. Explicit env /
+    # extra_envs win; only disaggregated runs are touched (aggregated hits the
+    # sglang server directly, which accepts token-id prompts).
+    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    if not _eval_tok_env:
+        try:
+            from ._multi_node_env import resolve_kb_topology
+
+            if str(resolve_kb_topology().get("pd_mode") or "").lower() == "disaggregated":
+                _eval_tok_env = "false"
+        except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
+            # Don't degrade silently: if this IS a PD run, failing to resolve the
+            # topology leaves MAGPIE_EVAL_TOKENIZED_REQUESTS unset, lm_eval keeps
+            # sending token-id prompts, and the sglang_router 422s every request
+            # -> accuracy reads 0 with no other clue pointing back here.
+            log.warning(
+                "_workload_envs: could not resolve PD topology to gate the lm_eval prompt format (%s); "
+                "if this is a disaggregated run, MAGPIE_EVAL_TOKENIZED_REQUESTS stays unset and the "
+                "sglang_router may reject token-id prompts with HTTP 422 (accuracy eval would read 0)",
+                exc,
+            )
+            _eval_tok_env = ""
+    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
+        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
     if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
@@ -1399,6 +1429,15 @@ def materialize_config_with_envs(
     for key in unset_list:
         if isinstance(extra_envs, dict) and key in extra_envs:
             envs[str(key)] = str(extra_envs[key])
+    filtered_envs = filter_benchmark_env_mapping(envs)
+    dropped_credentials = sorted(set(envs) - set(filtered_envs))
+    if dropped_credentials:
+        log.warning(
+            "Dropping control-plane credentials from benchmark envs: %s",
+            ", ".join(dropped_credentials),
+        )
+        envs.clear()
+        envs.update(filtered_envs)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

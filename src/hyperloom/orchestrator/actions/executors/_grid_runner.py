@@ -28,7 +28,8 @@ from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     _ENV_KEY_RE,
     is_python_package_root,
-    scrub_child_process_env,
+    redact_secret_values,
+    scrub_benchmark_process_env,
 )
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
@@ -37,6 +38,7 @@ from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     run_with_session_kill,
+    server_log_death_excerpt,
 )
 from .benchmark_result import (
     estimate_killed_variant_throughput,
@@ -44,7 +46,10 @@ from .benchmark_result import (
     harvest_leaked_artifacts,
 )
 from .benchmark_backend import build_benchmark_command
-from ._inferencex_patcher import ensure_benchmark_lib_eval_start_patched
+from ._inferencex_patcher import (
+    ensure_benchmark_lib_eval_probe_patched,
+    ensure_benchmark_lib_eval_start_patched,
+)
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -152,8 +157,6 @@ def _resolve_magpie_python() -> str:
         Returns:
             ``True`` if both imports succeed in the interpreter.
         """
-        # Probe Magpie AND ``yaml`` so an interpreter that resolves Magpie via a
-        # .pth but lacks PyYAML is skipped in favour of the canonical /opt/venv.
         try:
             # Probe with ``importlib.util.find_spec`` rather than a bare
             # ``import`` so a missing module returns a non-zero exit code
@@ -162,8 +165,7 @@ def _resolve_magpie_python() -> str:
             # stream, so a bare ``import Magpie`` on a candidate that lacks it
             # would leak an alarming traceback into the run log even though the
             # probe failing is an expected, benign step of interpreter
-            # resolution. ``find_spec`` still checks both Magpie and its
-            # top-level runtime dep ``yaml`` (see the note above).
+            # resolution.
             proc = run_with_session_kill(
                 [
                     py,
@@ -571,7 +573,9 @@ def _build_variant_yaml(
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
-    Injects the variant's flags via ``EXTRA_SGLANG_ARGS``. ``model_path``
+    Injects the variant's flags into the framework's ``EXTRA_*_ARGS`` env,
+    resolved by :func:`server_args_env_name` (``EXTRA_SGLANG_ARGS`` for sglang,
+    ``EXTRA_VLLM_ARGS`` for vllm, etc.). ``model_path``
     overrides the legacy hardcoded ``benchmark.model``; ``gpu_type`` pins the
     generic ``{framework}_{gpu_type}.sh``; ``benchmark_script`` (pre-sanitized)
     force-pins a script, applied last so the operator pick wins.
@@ -972,7 +976,7 @@ def _run_magpie(
     if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
-    env = scrub_child_process_env(os.environ.copy())
+    env = scrub_benchmark_process_env(os.environ.copy())
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
@@ -991,7 +995,8 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Baseline patches its own checkout, but explore / sweep never pass
         # through that hook: re-assert here so a resumed session or a re-cloned
-        # checkout still emits the eval-start marker. Idempotent.
+        # checkout still emits the eval-start marker and installs the
+        # generation-pathology probe. Both idempotent.
         try:
             ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
         except Exception as exc:  # noqa: BLE001 — patch is best-effort
@@ -1000,6 +1005,26 @@ def _run_magpie(
                 inferencex_path,
                 exc,
             )
+        try:
+            ensure_benchmark_lib_eval_probe_patched(Path(inferencex_path))
+        except Exception as exc:  # noqa: BLE001 — patch is best-effort
+            log.warning(
+                "_grid_runner: eval-probe patch skipped for %s: %s",
+                inferencex_path,
+                exc,
+            )
+    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight
+    # aiperf right before Magpie runs it, via the shared helper (also used by the
+    # baseline/profile shell-out). No-op under pytest / when AgentX is off (the
+    # helper keeps the agentx package import lazy for the OFF path, A2). A failed
+    # preflight becomes a structured nonzero rc so the grid records a failed
+    # benchmark instead of crashing.
+    from ._workload_envs import prepare_agentx_runtime
+
+    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
+    if _agx_err:
+        log.error("%s; failing this benchmark", _agx_err)
+        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
@@ -1270,6 +1295,7 @@ async def run_grid(
                     results.append(_session_deadline_skip_result(skipped_variant))
                 break
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
+        server_log = slot / "server.log"
         # Capability fast-fail: drop a variant whose env flag the build cannot
         # honour before booting a doomed server, still recording the failure so
         # the LLM learns not to re-pick it.
@@ -1394,6 +1420,7 @@ async def run_grid(
         warmup_tput: float | None = None
         if auto_warmup:
             warmup_slot = slot / "warmup_round"
+            warmup_server_log = warmup_slot / "server.log"
             warmup_lifecycle = {
                 "cleanup": False,
                 "pid_dir": str(slot),
@@ -1487,6 +1514,7 @@ async def run_grid(
                         status="failed",
                         error=f"warmup_timeout: {exc}",
                         error_class="warmup_magpie_timeout",
+                        server_log_path=_existing_log_path(warmup_server_log),
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=["run_grid_warmup_round_failed"],
@@ -1524,7 +1552,8 @@ async def run_grid(
                     port=int(lifecycle.get("port") or 0),
                 )
                 warmup_error = (
-                    (warmup_stderr or warmup_stdout)[-2000:]
+                    server_log_death_excerpt(str(warmup_server_log))
+                    or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
                     if warmup_rc != 0
                     else "warmup benchmark_report missing valid throughput/completed requests"
                 )
@@ -1560,6 +1589,7 @@ async def run_grid(
                         returncode=warmup_rc,
                         error=warmup_error,
                         error_class="warmup_round_failed",
+                        server_log_path=_existing_log_path(warmup_server_log),
                         note=variant.note,
                         runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
                         nonfatal_warnings=[
@@ -1733,6 +1763,7 @@ async def run_grid(
                     status="failed",
                     error=f"timeout: {exc}",
                     error_class="magpie_timeout",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     runtime_sec=round(
                         max(0.0, time.time() - variant_started_unix),
@@ -1778,13 +1809,14 @@ async def run_grid(
                 variant.name,
                 variant_runtime_sec,
             )
+            death_excerpt = server_log_death_excerpt(str(server_log)) or (
+                "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
+            )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
                 error_class="server_init_dead",
-                error_summary=(
-                    "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
-                ),
+                error_summary=death_excerpt,
                 extra_args=variant.extra_server_args,
             )
             results.append(
@@ -1795,8 +1827,9 @@ async def run_grid(
                     status="failed",
                     returncode=rc,
                     runtime_sec=variant_runtime_sec,
-                    error="server_init_dead: engine/worker bootstrap failed",
+                    error=death_excerpt,
                     error_class="server_init_dead",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
                 )
@@ -1849,6 +1882,7 @@ async def run_grid(
                     runtime_sec=variant_runtime_sec,
                     error="detokenizer_stall: server ready but log went silent",
                     error_class="detokenizer_stall",
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
                 )
@@ -1897,6 +1931,7 @@ async def run_grid(
                         f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
                         f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
                     ),
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                     nonfatal_warnings=ok_warnings,
                 )
@@ -1931,7 +1966,9 @@ async def run_grid(
             )
         if not candidates:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = (stderr or stdout)[-2000:] if rc != 0 else "no benchmark_* workspace produced"
+            no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
+                redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
+            )
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
                 i + 1,
@@ -1955,6 +1992,7 @@ async def run_grid(
                     returncode=rc,
                     error=no_ws_error_summary,
                     error_class="no_benchmark_workspace",
+                    server_log_path=_existing_log_path(server_log),
                     nonfatal_warnings=harvest_tags,
                     note=variant.note,
                 )
@@ -1982,8 +2020,9 @@ async def run_grid(
             warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
+            death_excerpt = server_log_death_excerpt(str(server_log))
             if rc != 0:
-                error = (stderr or stdout)[-2000:]
+                error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
                 # The bypass/scriptable path runs the customer body in a child
                 # whose stderr is redirected to benchmark_stderr.log, not the
                 # parent pipe — so `stderr`/`stdout` here are often empty and the
@@ -1991,13 +2030,13 @@ async def run_grid(
                 # only on disk. Fall back to it so abort_reason.json carries the
                 # actual failure instead of a blank `error`.
                 if not error.strip():
-                    error = _on_disk_stderr_tail(workspace, slot)
+                    error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
                 invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
-                error = "benchmark_report missing"
+                error = death_excerpt or "benchmark_report missing"
                 invalid_class = "benchmark_report_missing"
             else:
-                error = "benchmark_report missing valid throughput/completed requests"
+                error = death_excerpt or "benchmark_report missing valid throughput/completed requests"
                 invalid_class = "benchmark_report_invalid_metric"
             log.warning(
                 "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
@@ -2029,6 +2068,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=error,
                     error_class=invalid_class,
+                    server_log_path=_existing_log_path(server_log),
                     note=variant.note,
                 )
             )
@@ -2057,7 +2097,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
-                error=(stderr or stdout)[-2000:] if rc != 0 else None,
+                error=redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
@@ -2089,6 +2129,18 @@ def _session_deadline_skip_result(variant: GridVariant) -> VariantResult:
 
 SINGLE_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 MULTI_NODE_DEFAULT_KEEP_THRESHOLD_PCT = 2.0
+
+
+def _existing_log_path(path: Path) -> str | None:
+    """Return ``path`` as a string when it exists, else ``None``.
+
+    Args:
+        path (Path): Candidate ``server.log`` path.
+
+    Returns:
+        str | None: The stringified path, or ``None`` when absent.
+    """
+    return str(path) if path.exists() else None
 
 
 def _safe(name: str) -> str:

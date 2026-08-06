@@ -1,15 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Theoretical peak ``output_throughput`` ceiling (decode memory roofline).
+"""Analytic performance ceilings for the roofline snapshot.
 
-Formula (decode-only, memory-bound)::
+Four capabilities live here:
 
-    peak_output_tok_per_sec
-      = (HBM_BW_per_gpu × num_gpus)
-        / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
+1. The top-down memory-bound decode formula::
 
-Prefill is not modelled; ``batch = max(concurrency, 1)``. Outputs are an upper bound.
+       peak_output_tok_per_sec
+         = (HBM_BW_per_gpu × num_gpus)
+           / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
+
+   This formula does not model prefill; ``batch = max(concurrency, 1)``.
+2. The compute-bound ceiling (``compute_compute_bound_ceiling_tok_per_sec``)
+   and the ``min(T_mem, T_cmp)`` selector (``select_peak_and_bound``).
+3. The bottom-up per-op ``PerfModel`` breakdown, which does produce a
+   ``prefill_tok_per_s`` figure.
+4. The xDiT diffusion images/sec ceiling.
+
+All outputs are upper bounds.
 """
 
 from __future__ import annotations
@@ -147,9 +156,9 @@ def _parse_server_arg(args: str, flag: str) -> str:
     return value
 
 
-#: Magpie ``benchmark.envs`` keys that carry the runtime server args, one
-#: per framework. The baseline yaml only ever sets the one matching its
-#: framework, so reading all three and concatenating is safe.
+#: Magpie ``benchmark.envs`` keys that carry the runtime server args for the
+#: text-serving frameworks. The baseline yaml only ever sets the one matching
+#: its framework, so reading these and concatenating is safe.
 _RUNTIME_SERVER_ARG_ENV_KEYS = (
     "EXTRA_SGLANG_ARGS",
     "EXTRA_VLLM_ARGS",

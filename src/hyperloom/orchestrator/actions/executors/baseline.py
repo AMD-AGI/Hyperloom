@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -62,6 +62,7 @@ from ._workload_envs import (
 )
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
+    ensure_benchmark_lib_eval_probe_patched,
     ensure_benchmark_lib_eval_start_patched,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
@@ -344,6 +345,19 @@ def _materialized_run_eval_disabled(config_path: Path) -> bool:
     envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
     val = envs.get("RUN_EVAL")
     return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
+
+
+def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
+    """Set the effective eval mode after lifecycle eligibility is known."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    benchmark = cfg.setdefault("benchmark", {})
+    benchmark.setdefault("envs", {})["RUN_EVAL"] = (
+        "true" if enabled else "false"
+    )
+    config_path.write_text(
+        yaml.safe_dump(cfg, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
@@ -641,17 +655,14 @@ def _probe_aiter_jit_cache() -> dict[str, Any]:
     existing dir wins; counts ``.so`` recursively. Any IO error degrades
     to ``probe_status="error"`` (callers fall back to the WARM timeout).
 
-    Returns a dict with keys:
-        path           Path that was probed, or None if nothing found.
-        kernel_count   Number of `.so` files under `path` (recursive).
-        size_mb        Total size of those `.so` files, in MiB (int).
-        is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
-                       None when probe failed.
-        probe_status   "found" | "not_found" | "error".
-
     Returns:
-        dict[str, Any]: Probe info with keys ``path``, ``kernel_count``,
-            ``size_mb``, ``is_cold`` and ``probe_status``.
+        dict[str, Any]: Probe info with keys:
+            path           Path that was probed, or None if nothing found.
+            kernel_count   Number of `.so` files under `path` (recursive).
+            size_mb        Total size of those `.so` files, in MiB (int).
+            is_cold        True iff kernel_count < COLD_START_KERNEL_THRESHOLD;
+                           None when the probe found nothing or failed.
+            probe_status   "found" | "not_found" | "error".
     """
     info: dict[str, Any] = {
         "path": None,
@@ -750,7 +761,7 @@ def _apply_warm_patches(
     target_repo: str,
     output_dir: Path,
 ) -> list[dict[str, str]]:
-    """Apply warm-replay code patches (Phase 0+1) to InferenceX checkout.
+    """Apply warm-replay code patches to the InferenceX checkout.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref) and ``params["blocked_patches"]`` (blocklist). Applies each patch
@@ -1149,8 +1160,9 @@ class BaselineExecutor:
         the fixes here — after materialization pins the exact checkout, before
         launch — closes that window without an install re-run.
 
-        ProfileExecutor overrides this to additionally validate the
-        NUM_PROMPTS / PROFILE_EXTRA_BODY patches (and short-circuit on failure).
+        ProfileExecutor fully REPLACES this hook (it does not call ``super()``)
+        with NUM_PROMPTS / PROFILE_EXTRA_BODY validation; the eval-start and
+        eval-concurrency fixes below therefore apply to the baseline path only.
 
         Args:
             config_path: The materialized Magpie YAML config path.
@@ -1175,6 +1187,14 @@ class BaselineExecutor:
             except Exception as exc:  # noqa: BLE001 — patch is best-effort
                 log.warning(
                     "baseline_executor: eval-start patch skipped for %s: %s",
+                    ix_root,
+                    exc,
+                )
+            try:
+                ensure_benchmark_lib_eval_probe_patched(Path(ix_root))
+            except Exception as exc:  # noqa: BLE001 — patch is best-effort
+                log.warning(
+                    "baseline_executor: eval-probe patch skipped for %s: %s",
                     ix_root,
                     exc,
                 )
@@ -1577,7 +1597,7 @@ class BaselineExecutor:
             result (dict): The failed baseline result dict, mutated in place
                 when a sibling accuracy is salvaged.
         """
-        from ._accuracy_gate import request_baseline_accuracy_stop
+        from ._accuracy_gate import accuracy_meets_floor, request_baseline_accuracy_stop
 
         params = ctx.task.params or {}
         framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
@@ -1585,26 +1605,26 @@ class BaselineExecutor:
         shared_state = extra.get("shared_state") or self.shared_state
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = float(salvaged["accuracy"])
-            result["accuracy"] = acc_val
-            result["accuracy_task"] = salvaged.get("task", "gsm8k")
-            result["accuracy_metric"] = salvaged.get("metric", "")
-            result["accuracy_source"] = salvaged.get("source_file", "")
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
-            if shared_state is not None:
-                try:
-                    shared_state.baseline_accuracy = acc_val
-                except Exception:  # noqa: BLE001 — salvage must never break baseline
-                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
+            # ``accuracy_meets_floor`` already means "finite, strictly positive
+            # and >= floor", so floor 0.0 is the legacy "any usable accuracy".
+            if accuracy_meets_floor(acc_val, 0.0):
+                log.warning(
+                    "baseline_executor: eval-rooted baseline failure, but salvaged "
+                    "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
+                    "not stopping the run",
+                    acc_val,
+                    salvaged.get("source_file", ""),
+                )
+                return
+            # A measured zero is a broken baseline, not a usable reference: it
+            # must still reach the stop below, now with the score on record.
             log.warning(
-                "baseline_executor: eval-rooted baseline failure, but salvaged "
-                "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
-                "not stopping the run",
+                "baseline_executor: eval-rooted baseline failure and the sibling "
+                "attempt measured accuracy=%.4f (%s); stopping the run",
                 acc_val,
                 salvaged.get("source_file", ""),
             )
-            return
         request_baseline_accuracy_stop(
             shared_state,
             context=f"baseline:{framework or 'unknown'}:eval_aborted",
@@ -1633,7 +1653,9 @@ class BaselineExecutor:
         ``kind="baseline"`` opt out earlier, via ``quality_ref_exempt``.
 
         With eval-on-fail enablement active (the default), the result is stamped
-        as an eval-failure contract and routed to enablement rather than
+        as an eval-failure contract -- ``eval_generation_pathology`` when the
+        generation probe tripped, else whatever the score classifies as -- and
+        routed to enablement rather than
         stopping; ``_is_promotable_result`` then blocks it from anchoring
         ``baseline_tput`` / ``baseline_accuracy`` / ``baseline_config_path``.
         Otherwise the run stops. Throughput-level baseline failures are handled
@@ -1663,8 +1685,10 @@ class BaselineExecutor:
         eval_enablement = self._eval_enablement_active(ctx)
         from ._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+            EVAL_KIND_GENERATION_PATHOLOGY,
             accuracy_meets_floor,
             classify_accuracy_failure,
+            eval_probe_summary,
         )
 
         floor = DEFAULT_ENABLEMENT_ACCURACY_FLOOR
@@ -1700,29 +1724,21 @@ class BaselineExecutor:
         # should reach enablement.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
-            acc_val = float(salvaged["accuracy"])
-            result["accuracy"] = acc_val
-            result["accuracy_task"] = salvaged.get("task", "gsm8k")
-            result["accuracy_metric"] = salvaged.get("metric", "")
-            result["accuracy_source"] = salvaged.get("source_file", "")
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
-            if shared_state is not None:
-                try:
-                    shared_state.baseline_accuracy = acc_val
-                except Exception:  # noqa: BLE001 — salvage must never break baseline
-                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
             log.warning(
                 "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
-                "but salvaged a valid baseline accuracy=%.4f from a sibling "
-                "attempt (%s); not stopping the run",
+                "but salvaged a measured baseline accuracy=%.4f from a sibling "
+                "attempt (%s)",
                 acc_val,
                 salvaged.get("source_file", ""),
             )
-            if not eval_enablement or accuracy_meets_floor(acc_val, floor):
+            # Floor 0.0 reproduces the non-enablement "any positive accuracy is
+            # usable" rule; ``accuracy_meets_floor`` rejects zero either way.
+            if accuracy_meets_floor(acc_val, floor if eval_enablement else 0.0):
                 return
-            # Salvaged, but still under the floor: that is a real quality
-            # signal, so fall through to enablement with the observed value.
+            # Salvaged, but unusable (zero or still under the floor): that is a
+            # real quality signal, so fall through with the observed value
+            # rather than reporting it as a missing measurement.
             acc = acc_val
 
         # No opt-out: a genuine baseline exists to establish the accuracy
@@ -1740,14 +1756,21 @@ class BaselineExecutor:
                 f"task={result.get('accuracy_task')} metric={result.get('accuracy_metric')} "
                 f"source={result.get('accuracy_source')}"
             )
+            # A tripped probe means the eval was cut short because the model
+            # never stopped generating, not that it answered and got them wrong.
+            probe = result.get("eval_probe")
+            if probe:
+                kind = EVAL_KIND_GENERATION_PATHOLOGY
+                evidence = f"{evidence}; {eval_probe_summary(probe)}"
             self._stamp_eval_failure_contract(
                 ctx, result, kind=kind or "", observed_accuracy=observed, evidence=evidence
             )
             log.warning(
-                "baseline_executor: accuracy %s below floor %.4f; routing to "
+                "baseline_executor: accuracy %s below floor %.4f (kind=%s); routing to "
                 "enablement instead of stopping the run.",
                 acc,
                 floor,
+                kind,
             )
             return
         request_baseline_accuracy_stop(
@@ -1755,12 +1778,57 @@ class BaselineExecutor:
             context=f"baseline:{framework or 'unknown'}",
         )
 
+    def _apply_salvaged_accuracy(
+        self,
+        result: dict[str, Any],
+        salvaged: dict[str, Any],
+        shared_state: Any,
+    ) -> float:
+        """Record a salvaged sibling accuracy, publishing it as the gate
+        reference only when it can serve as one.
+
+        ``result`` carries the score whatever its value: that is evidence.
+        ``SharedState.baseline_accuracy`` is the reference later gates compare
+        against, where ``<= 0`` is :func:`accuracy_passed`'s "no baseline, skip
+        the check" sentinel -- a measured zero there bypasses the gate for every
+        later candidate.
+
+        Args:
+            result: The baseline result dict, mutated in place.
+            salvaged: The parsed eval dict from
+                :meth:`_salvage_sibling_baseline_accuracy`.
+            shared_state: The live SharedState, or ``None``.
+
+        Returns:
+            float: The salvaged accuracy.
+        """
+        from ._accuracy_gate import accuracy_meets_floor
+
+        acc_val = float(salvaged["accuracy"])
+        result["accuracy"] = acc_val
+        result["accuracy_task"] = salvaged.get("task", "gsm8k")
+        result["accuracy_metric"] = salvaged.get("metric", "")
+        result["accuracy_source"] = salvaged.get("source_file", "")
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+        if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
+            try:
+                shared_state.baseline_accuracy = acc_val
+            except Exception:  # noqa: BLE001 — salvage must never break baseline
+                log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+        return acc_val
+
     def _salvage_sibling_baseline_accuracy(
         self,
         result: dict[str, Any],
         framework: str | None,
     ) -> dict[str, Any] | None:
-        """Return a positive accuracy from a sibling baseline attempt, if any.
+        """Return a measured accuracy from a sibling baseline attempt, if any.
+
+        A measured ``0.0`` is returned like any other score: it is evidence,
+        not an absent measurement. The caller decides whether the value is
+        usable; filtering zeros here would make a real quality failure
+        indistinguishable from "the eval never ran".
 
         Scans the shared ``runs/baseline`` root (the parent of this attempt's
         ``output_dir``) so eval output written by any sibling attempt is seen.
@@ -1772,7 +1840,7 @@ class BaselineExecutor:
             framework: Framework name threaded into the eval parser.
 
         Returns:
-            The parsed eval dict when a positive accuracy is found, else
+            The parsed eval dict when a finite accuracy is found, else
             ``None``.
         """
         out = result.get("output_dir")
@@ -1782,16 +1850,15 @@ class BaselineExecutor:
         if not runs_root.exists():
             return None
         try:
-            from ._accuracy_gate import parse_eval_results
+            from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
         except Exception:  # noqa: BLE001 — salvage must never break the stop path
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
-        acc = eval_data.get("accuracy")
-        if acc is not None and float(acc) > 0.0:
-            return eval_data
-        return None
+        if _finite_score(eval_data.get("accuracy")) is None:
+            return None
+        return eval_data
 
     async def _run_once(
         self,
@@ -1934,6 +2001,9 @@ class BaselineExecutor:
         # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
         # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
+        defer_accuracy_until_after_measure = is_truthy(
+            params.get("defer_accuracy_until_after_measure")
+        )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
@@ -2008,7 +2078,6 @@ class BaselineExecutor:
         # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
         # never salvaging a prior attempt's stale ``results*.json`` from the
         # reused per-round slot.
-        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))
@@ -2028,6 +2097,17 @@ class BaselineExecutor:
             ctx_extra=extra,
         )
         double_run = double_run_requested and lifecycle["eligible"]
+        if defer_accuracy_until_after_measure and double_run:
+            # Only the lifecycle path can reuse the hot server for a staged
+            # accuracy round. A single-round fallback must retain the original
+            # eval contract so a throughput winner still carries accuracy.
+            _set_materialized_run_eval(
+                materialized_config_path,
+                enabled=False,
+            )
+        run_eval_disabled = _materialized_run_eval_disabled(
+            materialized_config_path
+        )
 
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
         # spans this baseline's benchmark rounds — a double-run's warmup +
@@ -2117,18 +2197,15 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             #
-            # No accuracy eval here: accuracy is a property of the model and its
-            # config, not of cold-vs-hot timing, so round 1 already measured the
-            # value round 2 would re-measure identically. Running it twice cost
-            # minutes per baseline and, worse, doubled the window in which a
-            # server death could take the eval down with it -- which is exactly
-            # how a run was lost. Round 1 keeps eval on and remains the accuracy
-            # source; round 2 only needs the hot throughput number.
+            # No accuracy eval here: ordinary baselines already measured it in
+            # round 1, while staged kernel integration intentionally defers it
+            # until after this hot-throughput gate. In both cases round 2 only
+            # needs the steady-state throughput number.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
                 measure_dir,
-                cleanup=True,
+                cleanup=not defer_accuracy_until_after_measure,
                 pid_dir=pid_dir,
                 port=port,
                 run_eval=False,
@@ -2173,6 +2250,74 @@ class BaselineExecutor:
                     _cold,
                     ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
                 )
+                if defer_accuracy_until_after_measure:
+                    try:
+                        min_tput = float(
+                            params.get(
+                                "post_measure_accuracy_min_tput",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        min_tput = 0.0
+                    if float(_hot or 0.0) >= min_tput:
+                        accuracy_dir = output_dir / "accuracy_round"
+                        accuracy_cfg = self._write_lifecycle_config(
+                            materialized_config_path,
+                            accuracy_dir,
+                            cleanup=True,
+                            pid_dir=pid_dir,
+                            port=port,
+                            run_eval=True,
+                        )
+                        try:
+                            accuracy_timeout_sec = int(
+                                params.get("accuracy_timeout_sec")
+                                or timeout_sec
+                            )
+                        except (TypeError, ValueError):
+                            accuracy_timeout_sec = timeout_sec
+                        accuracy_result = await self._run_single_benchmark(
+                            config_path=accuracy_cfg,
+                            output_dir=accuracy_dir,
+                            **{
+                                **common,
+                                "timeout_sec": max(
+                                    1,
+                                    accuracy_timeout_sec,
+                                ),
+                                "run_eval_disabled": False,
+                            },
+                        )
+                        result["accuracy_stage"] = {
+                            "status": accuracy_result.get("status"),
+                            "error_class": accuracy_result.get(
+                                "error_class"
+                            ),
+                            "workspace": accuracy_result.get("workspace"),
+                        }
+                        if accuracy_result.get("status") == "succeeded":
+                            for key in (
+                                "accuracy",
+                                "accuracy_task",
+                                "accuracy_metric",
+                                "accuracy_source",
+                            ):
+                                if accuracy_result.get(key) is not None:
+                                    result[key] = accuracy_result[key]
+                        else:
+                            result.setdefault("nonfatal_warnings", [])
+                            result["nonfatal_warnings"].append(
+                                "post_measure_accuracy_failed"
+                            )
+                    else:
+                        result["accuracy_stage"] = {
+                            "status": "skipped",
+                            "reason": "throughput_below_threshold",
+                            "minimum_tput": min_tput,
+                            "observed_tput": float(_hot or 0.0),
+                        }
             return result
         finally:
             # Defensive teardown so no persistent server leaks. Idempotent.
@@ -2252,12 +2397,12 @@ class BaselineExecutor:
         cleanup: bool,
         pid_dir: Path,
         port: int,
-        run_eval: bool = True,
+        run_eval: bool | None = None,
     ) -> Path:
         """Render a per-round YAML injecting ``benchmark.server_lifecycle``.
 
         Both rounds share ``pid_dir`` + ``port`` so round 2 re-attaches;
-        only ``cleanup`` differs (round 1 persists, round 2 tears down).
+        ``cleanup`` and ``run_eval`` can differ between rounds.
 
         Args:
             base_config_path: Source materialized YAML to clone and patch.
@@ -2266,6 +2411,8 @@ class BaselineExecutor:
             pid_dir: Shared pid/metadata directory keying the persistent
                 server across both rounds.
             port: Server port shared across both rounds.
+            run_eval: Explicitly forces ``RUN_EVAL`` when set; ``None`` keeps
+                the materialized benchmark contract unchanged.
 
         Returns:
             Path to the written per-round lifecycle YAML.
@@ -2279,8 +2426,10 @@ class BaselineExecutor:
             pid_dir=pid_dir,
             port=port,
         )
-        if not run_eval:
-            bench.setdefault("envs", {})["RUN_EVAL"] = "false"
+        if run_eval is not None:
+            bench.setdefault("envs", {})["RUN_EVAL"] = (
+                "true" if run_eval else "false"
+            )
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = Path(dest_dir) / "baseline_lifecycle.yaml"
         with out.open("w", encoding="utf-8") as f:
@@ -2450,7 +2599,7 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_child_process_env(os.environ.copy())
+        env = scrub_benchmark_process_env(os.environ.copy())
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -2759,7 +2908,7 @@ class BaselineExecutor:
             # Magpie never created a benchmark_* workspace, so the wrapper never
             # wrote server.log. Persist captured stderr/stdout so the failure
             # survives the NFS clone and S3 archive.
-            captured = (proc_stderr or "") + (proc_stdout or "")
+            captured = redact_secret_values((proc_stderr or "") + (proc_stdout or ""))
             stderr_log_path: str | None = None
             if captured.strip():
                 try:
@@ -2780,7 +2929,9 @@ class BaselineExecutor:
                     "status": "failed",
                     "error_class": "cuda_graph_capture_failed",
                     "returncode": proc_returncode,
-                    "error": server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:],
+                    "error": redact_secret_values(
+                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
+                    ),
                     **failure_extras,
                 }
             if server_init_dead:
@@ -2788,11 +2939,11 @@ class BaselineExecutor:
                     "status": "failed",
                     "error_class": "server_init_dead",
                     "returncode": proc_returncode,
-                    "error": server_init_dead_error,
+                    "error": redact_secret_values(server_init_dead_error),
                     **failure_extras,
                 }
             if proc_returncode != 0:
-                tail = (proc_stderr or proc_stdout or "")[-2000:]
+                tail = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
                 err_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
@@ -2855,6 +3006,7 @@ class BaselineExecutor:
             else:
                 error_class = "invalid_measurement"
                 error = "benchmark report did not contain positive throughput and completed requests"
+            error = redact_secret_values(error)
             return {
                 "status": "failed",
                 "error_class": error_class,
@@ -2918,7 +3070,7 @@ class BaselineExecutor:
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
             )
         else:
-            from ._accuracy_gate import parse_eval_results
+            from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
 
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
             # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
@@ -2933,6 +3085,11 @@ class BaselineExecutor:
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
+            # Records why the score is ~0; the score itself is already correct.
+            eval_probe = read_eval_probe(eval_search_root)
+            if eval_probe:
+                result["eval_probe"] = eval_probe
+                log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
 
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",

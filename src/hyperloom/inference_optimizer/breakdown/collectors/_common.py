@@ -348,7 +348,6 @@ def _load_optimization_journal(
     return entries if isinstance(entries, list) else []
 
 
-# §9 Kernel lifecycle
 def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
     """List ``(task_dir, benchmark_report.json)`` pairs under runs/profile/.
 

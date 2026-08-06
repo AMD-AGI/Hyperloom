@@ -159,16 +159,19 @@ class BuildLifecycleCollaborator:
     def _record_build_result(self, result: Any) -> None:
         """Append the manifest entry and record the failure carrier."""
         state = self.shared_state
-        manifest = list(getattr(state, "enablement_build_manifest", []) or [])
+        manifest = list(getattr(state.enablement, "build_manifest", []) or [])
         manifest.append(result.to_state())
-        state.enablement_build_manifest = manifest
+        state.enablement.build_manifest = manifest
         if not result.ok:
-            state.enablement_last_build_failure = {
+            state.enablement.last_build_failure = {
                 "failure_class": result.failure_class,
                 "failure_summary": result.failure_summary or result.error,
             }
-            # A killed build can wedge every later compile of a module; the
-            # per-attempt jit dir is swept so a resumed/next attempt is clean.
+            # A killed build can wedge every later compile of a module. Best-effort
+            # sweep of the per-attempt jit dir: skipped entirely while a compiler is
+            # still alive, and otherwise only reaps locks older than
+            # AITER_LOCK_STALE_MINUTES, so locks from a just-killed build survive
+            # until a later attempt.
             self._sweep_build_jit(result.attempt_root)
 
     @staticmethod
@@ -191,7 +194,7 @@ class BuildLifecycleCollaborator:
                 log.debug("targeted_build: lease release raced for %s", task_id, exc_info=True)
 
     async def _fail_build_row(self, task_id: str, *, failure_class: str, summary: str) -> None:
-        self.shared_state.enablement_last_build_failure = {
+        self.shared_state.enablement.last_build_failure = {
             "failure_class": failure_class,
             "failure_summary": summary,
         }

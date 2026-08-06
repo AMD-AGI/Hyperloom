@@ -180,7 +180,7 @@ If `specialist_done.proposal_set` is non-empty and the specialist did
 not write source patches, Orchestration uses the proposals as the grid
 for the next `delegate{action_name='explore', params={grid: [...]}}`
 round. Each variant inherits `provenance='specialist:<domain>'` for
-audit; the canonical explore ledger dedups by content fingerprint.
+audit; variants are deduped by content fingerprint within a single grid.
 
 **`atomic` (do-not-split) flag.** A specialist sets `"atomic": true` on a
 proposal whose `extra_args` / `extra_envs` are a **coupled set that only

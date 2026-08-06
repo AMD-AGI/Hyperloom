@@ -9,6 +9,7 @@ import logging as _logging
 from datetime import datetime, timezone
 from typing import Any
 from ..bus.message_bus import Message
+from ..state.shared_state import resolve_grading_anchor_tput
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -26,7 +27,7 @@ class KernelStackPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _drain_pending_keep_integrates(self) -> None:
-        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; failures → rejected_kernel_ids."""
+        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
 
         state = self.shared_state
@@ -499,9 +500,7 @@ class KernelStackPhase(PhaseHandler):
                 # The stack is applied on top of current_best, so the KEEP
                 # decision uses the incremental gain over current_best, not the
                 # total gain over the original baseline.
-                current_best = self.shared_state.current_best or {}
-                current_best_tput = float(current_best.get("tput") or 0.0)
-                decision_base = current_best_tput if current_best_tput > 0 else base_tput
+                decision_base = resolve_grading_anchor_tput(self.shared_state)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
                 incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
@@ -552,10 +551,11 @@ class KernelStackPhase(PhaseHandler):
     async def _auto_enqueue_pending_integrations(self) -> None:
         """Auto-dispatch integrate for KEEP'd kernels awaiting integration.
 
-        The candidate set is :meth:`SharedState.pending_keep_kernel_ids`, which
-        includes kernels whose only prior integrate attempts were un-exhausted
-        (retryable) faults. Duplicate dispatch is guarded per kernel_id by the
-        recorded integrate-attempt count (``_auto_integrate_attempt_marks``): a
+        The candidate set is :meth:`SharedState.pending_kernel_integration_records`,
+        which includes kernels whose only prior integrate attempts were un-exhausted
+        (retryable) faults. Duplicate dispatch is guarded per ``integration_id``
+        (falling back to ``kernel_id`` when absent) by the recorded
+        integrate-attempt count (``_auto_integrate_attempt_marks``): a
         kernel is re-dispatched only once its prior integrate has been recorded,
         never while one is in flight. Idempotent.
         """

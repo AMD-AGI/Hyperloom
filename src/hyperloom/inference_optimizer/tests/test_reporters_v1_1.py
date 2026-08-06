@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for v1.1 decision_journal + kernel_profiling renderers."""
+"""Tests for the decision_journal, kernel_profiling, invocation and phase-timeline renderers."""
 
 from __future__ import annotations
 

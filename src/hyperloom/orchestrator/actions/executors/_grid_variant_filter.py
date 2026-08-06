@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared helper for the ``explore`` executor's grid runs.
+"""Pre-flight variant filtering and ordering for explore/sweep grids.
 
-Takes a base Magpie YAML + a list of (name, extra_server_args, extra_envs)
-variants, runs Magpie once per variant, parses ``benchmark_report.json``,
-returns the winners.
+Operates purely on lists of ``GridVariant``: user skip patterns, multi-node
+invalid-variant drops and prioritisation, aiter-MoE pinning, xDiT env
+blacklisting, and model/framework compatibility filtering. The filter helpers
+return ``(kept, dropped)``; nothing here renders YAML, launches Magpie, or
+reads ``benchmark_report.json`` — that lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations

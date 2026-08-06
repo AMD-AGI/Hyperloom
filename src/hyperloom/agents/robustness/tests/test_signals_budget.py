@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :mod:`robustness_agent.signals.budget`."""
+"""Unit tests for :mod:`hyperloom.agents.robustness.signals.budget`."""
 
 from __future__ import annotations
 
@@ -188,7 +188,7 @@ def test_strategy_drift_silent_when_validated_gain_present():
 
 
 def test_strategy_drift_does_not_double_fire_with_warn():
-    """Past warn_pct, warn_no_gain takes over and drift is suppressed."""
+    """Past warn_pct, budget_burn_no_gain takes over and drift is suppressed."""
     ctx = _ctx(
         elapsed_minutes=270.0,
         remaining_minutes=90.0,

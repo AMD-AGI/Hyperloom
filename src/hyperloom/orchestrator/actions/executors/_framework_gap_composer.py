@@ -5,7 +5,7 @@
 
 Deterministically composes the gap/keyword text from structured workload data
 (framework, gpu_type, model_class, precision, profile bottleneck) instead of a
-hand-typed ``--framework-gap`` string. Pure; the executor handles I/O. Returns
+hand-typed gap string. Pure; the executor handles I/O. Returns
 ``(gap, keywords)`` so the executor can pass both to fa or pass ``keywords=[]``
 to let fa extract from gap.
 """

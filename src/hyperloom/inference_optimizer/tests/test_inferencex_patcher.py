@@ -653,3 +653,163 @@ def test_baseline_after_materialize_applies_eval_start_patch(tmp_path, monkeypat
 
     assert out is None
     assert 'echo "HYPERLOOM_EVAL_START" >&2' in lib.read_text(encoding="utf-8")
+
+
+# Verbatim upstream ``_patch_lm_eval`` shape: the probe is appended to the same
+# sitecustomize InferenceX already writes, anchored on the PYTHONPATH export.
+_EVAL_PROBE_FIXTURE = """#!/usr/bin/env bash
+_patch_lm_eval() {
+    local patch_dir
+    patch_dir="$(mktemp -d)"
+    cat > "$patch_dir/sitecustomize.py" <<'PY'
+from lm_eval.models.openai_completions import LocalChatCompletion as _LCC
+_LCC.parse_generations = staticmethod(lambda outputs, **kw: [""])
+PY
+    export PYTHONPATH="${patch_dir}:${PYTHONPATH:-}"
+}
+"""
+
+
+def _write_eval_probe_lib(root: Path) -> Path:
+    bench_dir = root / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_lib.sh"
+    lib.write_text(_EVAL_PROBE_FIXTURE, encoding="utf-8")
+    return lib
+
+
+def test_eval_probe_patch_appends_after_upstream_sitecustomize(tmp_path, monkeypatch):
+    """The probe must be appended to the same sitecustomize AFTER InferenceX's
+    own monkeypatches, and still before the PYTHONPATH export that publishes
+    it — otherwise it would wrap an unpatched parse_generations, or not load."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    lib = _write_eval_probe_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    rc = ensure_benchmark_lib_eval_probe_patched(tmp_path)
+    assert rc is True
+    text = lib.read_text(encoding="utf-8")
+    assert "HYPERLOOM_EVAL_PROBE" in text
+    upstream_at = text.index("_LCC.parse_generations = staticmethod")
+    probe_at = text.index("_hl_eval_probe_install")
+    export_at = text.index('export PYTHONPATH="${patch_dir}')
+    assert upstream_at < probe_at < export_at
+    # Appends (>>) so the upstream heredoc body survives.
+    assert 'cat >> "$patch_dir/sitecustomize.py"' in text
+    assert 'cat > "$patch_dir/sitecustomize.py"' in text
+
+
+def test_eval_probe_patch_heredoc_terminator_is_unindented(tmp_path, monkeypatch):
+    """A leading space on the terminator makes bash swallow the rest of the
+    file, so the eval would die at parse time rather than run unprobed."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    lib = _write_eval_probe_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    ensure_benchmark_lib_eval_probe_patched(tmp_path)
+
+    lines = lib.read_text(encoding="utf-8").splitlines()
+    assert lines.count("HYPERLOOM_PY") == 1, "heredoc terminator must appear once, at column 0"
+
+
+def test_eval_probe_patch_emits_valid_python(tmp_path, monkeypatch):
+    """The injected body is a string constant, so no linter or import ever
+    sees it — compiling it here is the only thing standing between a typo and
+    a sitecustomize that raises on every lm-eval start."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        _EVAL_PROBE_PY,
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    lib = _write_eval_probe_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    ensure_benchmark_lib_eval_probe_patched(tmp_path)
+
+    compile(_EVAL_PROBE_PY, "<probe>", "exec")
+    body = lib.read_text(encoding="utf-8").split("<<'HYPERLOOM_PY'\n", 1)[1].split("\nHYPERLOOM_PY\n", 1)[0]
+    compile(body + "\n", "<embedded-probe>", "exec")
+
+
+def test_eval_probe_patch_is_idempotent(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    lib = _write_eval_probe_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    ensure_benchmark_lib_eval_probe_patched(tmp_path)
+    after_first = lib.read_text(encoding="utf-8")
+    ensure_benchmark_lib_eval_probe_patched(tmp_path)
+    assert lib.read_text(encoding="utf-8") == after_first
+    assert after_first.count("_hl_eval_probe_install()") == 2  # one def, one call
+
+
+def test_eval_probe_patch_fails_soft_when_anchor_missing(tmp_path, monkeypatch):
+    """An upstream that no longer exports PYTHONPATH here must leave the eval
+    running unprobed, not break it."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    bench_dir = tmp_path / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_lib.sh"
+    lib.write_text("#!/usr/bin/env bash\nrun_lm_eval() { :; }\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+
+    assert ensure_benchmark_lib_eval_probe_patched(tmp_path) is False
+    assert "HYPERLOOM_EVAL_PROBE" not in lib.read_text(encoding="utf-8")
+
+
+def test_eval_probe_patch_is_concurrency_safe(tmp_path, monkeypatch):
+    """Several executors can patch one shared checkout at once."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_lib_eval_probe_patched,
+    )
+
+    lib = _write_eval_probe_lib(tmp_path)
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+
+    results: list[bool] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(ensure_benchmark_lib_eval_probe_patched(tmp_path)))
+        for _ in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(results)
+    assert lib.read_text(encoding="utf-8").splitlines().count("HYPERLOOM_PY") == 1
+
+
+def test_baseline_after_materialize_applies_eval_probe_patch(tmp_path, monkeypatch):
+    """Explore/sweep re-assert this in _grid_runner, but the baseline hook is
+    the one that matters: a non-terminating model there stops the whole run."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_eval_probe_lib(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
+
+    assert out is None
+    assert "HYPERLOOM_EVAL_PROBE" in lib.read_text(encoding="utf-8")

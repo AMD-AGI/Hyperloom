@@ -5,9 +5,12 @@ description: Generate a GEAK-compatible 4-mode test harness for a kernel before 
 
 # Unittest Harness Skill
 
-Generate a GEAK-compatible test harness for a kernel so that GEAK can evaluate
+Generate a GEAK-format test harness for a kernel so the optimizer can evaluate
 correctness and performance of optimized candidates. The harness is passed to
-`kernel_optimization.py` via `--test-command`.
+`kernel_optimization.py` via `--test-command`, which forwards it to the Forge
+submitter. This is the opt-in per-kernel Forge path only (exact
+`KERNEL_OPT_BACKEND_ORDER=forge`); the default GEAK whole-phase delegate never
+receives a `test_command`.
 
 This skill is executed by the **main agent** (Claude Code) — it does NOT call
 GEAK's API or miniswe. You read these instructions, search for tests, generate
@@ -41,7 +44,7 @@ test_command verbatim without appending a mode flag — a bare
 produces zero usable patches. See §4.2.1 for details.
 
 If the skill fails after retries, output nothing — the caller omits
-`--test-command` and GEAK falls back to its own test discovery.
+`--test-command` and Forge falls back to its own driver generation.
 
 ---
 
@@ -572,25 +575,34 @@ if __name__ == "__main__":
 #            return f"M={M} N={N} {dtype}"
 ```
 
-### 2.5 Key rules (validate_harness.py enforces rules 1-3 as hard failures)
+### 2.5 Key rules (validate_harness.py checks rules 1-3 textually)
 
-**These 3 rules cause hard validation failures if violated:**
+**These 3 rules cause hard validation failures if the required text is absent.
+The check is a plain substring search over the whole file, comments included —
+it never verifies that the wiring is correct, so getting the semantics right is
+the author's responsibility and no later gate catches a mistake.**
 
 1. **GEAK_WORK_DIR MUST be first in sys.path**. GEAK places its patched
    kernel candidate in `GEAK_WORK_DIR`. If the harness doesn't add it to
    `sys.path` before importing, the ORIGINAL unmodified kernel is tested
    instead of the patch → GEAK thinks every candidate is 1.00x → no
    optimization happens. This is the #1 cause of "GEAK did nothing" bugs.
+   Validation only checks that the string `GEAK_WORK_DIR` appears somewhere;
+   the sys.path insertion and its position are not checked. The 3.0 baseline
+   self-test runs against the unmodified kernel and passes either way, so a
+   broken rule 1 surfaces only as uniformly ~1.00x speedups.
 
 2. **GPU event timing ONLY**. Use `torch.cuda.Event(enable_timing=True)`,
    NEVER `time.perf_counter()` or `time.time()`. GPU kernels execute
    asynchronously — wall-clock timing measures Python overhead, not kernel
-   latency. `validate_harness.py` rejects any harness using wall-clock timing.
+   latency. `validate_harness.py` rejects a harness that mentions wall-clock
+   timing without also mentioning `torch.cuda.Event` / `enable_timing`.
 
 3. **GEAK_BENCHMARK_ITERATIONS from env**. The iteration count MUST be read
    from `os.environ.get("GEAK_BENCHMARK_ITERATIONS", "200")`. GEAK uses
-   this to control evaluation speed vs. accuracy. Hardcoding the value
-   breaks the contract.
+   this to control evaluation speed vs. accuracy. Validation only checks that
+   the name appears; hardcoding the count next to a stray mention still
+   passes, and still breaks the contract.
 
 **Additional rules (important but not enforced by static validation):**
 
@@ -683,8 +695,8 @@ If validation fails:
      `torch.cuda.empty_cache()` between configs
 3. Re-validate with `--all`
 
-Maximum 3 attempts. If all fail, **do not pass `--test-command`** — let GEAK
-use its own test discovery.
+Maximum 3 attempts. If all fail, **do not pass `--test-command`** — let Forge
+generate its own driver.
 
 ### 3.4 Diagnosing common failures
 
@@ -705,14 +717,14 @@ use its own test discovery.
 
 ### 4.1 Harness file location
 
-Write the harness into the GEAK output directory's `unittest/` subdirectory:
+The harness is written directly into the Forge attempt directory's `unittest/`
+subdirectory, which is where `harness_generator.py` puts it:
 
 ```
-$USER_DATA_PATH/kernel-agent/runs/<session_id>/unittest/<kernel_id>_harness.py
+$USER_DATA_PATH/kernel-agent/forge/<session_id>/<prompt_stem>/unittest/harness_<benchmark_stem>.py
 ```
 
-`kernel_optimization.py` will copy this file into the GEAK attempt's output
-directory (`geak/<session_id>/<attempt_id>/unittest/`) for traceability.
+Nothing copies it anywhere else afterwards.
 
 ### 4.2 Output values
 
@@ -724,8 +736,8 @@ After successful validation, output:
    python3 <harness_path> --correctness && python3 <harness_path> --benchmark
    ```
 
-The caller (`kernel_optimization.py`) will pass this as
-`--test-command "<test_command>"` to GEAK.
+The caller (`kernel_optimization.py`) accepts this as
+`--test-command "<test_command>"` and forwards it to the Forge submitter.
 
 #### 4.2.1 test_command MUST include a mode flag (GEAK SaveAndTest contract)
 
@@ -750,22 +762,6 @@ zero usable patches.
 **Always include `--correctness` in the first command** of the chain. It runs
 fast (~5 s) and is what GEAK's sub-agent should check on every patch attempt
 anyway.
-
-#### 4.2.2 Avoid `SameFileError` in the harness-copy step
-
-`kernel_optimization.py` copies any `.py` files referenced in `test_command`
-into `<out_dir>/unittest/` for traceability. If your harness is **already
-inside** `<out_dir>/unittest/` (the case when this skill writes there
-directly), the copy step will hit `shutil.SameFileError`.
-
-The caller is responsible for guarding the copy with an `os.path.samefile`
-check (already fixed in `kernel_optimization.py` L1403-1410), but if you
-build your own dispatcher, mirror the same guard:
-```python
-if _dst.exists() and _dst.resolve() == Path(src).resolve():
-    continue  # source and destination are the same file
-_shutil.copy2(src, _dst)
-```
 
 ---
 

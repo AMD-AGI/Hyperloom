@@ -37,7 +37,7 @@ def test_gain_math_branches() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.kb_writeback #
+# orchestrator.knowledge.kb_writeback                                         #
 # --------------------------------------------------------------------------- #
 def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
@@ -88,7 +88,7 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# baseline_comparison.name_mapping                                            #
+# baseline_comparison.target_analyzer                                         #
 # --------------------------------------------------------------------------- #
 def test_name_mapping_paths() -> None:
     from hyperloom.inference_optimizer.baseline_comparison import target_analyzer as nm
@@ -121,7 +121,7 @@ def test_framework_registry_surface() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.quantization_schemes                                          #
+# orchestrator.phases.quantization_schemes                                    #
 # --------------------------------------------------------------------------- #
 def test_quantization_join_and_prompt() -> None:
     from hyperloom.orchestrator.phases import quantization_schemes as qs
@@ -138,7 +138,7 @@ def test_quantization_join_and_prompt() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.objective                                                      #
+# orchestrator.state.objective                                                #
 # --------------------------------------------------------------------------- #
 def test_tput_objective_progress_zero() -> None:
     from hyperloom.orchestrator.state.objective import TargetTputObjective
@@ -220,7 +220,7 @@ def test_attempt_from_dict_with_fitness() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.action_executors._file_lock                                    #
+# orchestrator.actions.executors._file_lock                                   #
 # --------------------------------------------------------------------------- #
 def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
     import builtins
@@ -249,7 +249,7 @@ def test_file_lock_acquires(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.action_executors._framework_gap_composer                       #
+# orchestrator.actions.executors._framework_gap_composer                      #
 # --------------------------------------------------------------------------- #
 def test_framework_gap_bottleneck(tmp_path) -> None:
     from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
@@ -363,7 +363,7 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.backends._runtime_bridge                                       #
+# orchestrator.roles._runtime_bridge                                          #
 # --------------------------------------------------------------------------- #
 def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
     from hyperloom.orchestrator.roles import _runtime_bridge as rb

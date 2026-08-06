@@ -614,9 +614,9 @@ def _collect_detected_kernels(
         if kid in integ_gain_by_kid:
             entry["integrate_gain_pct"] = integ_gain_by_kid[kid]
         if kid in adopted_kids:
-            # Disambiguate which lane's patch was kept. With three lanes, pick
-            # the KEPT lane with the highest micro-speedup; fall back to
-            # 'kernel_agent' when integrate KEPT but no single lane shows a KEEP.
+            # Disambiguate which lane's patch was kept. Pick the KEPT lane
+            # with the highest micro-speedup; fall back to 'kernel_agent' when
+            # integrate KEPT but no single lane shows a KEEP.
             kept_lanes: list[tuple[str, float]] = []
             for lane in ("geak", "forge"):
                 row = entry.get(lane)
@@ -1078,10 +1078,15 @@ def collect_conc_sweep_summary(
 ) -> dict[str, Any]:
     """Mirror ``reports/conc_sweep_summary.json`` into its section.
 
-    Missing → ``{}`` (quiet); malformed → ``{}`` + warning. Otherwise
-    mirrored verbatim (only ``comparison`` shape-guarded) + ``report_path``.
+    Missing → recover from ``runs/conc_sweep``, returning the recovered
+    payload + a warning when it yields successful pairs, else ``{}``;
+    malformed → ``{}`` + warning. Otherwise mirrored verbatim (only
+    ``comparison`` shape-guarded) + ``report_path``, except that a mirrored
+    report with zero successful pairs is superseded by the recovered payload
+    (``source="recovered_from_runs"``, ``schema_version="recovered-v1"``, the
+    mirrored path kept as ``original_report_path``) when recovery finds pairs.
     Do not synthesize the optional blocks the producer omits when
-    ``status="skipped"``; pass through exactly what it wrote.
+    ``status="skipped"``.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -1090,8 +1095,8 @@ def collect_conc_sweep_summary(
 
     Returns:
         dict[str, Any]: The mirrored conc-sweep summary (with a
-        ``report_path``), or ``{}`` when the file is absent / not a JSON
-        object.
+        ``report_path``), the run-workspace recovery payload, or ``{}`` when
+        the file is absent / not a JSON object and recovery finds no pairs.
     """
     path = session_dir / _CONC_SWEEP_SUMMARY_REL_PATH
     if not path.exists():

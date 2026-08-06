@@ -4,8 +4,8 @@
 """Specialist_done bookkeeping tests.
 
 Exercises ``_record_specialist_result``, the intent-routing path, the
-dispatcher exit hook, streak semantics, round_id idempotence, and
-unknown-task defense.
+dispatcher exit hook, round_id idempotence, and the stalled-domain
+hard-trigger's round-counter semantics.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def _done_payload(
 # 1. _record_specialist_result — direct bookkeeping unit tests
 @pytest.mark.asyncio
 async def test_record_specialist_result_non_empty_proposal_set(coord):
-    """Non-empty proposal_set: ledger +1 row, streak reset, last_specialist mirrored, save called."""
+    """Non-empty proposal_set: ledger +1 row, last_specialist mirrored, save called."""
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
 

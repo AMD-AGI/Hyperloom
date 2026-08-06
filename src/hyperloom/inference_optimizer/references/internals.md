@@ -5,10 +5,10 @@ needs to know these exist; it never proposes or executes them. Read this when
 debugging optimizer behavior or interpreting EXPLORE / FRAMEWORK_AGENT / KERNEL
 decisions.
 
-## IR-4 / IR-6 / IR-7 — EXPLORE phase contracts
+## IR-4 / IR-6 — EXPLORE phase contracts
 
 These govern the optimizer's EXPLORE phase, not the launcher; the full contract
-lives in `orchestrator/system_prompts/orchestration.md`. In brief:
+lives in `orchestrator/prompts/orchestration.md`. In brief:
 
 - **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
   research-backed variants when available, but `llm_direct`, `default_grid`,
@@ -52,7 +52,7 @@ still-available candidates and choosing the one most likely to raise throughput
 candidate is Critic-gated, then `git apply`d against the live
 framework_source_roots and benchmarked; KEEP commits to the live tree (next
 candidate stacks on top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), plateau (3 consecutive benchmarked candidate tests with no
+(<0.6 × max_hours), plateau (5 consecutive benchmarked candidate tests with no
 KEEP), or an empty
 discovery batch. Resume skips completed candidates by idempotency key. The
 launcher only chooses whether the phase runs (`--no-framework-agent`).
@@ -66,7 +66,7 @@ specialist-informed `explore` flow. Do not recreate the retired `backends` /
 Rules that look reasonable but break the current flow:
 
 - **No `framework first-explore priority` rule** in
-  `system_prompts/orchestration.md` — conflicts with the EXPLORE
+  `prompts/orchestration.md` — conflicts with the EXPLORE
   specialist-informed flow. Framework-agent runs in the dedicated
   **FRAMEWORK** phase before EXPLORE; the LLM never proposes the
   `framework` action — it is Coordinator-managed and absent from
@@ -95,9 +95,11 @@ draft/MTP path exists, benchmarked with chat-formatted prompts.
 ### Per-Run Asset Override (advanced)
 
 To override shipped configs without editing them, materialize a per-run asset
-root and pass `--asset-root`. `mkdir -p "$ASSET_ROOT/scripts/configs"`,
-`ln -sfn` `actions/` / `kernel_opt/` / `orchestrator/` and the two
-`scripts/ab_torch_compile_*.py` from `$REPO_ROOT/src/hyperloom/inference_optimizer/`, then
+root and `export INFERENCE_OPTIMIZER_ASSET_ROOT="$ASSET_ROOT"` (env var, not a
+CLI flag; `asset_root()` raises `AssetRootNotFound` if the dir is missing).
+`mkdir -p "$ASSET_ROOT/assets/configs"`, `ln -sfn` `actions/` from
+`$REPO_ROOT/src/hyperloom/inference_optimizer/` and `orchestrator/` from
+`$REPO_ROOT/src/hyperloom/`, then
 copy + edit the relevant `baseline_*.yaml` / `profile_*.yaml`. Reach for this
 only when `_workload_envs.materialize_config_with_envs` defaults don't fit
 (e.g. per-yaml `profiler.torch_profiler.enabled`); otherwise `--model` /
@@ -117,7 +119,7 @@ The optimizer should:
    `rule='phase_incompatible'`. Concurrent GPU work is serialised by the lane /
    GPU lease rather than a policy deny, so explore / kernel dispatches keep
    flowing while analysis refreshes. Each analysis also stamps a decode roofline
-   ceiling (`orchestrator/roofline_ceiling.py`) for the report's
+   ceiling (`orchestrator/kernel/roofline_ceiling.py`) for the report's
    `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
    `last_trace_analyze`.

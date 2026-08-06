@@ -57,9 +57,13 @@ params_schema:
   warm_recipe_tier:
     type: string
     description: |
-      ``exact`` (precise 5-tuple hit) / ``relative`` (server-returned
-      neighbouring 5-tuple) — the warm-start tier that produced this
-      recipe.
+      The warm-start tier that produced this recipe, as stamped by
+      ``_cascade_warm_start_search``: ``exact`` (1.0, full 7-tuple canonical-id
+      hit) / ``same_arch_class`` (0.95, drops model) /
+      ``same_arch_any_version`` (0.5, drops model + framework_version) /
+      ``relative`` (0.3, dispatcher-returned non-exact row). Skipped
+      ``warm_replay_outcome`` payloads may also carry ``seed_only`` (0.0,
+      recipe with no actionable best_config) or ``miss`` (0.0).
   warm_recipe_conf:
     type: number
     description: |

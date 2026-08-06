@@ -56,8 +56,10 @@ python -m hyperloom.agents.quantization.cli \
 
 The equivalent console script is `quantization-agent`.
 
-Exit codes: `0` success/partial · `1` failed · `2` argparse error ·
-`3` operator-rejected checkpoint.
+Exit codes: `0` success/partial · `1` failed · `2` argparse error. An
+operator-rejected checkpoint is not a distinct code — it surfaces as `partial`
+(exit 0) or `failed` (exit 1) with the reason in `assessment.notes`
+(`eval_gap_exceeded_rejected` / `operator_declined_retry`).
 
 The CLI prints a JSON summary (`status` + `quantized_model_dir` +
 `assessment`) on stdout.
@@ -115,7 +117,8 @@ can read these directly:
 - `session_context.json` — handshake payload passed to the SDK at session start.
 - `run_manifest.yaml` — Quark's workflow manifest (inputs, outputs, exec phases).
 - `model_analysis.json`, `quant_plan.json` — intake + plan outputs.
-- `validation_report.md` + `val_<step>.json` — validator results (4 steps).
+- `validation_report.md` — validator results (4 steps: auxiliary / md5 /
+  config / fuzzy, parsed from the report text).
 - `source_eval.md`, `quantized_eval.md` — raw `quark-torch-llm-eval` Markdown.
 - `eval_report.json` — synthesized eval summary (`source_score`,
   `quantized_score`, `relative_gap`, `within_threshold`).

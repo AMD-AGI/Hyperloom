@@ -425,7 +425,12 @@ class TestAutoWarmupTeardown:
             state["n"] += 1
             if state["n"] == 1:
                 # Warmup round fails (nonzero, no workspace).
-                return subprocess.CompletedProcess(cmd, 1, "", "warmup boom")
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    "",
+                    "warmup boom SAFE_API_KEY=ak-warmup-secret-value",
+                )
             out_idx = cmd.index("--output-dir")
             _valid_workspace(Path(cmd[out_idx + 1]))
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
@@ -433,6 +438,11 @@ class TestAutoWarmupTeardown:
         results, teardown_calls = self._run_capture_teardown(_run, base, tmp_path / "out")
         assert results[0].status == "failed"
         assert results[0].error_class == "warmup_round_failed"
+        assert "warmup-secret-value" not in results[0].error
+        assert "[REDACTED]" in results[0].error
+        marker_path = next((tmp_path / "out").glob("variant_*/abort_reason.json"))
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert "warmup-secret-value" not in marker["error"]
         # The measured round never ran — only the warmup call was made.
         assert state["n"] == 1
         # Exactly one teardown, from the warmup-failure branch.

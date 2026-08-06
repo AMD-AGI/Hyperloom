@@ -339,7 +339,7 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
             seen.add(key)
             unique_configs.append((dims, dtype))
 
-    # Scale variants to reach >= 6 configs.
+    # Scale the leading dim to grow the sweep up to 8 configs.
     base_configs = list(unique_configs)
     for dims, dtype in base_configs:
         if len(unique_configs) >= 8:

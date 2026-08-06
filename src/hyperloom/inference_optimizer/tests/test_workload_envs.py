@@ -111,6 +111,34 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
+def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch):
+    # PD-disaggregated: force lm_eval string prompts so the sglang_router's
+    # /v1/completions (StringOrArray) does not 422 on token-id prompts.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "disaggregated"})
+    src = tmp_path / "base.yaml"
+    _write(src)
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"].get("MAGPIE_EVAL_TOKENIZED_REQUESTS") == "false"
+
+
+def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
+    # Aggregated hits the sglang server directly (accepts token-id prompts), so
+    # the env is left unset and the default tokenized path is preserved.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", lambda: {"pd_mode": "aggregated"})
+    src = tmp_path / "base.yaml"
+    _write(src)
+    bench = _materialize(src, tmp_path / "out")
+    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+
+
 # ---- _visible_gpu_count ---------------------------------------------------
 def test_visible_gpu_count_override_valid(monkeypatch):
     _clear_env(monkeypatch)
@@ -397,7 +425,7 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "isl,osl,conc,factor",
     [
-        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 -> factor 3
+        (4000, 2000, 8, 3),  # 4096 < seq <= 16384 -> factor 3
         (3000, 1000, 8, 5),  # 1024 < seq <= 4096 -> factor 5
         (20000, 5000, 8, 2),  # > 16384 -> factor 2
     ],

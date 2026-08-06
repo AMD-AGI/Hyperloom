@@ -5,17 +5,24 @@
 
 Deterministic, LLM-free observability helpers for the FRAMEWORK_AGENT phase:
 
+- :func:`candidate_key` is the canonical candidate identity (precedence
+  ``candidate_id or pr_url or ref``) used for candidate selection, dedup,
+  progress-row keying, and task idempotency across the whole pump.
+- :func:`candidate_slug` is the shared path-slug helper the writers use.
 - :func:`write_decision_json` drops a uniform ``decision.json`` under
   ``runs/framework_agent/<slug>/`` for every candidate terminal event
   (critic-denied, executor KEEP/REVERT/apply_failed/..., authored-patch
   KEEP/REVERT). This is the single per-candidate fate record an operator
   or downstream tool can read without parsing the whole event log.
+- :func:`write_semantic_audit` writes ``semantic_audit.json`` + a readable
+  ``semantic_audit.md`` alongside ``decision.json``.
 - :func:`summarize_candidate_outcomes` classifies a batch's progress rows
   into ``empty_discovery`` / ``tested_no_keep`` / ``tested_with_keep`` so the
   phase-done summary, report, and robustness advisory can tell "discovered
   nothing" apart from "tested candidates but none cleared the gate".
 
-Both are pure / best-effort: a write failure never raises into the pump.
+The key/slug helpers are pure; the writers are best-effort — a write failure
+logs at debug and returns ``None`` rather than raising into the pump.
 """
 
 from __future__ import annotations
@@ -148,7 +155,7 @@ def write_semantic_audit(
     """Persist a candidate's semantic-audit verdict next to its decision.json.
 
     Writes ``semantic_audit.json`` + a readable ``semantic_audit.md`` under
-    ``runs/framework_agent/<slug>/`` (G9 — co-located with decision.json).
+    ``runs/framework_agent/<slug>/``, alongside ``decision.json``.
     Best-effort: returns the JSON path, or ``None`` on failure.
 
     Args:

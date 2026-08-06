@@ -1,6 +1,6 @@
 """Multi-attempt orchestration: ``quantize_via_prompt`` public entry.
 
-Wraps :func:`_runner.run_one_attempt` with the diagnose-fix-retry protocol
+Wraps :func:`.runner.run_one_attempt` with the diagnose-fix-retry protocol
 (the per-attempt contract lives in ``SKILL.md``). Each attempt is classified
 into an outcome that decides done/failed/partial/retry; retryable outcomes
 require a ``fix_hypothesis_attempt_N.md`` and are capped by
@@ -32,7 +32,8 @@ from .runner import RunOneAttemptFn, run_one_attempt
 
 _COUNTER_FILE = "requantize_attempts.txt"
 
-# Upstream git URL for the Quark repo; installers clone it when default absent.
+# Upstream git URL for the Quark repo; quoted in the quark_root_missing error
+# so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 
 
@@ -177,7 +178,7 @@ def _decide_next_step(
     Args:
         outcome: The classified outcome of the just-finished attempt.
         workspace: Attempt workspace directory.
-        attempt_number: Zero-based index of the attempt just completed.
+        attempt_number: 1-based index of the attempt just completed.
         interactive: Whether operator prompts are allowed.
         max_requantize_attempts: Cap on requantize retries.
         counter: Current value of the persisted requantize counter.
@@ -251,7 +252,7 @@ async def quantize_via_prompt(
 
     ``quark_root`` falls back to ``$QUARK_ROOT`` then to a hard error (mapped
     to ``quark_root_missing`` at the assessment level). The threshold resolves
-    per ``_eval.resolve_threshold``; the interactive flag per
+    per ``eval.resolve_threshold``; the interactive flag per
     ``_resolve_interactive``.
 
     Args:

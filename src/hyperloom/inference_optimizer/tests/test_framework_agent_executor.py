@@ -26,6 +26,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -357,6 +358,41 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
     assert len(result["patches_applied"]) == 1
     assert result["patches_reverted"] == []
     assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_reverts_when_live_anchor_exceeds_queued_baseline(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+    state = SharedState()
+    state.baseline_tput = 1000.0
+    state.current_best = {"tput": 1150.0}
+
+    async def fake_bench(self, *, params, output_root, slug):  # noqa: ARG001
+        return {"status": "succeeded", "output_throughput": 1100.0}, {"accuracy_pass": None}
+
+    ctx = _make_ctx(
+        "t-fp-stale-anchor",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+        },
+    )
+    ctx.extra["shared_state"] = state
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "reverted"
+    assert result["base_tput"] == 1150.0
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio

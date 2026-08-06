@@ -22,8 +22,8 @@ Usage::
         --output-prefix runs/manual_roofline_bench/qwen3_30b_a3b_post_e2e_sweep
 
 Per ``conc`` the script reuses one sglang server (no restart between
-concurrencies). OOM rows are recorded as ``status=OOM`` in the csv and
-left empty in the svg.
+concurrencies). Failed/OOM rows are recorded as ``status=FAILED_OR_OOM`` in
+the csv (successful rows use ``status=OK``) and left empty in the svg.
 """
 
 from __future__ import annotations
@@ -77,7 +77,8 @@ def load_session_state(session_dir: Path) -> dict[str, Any]:
 def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemplate]:
     """Build the (baseline, optimized) launch templates from state.json.
 
-    Baseline = vanilla sglang (no extra flags / envs). Optimized =
+    Baseline = no session-derived extra flags/envs (``SglangServer.DEFAULT_FLAGS``
+    and the AITER/ROCm env defaults still apply to both arms). Optimized =
     state.current_best.extra_server_args + extra_envs.
 
     Args:

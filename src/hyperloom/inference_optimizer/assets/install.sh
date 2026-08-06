@@ -11,11 +11,12 @@
 # Stack (in order):
 #   1. inference_optimizer + extras (pulls in claude_agent_sdk via
 #      pyproject `[test]` extra)
-#   2. Magpie (benchmark engine) into the pod-local open-source repo tree,
+#   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
 #      pinned to MAGPIE_REF (a commit SHA or tag)
 #   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (bugs.md §C #1 root-cause fix; fail-soft — a no-op when the
-#       MAGPIE_REF target already has upstream atomic copying)
+#       (root-cause fix for the Hyperloom #C1 script-tearing race;
+#       fail-soft — a no-op when the MAGPIE_REF target already has
+#       upstream atomic copying)
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -247,7 +248,7 @@ Installs:
   - langfuse SDK, but ONLY when HYPERLOOM_LANGFUSE_ENABLE is on in the
     environment / .env (opt-in live trace push; skipped otherwise)
   - Magpie (pip-installed from MAGPIE_PACKAGE_SPEC)
-  - Detects/exports INFERENCEX_PATH
+  - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
   - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
@@ -1047,10 +1048,11 @@ PY
 }
 
 # --- 2a. aiperf (AgentX benchmark client) — fail-soft, AgentX-only ---
-# Installs the pinned aiperf so HYPERLOOM_AGENTX works out of the box. A failure
-# here is NON-fatal: it only warns and leaves aiperf absent, so the default
-# synthetic path is never blocked by an AgentX-only dependency. Skipped when the
-# operator points AIPERF_BIN at their own build.
+# Installs the pinned aiperf for HYPERLOOM_AGENTX; only reached when the caller
+# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site). A
+# failure here is NON-fatal: it only warns and leaves aiperf absent, so the
+# default synthetic path is never blocked by an AgentX-only dependency. Skipped
+# when the operator points AIPERF_BIN at their own build.
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
@@ -1077,8 +1079,8 @@ ensure_aiperf() {
 }
 
 # --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
-# Hyperloom bugs.md §C #1 (vllm_mi300x.sh / sglang_mi300x.sh sourced by a
-# leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
+# The Hyperloom #C1 script-tearing race (vllm_mi300x.sh / sglang_mi300x.sh
+# sourced by a leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
 # `syntax error near unexpected token 'fi'`). Magpie is invoked as a
 # subprocess, so monkey-patching from the Coordinator process does not
 # reach it; we patch the cloned source in place at install time. The
@@ -1089,7 +1091,7 @@ ensure_aiperf() {
 # `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
 # upstream commit that already copies scripts atomically
 # (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
-# bugs.md §C #1 is already mitigated upstream, so we `warn` and continue
+# the #C1 race is already mitigated upstream, so we `warn` and continue
 # instead of aborting every install. (A sibling branch makes the patcher
 # itself upstream-aware; this warn is the defense-in-depth complement.) If
 # you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
@@ -1155,14 +1157,14 @@ PY
     rc=$?
     if [ "$rc" -eq 4 ]; then
       # GENUINE failure: the legacy block is gone AND upstream is not atomic
-      # (or a read/write error). bugs.md §C #1 (script-tearing race) is NOT
+      # (or a read/write error). The Hyperloom #C1 script-tearing race is NOT
       # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
       # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
       # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
       if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
         warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
       else
-        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. bugs.md §C #1 (script-tearing race) is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
+        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. The Hyperloom #C1 script-tearing race is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
       fi
     elif [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
@@ -1196,11 +1198,11 @@ PY
 # (`/shared/hyperloom/InferenceX`, `/shared/fully-local/.../InferenceX`,
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
-# concurrent-write races in bugs.md §C #1 — every fresh Magpie
-# subprocess `shutil.copy2`'d its scripts on top of the same shared
-# files, while bash interpreters from neighbouring installs were
-# `source`-ing them. Cloning a per-install copy here eliminates the
-# cross-install fan-in (Magpie's in-place atomic-write patch then
+# concurrent-write races behind the Hyperloom #C1 script-tearing race —
+# every fresh Magpie subprocess `shutil.copy2`'d its scripts on top of
+# the same shared files, while bash interpreters from neighbouring
+# installs were `source`-ing them. Cloning a per-install copy here
+# eliminates the cross-install fan-in (Magpie's in-place atomic-write patch then
 # closes the intra-install race window — both fixes are needed; this
 # one alone is not sufficient).
 #
@@ -1661,8 +1663,7 @@ log "  (a) source ${KERNEL_AGENT_ENV}, then run hyperloom.inference_optimizer.cl
 log "  (b) just launch hyperloom.inference_optimizer.cli — preflight will auto-source"
 log "      \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
 log "      via _load_kernel_agent_env_fallback() if HYPERLOOM_KERNEL_AGENT_ROOT"
-log "      is unset (added May 2026 after the R1 N14 stall — see"
-log "      design/roofline-v2.md §6.6 if it exists)."
+log "      is unset."
 log ""
 log "If you skip BOTH and HYPERLOOM_KERNEL_AGENT_ROOT stays unset, the"
 log "roofline composite action's trace_analyze sub-step will fail with"

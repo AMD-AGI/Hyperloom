@@ -1246,7 +1246,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
-    """FRAMEWORK=atom now attempts the normal roofline profile sub-step."""
+    """FRAMEWORK=atom attempts the normal roofline profile sub-step."""
     from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
     )
@@ -1258,7 +1258,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     from hyperloom.orchestrator.actions.executors import profile as profile_mod
 
     async def _explode(_ctx):
-        raise AssertionError("profile_executor must not be invoked under atom")
+        raise AssertionError("profile_executor sentinel: sub-step reached under atom")
 
     monkeypatch.setattr(profile_mod, "profile_executor", _explode)
 
@@ -3324,7 +3324,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         )
 
     # Callback must have fired for every candidate, in completion order
-    # (NOT input order). kB finishes first (sleep=0.01), then kC, then kA.
+    # (NOT input order). kB runs ungated first, then releases kC, then kA.
     assert [r["kernel_id"] for r in recorded] == ["kB", "kC", "kA"], recorded
     assert completion_log == ["kB", "kC", "kA"]
 

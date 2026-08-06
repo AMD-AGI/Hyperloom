@@ -52,6 +52,50 @@ def test_default_top_k_invalid_falls_back(monkeypatch):
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
+def test_rocm_paged_attention_dispatch_resolves_runtime_implementation():
+    """The observed ROCM_ATTN symbol must resolve past the shared wrapper."""
+    resolution = tla.OpResolver(tla.load_mapping()).resolve_op_source(
+        "vllm::unified_attention_with_output",
+        framework="vllm",
+        device_kernel_name="kernel_paged_attention_2d",
+    )
+
+    assert resolution is not None
+    assert resolution.is_routable is True
+    assert resolution.primary_source.endswith(
+        "vllm/v1/attention/ops/chunked_prefill_paged_decode.py"
+    )
+    assert resolution.primary_runtime_backend == "ROCM_ATTN"
+    assert resolution.matched_route == "kernel_paged_attention_2d"
+
+
+def test_non_rewritable_dispatch_still_records_runtime_backend():
+    resolution = tla.OpResolver(
+        {
+            "vllm::dispatch_op": {
+                "kind": "dispatch",
+                "vllm": {
+                    "runtime_kernel": {
+                        "kernel_source_path": "vllm/ops/runtime.py",
+                        "kernel_kind": "triton",
+                        "backend": "ROCM_ATTN",
+                        "patchable": False,
+                    }
+                },
+            }
+        }
+    ).resolve_op_source(
+        "vllm::dispatch_op",
+        framework="vllm",
+        device_kernel_name="runtime_kernel",
+    )
+    assert resolution is not None
+    assert resolution.status == "non_rewritable"
+    item: dict = {}
+    resolution.stamp_onto(item)
+    assert item["runtime_backend"] == "ROCM_ATTN"
+
+
 def test_deterministic_category_analysis_command_maps_manifest_names(tmp_path):
     """Deterministic route must invoke the real TraceLens script for manifest category names."""
     cases = {
@@ -303,7 +347,7 @@ def test_a_rejects_kernel_cat_when_name_is_runtime_api():
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
     """Build a synthetic trace mirroring the resume4 shape and confirm
-    the buggy events drop out of top-K."""
+    is_kernel_event rejects the sync events before they can reach top-K."""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
@@ -4606,8 +4650,7 @@ def test_minimal_analysis_md_includes_system_level_signals(tmp_path):
 
     assert "## System-Level Signals" in text
     assert "GPU idle | 20.00%" in text
-    # 20% idle is above the default 80%? No — default gate is high; ensure the
-    # note reflects the threshold comparison deterministically.
+    # 20% idle is within the default 80% gate; the note records that comparison.
     assert "idle gate" in text
     assert "Exposed communication | 4.00%" in text
     assert "Exposed memcpy (device copy) | 1.00%" in text

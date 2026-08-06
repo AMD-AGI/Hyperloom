@@ -1,6 +1,8 @@
 # Magpie baseline benchmark config for SGLang.
-# Used by hyperloom.orchestrator.actions.executors.baseline /
-# sweep / backends / params as the default benchmark config.
+# Used by hyperloom.orchestrator.actions.executors.{baseline, sweep, explore,
+# integrate_patch, framework_agent} via default_baseline_config() as the
+# default benchmark config (also orchestrator/specialists/rebench.py and
+# orchestrator/kernel/conc_sweep.py).
 #
 # Two fields are FALLBACK ONLY and overridden at run time by the executor:
 #   - `benchmark.model`     <- --model / $MODEL_PATH

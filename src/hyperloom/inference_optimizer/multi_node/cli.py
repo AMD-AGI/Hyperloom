@@ -173,6 +173,37 @@ def _infera_ssh_dir() -> Path:
     return _state_file().parent / "mn_ssh"
 
 
+def _multinode_server_log_dir() -> str:
+    """Resolve a cross-node-visible directory for the per-rank server logs.
+
+    RayJob spawns the prefill/decode legs on different pods than the launch
+    driver, so a node-local ``/tmp`` log dir hides the decode leg's log from the
+    driver's health-wait: its fatal-log fast-fail never fires (a crash burns the
+    full probe timeout before returning "unconfirmed") and its failure-path tail
+    only ever reads ``bytes=0``. Mirror infera and write the logs to a shared
+    filesystem every node mounts so ``{role}_0.log`` is readable from the driver.
+
+    Resolution:
+        1. ``HYPERLOOM_MN_SERVER_LOG_DIR`` (``$VAR`` expanded), when absolute --
+           the same operator override infera honors.
+        2. Otherwise the session runtime dir (``.../runtime/server_logs``), which
+           is on the shared FS and unique per run, so concurrent runs' rank logs
+           cannot collide (infera's ``$USER_DATA_PATH/server_logs`` default can).
+        3. Otherwise a node-local ``/tmp`` dir -- a last resort for a dev/single
+           box where no shared FS is configured.
+
+    Returns:
+        str: The directory the launch driver passes as ``--log-dir``.
+    """
+    explicit = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
+    if explicit.startswith("/") and "$" not in explicit:
+        return explicit
+    try:
+        return str(_state_file().parent / "server_logs")
+    except Exception:  # noqa: BLE001 - state file unresolvable (dev/single box)
+        return str(Path(tempfile.gettempdir()) / "multi_node_logs")
+
+
 def _load_state() -> dict[str, Any]:
     """Load the CLI state file as a dict.
 
@@ -1660,8 +1691,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
       restart-server invocation; the driver inside the pod handles the rest.
 
     Infera backend (state.backend == 'infera') routes to the SSH fan-out path
-    instead of the Ray Dashboard; the RayJob path below is byte-for-byte
-    unchanged for non-infera state.
+    instead of the Ray Dashboard.
 
     Args:
         args (argparse.Namespace): Parsed ``restart-server`` arguments
@@ -1690,9 +1720,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         pid_dir = (
             args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         )
-        log_dir = (
-            args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
-        )
+        log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
@@ -1776,7 +1804,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             )
 
         with _ray_dashboard_client(state) as ray:
-            # Phase B: launch new (skipped when resuming a RUNNING launch).
+            # Launch new servers (skipped when resuming a RUNNING launch).
             # Driver returns once every rank spawned its launcher.
             if not launch_sub:
                 launch_sub = ray.submit_job(launch_ep, runtime_env=_forward_runtime_env())
@@ -2014,8 +2042,11 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
             print_logs).
 
     Returns:
-        int: A process exit code (``EXIT_OK`` on success, otherwise a
-            config error code).
+        int: ``EXIT_OK`` once the kill fan-out was submitted, or ``1`` when at
+            least one pod's kill failed (infera path only).
+
+    Raises:
+        RuntimeError: If required state keys are missing.
     """
     if _load_state().get("backend") == "infera":
         return _infera_kill_inference(args)

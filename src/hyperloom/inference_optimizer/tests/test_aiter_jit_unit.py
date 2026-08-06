@@ -94,7 +94,7 @@ def test_clean_no_dir_returns_zero_stats():
 
 
 def test_clean_unresolvable_dir_returns_empty_stats(monkeypatch):
-    # Force resolution to fail so the resolved-is-None early return is hit.
+    # Force resolution to yield no trees so the empty-list early return is hit.
     monkeypatch.setattr(aj, "_resolve_lock_sweep_dirs", lambda d: [])
     stats = aj.clean_stale_aiter_locks(None)
     assert stats["dir"] is None

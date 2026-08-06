@@ -26,6 +26,22 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 
 
+# ``_export_workload_envs_for_optimize`` writes TP/CONC/EP straight into
+# ``os.environ``, which ``monkeypatch`` cannot undo, so restore them here.
+_EXPORTED_WORKLOAD_ENVS = ("TP", "CONC", "EP")
+
+
+@pytest.fixture(autouse=True)
+def _restore_exported_workload_envs():
+    saved = {key: os.environ.get(key) for key in _EXPORTED_WORKLOAD_ENVS}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _ns(**kwargs) -> argparse.Namespace:
     defaults = {"conc": 64}
     defaults.update(kwargs)

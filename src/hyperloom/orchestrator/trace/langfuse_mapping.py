@@ -6,10 +6,14 @@
 Projects the local JSONL trace streams under ``reports/trace/`` onto the
 Langfuse object model, shared by the live emitter and offline backfill:
 
-* session            -> Trace      (``trace_id`` derived from ``session_id``)
-* phase              -> Span
-* one LLM call       -> Generation (model + token usage + prompt/response)
-* one decision       -> Score      (gain_pct NUMERIC / outcome CATEGORICAL)
+* session              -> Trace       (``trace_id`` derived from ``session_id``)
+* phase                -> Span
+* (phase, agent)       -> Span        (``agent:<name>``, nested under the phase span)
+* one LLM call         -> Generation  (model + token usage + prompt/response)
+* one decision         -> ``optimization_step:<operation_kind>`` Span, plus 1-4 Scores:
+                          ``decision_outcome`` CATEGORICAL (always) and, when present,
+                          ``gain_pct`` / ``predicted_gain_pct`` / ``proposal_score`` NUMERIC
+* recipe-KB audit row  -> Span        (``kb:recipe_write:<generator>`` / ``kb:recipe_snapshot:<method>``)
 
 These are pure, SDK-free functions; nothing here imports ``langfuse``.
 """
@@ -365,11 +369,13 @@ def session_start_payload(
 
 
 def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Project one ``decision_trace.jsonl`` row onto zero or more Score dicts.
+    """Project one ``decision_trace.jsonl`` row onto one or more Score dicts.
 
     Always emits a CATEGORICAL ``decision_outcome`` score (KEEP / REVERT /
-    no_promote); additionally a NUMERIC ``gain_pct`` score when the decision
-    carries a measured gain. Each returned dict is transport-agnostic
+    no_promote); additionally NUMERIC ``gain_pct`` (measured gain),
+    ``predicted_gain_pct`` (the proposer's estimate) and ``proposal_score``
+    (mean pre-decision rater score) when the decision carries them. Each
+    returned dict is transport-agnostic
     (``name`` / ``value`` / ``data_type`` / ``comment`` / ``metadata``) so the
     caller can hand it to the SDK or a REST body unchanged.
 
@@ -377,7 +383,7 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
         decision_row: One ``decision_trace.jsonl`` row dict.
 
     Returns:
-        A list of transport-agnostic Score dicts (one or two entries).
+        A list of one to four transport-agnostic Score dicts.
     """
     dec = decision_row.get("decision") or {}
     meta = {

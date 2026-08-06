@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a2/hyperloom_inference_optimizer-1.0.0a2-py3-none-any.whl --target .
+python3 -m pip install https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a3/hyperloom_inference_optimizer-1.0.0a3-py3-none-any.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -190,7 +190,6 @@ Before writing, explicitly tell the user:
   even when a different `ANTHROPIC_BASE_URL` already exists.
 - Preserve existing keys unrelated to this setup.
 - Never print secret values back to the user.
-- Do not write `HYPERLOOM_INSTALL_SOURCE`.
 - Do not overwrite an existing non-placeholder secret key.
 
 Write the Anthropic keys plus the common keys:
@@ -252,7 +251,7 @@ For `none`:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes
 ```
 
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already

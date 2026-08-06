@@ -202,7 +202,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         CriticHealthConfig,
         evaluator=evaluate_critic_health_signals,
     ),
-    # F1 ray-pending is stateful; F2/F4/F5 live in the module helper — both
+    # F1 ray-pending is stateful; F2/F5 live in the module helper — both
     # driven off one KernelPipelineConfig slot.
     SignalSpec(
         "ray_pending",

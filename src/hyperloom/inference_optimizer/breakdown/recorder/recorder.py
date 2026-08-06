@@ -12,6 +12,9 @@ re-walk heterogeneous artifacts later. Each producer owns its own files:
 * :meth:`Recorder.record_item` — one fragment per event; uniquely named so
   concurrent producers never collide. Pass ``key`` for an idempotent
   (overwrite-on-rewrite) item that survives resume without duplicating.
+* :meth:`Recorder.record_upsert_singleton` / :meth:`Recorder.record_upsert_item`
+  — the same, but merged into the prior fragment payload instead of replacing
+  it, for producers that emit a fact in several partial updates.
 
 Writes are atomic (tmp + ``os.replace``) and filenames are unique per
 (section, producer), so this is safe across processes and on network
@@ -39,8 +42,12 @@ SectionShape = Literal["item", "singleton"]
 #
 # * ``singleton`` — one final dict; the owner rewrites its own file on update
 #   (last write by ``ts`` wins at assembly time).
-# * ``item`` — an append-only event stream concatenated into a list (ordered by
-#   ``seq`` then ``ts``) at assembly time.
+# * ``item`` — an event stream assembled into a list. The v4 entity streams
+#   (phase_transitions, subjects, operations, measurements, adoptions,
+#   artifacts, trace_events) are ordered by ``ts`` then ``seq`` and deep-merged
+#   by stable entity id, so repeated partial updates for one id collapse into a
+#   single record; every other item section stays append-only and is
+#   concatenated in ``seq`` then ``ts`` order.
 #
 # Derived sections (see ``DERIVED_SECTIONS``) are NOT written by producers
 # during the run; they are computed at finalize from in-memory ``SharedState``
@@ -100,8 +107,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
 }
 
 # Sections computed at finalize from in-memory state, never written as
-# fragments. Listed so the assembler can distinguish "expected absent" from
-# "missing producer".
+# fragments.
 DERIVED_SECTIONS: frozenset[str] = frozenset(
     {
         "capability_summary",

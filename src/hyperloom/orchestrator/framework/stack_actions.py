@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-# Acquisition methods the adapters support. Compiled builds are deferred to the
-# targeted-build path: only wheel / editable-ref / local-tree / package-source here.
+# Acquisition-method vocabulary accepted by ``from_state``; compiled builds are
+# deferred to the targeted-build path. Current adapters provision only wheel or
+# editable_ref — other accepted values are rejected at provision time.
 _ACQUISITION_METHODS: frozenset[str] = frozenset(
     {"wheel", "editable_ref", "local_tree", "package_source", "none"}
 )

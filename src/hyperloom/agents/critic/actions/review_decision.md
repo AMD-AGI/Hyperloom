@@ -64,12 +64,13 @@ python -m runtime.cli commit-review \
   --out "$CRITIC_WORKDIR/emit.json"
 ```
 
-The output is `emit.json["critic_decision_review"]`. The runtime also
-writes a KB row when:
+The output is `emit.json["critic_decision_review"]`. The runtime
+attempts a KB row for every verdict (`needs_info` included; `confidence`
+only selects the row's importance). The write is skipped when:
 
-- the verdict is `adopt` / `reject` / `revise`,
-- `confidence` is at least `medium`, and
-- the topic is slugifiable.
+- KB writes are disabled or the KB breaker is open,
+- the scope cannot be built (missing model / framework), or
+- no slugifiable topic can be derived.
 
 KB writes are best-effort: if they fail, `emit.json["kb_writes"]` will
 contain `status="dead_lettered"` and the decision review still goes

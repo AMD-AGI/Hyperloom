@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 2a/3 tests for the bypass benchmark backend + Python engine.
+"""Tests for the bypass benchmark backend + Python engine.
 
 No real GPU/server: server launch, client subprocess, and HTTP readiness are
 all injected/monkeypatched. Verifies backend selection, argv construction, the
@@ -402,7 +402,7 @@ def test_bypass_run_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
     monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         # The client writes inferencex_result.json into --result-dir.
         result_dir = Path(cmd[cmd.index("--result-dir") + 1])
         raw = {
@@ -512,7 +512,7 @@ def test_bypass_eval_env_passthrough(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bypass_engine, "build_eval_command", fake_eval_cmd)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -564,7 +564,7 @@ def test_bypass_eval_limit_absent_is_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bypass_engine, "build_eval_command", fake_eval_cmd)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -721,7 +721,7 @@ def test_client_phase_reuses_healthy_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -803,7 +803,7 @@ def _write_cfg_lifecycle(tmp_path, inferencex, cleanup, pid_dir):
 
 
 def _fake_client_run(monkeypatch, tput=700.0):
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--result-dir" in cmd:
             rd = Path(cmd[cmd.index("--result-dir") + 1])
             rd.mkdir(parents=True, exist_ok=True)
@@ -963,7 +963,7 @@ def test_remote_multinode_client_no_server(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--result-dir" in cmd:
             captured["base_url"] = cmd[cmd.index("--base-url") + 1] if "--base-url" in cmd else None
             rd = Path(cmd[cmd.index("--result-dir") + 1])
@@ -1267,7 +1267,7 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
         if "--num-prompts" in cmd:
             captured["num_prompts"] = cmd[cmd.index("--num-prompts") + 1]
             captured["num_warmups"] = cmd[cmd.index("--num-warmups") + 1]
@@ -1291,9 +1291,11 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
     assert captured.get("num_warmups") == "3"
 
 
-def test_server_env_injects_rocr_visible_devices():
+def test_server_env_injects_rocr_visible_devices(monkeypatch):
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     env = bypass_runner._server_env(False, None, {"ROCR_VISIBLE_DEVICES": "0,1,2,3"})
     assert env["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert "SAFE_API_KEY" not in env
     env2 = bypass_runner._server_env(False, None, {})
     # No pin in bench_envs: whatever the parent env had (may be unset).
     assert env2.get("ROCR_VISIBLE_DEVICES") == os.environ.get("ROCR_VISIBLE_DEVICES")
@@ -1302,9 +1304,9 @@ def test_server_env_injects_rocr_visible_devices():
 def _eval_client_run(monkeypatch, *, client_rc=0, eval_rc=1):
     """Fake subprocess.run: client writes result (client_rc), eval returns eval_rc.
 
-    The client is identified by --result-dir (writes inferencex_result.json);
-    the lm_eval dep probe/install is a no-op passthrough; anything else is
-    treated as the eval subprocess.
+    The client is identified by --result-dir plus benchmark_serving.py (writes
+    inferencex_result.json); the lm_eval dep probe/install is a no-op
+    passthrough; anything else is treated as the eval subprocess.
     """
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
@@ -1608,9 +1610,11 @@ def test_write_report_emits_magpie_compat_artifacts(tmp_path):
 def test_run_subprocess_timeout_writes_log(tmp_path, monkeypatch):
     """Timeouts return 124 and leave a phase stderr log for debugging."""
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+        assert "SAFE_API_KEY" not in (env or {})
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
+    monkeypatch.setenv("SAFE_API_KEY", "must-not-reach-benchmark")
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     rc = bypass_runner._run_subprocess(["client"], 0.01, tmp_path, "client")

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests pinning ``orchestrator.conc_sweep._build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
+"""Tests pinning ``orchestrator.kernel.conc_sweep._build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-# Imported first to break a circular dependency between conc_sweep and
-# action_executors.conc_sweep.
+# kernel.conc_sweep and actions.executors.conc_sweep import each other; this
+# resolves only once executors is already in sys.modules.
 from hyperloom.orchestrator.kernel.conc_sweep import _build_roofline_ceiling
 from hyperloom.orchestrator.kernel.roofline_ceiling import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState

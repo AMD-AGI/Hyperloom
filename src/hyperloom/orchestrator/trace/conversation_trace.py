@@ -179,7 +179,8 @@ def append_conversation(
     """Append one validated conversation row to the conversations ledger.
 
     The row is serialized (which stamps ``ts`` and redacts the text),
-    checked against the closed schema, then atomically appended.
+    checked against the closed schema, then appended as a single-line JSONL
+    write (the standard append-log idiom; not atomic across processes).
     ``OSError`` while writing is logged and swallowed so a full disk or a
     permissions glitch never breaks the optimization loop.
 
